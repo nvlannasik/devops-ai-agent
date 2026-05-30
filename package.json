@@ -1,0 +1,26 @@
+{
+  "name": "devops-ai-agent",
+  "version": "1.0.0",
+  "description": "DevOps AI Agent for RCA and incident response via Slack",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.100.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@slack/bolt": "4.7.3",
+    "dotenv": "16.5.0",
+    "openai": "4.103.0",
+    "winston": "3.17.0",
+    "zod": "3.25.28"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.1",
+    "tsx": "4.22.3",
+    "typescript": "6.0.3"
+  }
+}
