@@ -8,10 +8,27 @@ import type { ToolDefinition } from "../llm/types.js";
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 1000;
 
+// simple async mutex — prevents concurrent reconnects from racing
+class Mutex {
+  private locked = false;
+  private queue: Array<() => void> = [];
+
+  async acquire(): Promise<void> {
+    if (!this.locked) { this.locked = true; return; }
+    return new Promise((resolve) => this.queue.push(resolve));
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) { next(); } else { this.locked = false; }
+  }
+}
+
 export class MCPClient {
   private client: Client;
   private tools: ToolDefinition[] = [];
   private connected = false;
+  private reconnectMutex = new Mutex();
 
   constructor() {
     this.client = new Client({ name: "devops-ai-agent", version: "1.0.0" });
@@ -64,8 +81,15 @@ export class MCPClient {
 
   async callTool(name: string, input: Record<string, unknown>): Promise<string> {
     if (!this.connected) {
-      logger.warn("MCP not connected, attempting reconnect...");
-      await this.connectWithRetry(0);
+      await this.reconnectMutex.acquire();
+      try {
+        if (!this.connected) { // double-check after acquiring lock
+          logger.warn("MCP not connected, attempting reconnect...");
+          await this.connectWithRetry(0);
+        }
+      } finally {
+        this.reconnectMutex.release();
+      }
     }
 
     try {
@@ -73,10 +97,15 @@ export class MCPClient {
       const content = result.content as Array<{ type: string; text?: string }>;
       return content.map((c) => c.text ?? "").join("\n");
     } catch (err) {
-      // if call fails due to connection issue, reconnect once and retry
-      logger.warn(`Tool call failed, reconnecting: ${err}`);
-      this.connected = false;
-      await this.connectWithRetry(0);
+      // reconnect once on failure, serialized via mutex
+      await this.reconnectMutex.acquire();
+      try {
+        logger.warn(`Tool call failed, reconnecting: ${err}`);
+        this.connected = false;
+        await this.connectWithRetry(0);
+      } finally {
+        this.reconnectMutex.release();
+      }
       const result = await this.client.callTool({ name, arguments: input });
       const content = result.content as Array<{ type: string; text?: string }>;
       return content.map((c) => c.text ?? "").join("\n");

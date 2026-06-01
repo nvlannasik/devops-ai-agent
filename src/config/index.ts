@@ -37,4 +37,19 @@ export const config = {
       url: process.env.MCP_HTTP_URL ?? "http://localhost:3001/mcp",
     },
   },
+
+  memory: {
+    // MEMORY_BACKEND: "inmemory" (default) | "redis"
+    backend: (process.env.MEMORY_BACKEND ?? "inmemory") as "inmemory" | "redis",
+    redis: {
+      host:     process.env.REDIS_HOST     ?? "localhost",
+      port:     parseInt(process.env.REDIS_PORT ?? "6379"),
+      db:       parseInt(process.env.REDIS_DB   ?? "0"),
+      username: process.env.REDIS_USERNAME,
+      password: process.env.REDIS_PASSWORD,
+      tls:      process.env.REDIS_TLS === "true",
+    },
+  },
+
+  maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),
 } as const;

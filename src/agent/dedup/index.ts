@@ -1,4 +1,4 @@
-const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours — matches Alertmanager repeat_interval
 
 export class AlertDeduplicator {
   private seen = new Map<string, number>(); // fingerprint → expiry timestamp

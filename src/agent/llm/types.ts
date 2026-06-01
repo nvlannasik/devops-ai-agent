@@ -32,9 +32,17 @@ export interface ContentBlock {
   content?: string;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
 export interface LLMResponse {
   content: ContentBlock[];
   stopReason: "end_turn" | "tool_use" | "max_tokens";
+  usage?: TokenUsage;
 }
 
 export interface LLMClient {

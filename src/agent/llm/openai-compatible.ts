@@ -49,6 +49,15 @@ export class OpenAICompatibleClient implements LLMClient {
     }
 
     const stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : "end_turn";
-    return { content, stopReason: stopReason as LLMResponse["stopReason"] };
+    return {
+      content,
+      stopReason: stopReason as LLMResponse["stopReason"],
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+    };
   }
 }

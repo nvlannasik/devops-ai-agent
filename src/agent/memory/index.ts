@@ -1,25 +1,58 @@
 import type { Message } from "../llm/types.js";
+import type { Redis } from "ioredis";
 
-const MAX_MESSAGES = 50; // prevent unbounded growth
+const MAX_MESSAGES = 50;
+const REDIS_TTL_SEC = 86400;
 
 export class ConversationMemory {
   private store = new Map<string, Message[]>();
+  private rcaThreads = new Set<string>(); // in-memory; Redis uses a separate key
+  private redis: Redis | null;
 
-  get(threadId: string): Message[] {
+  constructor(redis?: Redis) {
+    this.redis = redis ?? null;
+  }
+
+  async get(threadId: string): Promise<Message[]> {
+    if (this.redis) {
+      const raw = await this.redis.get(`conv:${threadId}`);
+      return raw ? (JSON.parse(raw) as Message[]) : [];
+    }
     return this.store.get(threadId) ?? [];
   }
 
-  append(threadId: string, message: Message): void {
-    const history = this.store.get(threadId) ?? [];
+  async append(threadId: string, message: Message): Promise<void> {
+    const history = await this.get(threadId);
     history.push(message);
-    // trim oldest messages if exceeding limit (keep system context intact)
-    if (history.length > MAX_MESSAGES) {
-      history.splice(0, history.length - MAX_MESSAGES);
+    if (history.length > MAX_MESSAGES) history.splice(0, history.length - MAX_MESSAGES);
+    if (this.redis) {
+      await this.redis.set(`conv:${threadId}`, JSON.stringify(history), "EX", REDIS_TTL_SEC);
+    } else {
+      this.store.set(threadId, history);
     }
-    this.store.set(threadId, history);
   }
 
-  clear(threadId: string): void {
-    this.store.delete(threadId);
+  async markRcaSent(threadId: string): Promise<void> {
+    if (this.redis) {
+      await this.redis.set(`rca:${threadId}`, "1", "EX", REDIS_TTL_SEC);
+    } else {
+      this.rcaThreads.add(threadId);
+    }
+  }
+
+  async hasRca(threadId: string): Promise<boolean> {
+    if (this.redis) {
+      return (await this.redis.exists(`rca:${threadId}`)) === 1;
+    }
+    return this.rcaThreads.has(threadId);
+  }
+
+  async clear(threadId: string): Promise<void> {
+    if (this.redis) {
+      await this.redis.del(`conv:${threadId}`, `rca:${threadId}`);
+    } else {
+      this.store.delete(threadId);
+      this.rcaThreads.delete(threadId);
+    }
   }
 }
