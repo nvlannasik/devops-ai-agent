@@ -15,7 +15,7 @@ export const config = {
   },
 
   llm: {
-    provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible",
+    provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible" | "private-llm",
     claude: {
       apiKey: process.env.ANTHROPIC_API_KEY!,
       model: process.env.CLAUDE_MODEL ?? "claude-opus-4-5",
@@ -24,6 +24,13 @@ export const config = {
       baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL,
       apiKey: process.env.OPENAI_COMPATIBLE_API_KEY ?? "none",
       model: process.env.OPENAI_COMPATIBLE_MODEL ?? "gpt-4",
+    },
+    sqs: {
+      region: process.env.AWS_REGION ?? "ap-southeast-1",
+      requestQueueName: process.env.SQS_REQUEST_QUEUE_NAME ?? "llm-request.fifo",
+      responseQueueName: process.env.SQS_RESPONSE_QUEUE_NAME ?? "llm-response.fifo",
+      timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_MS ?? "120000"),
+      pollWaitSeconds: parseInt(process.env.SQS_POLL_WAIT_SECONDS ?? "10"),
     },
   },
 

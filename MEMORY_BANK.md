@@ -132,6 +132,35 @@ src/
 4. **Race condition on reconnect** — `reconnectMutex` added to MCPClient
 5. **False positive confidence parsing** — regex anchored to label, no longer matches mid-sentence phrases
 
+## Private LLM via SQS
+
+For LLMs in a strict private network (no inbound exceptions), set `LLM_PROVIDER=private-llm`.
+
+**Flow:**
+```
+Agent → SQS Request Queue → llm-worker (private net) → Private LLM
+Agent ← SQS Response Queue ← llm-worker
+```
+
+**SQSLLMClient** (`src/agent/llm/sqs.ts`):
+- Resolves queue URLs from names via `GetQueueUrl` at first call (cached after)
+- Auto-creates queue via `CreateQueue` if `QueueDoesNotExist` is thrown
+- FIFO detection: queue name ending in `.fifo` → sets `FifoQueue=true`
+- Polls response queue with long-polling until `timeoutMs` (default 120s)
+- Each LLM iteration = one SQS round-trip (~5-10s added latency per iteration)
+
+**Config:**
+```
+AWS_REGION               # default: ap-southeast-1
+SQS_REQUEST_QUEUE_NAME   # default: llm-request.fifo
+SQS_RESPONSE_QUEUE_NAME  # default: llm-response.fifo
+SQS_LLM_TIMEOUT_MS       # default: 120000
+SQS_POLL_WAIT_SECONDS    # default: 10
+```
+
+**IAM permissions needed** (for EKS pod role):
+`sqs:SendMessage`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:GetQueueUrl`, `sqs:CreateQueue`
+
 ## Alertmanager Integration Notes
 - `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace combination
 - `repeat_interval: 12h` — agent dedup TTL must be >= this (set to 12h)
@@ -147,3 +176,4 @@ src/
 - [ ] Multi-cluster support (one MCP server per cluster, agent selects based on namespace/label)
 - [ ] Alert grouping — if 5 pods crash in the same namespace, investigate once not 5 times
 - [ ] Webhook authentication for `/alert` endpoint (currently unauthenticated)
+- [ ] SQS message visibility timeout tuning (currently uses SQS default 30s — should be > LLM inference time)
