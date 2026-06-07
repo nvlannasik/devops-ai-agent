@@ -1,6 +1,6 @@
 # DevOps AI Agent
 
-AI-powered DevOps agent for incident investigation and Root Cause Analysis (RCA), integrated with Slack and backed by Kubernetes, Prometheus, and Loki observability data via MCP.
+AI-powered DevOps agent for incident investigation and Root Cause Analysis (RCA), integrated with Slack and backed by Kubernetes, Prometheus, and Loki via MCP.
 
 ## How It Works
 
@@ -9,11 +9,11 @@ Slack mention / Alertmanager webhook
         ↓
    Alert deduplication (fingerprint + 12h TTL)
         ↓
-   Agent investigates (agentic loop, max 10 iterations)
+   Agent investigates (agentic loop, max 10 iterations, parallel tool calls)
         ↓
-   LLM calls MCP tools (K8s, Prometheus, Loki) in parallel
+   LLM calls MCP tools (K8s, Prometheus, Loki)
         ↓
-   RCA posted to Slack thread as Block Kit
+   RCA posted as Slack Block Kit
         ↓
    Confidence Low? → mention on-call users
 ```
@@ -28,194 +28,173 @@ Slack mention / Alertmanager webhook
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
 npm install
-npm run dev                    # development (tsx watch)
-npm run build && npm start     # production
+npm run dev
+npm run build && npm start
 ```
 
 ## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NODE_ENV` | `dev` / `staging` / `prod` | `dev` |
 | `PORT` | HTTP port | `3000` |
-| `SLACK_BOT_TOKEN` | Bot OAuth token (`xoxb-...`) | required |
-| `SLACK_SIGNING_SECRET` | App signing secret (HTTP mode) | required |
-| `SLACK_APP_TOKEN` | App-level token for Socket Mode (`xapp-...`) | optional |
+| `SLACK_BOT_TOKEN` | `xoxb-...` | required |
+| `SLACK_SIGNING_SECRET` | For HTTP mode | required |
+| `SLACK_APP_TOKEN` | `xapp-...` for Socket Mode | optional |
 | `SLACK_ALERT_CHANNEL` | Channel ID for Alertmanager alerts | optional |
-| `SLACK_ONCALL_USERS` | Comma-separated Slack user IDs to mention on Low confidence | optional |
-| `LLM_PROVIDER` | `claude` or `openai-compatible` | `claude` |
-| `ANTHROPIC_API_KEY` | Anthropic API key | required if Claude |
-| `CLAUDE_MODEL` | Claude model name | `claude-opus-4-5` |
-| `OPENAI_COMPATIBLE_BASE_URL` | Base URL for private LLM | required if openai-compatible |
-| `OPENAI_COMPATIBLE_API_KEY` | API key for private LLM | — |
-| `OPENAI_COMPATIBLE_MODEL` | Model name | `gpt-4` |
+| `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
+| `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` | `claude` |
+| `ANTHROPIC_API_KEY` | Required if claude | — |
+| `CLAUDE_MODEL` | | `claude-opus-4-5` |
+| `OPENAI_COMPATIBLE_BASE_URL` | Required if openai-compatible | — |
+| `OPENAI_COMPATIBLE_API_KEY` | | — |
+| `OPENAI_COMPATIBLE_MODEL` | | `gpt-4` |
+| `SQS_REGION` | Required if private-llm | `ap-southeast-1` |
+| `SQS_REQUEST_QUEUE_NAME` | | `llm-request.fifo` |
+| `SQS_RESPONSE_QUEUE_NAME` | | `llm-response.fifo` |
+| `SQS_LLM_TIMEOUT_MS` | Max wait for LLM response | `120000` |
+| `SQS_POLL_WAIT_SECONDS` | | `10` |
+| `AWS_ACCESS_KEY_ID` | Local dev only — use IRSA on EKS | — |
 | `MCP_TRANSPORT` | `stdio` or `http` | `stdio` |
-| `MCP_STDIO_COMMAND` | Command to run MCP server | `node` |
-| `MCP_STDIO_ARGS` | Args for MCP server (comma-separated) | — |
-| `MCP_HTTP_URL` | MCP server HTTP URL | `http://localhost:3001/mcp` |
+| `MCP_STDIO_ARGS` | Path to MCP server `dist/index.js` | — |
+| `MCP_HTTP_URL` | | `http://localhost:3001/mcp` |
 | `MEMORY_BACKEND` | `inmemory` or `redis` | `inmemory` |
-| `REDIS_HOST` | Redis host | `localhost` |
-| `REDIS_PORT` | Redis port | `6379` |
-| `REDIS_DB` | Redis database index | `0` |
-| `REDIS_USERNAME` | Redis username (optional) | — |
-| `REDIS_PASSWORD` | Redis password (optional) | — |
-| `REDIS_TLS` | Enable TLS (`true`/`false`) | `false` |
-| `MAX_CONCURRENT_INVESTIGATIONS` | Max parallel investigations | `5` |
-| `AWS_REGION` | AWS region for SQS (private-llm only) | `ap-southeast-1` |
-| `SQS_REQUEST_QUEUE_NAME` | FIFO queue name for LLM requests | `llm-request.fifo` |
-| `SQS_RESPONSE_QUEUE_NAME` | FIFO queue name for LLM responses | `llm-response.fifo` |
-| `SQS_LLM_TIMEOUT_MS` | Max wait time for LLM response (ms) | `120000` |
-| `SQS_POLL_WAIT_SECONDS` | SQS long-poll wait per call (max 20) | `10` |
+| `REDIS_HOST` | | `localhost` |
+| `REDIS_PORT` | | `6379` |
+| `REDIS_DB` | | `0` |
+| `REDIS_PASSWORD` | | — |
+| `REDIS_TLS` | | `false` |
+| `MAX_CONCURRENT_INVESTIGATIONS` | | `5` |
+| `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
 
 ## Usage
 
-### Manual Investigation via Slack
-
-Mention the bot in any channel:
+### Manual Investigation
 
 ```
 @devops-agent pods in namespace payment-service are crashing with OOMKilled
 ```
 
-The agent investigates and replies in the thread with a full RCA.
-
 ### Follow-up Questions
 
-Conversation history is maintained per Slack thread. After an RCA is posted, follow-up messages are handled in conversation mode (no RCA format):
+After RCA is posted, follow-up messages are answered conversationally:
 
 ```
 @devops-agent show me the logs
 @devops-agent when did this start?
-@devops-agent what's the memory trend for the last hour?
 ```
 
 ### Alertmanager Integration
 
 ```yaml
-# alertmanager.yml
 receivers:
   - name: devops-ai-agent
     webhook_configs:
-      - url: http://your-agent-host:3000/alert
+      - url: http://your-agent:3000/alert
         send_resolved: false
-
 route:
-  group_by: ["alertname", "namespace"]   # important: one webhook per alert+namespace
+  group_by: ["alertname", "namespace"]
   repeat_interval: 12h
   receiver: devops-ai-agent
 ```
 
-The agent posts the alert to `SLACK_ALERT_CHANNEL` and auto-investigates in the thread. Duplicate alerts (same labels) within 12 hours are silently suppressed.
-
-## RCA Output Format
+## RCA Output (Slack Block Kit)
 
 ```
-🔴 Critical Severity Incident          ← Slack header block
+🔴 Critical Severity Incident
 
 📍 Root Cause
-Pod payment-api-xxx is OOMKilled due to a memory leak in the connection pool.
+Pod payment-api-xxx OOMKilled — memory leak in connection pool.
 
 📊 Evidence
-• Pod restarted 15 times in 30 minutes — k8s_list_events `pavenow-staging/payment-api`
-• Memory at 98% of 512Mi limit — prometheus_query `pavenow-staging`
-• "OutOfMemoryError" in logs — loki_query_range `pavenow-staging`
+• Pod restarted 15x in 30min — k8s_list_events
+• Memory 98% of 512Mi limit — prometheus_query
+• OutOfMemoryError in logs — loki_query_range
 
 🚫 Ruled Out
-• Network issue — no connection errors found in events
+• Network issue — no connection errors found
 
 🔧 Recommended Actions
 1. Immediate: Increase memory limit to 1Gi
-2. Short-term: Review connection pool configuration
-3. Long-term: Implement HPA with proper resource profiling
+2. Short-term: Review connection pool
+3. Long-term: HPA + resource profiling
 
-⚠️ Impact if Unresolved
-Complete payment service outage
+⚠️ Impact if Unresolved: Payment outage
 
-📈 Confidence: `High` — three independent sources confirm the same root cause
+📈 Confidence: `High`
 ```
 
-When confidence is **Low**, all users in `SLACK_ONCALL_USERS` are automatically mentioned in the thread.
+## Private LLM via SQS
+
+For LLMs in a strict private network, set `LLM_PROVIDER=private-llm`. The agent publishes requests to SQS and polls for responses — private network only needs outbound access to AWS SQS.
+
+See [llm-worker](../llm-worker) for the worker service deployed in the private network.
 
 ## Key Features
 
 | Feature | Details |
 |---------|---------|
-| **Alert Deduplication** | Same alert (identical labels) processed once per 12-hour window |
-| **MCP Reconnect** | Exponential backoff (1s→2s→4s→8s→16s, max 5 retries), mutex-protected |
-| **Context Window Management** | Tool results truncated to 8000 chars, history trimmed to 40 messages |
-| **Confidence Threshold** | Low confidence → auto-mention all `SLACK_ONCALL_USERS` in thread |
-| **Follow-up Mode** | After RCA is posted, subsequent mentions are handled conversationally |
-| **Prompt Caching** | System prompt cached by Anthropic (ephemeral) — reduces token cost on long investigations |
-| **Parallel Tool Calls** | Independent tool calls executed in parallel per LLM iteration |
-| **Multi-LLM Support** | Claude (Anthropic) or any OpenAI-compatible API (private LLM) |
-| **Redis Memory** | Conversation history persisted in Redis with 24h TTL (optional) |
+| Alert Deduplication | Same alert processed once per 12h |
+| MCP Reconnect | Exponential backoff + mutex-protected |
+| Context Window | Tool results truncated to 8000 chars, history to 40 messages |
+| Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
+| Follow-up Mode | `markRcaSent` flag prevents RCA format on follow-ups |
+| Prompt Caching | Anthropic ephemeral cache reduces token cost |
+| Parallel Tools | Independent tool calls executed in parallel |
+| Multi-LLM | Claude, OpenAI-compatible, or private via SQS |
 
 ## Project Structure
 
 ```
 src/
 ├── agent/
-│   ├── index.ts                  # Orchestrator — agentic loop
-│   ├── confidence/index.ts       # Parse confidence level from RCA text
-│   ├── context/index.ts          # Context window management
-│   ├── dedup/index.ts            # Alert deduplication (fingerprint + TTL)
+│   ├── index.ts                  # Agentic loop, parallel tool calls
+│   ├── confidence/index.ts       # parseConfidence()
+│   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks()
+│   ├── dedup/index.ts            # AlertDeduplicator
 │   ├── llm/
-│   │   ├── index.ts              # LLM factory
-│   │   ├── claude.ts             # Anthropic Claude client (with prompt caching)
-│   │   ├── openai-compatible.ts  # OpenAI-compatible client
-│   │   └── types.ts              # Shared LLM types
-│   ├── mcp/client.ts             # MCP client with reconnect + mutex
-│   ├── memory/index.ts           # Conversation history + RCA flag (Redis/in-memory)
-│   └── prompts/system.ts         # Static system prompt + dynamic time context
-├── app/index.ts                  # Slack Bolt app + Alertmanager webhook
-├── config/index.ts               # Configuration
+│   │   ├── claude.ts, openai-compatible.ts, sqs.ts
+│   │   ├── index.ts              # createLLMClient() factory
+│   │   └── types.ts
+│   ├── mcp/client.ts             # Reconnect + mutex
+│   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
+│   └── prompts/system.ts         # Static prompt + time context
+├── app/index.ts                  # Slack Bolt + Alertmanager webhook
+├── config/index.ts
 └── utils/
-    ├── logger/index.ts           # Winston logger
+    ├── logger/index.ts
     └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()
 ```
 
+## AWS Authentication
+
+Set `AWS_AUTH_MODE` to control how credentials are obtained (read by `entrypoint.sh`):
+
+| `AWS_AUTH_MODE` | Use case | Extra env vars needed |
+|-----------------|----------|-----------------------|
+| `iam-anywhere` (default) | On-premise / private network with X.509 cert | `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PROFILE_ARN`, `AWS_ROLE_ARN`, `CERT_PATH`, `CERT_KEY_PATH` |
+| `irsa` | EKS with IAM Roles for Service Accounts | none |
+| `env` | Local dev / CI | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| `instance-profile` | EC2 / ECS | none |
+
 ## Slack App Setup
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App
-2. **OAuth & Permissions** → Add scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`
-3. **Event Subscriptions** → Enable, subscribe to `app_mention`
-4. **Install to Workspace** → copy Bot Token and Signing Secret to `.env`
-5. For Socket Mode (no public URL): enable Socket Mode, generate App Token with `connections:write` scope, set `SLACK_APP_TOKEN`
+1. [api.slack.com/apps](https://api.slack.com/apps) → Create App
+2. **OAuth & Permissions** → scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`
+3. **Event Subscriptions** → subscribe to `app_mention`
+4. Copy Bot Token + Signing Secret to `.env`
+5. Socket Mode: enable + generate App Token with `connections:write`
 
 ## Docker
 
 ```bash
-# Build
 docker build -t devops-ai-agent .
 
-# Run
 docker run -p 3000:3000 \
   -e SLACK_BOT_TOKEN=xoxb-... \
-  -e SLACK_SIGNING_SECRET=... \
   -e SLACK_APP_TOKEN=xapp-... \
   -e ANTHROPIC_API_KEY=... \
   -e MCP_TRANSPORT=http \
   -e MCP_HTTP_URL=http://devops-mcp-server:3000/mcp \
-  -e MEMORY_BACKEND=redis \
-  -e REDIS_HOST=redis \
   devops-ai-agent
 ```
-
-## Private LLM via SQS
-
-For LLMs hosted in a strict private network (no inbound exceptions), use the event-driven SQS transport. The agent publishes requests to SQS and polls for responses — the private network only needs outbound access to AWS SQS.
-
-```
-EKS (devops-ai-agent)          Private Network
-        ↓ publish               ↑ poll
-  SQS Request Queue  ──────────── llm-worker
-  SQS Response Queue ──────────── llm-worker
-        ↑ poll                  ↓ call
-                            Private LLM API
-```
-
-Set `LLM_PROVIDER=private-llm` and configure SQS queue names. Queues are **auto-created** if they don't exist.
-
-See [llm-worker](../llm-worker) for the worker service deployed in the private network.

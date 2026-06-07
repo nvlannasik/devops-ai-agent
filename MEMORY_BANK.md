@@ -6,7 +6,7 @@ AI Agent for DevOps incident investigation and Root Cause Analysis (RCA). Uses S
 ## Tech Stack
 - **Runtime:** Node.js >= 24, TypeScript (ESM)
 - **Slack:** `@slack/bolt` v4 (Socket Mode or HTTP Mode)
-- **LLM:** `@anthropic-ai/sdk` v0.100.1 (Claude) + `openai` SDK (OpenAI-compatible)
+- **LLM:** `@anthropic-ai/sdk` v0.100.1 (Claude) + `openai` SDK (OpenAI-compatible) + `SQSLLMClient` (private LLM)
 - **MCP Client:** `@modelcontextprotocol/sdk` v1.29.0
 - **Memory:** In-memory Map or Redis (`ioredis`)
 - **Build:** `tsc` → `dist/`, dev via `tsx watch`
@@ -21,7 +21,7 @@ Slack mention / Alertmanager webhook
    DevOpsAgent.investigate(threadId, message)
         ↓ (checks hasRca flag → prepend [FOLLOW-UP] if true)
    LLM.chat(history, tools, systemPrompt)
-        ↓ (agentic loop, max 10 iterations)
+        ↓ (agentic loop, max 10 iterations, parallel tool calls)
    MCPClient.callTool() → devops-mcp-server
         ↓
    RCA text → isRcaResponse() → Block Kit or plain mrkdwn
@@ -34,146 +34,136 @@ Slack mention / Alertmanager webhook
 ## Key Design Decisions
 
 ### Follow-up vs Investigation Mode
-- After RCA is posted, `markRcaSent(threadId)` is called → stores `rca:{threadId}` in Redis
+- After RCA is posted, `markRcaSent(threadId)` stores `rca:{threadId}` in Redis
 - Follow-up messages are prepended with `[FOLLOW-UP — conversation mode, do NOT use RCA format]`
-- This is critical — without this prefix, the LLM defaults to RCA format regardless of context
-- **Do not remove this prefix**
+- **Do not remove this prefix** — without it, LLM defaults to RCA format regardless of context
 
 ### System Prompt Strategy
 - `buildStaticSystemPrompt()` — large static prompt cached by Anthropic (`cache_control: ephemeral`)
 - `buildTimeContext()` — called once per investigation, injects unix timestamps for tool params
-- Time context is prepended to the first message only (not every message)
-- Prompt contains failure playbooks (CrashLoopBackOff, OOMKilled, etc.) to guide investigation
+- Time context prepended to first message only
 
 ### Block Kit Rendering
-- `isRcaResponse(text)` — detects RCA output via regex matching Severity + Root Cause labels
+- `isRcaResponse(text)` — detects RCA via regex matching Severity + Root Cause labels
+- Regex handles `Critical` and `[Critical]` (LLM sometimes adds brackets)
 - `buildRcaBlocks(text)` — parses RCA text into Slack Block Kit blocks
-- Regex handles both `Critical` and `[Critical]` (LLM sometimes adds brackets despite prompt instructions)
-- Fallback: if parsing fails (blocks <= 2), returns a single section block with raw text
+- Fallback: if parsing fails (blocks <= 2), returns single section block with raw text
 
 ### MCP Client Reconnect
 - Exponential backoff: 1s → 2s → 4s → 8s → 16s (max 5 retries)
-- `reconnectMutex` — prevents race condition when parallel tool calls all hit disconnect simultaneously
-- Double-check pattern: verify `connected` state before and after acquiring the mutex
+- `reconnectMutex` — prevents race condition when parallel tool calls hit disconnect simultaneously
+- Double-check pattern: verify `connected` state before and after acquiring mutex
 
 ### Context Window Management
 - Tool results truncated to 8000 chars before entering history
-- History trimmed to 40 messages, always preserving the first message (original issue)
-- `trimHistory()` called on every LLM iteration, not on append
+- History trimmed to 40 messages, always preserving first message (original issue)
 
 ### Alert Deduplication
 - Fingerprint: all labels sorted and joined → stable string
 - TTL: 12 hours (matches Alertmanager `repeat_interval`)
-- In-memory Map with auto-cleanup of expired entries
+
+## LLM Providers
+
+| `LLM_PROVIDER` | Class | Notes |
+|----------------|-------|-------|
+| `claude` | `ClaudeClient` | Anthropic SDK, prompt caching |
+| `openai-compatible` | `OpenAICompatibleClient` | Any OpenAI-compatible API |
+| `private-llm` | `SQSLLMClient` | Event-driven via SQS, for strict private networks |
+
+### Private LLM via SQS
+- Agent publishes `{ requestId, messages, tools, systemPrompt }` to SQS Request Queue
+- Polls Response Queue for matching `requestId`
+- Queue URLs resolved from names via `GetQueueUrl`, auto-created if not exist
+- Timeout: `SQS_LLM_TIMEOUT_MS` (default 120s)
 
 ## Slack Modes
 
-### Socket Mode (recommended for K8s deployment)
+### Socket Mode (recommended for K8s)
 - Set `SLACK_APP_TOKEN=xapp-...`
-- Bolt connects WebSocket to Slack (outbound) — no public URL required
-- Alertmanager webhook (`/alert`) and health check (`/health`) run on a separate Express server on the same port
-- No Ingress/LoadBalancer needed for Slack events
+- Bolt connects outbound WebSocket — no public URL / Ingress needed
+- Alertmanager webhook runs on separate Express server on same port
 
 ### HTTP Mode
-- Do not set `SLACK_APP_TOKEN`
-- Slack sends events to a public URL via Events API
-- Requires a publicly reachable Ingress/LoadBalancer
-- `SLACK_SIGNING_SECRET` is used to verify request authenticity
+- No `SLACK_APP_TOKEN`
+- Requires publicly reachable Ingress/LoadBalancer
+- `SLACK_SIGNING_SECRET` verifies request authenticity
 
 ## Environment Variables
 ```
-SLACK_BOT_TOKEN          # xoxb-... (required)
-SLACK_SIGNING_SECRET     # required for HTTP mode
-SLACK_APP_TOKEN          # xapp-... for Socket Mode
-SLACK_ALERT_CHANNEL      # channel ID for Alertmanager alerts
-SLACK_ONCALL_USERS       # comma-separated user IDs, mentioned when confidence is Low
+SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN
+SLACK_ALERT_CHANNEL, SLACK_ONCALL_USERS
 
-LLM_PROVIDER             # claude | openai-compatible
-ANTHROPIC_API_KEY        # required if claude
-CLAUDE_MODEL             # default: claude-opus-4-5
+LLM_PROVIDER            # claude | openai-compatible | private-llm
+ANTHROPIC_API_KEY, CLAUDE_MODEL
+OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_MODEL
 
-MCP_TRANSPORT            # stdio | http
-MCP_STDIO_ARGS           # path to MCP server dist/index.js (comma-separated)
-MCP_HTTP_URL             # http://devops-mcp-server:3000/mcp
+# Private LLM (SQS)
+SQS_REGION, SQS_REQUEST_QUEUE_NAME, SQS_RESPONSE_QUEUE_NAME
+SQS_LLM_TIMEOUT_MS, SQS_POLL_WAIT_SECONDS
+AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  # local dev only; use IRSA on EKS
 
-MEMORY_BACKEND           # inmemory | redis
-REDIS_HOST/PORT/DB       # if using redis
-
-MAX_CONCURRENT_INVESTIGATIONS  # default: 5
+MCP_TRANSPORT, MCP_STDIO_ARGS, MCP_HTTP_URL
+MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS
+MAX_CONCURRENT_INVESTIGATIONS
+LOG_LEVEL   # error | warn | info | http | debug
 ```
 
 ## File Structure
 ```
 src/
 ├── agent/
-│   ├── index.ts                  # DevOpsAgent: agentic loop, parallel tool calls
-│   ├── confidence/index.ts       # parseConfidence() — regex extracts High/Medium/Low
-│   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks(), truncateToolResult()
+│   ├── index.ts                  # Orchestrator — agentic loop, parallel tool calls
+│   ├── confidence/index.ts       # parseConfidence() — anchored regex, no false positives
+│   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks()
 │   ├── dedup/index.ts            # AlertDeduplicator: fingerprint + TTL
 │   ├── llm/
 │   │   ├── index.ts              # createLLMClient() factory
-│   │   ├── claude.ts             # ClaudeClient: cache_control on system prompt + tools
-│   │   ├── openai-compatible.ts  # OpenAICompatibleClient
-│   │   └── types.ts              # LLMClient, Message, ContentBlock, TokenUsage
-│   ├── mcp/client.ts             # MCPClient: reconnect with mutex
-│   ├── memory/index.ts           # ConversationMemory: Redis/in-memory, hasRca/markRcaSent
+│   │   ├── claude.ts             # Anthropic + prompt caching
+│   │   ├── openai-compatible.ts
+│   │   ├── sqs.ts                # SQSLLMClient: queue name resolution + auto-create
+│   │   └── types.ts
+│   ├── mcp/client.ts             # MCPClient: reconnect + mutex
+│   ├── memory/index.ts           # Redis/in-memory, hasRca/markRcaSent
 │   └── prompts/system.ts         # buildStaticSystemPrompt(), buildTimeContext()
-├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver, handleMention/handleAlert
-├── config/index.ts               # Config object
+├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + error handler
+├── config/index.ts
 └── utils/
-    ├── logger/index.ts           # Winston logger
+    ├── logger/index.ts           # Winston, LOG_LEVEL support
     └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()
 ```
 
+## AWS Authentication
+
+Controlled by `AWS_AUTH_MODE` env var (read by `entrypoint.sh`):
+
+| Mode | Setup | Use case |
+|------|-------|----------|
+| `iam-anywhere` | Writes `~/.aws/config` with `credential_process` pointing to `aws_signing_helper` | On-premise / private network with X.509 cert |
+| `irsa` | No setup — IRSA injects credentials via projected service account token | EKS with IRSA |
+| `env` | No setup — `AWS_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY` already in env | Local dev, CI/CD |
+| `instance-profile` | No setup — EC2 instance metadata used | EC2, ECS |
+
+Default is `iam-anywhere` for backward compat — **set `AWS_AUTH_MODE=irsa` on EKS**.
+
+Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PROFILE_ARN`, `AWS_ROLE_ARN`, `CERT_PATH`, `CERT_KEY_PATH`.
+
 ## Bugs Fixed
-1. **"Already connected to transport"** — MCP server HTTP mode now creates a new McpServer per request
-2. **Follow-up always returns RCA format** — inject `[FOLLOW-UP]` prefix + `markRcaSent` Redis flag
-3. **Block Kit not rendering** — LLM outputs `[Critical]` with brackets; regex updated to handle both forms
-4. **Race condition on reconnect** — `reconnectMutex` added to MCPClient
-5. **False positive confidence parsing** — regex anchored to label, no longer matches mid-sentence phrases
+1. **"Already connected to transport"** — MCP server HTTP mode creates new McpServer per request
+2. **Follow-up always returns RCA format** — `[FOLLOW-UP]` prefix + `markRcaSent` Redis flag
+3. **Block Kit not rendering** — LLM outputs `[Critical]`; regex handles both forms
+4. **Race condition on reconnect** — `reconnectMutex` in MCPClient
+5. **False positive confidence** — regex anchored to label
 
-## Private LLM via SQS
-
-For LLMs in a strict private network (no inbound exceptions), set `LLM_PROVIDER=private-llm`.
-
-**Flow:**
-```
-Agent → SQS Request Queue → llm-worker (private net) → Private LLM
-Agent ← SQS Response Queue ← llm-worker
-```
-
-**SQSLLMClient** (`src/agent/llm/sqs.ts`):
-- Resolves queue URLs from names via `GetQueueUrl` at first call (cached after)
-- Auto-creates queue via `CreateQueue` if `QueueDoesNotExist` is thrown
-- FIFO detection: queue name ending in `.fifo` → sets `FifoQueue=true`
-- Polls response queue with long-polling until `timeoutMs` (default 120s)
-- Each LLM iteration = one SQS round-trip (~5-10s added latency per iteration)
-
-**Config:**
-```
-AWS_REGION               # default: ap-southeast-1
-SQS_REQUEST_QUEUE_NAME   # default: llm-request.fifo
-SQS_RESPONSE_QUEUE_NAME  # default: llm-response.fifo
-SQS_LLM_TIMEOUT_MS       # default: 120000
-SQS_POLL_WAIT_SECONDS    # default: 10
-```
-
-**IAM permissions needed** (for EKS pod role):
-`sqs:SendMessage`, `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:GetQueueUrl`, `sqs:CreateQueue`
-
-## Alertmanager Integration Notes
-- `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace combination
-- `repeat_interval: 12h` — agent dedup TTL must be >= this (set to 12h)
-- Label templating `{{ $labels.pod }}` in the `labels:` block is **not resolved** by Prometheus — only works in `annotations:`
-- `startsAt` from Alertmanager payload is included in `issueText` as a unix timestamp for the agent to use as a query anchor
+## Alertmanager Config Notes
+- `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace
+- `repeat_interval: 12h` — agent dedup TTL matches this
+- Label templating in `labels:` block NOT resolved by Prometheus — use `annotations:` only
+- `startsAt` included in issueText as unix timestamp for query anchoring
 
 ## Potential Improvements
 - [ ] `/clear` Slack command to reset thread history
-- [ ] Configurable confidence threshold via env var (currently hardcoded to "low")
-- [ ] Rate limiting per user/channel
-- [ ] Persistent dedup storage (currently in-memory; restarts reset it)
-- [ ] Streaming response to Slack (incrementally update message during investigation)
-- [ ] Multi-cluster support (one MCP server per cluster, agent selects based on namespace/label)
-- [ ] Alert grouping — if 5 pods crash in the same namespace, investigate once not 5 times
-- [ ] Webhook authentication for `/alert` endpoint (currently unauthenticated)
-- [ ] SQS message visibility timeout tuning (currently uses SQS default 30s — should be > LLM inference time)
+- [ ] Configurable confidence threshold via env var
+- [ ] Persistent dedup storage (current in-memory resets on restart)
+- [ ] Alert grouping — investigate once if many pods fail in same namespace
+- [ ] Webhook auth for `/alert` endpoint
+- [ ] SQS message visibility timeout > LLM inference time
