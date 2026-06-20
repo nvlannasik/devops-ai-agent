@@ -63,6 +63,7 @@ RUN npm ci --omit=dev
 
 # Copy build output
 COPY --from=builder /app/dist ./dist
+COPY prompts/ ./prompts/
 
 EXPOSE 3000
 

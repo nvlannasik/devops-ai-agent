@@ -29,7 +29,7 @@ export const config = {
       region: process.env.AWS_REGION ?? "ap-southeast-1",
       requestQueueName: process.env.SQS_REQUEST_QUEUE_NAME ?? "llm-request.fifo",
       responseQueueName: process.env.SQS_RESPONSE_QUEUE_NAME ?? "llm-response.fifo",
-      timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_MS ?? "120000"),
+      timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_SECONDS ?? "120") * 1000,
       pollWaitSeconds: parseInt(process.env.SQS_POLL_WAIT_SECONDS ?? "10"),
     },
   },
@@ -43,7 +43,12 @@ export const config = {
     http: {
       url: process.env.MCP_HTTP_URL ?? "http://localhost:3001/mcp",
     },
+    // per-tool-call timeout (seconds) so a hung MCP server / upstream can't stall an investigation
+    toolTimeoutMs: parseInt(process.env.MCP_TOOL_TIMEOUT_SECONDS ?? "45") * 1000,
   },
+
+  // wall-clock budget (seconds) for a single investigation — bounds how long a semaphore slot is held
+  investigationTimeoutMs: parseInt(process.env.INVESTIGATION_TIMEOUT_SECONDS ?? "300") * 1000,
 
   memory: {
     // MEMORY_BACKEND: "inmemory" (default) | "redis"
