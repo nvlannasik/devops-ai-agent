@@ -47,4 +47,6 @@ export interface LLMResponse {
 
 export interface LLMClient {
   chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse>;
+  // optional teardown (e.g. SQS client stops its dispatcher and deletes its per-instance queue)
+  shutdown?(): Promise<void>;
 }

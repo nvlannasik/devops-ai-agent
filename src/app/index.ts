@@ -74,14 +74,19 @@ export class SlackApp {
 
   // Mount /alert and /health onto any Express router (used by both modes)
   private _mountAlertRoute(router: express.IRouter): void {
-    router.post("/alert", async (req: Request, res: Response) => {
-      try {
-        await this.handleAlert(req.body as AlertmanagerPayload);
-        res.status(200).json({ ok: true });
-      } catch (err) {
-        logger.error(`Alert webhook error: ${err}`);
-        res.status(500).json({ ok: false });
+    router.post("/alert", (req: Request, res: Response) => {
+      const payload = req.body as AlertmanagerPayload;
+      if (!payload || !Array.isArray(payload.alerts)) {
+        res.status(400).json({ ok: false, error: "invalid alertmanager payload" });
+        return;
       }
+      // Ack immediately. An investigation takes minutes; holding the connection
+      // open makes Alertmanager time out (seconds) and retry the whole batch.
+      // Notifications + investigations run in the background after this returns.
+      res.status(200).json({ ok: true });
+      this.handleAlert(payload).catch((err) =>
+        logger.error(`[slack] alert processing failed: ${err instanceof Error ? err.message : err}`)
+      );
     });
 
     router.get("/health", (_req: Request, res: Response) => {
@@ -144,41 +149,62 @@ export class SlackApp {
       const severity = alert.labels.severity ?? "unknown";
       logger.info(`[slack] processing alert: ${alertName} severity=${severity}`);
 
-      const severityEmoji: Record<string, string> = {
-        critical: "🔴", warning: "🟡", info: "🔵",
-      };
-      const emoji = severityEmoji[severity] ?? "⚪";
+      const issueText = this.buildAlertText(alert);
 
-      const lines: string[] = [
-        `🚨 *${alertName}*`,
-        `*Severity:* ${emoji} \`${severity}\``,
-      ];
-      if (alert.annotations?.summary)     lines.push(`*Summary:* ${alert.annotations.summary}`);
-      if (alert.annotations?.description) lines.push(`*Description:* ${alert.annotations.description}`);
-      if (alert.labels.namespace)         lines.push(`*Namespace:* \`${alert.labels.namespace}\``);
-      if (alert.labels.pod)               lines.push(`*Pod:* \`${alert.labels.pod}\``);
-      if (alert.startsAt)                 lines.push(`*Firing since:* \`${new Date(alert.startsAt).toISOString()}\` (unix: \`${Math.floor(new Date(alert.startsAt).getTime() / 1000)}\`)`);
-
-      const issueText = lines.join("\n");
-
+      // Post the alert + investigating notice up front so it shows in Slack
+      // immediately — never gated behind another alert's multi-minute investigation.
       const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
       const threadId = posted.ts!;
-
       await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
-      await this.semaphore.acquire();
-      try {
-        const rca = await this.agent.investigate(threadId, issueText);
-        await this.app.client.chat.postMessage({
+
+      // Fire-and-forget — the LLM run must not delay the next alert's notification.
+      // Concurrency stays bounded by the semaphore inside the background task.
+      void this.investigateAlertInBackground(channel, threadId, issueText);
+    }
+  }
+
+  private buildAlertText(alert: AlertmanagerPayload["alerts"][number]): string {
+    const alertName = alert.labels.alertname ?? "Unknown";
+    const severity = alert.labels.severity ?? "unknown";
+    const emoji = ({ critical: "🔴", warning: "🟡", info: "🔵" } as Record<string, string>)[severity] ?? "⚪";
+
+    const lines: string[] = [
+      `🚨 *${alertName}*`,
+      `*Severity:* ${emoji} \`${severity}\``,
+    ];
+    if (alert.annotations?.summary)     lines.push(`*Summary:* ${alert.annotations.summary}`);
+    if (alert.annotations?.description) lines.push(`*Description:* ${alert.annotations.description}`);
+    if (alert.labels.namespace)         lines.push(`*Namespace:* \`${alert.labels.namespace}\``);
+    if (alert.labels.pod)               lines.push(`*Pod:* \`${alert.labels.pod}\``);
+    if (alert.startsAt)                 lines.push(`*Firing since:* \`${new Date(alert.startsAt).toISOString()}\` (unix: \`${Math.floor(new Date(alert.startsAt).getTime() / 1000)}\`)`);
+
+    return lines.join("\n");
+  }
+
+  private async investigateAlertInBackground(channel: string, threadId: string, issueText: string): Promise<void> {
+    await this.semaphore.acquire();
+    try {
+      const rca = await this.agent.investigate(threadId, issueText);
+      await this.app.client.chat.postMessage({
+        channel,
+        thread_ts: threadId,
+        text: rca,
+        ...(isRcaResponse(rca) ? { blocks: buildRcaBlocks(rca) } : { mrkdwn: true }),
+      });
+      if (isRcaResponse(rca)) await this.agent.markRcaSent(threadId);
+      await this.notifyIfLowConfidence(channel, threadId, rca);
+    } catch (err) {
+      logger.error(`[slack] background investigation failed for thread ${threadId}: ${err}`);
+      await this.app.client.chat
+        .postMessage({
           channel,
           thread_ts: threadId,
-          text: rca,
-          ...(isRcaResponse(rca) ? { blocks: buildRcaBlocks(rca) } : { mrkdwn: true }),
-        });
-        if (isRcaResponse(rca)) await this.agent.markRcaSent(threadId);
-        await this.notifyIfLowConfidence(channel, threadId, rca);
-      } finally {
-        this.semaphore.release();
-      }
+          text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`,
+          mrkdwn: true,
+        })
+        .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${e}`));
+    } finally {
+      this.semaphore.release();
     }
   }
 

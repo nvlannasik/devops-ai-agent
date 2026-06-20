@@ -31,7 +31,12 @@ cp .env.example .env
 npm install
 npm run dev
 npm run build && npm start
+npm test                       # unit tests
 ```
+
+## Testing
+
+`npm test` runs `node --import tsx --test 'src/**/*.test.ts'` — Node's built-in test runner (Node >= 24), no extra dependencies. Test files (`*.test.ts`) are excluded from the production build, so `dist/` stays clean. Current coverage: history trimming with `tool_use`/`tool_result` pairing, tool-result truncation, conversation memory, and the SQS response-release backoff.
 
 ## Configuration
 
@@ -52,12 +57,13 @@ npm run build && npm start
 | `SQS_REGION` | Required if private-llm | `ap-southeast-1` |
 | `SQS_REQUEST_QUEUE_NAME` | | `llm-request.fifo` |
 | `SQS_RESPONSE_QUEUE_NAME` | | `llm-response.fifo` |
-| `SQS_LLM_TIMEOUT_MS` | Max wait for LLM response | `120000` |
+| `SQS_LLM_TIMEOUT_SECONDS` | Max wait for LLM response | `120` |
 | `SQS_POLL_WAIT_SECONDS` | | `10` |
 | `AWS_ACCESS_KEY_ID` | Local dev only — use IRSA on EKS | — |
 | `MCP_TRANSPORT` | `stdio` or `http` | `stdio` |
 | `MCP_STDIO_ARGS` | Path to MCP server `dist/index.js` | — |
 | `MCP_HTTP_URL` | | `http://localhost:3001/mcp` |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Per-tool-call timeout (a hung MCP server can't stall an investigation) | `45` |
 | `MEMORY_BACKEND` | `inmemory` or `redis` | `inmemory` |
 | `REDIS_HOST` | | `localhost` |
 | `REDIS_PORT` | | `6379` |
@@ -65,6 +71,7 @@ npm run build && npm start
 | `REDIS_PASSWORD` | | — |
 | `REDIS_TLS` | | `false` |
 | `MAX_CONCURRENT_INVESTIGATIONS` | | `5` |
+| `INVESTIGATION_TIMEOUT_SECONDS` | Wall-clock budget per investigation (bounds how long a slot is held) | `300` |
 | `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
 
 ## Usage
@@ -130,6 +137,20 @@ For LLMs in a strict private network, set `LLM_PROVIDER=private-llm`. The agent 
 
 See [llm-worker](../llm-worker) for the worker service deployed in the private network.
 
+## Customizing the System Prompt
+
+The agent's system prompt lives in `prompts/system.md` at the project root — plain Markdown, no TypeScript required.
+
+To update the prompt:
+1. Edit `prompts/system.md`
+2. Restart the agent (no rebuild needed)
+
+The prompt is read once on first use and cached in memory. Key sections you may want to tune:
+- **Response Mode** — conversation vs investigation mode rules
+- **Failure Mode Playbooks** — investigation steps per symptom (CrashLoopBackOff, OOMKilled, etc.)
+- **RCA Output Format** — Slack Block Kit formatting rules
+- **Severity / Confidence thresholds**
+
 ## Key Features
 
 | Feature | Details |
@@ -141,7 +162,12 @@ See [llm-worker](../llm-worker) for the worker service deployed in the private n
 | Follow-up Mode | `markRcaSent` flag prevents RCA format on follow-ups |
 | Prompt Caching | Anthropic ephemeral cache reduces token cost |
 | Parallel Tools | Independent tool calls executed in parallel |
+| Async Alert Webhook | `/alert` acks `200` immediately and investigates in the background — no Alertmanager timeout, notifications never wait behind another alert's investigation |
+| SQS Dispatcher | Single per-process dispatcher routes shared-queue responses by `requestId`; releases non-owned messages so concurrent investigations don't stall each other |
+| Bounded Latency | Per-tool-call, per-investigation, and SQS client request timeouts prevent a hung dependency from freezing the agent |
 | Multi-LLM | Claude, OpenAI-compatible, or private via SQS |
+| Prompt from Markdown | Edit `prompts/system.md` to update prompt without rebuild |
+| Truncated Logs | Long field values shown as `...[truncated N chars]` |
 
 ## Project Structure
 

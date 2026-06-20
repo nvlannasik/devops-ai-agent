@@ -93,7 +93,7 @@ export class MCPClient {
     }
 
     try {
-      const result = await this.client.callTool({ name, arguments: input });
+      const result = await this.client.callTool({ name, arguments: input }, undefined, { timeout: config.mcp.toolTimeoutMs });
       const content = result.content as Array<{ type: string; text?: string }>;
       return content.map((c) => c.text ?? "").join("\n");
     } catch (err) {
@@ -106,7 +106,7 @@ export class MCPClient {
       } finally {
         this.reconnectMutex.release();
       }
-      const result = await this.client.callTool({ name, arguments: input });
+      const result = await this.client.callTool({ name, arguments: input }, undefined, { timeout: config.mcp.toolTimeoutMs });
       const content = result.content as Array<{ type: string; text?: string }>;
       return content.map((c) => c.text ?? "").join("\n");
     }
