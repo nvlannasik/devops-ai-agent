@@ -4,6 +4,7 @@ import { ConversationMemory } from "./memory/index.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
 import { trimHistory, sanitizeContentBlocks } from "./context/index.js";
 import { config } from "../config/index.js";
+import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
 import { Redis } from "ioredis";
 import logger from "../utils/logger/index.js";
@@ -58,7 +59,7 @@ export class DevOpsAgent {
 
   async investigate(threadId: string, userMessage: string): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
-    logger.debug(`[${threadId}] Issue: ${userMessage.slice(0, 120)}${userMessage.length > 120 ? "..." : ""}`);
+    logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
 
     const isFollowUp = await this.memory.hasRca(threadId);
@@ -76,7 +77,13 @@ export class DevOpsAgent {
     let iterations = 0;
     let totalUsage = zeroUsage();
 
+    const deadline = investigationStart + config.investigationTimeoutMs;
+
     while (iterations < MAX_ITERATIONS) {
+      if (Date.now() > deadline) {
+        logger.warn(`[${threadId}] Investigation exceeded ${config.investigationTimeoutMs}ms budget after ${iterations} LLM calls`);
+        return "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.";
+      }
       iterations++;
 
       const messages = trimHistory(await this.memory.get(threadId));
@@ -107,7 +114,13 @@ export class DevOpsAgent {
           `total tokens — in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
           `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`
         );
-        return this.extractText(response.content);
+        const summary = this.extractText(response.content);
+        if (!summary) {
+          // never return empty — Slack chat.postMessage rejects an empty text with `no_text`
+          logger.warn(`[${threadId}] LLM returned an empty final response (stop=${response.stopReason})`);
+          return "⚠️ The investigation finished but the model returned an empty response. Please re-run or rephrase the request.";
+        }
+        return summary;
       }
 
       if (response.stopReason === "tool_use") {
@@ -129,7 +142,7 @@ export class DevOpsAgent {
       toolUses.map(async (toolUse) => {
         const { id, name, input } = toolUse;
         const start = Date.now();
-        logger.info(`[${threadId}] → tool: ${name} input: ${JSON.stringify(input).slice(0, 200)}`);
+        logger.info(`[${threadId}] → tool: ${name} input: ${truncate(JSON.stringify(input))}`);
         try {
           const result = await this.mcp.callTool(name!, input as Record<string, unknown>);
           logger.info(`[${threadId}] ← tool: ${name} ok (${Date.now() - start}ms, ${result.length} chars)`);
@@ -161,5 +174,6 @@ export class DevOpsAgent {
 
   async shutdown(): Promise<void> {
     await this.mcp.disconnect();
+    await this.llm.shutdown?.();
   }
 }

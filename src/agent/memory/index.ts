@@ -1,5 +1,6 @@
 import type { Message } from "../llm/types.js";
 import type { Redis } from "ioredis";
+import { trimToWindow } from "../context/index.js";
 
 const MAX_MESSAGES = 50;
 const REDIS_TTL_SEC = 86400;
@@ -24,11 +25,14 @@ export class ConversationMemory {
   async append(threadId: string, message: Message): Promise<void> {
     const history = await this.get(threadId);
     history.push(message);
-    if (history.length > MAX_MESSAGES) history.splice(0, history.length - MAX_MESSAGES);
+    // preserve the original issue (index 0) and keep tool_use/tool_result pairs
+    // intact — a blind splice on the oldest messages dropped the issue and could
+    // orphan a tool_result, which the trimHistory window then assumes never happens
+    const trimmed = trimToWindow(history, MAX_MESSAGES);
     if (this.redis) {
-      await this.redis.set(`conv:${threadId}`, JSON.stringify(history), "EX", REDIS_TTL_SEC);
+      await this.redis.set(`conv:${threadId}`, JSON.stringify(trimmed), "EX", REDIS_TTL_SEC);
     } else {
-      this.store.set(threadId, history);
+      this.store.set(threadId, trimmed);
     }
   }
 

@@ -38,6 +38,19 @@ Slack mention / Alertmanager webhook
 - Follow-up messages are prepended with `[FOLLOW-UP — conversation mode, do NOT use RCA format]`
 - **Do not remove this prefix** — without it, LLM defaults to RCA format regardless of context
 
+### System Prompt from Markdown
+- `prompts/system.md` at project root — edit this file to update the prompt without rebuilding TypeScript
+- `buildStaticSystemPrompt()` reads and caches the file on first call
+- Path resolution supports both dev (`src/agent/prompts/`) and prod (`dist/src/agent/prompts/`)
+- Dockerfile copies `prompts/` directory to image alongside `dist/`
+
+### Truncated Log Formatting
+- `src/utils/truncate/index.ts` — `truncate(value, max?)` helper
+- Format: `...[truncated N chars]` — shows exactly how much was cut
+- Used in: issue preview (120 chars), tool input log (200 chars)
+- Tool result truncation in `context/index.ts` uses same format
+- Log output itself is never truncated — only field values within log messages
+
 ### System Prompt Strategy
 - `buildStaticSystemPrompt()` — large static prompt cached by Anthropic (`cache_control: ephemeral`)
 - `buildTimeContext()` — called once per investigation, injects unix timestamps for tool params
@@ -54,9 +67,16 @@ Slack mention / Alertmanager webhook
 - `reconnectMutex` — prevents race condition when parallel tool calls hit disconnect simultaneously
 - Double-check pattern: verify `connected` state before and after acquiring mutex
 
+### Timeouts (don't let one investigation stall the agent)
+- `MCP_TOOL_TIMEOUT_SECONDS` (default 45) → passed as the MCP SDK `callTool` request `timeout`; a hung MCP server/upstream rejects the call instead of blocking. Set below the SDK's 60s default and above the MCP server's own upstream timeout so the server's specific error surfaces first.
+- `INVESTIGATION_TIMEOUT_SECONDS` (default 300) → wall-clock budget checked at the top of each agentic-loop iteration in `investigate()`. Bounds how long a `Semaphore` slot is held (`MAX_ITERATIONS=10` only bounds iteration count, not time). Combined with the per-tool timeout, total runtime is bounded to ~budget + one in-flight call.
+- **Env vars are in seconds; config converts to ms internally** (`* 1000`) since `setTimeout`/SDK/axios take ms. Internal field names keep the `Ms` suffix.
+
 ### Context Window Management
 - Tool results truncated to 8000 chars before entering history
-- History trimmed to 40 messages, always preserving first message (original issue)
+- `trimToWindow(messages, max)` in `context/index.ts` is the single pairing-aware trimmer: keeps first message (original issue) + most recent, and advances the window past any leading orphaned `tool_result`
+- Used by both layers: model window = 40 (`trimHistory`), storage cap = 50 (`memory.append`)
+- **Never reintroduce a blind `slice`/`splice`** — it can drop the issue or split a `tool_use`/`tool_result` pair, which the Anthropic API rejects with a 400 on long investigations
 
 ### Alert Deduplication
 - Fingerprint: all labels sorted and joined → stable string
@@ -71,10 +91,17 @@ Slack mention / Alertmanager webhook
 | `private-llm` | `SQSLLMClient` | Event-driven via SQS, for strict private networks |
 
 ### Private LLM via SQS
-- Agent publishes `{ requestId, messages, tools, systemPrompt }` to SQS Request Queue
-- Polls Response Queue for matching `requestId`
-- Queue URLs resolved from names via `GetQueueUrl`, auto-created if not exist
-- Timeout: `SQS_LLM_TIMEOUT_MS` (default 120s)
+- Agent publishes `{ requestId, messages, tools, systemPrompt }` to the shared SQS Request Queue
+- **Shared response queue + one dispatcher per process:** a single `dispatchLoop()` per replica polls the shared response queue and routes each message to the waiting `chat()` call via `Map<requestId, waiter>` (`pending`). Replaces the old design where every concurrent investigation polled independently and **skipped non-matching messages without releasing them** — leaving them invisible for the whole visibility timeout and stalling the rightful waiter.
+- SQS has no selective receive, so a replica can pull another replica's response. Routing in `routeMessage()`:
+  - ours & awaited → delete + resolve/reject
+  - ours & already done (timed out) → delete — `issued` tombstone (TTL 2× timeout) recognises our own late/duplicate responses so they aren't bounced around
+  - not ours → `ChangeMessageVisibility` release so the owner can grab it: `releaseVisibilitySeconds()` returns `0` (instant) up to `RELEASE_FAST_LIMIT=20` receives, then `60`s backoff so a true orphan (requester died) can't hot-loop the queue — SQS retention eventually clears it
+- `chat()` registers the waiter, publishes, awaits a promise resolved by the dispatcher; per-request `setTimeout` enforces `SQS_LLM_TIMEOUT_SECONDS` (default 120)
+- **Shutdown:** `SQSLLMClient.shutdown()` (via optional `LLMClient.shutdown?()`, called from `DevOpsAgent.shutdown()`) aborts the dispatcher and rejects pending waiters. No queues to delete — the response queue is shared, so **no per-replica queue sprawl** even under autoscaling.
+- **SQSClient has explicit timeouts** (`requestHandler: { connectionTimeout, requestTimeout }`, `maxAttempts: 3`). Critical: the dispatcher is the **single** deliverer of all LLM responses — a hung SQS call (no timeout) once froze it permanently, so it delivered a couple of responses then silently stalled and every later investigation timed out. `requestTimeout = (pollWaitSeconds + 15)s` so the long-poll receive isn't cut short.
+- IAM (private-llm provider): `sqs:SendMessage/ReceiveMessage/DeleteMessage/ChangeMessageVisibility/GetQueueUrl/CreateQueue` on `llm-*.fifo`
+- Rejected alternative: per-instance reply-to queue (`llm-response-<podname>.fifo`). Cleaner routing but creates one queue per pod → list grows, orphans on hard crash. Chose the shared-queue dispatcher to keep the queue count constant at 3.
 
 ## Slack Modes
 
@@ -99,7 +126,7 @@ OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_MODEL
 
 # Private LLM (SQS)
 SQS_REGION, SQS_REQUEST_QUEUE_NAME, SQS_RESPONSE_QUEUE_NAME
-SQS_LLM_TIMEOUT_MS, SQS_POLL_WAIT_SECONDS
+SQS_LLM_TIMEOUT_SECONDS, SQS_POLL_WAIT_SECONDS
 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  # local dev only; use IRSA on EKS
 
 MCP_TRANSPORT, MCP_STDIO_ARGS, MCP_HTTP_URL
@@ -153,6 +180,22 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 3. **Block Kit not rendering** — LLM outputs `[Critical]`; regex handles both forms
 4. **Race condition on reconnect** — `reconnectMutex` in MCPClient
 5. **False positive confidence** — regex anchored to label
+6. **Orphaned `tool_result` on long investigations** — two independent trimmers (`trimHistory` keep-first + `memory.append` blind splice) could drop the issue or split a `tool_use`/`tool_result` pair → Anthropic 400. Unified into pairing-aware `trimToWindow()`; covered by `context/index.test.ts`
+7. **`/alert` webhook held open during investigation** — awaited the full multi-minute investigation before replying, causing Alertmanager timeouts/retries and late notifications for batched alerts. Now acks `200` immediately and investigates in the background (see Alert Webhook is Async)
+8. **SQS response polling stalled waiters across concurrent investigations / replicas** — every concurrent investigation polled the shared response queue and skipped non-matching messages **without releasing them**, so they stayed invisible for the visibility timeout and the rightful waiter stalled (worse under autoscaling). Now a single dispatcher per process + `ChangeMessageVisibility` release with orphan backoff (see Private LLM via SQS); `releaseVisibilitySeconds` covered by `llm/sqs.test.ts`
+9. **Empty RCA → Slack `no_text`** — when the model's final turn had no text, `investigate()` returned `""` and `chat.postMessage({ text: "" })` failed with `no_text`. `investigate()` now substitutes a fallback message so the return is never empty.
+
+## Testing
+- `npm test` → `node --import tsx --test 'src/**/*.test.ts'` (Node >= 24 built-in runner + tsx, zero new deps)
+- Test files (`*.test.ts`) excluded from `tsc` build so `dist/` stays clean
+- Covered so far: `trimToWindow`/`trimHistory` pairing invariants, `truncateToolResult`, `sanitizeContentBlocks`, `ConversationMemory` (in-memory backend)
+
+### Alert Webhook is Async (do not re-block it)
+- `POST /alert` validates the payload, returns `200` **immediately**, then processes in the background
+- Inside `handleAlert`: each alert's Slack notification is posted up front (sequential, fast); the investigation is fired via `void investigateAlertInBackground(...)` so it never delays the next alert's notification or the webhook ack
+- Background concurrency is bounded by the existing `Semaphore`; failures are caught and posted into the alert thread
+- **Why:** investigations take minutes — awaiting them held the connection open past Alertmanager's seconds-long webhook timeout (causing retries) and serialized notifications so later alerts in a batched payload appeared late
+- Trade-off: after the `200` ack a crash loses the in-flight RCA (not the alert — it's already in Slack); Alertmanager `repeat_interval` + in-memory dedup reset on restart re-trigger it. Graceful-shutdown drain of in-flight investigations is a possible follow-up.
 
 ## Alertmanager Config Notes
 - `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace
