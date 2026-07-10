@@ -1,0 +1,219 @@
+# Design — Guarded Remediation
+
+> **Status:** design agreed, ready for v1 implementation (2026-06-25). Open questions
+> from the first draft have been resolved (see Decisions summary). This is the source
+> of truth; implementation follows §8.
+
+## 1. Goal
+
+Today the agent stops at **diagnosis** (RCA). Guarded Remediation lets the agent
+**execute fixes** (restart, scale, rollback) — but **always through a human approval
+gate** in the alert thread, **never** automatically without confirmation.
+
+"Guarded" means every action is bounded by:
+1. **Whitelist** of allowed actions (not arbitrary kubectl),
+2. **Approval** from an authorized human before execution,
+3. **Audit trail** of everything (who, when, what action, what result).
+
+## 2. Non-goals (v1)
+
+- ❌ Auto-remediation without approval (maybe v2 for low-risk + high-confidence; **not** now).
+- ❌ Arbitrary command execution. Structured actions from the whitelist only.
+- ❌ Remediation outside Kubernetes (no cloud API, no DB surgery).
+- ❌ Multi-step orchestration / runbook automation. One action per approval for now.
+
+## 3. Threat model — why "guarded"
+
+Write actions are **irreversible-ish** with real blast radius:
+- The LLM can misdiagnose → restart/scale the wrong component → cause a new outage.
+- Without auth/whitelist, an MCP write-tool is RCE against the cluster.
+- Without approval, a single false-positive alert can trigger a destructive action at 3am.
+
+So **least-privilege RBAC + whitelist + approval + audit** is not optional — it *is* the
+feature. See §5.5 for **enforcement layering** (where each guard is enforced).
+
+## Decisions summary
+
+| Question | Decision | §  |
+|----------|----------|----|
+| Write tools: separate server or flag? | **Flag `MCP_ENABLE_WRITE_TOOLS`** on one server; write tools are **not registered** when off (conditional spread, not a conditional handler) | 5.1 |
+| Who may approve? | **`SLACK_APPROVER_USERS`** allowlist, fallback `SLACK_ONCALL_USERS`; non-approver → ephemeral "not authorized" | 5.2 |
+| Audit schema | **Separate `remediations` table (1:N)** — not extra columns on `incidents` | 5.4 |
+| LLM-proposed or rule-based? | **LLM proposes** (structured output) + **server-side validation** before the card | 6 |
+| Approval expiry | **15 minutes, checked at click time** (not at post time) | 5.2 |
+| Dry-run | **Mandatory**, its result is shown on the approval card | 5.3 |
+| Namespace allowlist / blast radius | **Env var, enforced in the MCP server + RBAC** (not just the agent) | 5.5 |
+
+## 4. Flow
+
+```
+Alert → investigate → RCA posted (existing)
+                          ↓
+        LLM proposal call (structured output) — only if a known action fits
+                          ↓
+        Server-side validate (whitelist + namespace allowlist); invalid → no card, log warn
+                          ↓
+        Dry-run the action → insert remediations row (status=proposed)
+                          ↓
+        Post APPROVAL CARD in the thread (Block Kit buttons)
+           ┌─────────────────────────────────────────────┐
+           │ 🔧 Proposed: restart deploy/payment-api       │
+           │    namespace: payment · reason: OOM loop      │
+           │    Predicted: pod payment-api-xyz restarts    │
+           │    [ Approve ]   [ Reject ]                   │
+           └─────────────────────────────────────────────┘
+                          ↓ (approver clicks — handled by app.action, NOT the investigation loop)
+        ack() <3s → update card "⏳ Executing..." → row-flip lock → execute MCP write-tool
+                          ↓
+        Update card ✅/❌ + write result to the remediations row
+```
+
+The investigation loop **ends after posting the card** — the rest of the flow
+(approve/reject/execute) is handled entirely by a separate `app.action` handler. Do not
+block the investigation loop waiting on approval.
+
+## 5. Components
+
+### 5.1 MCP write-tools (`devops-mcp-server`)
+- New tools: v1 is just **`k8s_rollout_restart`**; `k8s_scale` / `k8s_rollout_undo` come later. Strict zod input (namespace + workload **required**).
+- **Conditional registration via flag** — write tools **must not appear** in `listTools()` when the flag is off. The agent caches `listTools()` once at startup (`discoverTools()`), so a tool that is listed but fails on call makes the LLM loop. Wire it in `src/tools/index.ts` (the existing spread pattern), **not** as a conditional handler:
+  ```ts
+  const writeEnabled = process.env.MCP_ENABLE_WRITE_TOOLS === "true";
+  const allTools: Tool[] = [
+    ...kubernetes, ...prometheus, ...loki, ...tracing,
+    ...(writeEnabled ? writeTools : []),
+  ];
+  ```
+- **Behind `MCP_AUTH_TOKEN`** (already done) — a write tool is never unauthenticated.
+- Every write tool supports **dry-run** (`--dry-run=server`) to feed the predicted effect into the approval card.
+
+### 5.2 Approval gate (agent side, Slack)
+- Block Kit message with **Approve/Reject buttons** (`actions` block; `action_id` carries the remediation id).
+- **Interactivity:** Socket Mode → `app.action("approve_remediation", ...)` (no public URL — matches the current Socket Mode default). HTTP Mode needs an interactivity request URL (public).
+- **Approver = `SLACK_APPROVER_USERS`** (fallback `SLACK_ONCALL_USERS`). Check `body.user.id` against the allowlist; non-approvers get an **ephemeral** "not authorized" — this never exposes the approver list to the channel.
+- **Expiry: 15 minutes, checked in the handler at click time** (`created_at + 15m < now()`), not at post time. A card posted at 02:00 and approved at 02:14 is still valid; what's prevented is approving a stale 3am card first seen at 8am.
+- **`ack()` must run < 3 seconds** (Slack hard timeout). Pattern:
+  ```ts
+  app.action("approve_remediation", async ({ ack, body, client }) => {
+    await ack();                                   // < 3s, must come first
+    await client.chat.update({ ..., text: "⏳ Executing..." });
+    const result = await executeRemediation(...);  // MCP call, may take 10–30s
+    await client.chat.update({ ..., text: result });
+  });
+  ```
+
+### 5.3 Execution path
+- On approve: the agent calls the MCP write-tool via the existing `MCPClient.callTool()`.
+- **Dry-run is mandatory before execute** — if dry-run fails, abort and do not run the real action.
+- **Idempotency / double-execute guard (atomic row-flip):** the button can be double-clicked, and under multi-pod, Socket Mode may deliver the interaction to any pod (especially on reconnect). Use the row as a lock:
+  ```sql
+  UPDATE remediations SET status='executing'
+   WHERE id=$1 AND status='approved'
+  ```
+  Only one wins (atomic — same trick as dedup). **0 rows updated** = another process already executed → the losing pod **posts an ephemeral** "⚠️ This action is already being executed by another process." Never fail silently.
+
+### 5.4 Audit trail (DB, `migration 002_remediations.sql`)
+A **separate `remediations` table (1:N, FK to `incidents`)** — not extra columns on
+`incidents`. A single incident that needs two actions (restart fails → scale) breaks the
+1:1 approach immediately. This table also doubles as the **idempotency lock** (§5.3) and
+the **duplicate-card guard** (below).
+
+```sql
+CREATE TABLE remediations (
+  id BIGSERIAL PRIMARY KEY,
+  incident_id BIGINT REFERENCES incidents(id),
+  action TEXT NOT NULL,            -- e.g. "k8s_rollout_restart"
+  params JSONB NOT NULL,           -- {namespace, workload, ...}
+  status TEXT NOT NULL,            -- proposed | approved | rejected | executing | succeeded | failed
+  proposed_by TEXT,                -- 'agent'
+  approved_by TEXT,                -- Slack user id
+  result TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  executed_at TIMESTAMPTZ
+);
+
+-- Duplicate-card guard: at most one active remediation per incident.
+-- SELECT-then-INSERT is NOT atomic across pods (TOCTOU); this index is the real
+-- guarantee, not the SELECT. Without it, two pods can both insert → two cards.
+CREATE UNIQUE INDEX one_active_remediation ON remediations (incident_id)
+  WHERE status IN ('proposed', 'approved', 'executing');
+```
+
+> **`storeIncident` must return `id`.** It is currently `store(...): Promise<void>`. To
+> link `remediations.incident_id`, change it to `Promise<number | null>` with
+> `INSERT INTO incidents ... RETURNING id`. The caller in `investigateAlertInBackground`
+> keeps `incidentId` to pass into the proposal flow.
+
+> *Priority note:* `AlertDeduplicator` already prevents duplicate cards from the same
+> alert. The TOCTOU above only opens up when an alert **re-fires after 12h** while an old
+> card is still pending — so the unique index matters, but it isn't the hottest path.
+
+### 5.5 Guardrails & enforcement layering (non-negotiable)
+Defense in depth — each guard is enforced at the correct layer, **not just in the agent**:
+
+```
+RBAC ServiceAccount  ← floor, cannot be bypassed at the app layer
+        ↑
+MCP server validate  ← whitelist + namespace allowlist + block kube-system (trust boundary; holds cluster creds)
+        ↑
+Agent validate       ← UX only: don't show an invalid card
+```
+
+- **Action whitelist** — the agent may only propose from a fixed set; the MCP server rejects anything else.
+- **Namespace allowlist is enforced in the MCP server** (which holds the credentials), not just the agent. A buggy/compromised agent still can't get through if the server + RBAC hold.
+  ```
+  ALLOWED_REMEDIATION_NAMESPACES=payment,orders,inventory   # empty = everything blocked
+  MAX_SCALE_DELTA=5                                          # max replica change
+  ```
+  Always block `kube-system`, `kube-public`, `flux-system` **regardless of the allowlist**.
+- **Least-privilege RBAC** — the agent/MCP server ServiceAccount gets only the verbs it needs (`patch deployments` for restart/scale; `create deployments/rollback`), scoped to allowed namespaces. This is the last line: even if every app-layer guard fails, RBAC holds.
+- **Rate limit** (v2) — max N remediations per hour per namespace, to stop a flapping alert from restarting repeatedly.
+
+## 6. Proposal generation
+
+**LLM proposes + server-side validation.** After the RCA completes, a **separate LLM
+call** with structured output produces the proposal:
+
+```json
+{ "action": "k8s_rollout_restart", "namespace": "payment", "workload": "payment-api", "reason": "OOM loop confirmed in pod logs" }
+```
+
+- The LLM already has full context (RCA, namespace, workload from tool results); a deterministic rule (`alertname → action`) would drift from reality and need maintenance.
+- The output is **validated** (whitelist + namespace allowlist) **before** any DB insert or card. Failed validation → no card, log a warning. A bad LLM proposal = no card = no execution.
+- **Trade-off (accepted):** +1 LLM round-trip per incident (token + latency). Cleaner and easier to validate than parsing RCA text. The alternative (a `propose_remediation` tool in the final RCA turn) is deferred — a separate call is safer.
+
+## 7. v1 scope (minimal cut)
+
+The smallest thing that's actually useful **and** safe:
+1. **One** write tool: `k8s_rollout_restart` (most common, reversible-ish, low blast radius).
+2. Approval gate: Socket Mode `app.action` + `SLACK_APPROVER_USERS` (fallback oncall).
+3. `remediations` table + unique index + `storeIncident` returns id.
+4. Mandatory dry-run before execute; row-flip idempotency lock.
+5. Guardrails: whitelist (trivially 1 action), namespace allowlist + block kube-system **in the MCP server**, least-privilege RBAC.
+
+**Skip for v1:** scale/rollback, rate limiting, auto-remediation, multi-step. Add once the single-action flow is proven.
+
+## 8. Implementation order
+
+Steps 1 & 2 can run in parallel (server & agent are independent early on):
+
+| Step | Repo | Task |
+|------|------|------|
+| 1 | `devops-ai-agent` | Migration `002_remediations.sql` (table + unique index) + `storeIncident` returns `id` |
+| 2 | `devops-mcp-server` | Tool `k8s_rollout_restart` + flag `MCP_ENABLE_WRITE_TOOLS` (conditional spread) + dry-run + namespace/whitelist enforced server-side |
+| 3 | `devops-ai-agent` | Proposal flow: LLM structured output → validate → insert `remediations` → post approval card |
+| 4 | `devops-ai-agent` | `app.action` handlers `approve_remediation` / `reject_remediation` (ack → update card → row-flip → execute → result) |
+| 5 | Ops | K8s RBAC: add `patch deployments` in the allowed namespaces |
+
+Dependencies: Step 3 needs 1. Step 4 needs 2+3. Step 5 any time before deploy.
+
+## 9. Dependencies / prerequisites
+- ✅ MCP HTTP auth (done) — write tools must sit behind it.
+- ✅ Migration system (done) — `002_*.sql` for the remediation schema.
+- ⬜ Slack interactivity (Socket Mode `app.action` handlers) — new.
+- ⬜ Agent/MCP server RBAC reviewed for least-privilege write verbs — ops task.
+
+## 10. v2 (after v1 is proven)
+- **Rate limiting** — max N remediations/hour/namespace via a Redis counter (`INCR remediation:{ns} EX 3600`), same pattern as dedup.
+- **Resolved-alert feedback loop** (roadmap §D) — when an alert resolves, update the `remediations` outcome: did the approved action actually fix it? This data enriches future `incidents` recall.
+- **Auto-remediation for low-risk + high-confidence** — e.g. confidence=High + action=restart + non-prod namespace → skip approval. **Explicit opt-in** via env (`ALLOW_AUTO_REMEDIATION_NAMESPACES`), never the default.

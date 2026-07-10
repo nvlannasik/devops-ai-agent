@@ -7,7 +7,7 @@ AI-powered DevOps agent for incident investigation and Root Cause Analysis (RCA)
 ```
 Slack mention / Alertmanager webhook
         ↓
-   Alert deduplication (fingerprint + 12h TTL)
+   Alert deduplication (fingerprint + 12h TTL; Redis-backed = atomic across pods)
         ↓
    Agent investigates (agentic loop, max 10 iterations, parallel tool calls)
         ↓
@@ -36,7 +36,7 @@ npm test                       # unit tests
 
 ## Testing
 
-`npm test` runs `node --import tsx --test 'src/**/*.test.ts'` — Node's built-in test runner (Node >= 24), no extra dependencies. Test files (`*.test.ts`) are excluded from the production build, so `dist/` stays clean. Current coverage: history trimming with `tool_use`/`tool_result` pairing, tool-result truncation, conversation memory, and the SQS response-release backoff.
+`npm test` runs `node --import tsx --test 'src/**/*.test.ts'` — Node's built-in test runner (Node >= 24), no extra dependencies. Test files (`*.test.ts`) are excluded from the production build, so `dist/` stays clean. Current coverage: history trimming with `tool_use`/`tool_result` pairing, tool-result truncation, conversation memory, the SQS response-release backoff, and incident-memory parsing/no-op guards.
 
 ## Configuration
 
@@ -50,7 +50,8 @@ npm test                       # unit tests
 | `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
 | `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` | `claude` |
 | `ANTHROPIC_API_KEY` | Required if claude | — |
-| `CLAUDE_MODEL` | | `claude-opus-4-5` |
+| `CLAUDE_MODEL` | | `claude-opus-4-8` |
+| `MAX_TOKENS` | Output token ceiling (claude + openai-compatible) | `8096` |
 | `OPENAI_COMPATIBLE_BASE_URL` | Required if openai-compatible | — |
 | `OPENAI_COMPATIBLE_API_KEY` | | — |
 | `OPENAI_COMPATIBLE_MODEL` | | `gpt-4` |
@@ -63,8 +64,15 @@ npm test                       # unit tests
 | `MCP_TRANSPORT` | `stdio` or `http` | `stdio` |
 | `MCP_STDIO_ARGS` | Path to MCP server `dist/index.js` | — |
 | `MCP_HTTP_URL` | | `http://localhost:3001/mcp` |
+| `MCP_AUTH_TOKEN` | Bearer token sent to the MCP server (http transport); must match the server's `MCP_AUTH_TOKEN` | — |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Per-tool-call timeout (a hung MCP server can't stall an investigation) | `45` |
-| `MEMORY_BACKEND` | `inmemory` or `redis` | `inmemory` |
+| `MEMORY_BACKEND` | Conversation memory: `inmemory` or `redis` | `inmemory` |
+| `DB_HOST` | Postgres host for durable incident memory; **disabled if unset** | — |
+| `DB_PORT` | | `5432` |
+| `DB_NAME` | | `devops_agent` |
+| `DB_USERNAME` | | — |
+| `DB_PASSWORD` | | — |
+| `DB_SSL_MODE` | `disable` / `require` / `verify-full` | `disable` |
 | `REDIS_HOST` | | `localhost` |
 | `REDIS_PORT` | | `6379` |
 | `REDIS_DB` | | `0` |
@@ -137,6 +145,26 @@ For LLMs in a strict private network, set `LLM_PROVIDER=private-llm`. The agent 
 
 See [llm-worker](../llm-worker) for the worker service deployed in the private network.
 
+## Incident Memory
+
+Set `DB_HOST` (+ `DB_NAME`/`DB_USERNAME`/`DB_PASSWORD`/`DB_SSL_MODE`) to give the agent a durable memory of past incidents (distinct from conversation memory, which is a short-lived Redis/in-memory cache). On each Alertmanager-triggered investigation the agent:
+
+1. **Recalls** prior resolved incidents with the same `alertname` (+ `namespace` if present) and injects a compact digest — *"2026-06-19 (critical, High): OOMKilled — connection pool leak"* — into the prompt.
+2. **Stores** the resulting RCA (alertname, namespace, severity, confidence, root cause) after it's posted.
+
+Past incidents are framed to the model as **hypotheses to verify**, not facts, to avoid anchoring on a stale root cause. Recall keys on exact label match (no vector search) — deploy a Postgres component alongside the agent.
+
+### Database Migrations
+
+Schema lives in versioned `.sql` files under `migrations/` and is applied by a small framework-free runner (`src/db/migrate.ts`):
+
+```bash
+npm run migrate          # dev (tsx)
+npm run migrate:prod     # prod (node dist/src/db/migrate-cli.js)
+```
+
+The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as `migrations/002_*.sql`.
+
 ## Customizing the System Prompt
 
 The agent's system prompt lives in `prompts/system.md` at the project root — plain Markdown, no TypeScript required.
@@ -155,7 +183,9 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 
 | Feature | Details |
 |---------|---------|
-| Alert Deduplication | Same alert processed once per 12h |
+| Alert Deduplication | Same alert processed once per 12h. With `MEMORY_BACKEND=redis` the claim is an atomic `SET NX` in Redis, so under multi-pod autoscaling only one pod investigates; in-memory fallback is single-pod only |
+| Readiness `/health` | Returns `503` (not `200`) when a configured dependency (MCP, Postgres, Redis) is unreachable, so K8s readiness probes stop routing to a pod that can't investigate |
+| Incident Memory | Durable (Postgres) — recalls prior RCAs for the same alert+namespace so recurring incidents aren't re-diagnosed from scratch. Disabled unless `DB_HOST` is set |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Window | Tool results truncated to 8000 chars, history to 40 messages |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
@@ -182,11 +212,14 @@ src/
 │   │   ├── claude.ts, openai-compatible.ts, sqs.ts
 │   │   ├── index.ts              # createLLMClient() factory
 │   │   └── types.ts
+│   ├── incidents/index.ts        # Durable incident memory (Postgres) — recall/store past RCAs
 │   ├── mcp/client.ts             # Reconnect + mutex
 │   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
 │   └── prompts/system.ts         # Static prompt + time context
-├── app/index.ts                  # Slack Bolt + Alertmanager webhook
+├── app/index.ts                  # Slack Bolt + Alertmanager webhook, /health readiness
 ├── config/index.ts
+├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
+├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
 └── utils/
     ├── logger/index.ts
     └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()

@@ -78,9 +78,36 @@ Slack mention / Alertmanager webhook
 - Used by both layers: model window = 40 (`trimHistory`), storage cap = 50 (`memory.append`)
 - **Never reintroduce a blind `slice`/`splice`** — it can drop the issue or split a `tool_use`/`tool_result` pair, which the Anthropic API rejects with a 400 on long investigations
 
-### Alert Deduplication
+### Alert Deduplication (multi-pod safe)
 - Fingerprint: all labels sorted and joined → stable string
 - TTL: 12 hours (matches Alertmanager `repeat_interval`)
+- **Redis-backed when `MEMORY_BACKEND=redis`:** the claim is an atomic `SET dedup:{fp} 1 EX <ttl> NX` — returns `"OK"` only for the first pod to see the alert, so under autoscaling N pods can't all investigate the same alert. In-memory `Map` is the **single-pod fallback** when Redis isn't configured.
+- Reuses the **one shared Redis connection** (`src/redis.ts` singleton, `getRedis()`), same client as conversation memory — zero new deps, zero extra connection. `shouldProcess()` is now **async** (Redis call); caller `await`s it in `handleAlert`.
+- `dedup/index.test.ts` covers the in-memory fallback path (first-vs-repeat, label-order stability, TTL expiry).
+
+### Readiness `/health`
+- `GET /health` calls `agent.healthCheck()` → checks MCP (`isConnected()` flag) + Postgres (`SELECT 1`, only if incidents enabled) + Redis (`PING`, only if backend=redis).
+- Returns **`503`** when any configured dependency is down, `200` + `{checks}` when all up — so K8s readiness probes stop routing to a pod that can't investigate. Wire `readinessProbe: httpGet /health` in the Deployment.
+- MCP check is a **real MCP `ping` request** (5s timeout) — upgraded from the cached connect flag after testing hit the dead-but-flagged-up case (MCP down after startup, `/health` still 200). On ping failure it also flips `connected` so the next tool call takes the reconnect path.
+- The **MCP server itself** probes its upstreams (Prometheus/Loki/tracing) at startup and logs `Upstream UNREACHABLE` warnings — non-fatal by design (Prometheus down must not take k8s tools down). Surfaces wrong `PROMETHEUS_URL`-style misconfig at deploy time instead of first tool call.
+
+### MCP HTTP Auth (shared bearer token)
+- Set the **same `MCP_AUTH_TOKEN`** on the agent and the MCP server (from one K8s Secret).
+- Agent: `StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: \`Bearer <token>\` } } })` when set (`mcp/client.ts`).
+- Server (`devops-mcp-server/src/app/index.ts`): middleware on `/mcp` requires the bearer token, returns `401` otherwise; `/health` stays open for probes. Compare via `timingSafeEqualStr` (sha256 → `crypto.timingSafeEqual`) — constant-time, never leaks token length. Token unset → open but logs a **warning** in http mode (never silently open). `auth.test.ts` covers match / equal-length-mismatch / different-length-no-throw.
+- **Prerequisite for write/remediation tools** — never expose a state-changing tool behind an unauthenticated transport.
+
+### LLM Output Tokens / Model
+- `MAX_TOKENS` env (default `8096`) caps output for the **claude + openai-compatible** paths (`config.llm.maxTokens`); was hardcoded in `claude.ts` and entirely missing in `openai-compatible.ts` (so it used the provider default and could truncate).
+- `CLAUDE_MODEL` default is `claude-opus-4-8` (latest opus tier). SQS path's model + token limit live in **llm-worker**, not here — don't push them from the agent (two sources of truth).
+
+### Incident Memory (durable, `agent/incidents/index.ts`)
+- **Purpose:** learn from past RCAs — recall prior resolved incidents for the same `(alertname, namespace)` and inject a compact digest into the prompt so recurring incidents aren't re-diagnosed cold.
+- **Store = Postgres (`pg`), NOT Redis.** Redis here is a cache (conversation memory, 24h TTL, evictable); incident memory is a system-of-record that must persist for months. Enabled only when `DB_HOST` is set (discrete `DB_*` vars → `pg.Pool` via `db/pool.ts`; `DB_SSL_MODE` maps to pg's `ssl`); `IncidentMemory(null)` is a safe no-op otherwise (single-pod dev works without Postgres).
+- **Schema = versioned migrations, NOT inline DDL.** `migrations/*.sql` applied by a framework-free runner (`db/migrate.ts`, uses installed `pg`): tracks applied files in `schema_migrations`, each in a txn, guarded by a **`pg_advisory_lock`** so concurrent pod startups (autoscaling) serialize instead of racing on `CREATE TABLE`. `runMigrations()` runs on agent startup AND via `npm run migrate` / `migrate:prod` (for a K8s Job/initContainer). `migrations/` is copied into the Docker image. Add changes as `002_*.sql`. `pendingMigrations()` (pure: filter/sort/skip-applied) is unit-tested. `IncidentMemory` no longer does DDL.
+- **Wiring:** owned by `DevOpsAgent` (alongside Redis/memory init), exposed as `recallIncidents(labels)` / `storeIncident(labels, rca)`. App calls them only on the **alert path** (`investigateAlertInBackground`) where `alert.labels` give `alertname`/`namespace`; recall + store are best-effort (`.catch`) so a DB failure never breaks an investigation. Mentions have no labels → not stored.
+- **Recall = exact label match, no vector DB** (`// ponytail:` add embeddings only if too coarse). Past incidents framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
+- `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
 
 ## LLM Providers
 
@@ -121,8 +148,9 @@ SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN
 SLACK_ALERT_CHANNEL, SLACK_ONCALL_USERS
 
 LLM_PROVIDER            # claude | openai-compatible | private-llm
-ANTHROPIC_API_KEY, CLAUDE_MODEL
+ANTHROPIC_API_KEY, CLAUDE_MODEL   # default claude-opus-4-8
 OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_MODEL
+MAX_TOKENS              # output ceiling for claude + openai-compatible (default 8096)
 
 # Private LLM (SQS)
 SQS_REGION, SQS_REQUEST_QUEUE_NAME, SQS_RESPONSE_QUEUE_NAME
@@ -130,7 +158,9 @@ SQS_LLM_TIMEOUT_SECONDS, SQS_POLL_WAIT_SECONDS
 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  # local dev only; use IRSA on EKS
 
 MCP_TRANSPORT, MCP_STDIO_ARGS, MCP_HTTP_URL
-MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS
+MCP_AUTH_TOKEN          # bearer token for MCP http transport; must match the server's MCP_AUTH_TOKEN
+MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS   # conversation cache + multi-pod dedup
+DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD, DB_SSL_MODE   # durable incident memory; disabled if DB_HOST unset
 MAX_CONCURRENT_INVESTIGATIONS
 LOG_LEVEL   # error | warn | info | http | debug
 ```
@@ -149,11 +179,14 @@ src/
 │   │   ├── openai-compatible.ts
 │   │   ├── sqs.ts                # SQSLLMClient: queue name resolution + auto-create
 │   │   └── types.ts
-│   ├── mcp/client.ts             # MCPClient: reconnect + mutex
+│   ├── incidents/index.ts        # IncidentMemory: durable recall/store (Postgres) + ping()
+│   ├── mcp/client.ts             # MCPClient: reconnect + mutex + isConnected() + bearer auth
 │   ├── memory/index.ts           # Redis/in-memory, hasRca/markRcaSent
 │   └── prompts/system.ts         # buildStaticSystemPrompt(), buildTimeContext()
-├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + error handler
+├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + /health readiness + error handler
 ├── config/index.ts
+├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
+├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
 └── utils/
     ├── logger/index.ts           # Winston, LOG_LEVEL support
     └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()
@@ -203,10 +236,30 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - Label templating in `labels:` block NOT resolved by Prometheus — use `annotations:` only
 - `startsAt` included in issueText as unix timestamp for query anchoring
 
-## Potential Improvements
+## Roadmap / Backlog
+
+### Done (recent)
+- [x] **Distributed tracing** (3rd observability pillar) — Tempo/Jaeger adapters in devops-mcp-server (`tracing_search` / `tracing_get_trace` / `tracing_list_services`)
+- [x] **Durable incident memory** (Postgres + framework-free migrations)
+- [x] **Multi-pod alert dedup** (Redis `SET NX`) — replaces the old in-memory-only dedup
+- [x] **Readiness `/health`** (503 when MCP/Postgres/Redis down)
+- [x] **Configurable `MAX_TOKENS` + model default refresh** (`claude-opus-4-8`)
+- [x] **MCP HTTP auth** (shared bearer token, constant-time check)
+
+### Next — ordered
+- [ ] **D. Resolved-alert loop** — handle Alertmanager `status: resolved` (currently skipped): post a "✅ resolved" update to the incident thread + record outcome in DB. Becomes a **feedback signal** for incident-memory quality. Small.
+- [ ] **C. Guarded Remediation** — agent executes actions (restart/scale/rollback) via the alert thread with a Slack **approval gate** + DB audit trail. Design agreed → **`docs/DESIGN_guarded_remediation.md`**. Depends on MCP write-tools + MCP auth (done).
+- [ ] **E. On-call feedback learning** — capture human-confirmed root causes/actions from alert threads (`@agent learn` / ✅ reaction) into a trusted `incident_feedback` tier; recall as strong prior. Design → **`docs/DESIGN_oncall_feedback_learning.md`**. Shares migration-002 prerequisites with C (`storeIncident` returns id, `thread_ts`/`channel` on incidents).
+
+### Parked (design captured, revisit when prioritized)
+- **FinOps** (cost Q&A, waste audit, cost-anomaly-as-incident, rightsizing) — mostly config/prompt via OpenCost→Prometheus; see **`docs/DESIGN_finops.md`**.
+- **VM/baremetal execution** via Ansible-backed MCP tools — deemed too complex for now; K8s + observability scope only. Key notes: whitelist = curated playbooks (never generic exec), `--check` = dry-run, plain-CLI-vs-AWX decides the architecture.
+
+### Tier 3 — skip until justified (YAGNI)
+- [ ] Semantic/vector recall for incident memory (exact-label match is enough until incidents number in the hundreds)
+- [ ] Alert correlation/grouping — one investigation when many pods fail in the same namespace
+- [ ] Self-metrics endpoint (agent exposes its own Prometheus metrics; token usage already logged)
 - [ ] `/clear` Slack command to reset thread history
 - [ ] Configurable confidence threshold via env var
-- [ ] Persistent dedup storage (current in-memory resets on restart)
-- [ ] Alert grouping — investigate once if many pods fail in same namespace
-- [ ] Webhook auth for `/alert` endpoint
-- [ ] SQS message visibility timeout > LLM inference time
+- [ ] Webhook auth for the `/alert` endpoint (Alertmanager → agent; distinct from MCP auth)
+- [ ] Graceful-shutdown drain of in-flight investigations

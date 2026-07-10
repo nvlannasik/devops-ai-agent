@@ -89,8 +89,15 @@ export class SlackApp {
       );
     });
 
-    router.get("/health", (_req: Request, res: Response) => {
-      res.json({ ok: true, mode: config.slack.appToken ? "socket" : "http" });
+    router.get("/health", async (_req: Request, res: Response) => {
+      const mode = config.slack.appToken ? "socket" : "http";
+      try {
+        const health = await this.agent.healthCheck();
+        // 503 when a dependency is down so K8s readiness probe stops routing traffic here.
+        res.status(health.ok ? 200 : 503).json({ ok: health.ok, mode, checks: health.checks });
+      } catch (err) {
+        res.status(503).json({ ok: false, mode, error: err instanceof Error ? err.message : String(err) });
+      }
     });
   }
 
@@ -141,7 +148,7 @@ export class SlackApp {
         logger.debug(`[slack] skipping non-firing alert: ${alertName} (${alert.status})`);
         continue;
       }
-      if (!this.dedup.shouldProcess(alert.labels)) {
+      if (!(await this.dedup.shouldProcess(alert.labels))) {
         logger.info(`[slack] duplicate alert suppressed: ${alertName}`);
         continue;
       }
@@ -159,7 +166,7 @@ export class SlackApp {
 
       // Fire-and-forget — the LLM run must not delay the next alert's notification.
       // Concurrency stays bounded by the semaphore inside the background task.
-      void this.investigateAlertInBackground(channel, threadId, issueText);
+      void this.investigateAlertInBackground(channel, threadId, issueText, alert.labels);
     }
   }
 
@@ -181,17 +188,32 @@ export class SlackApp {
     return lines.join("\n");
   }
 
-  private async investigateAlertInBackground(channel: string, threadId: string, issueText: string): Promise<void> {
+  private async investigateAlertInBackground(
+    channel: string,
+    threadId: string,
+    issueText: string,
+    labels: Record<string, string>
+  ): Promise<void> {
     await this.semaphore.acquire();
     try {
-      const rca = await this.agent.investigate(threadId, issueText);
+      // Prepend any prior similar incidents so the agent can recognize a recurrence.
+      // Best-effort: a recall failure must not block the investigation.
+      const prior = await this.agent.recallIncidents(labels).catch(() => "");
+      const fullIssue = prior ? `${prior}\n\n---\n\n${issueText}` : issueText;
+
+      const rca = await this.agent.investigate(threadId, fullIssue);
       await this.app.client.chat.postMessage({
         channel,
         thread_ts: threadId,
         text: rca,
         ...(isRcaResponse(rca) ? { blocks: buildRcaBlocks(rca) } : { mrkdwn: true }),
       });
-      if (isRcaResponse(rca)) await this.agent.markRcaSent(threadId);
+      if (isRcaResponse(rca)) {
+        await this.agent.markRcaSent(threadId);
+        await this.agent.storeIncident(labels, rca).catch((e) =>
+          logger.error(`[slack] failed to store incident for thread ${threadId}: ${e}`)
+        );
+      }
       await this.notifyIfLowConfidence(channel, threadId, rca);
     } catch (err) {
       logger.error(`[slack] background investigation failed for thread ${threadId}: ${err}`);

@@ -14,7 +14,7 @@ export class ClaudeClient implements LLMClient {
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 8096,
+      max_tokens: config.llm.maxTokens,
       // system prompt as a cacheable block — large static content, stable across iterations
       system: [
         {

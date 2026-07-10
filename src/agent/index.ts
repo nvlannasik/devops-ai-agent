@@ -1,12 +1,15 @@
 import { createLLMClient } from "./llm/index.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
+import { IncidentMemory } from "./incidents/index.js";
+import { createPool } from "../db/pool.js";
+import { runMigrations } from "../db/migrate.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
 import { trimHistory, sanitizeContentBlocks } from "./context/index.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
-import { Redis } from "ioredis";
+import { initRedis, pingRedis } from "../redis.js";
 import logger from "../utils/logger/index.js";
 
 const MAX_ITERATIONS = 10;
@@ -29,32 +32,54 @@ export class DevOpsAgent {
   private llm: LLMClient;
   private mcp: MCPClient;
   private memory: ConversationMemory;
+  private incidents: IncidentMemory;
 
   constructor() {
     this.llm = createLLMClient();
     this.mcp = new MCPClient();
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
+    this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
   }
 
   async initialize(): Promise<void> {
     await this.mcp.connect();
-    if (config.memory.backend === "redis") {
-      const { host, port, db, username, password, tls } = config.memory.redis;
-      const redis = new Redis({
-        host,
-        port,
-        db,
-        username,
-        password,
-        tls: tls ? {} : undefined,
-      });
-      redis.on("error", (err: Error) => logger.error(`Redis error: ${err.message}`));
-      await redis.ping(); // verify connection at startup — fails fast if unreachable
+    const redis = await initRedis(); // shared by conversation memory + alert dedup; null if not configured
+    if (redis) {
       this.memory = new ConversationMemory(redis);
-      logger.info(`Memory backend: Redis ${host}:${port} db=${db} tls=${tls}`);
     } else {
       logger.info("Memory backend: in-memory");
     }
+
+    if (config.incidents.enabled) {
+      const { host, port, database, sslMode } = config.incidents.db;
+      const pool = createPool();
+      pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
+      await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
+      this.incidents = new IncidentMemory(pool);
+      logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
+    } else {
+      logger.info("Incident memory: disabled (set DB_HOST to enable)");
+    }
+  }
+
+  // Readiness check for /health — reports each enabled dependency. ok=false (→ 503) if any
+  // configured dependency is unreachable, so K8s stops routing to a pod that can't investigate.
+  async healthCheck(): Promise<{ ok: boolean; checks: Record<string, "up" | "down"> }> {
+    const checks: Record<string, "up" | "down"> = {
+      mcp: (await this.mcp.ping()) ? "up" : "down",
+    };
+    if (config.incidents.enabled) checks.postgres = (await this.incidents.ping()) ? "up" : "down";
+    if (config.memory.backend === "redis") checks.redis = (await pingRedis()) ? "up" : "down";
+    return { ok: Object.values(checks).every((s) => s === "up"), checks };
+  }
+
+  // Durable cross-incident memory — recall returns "" when disabled or no prior match.
+  recallIncidents(labels: Record<string, string>): Promise<string> {
+    return this.incidents.recall(labels);
+  }
+
+  storeIncident(labels: Record<string, string>, rca: string): Promise<void> {
+    return this.incidents.store(labels, rca);
   }
 
   async investigate(threadId: string, userMessage: string): Promise<string> {
@@ -175,5 +200,6 @@ export class DevOpsAgent {
   async shutdown(): Promise<void> {
     await this.mcp.disconnect();
     await this.llm.shutdown?.();
+    await this.incidents.close();
   }
 }

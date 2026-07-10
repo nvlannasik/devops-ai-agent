@@ -16,9 +16,11 @@ export const config = {
 
   llm: {
     provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible" | "private-llm",
+    // Output token ceiling for claude + openai-compatible. SQS path's limit lives in llm-worker.
+    maxTokens: parseInt(process.env.MAX_TOKENS ?? "8096"),
     claude: {
       apiKey: process.env.ANTHROPIC_API_KEY!,
-      model: process.env.CLAUDE_MODEL ?? "claude-opus-4-5",
+      model: process.env.CLAUDE_MODEL ?? "claude-opus-4-8",
     },
     openaiCompatible: {
       baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL,
@@ -42,6 +44,8 @@ export const config = {
     },
     http: {
       url: process.env.MCP_HTTP_URL ?? "http://localhost:3001/mcp",
+      // Sent as `Authorization: Bearer <token>` when set — must match the server's MCP_AUTH_TOKEN.
+      authToken: process.env.MCP_AUTH_TOKEN,
     },
     // per-tool-call timeout (seconds) so a hung MCP server / upstream can't stall an investigation
     toolTimeoutMs: parseInt(process.env.MCP_TOOL_TIMEOUT_SECONDS ?? "45") * 1000,
@@ -60,6 +64,20 @@ export const config = {
       username: process.env.REDIS_USERNAME,
       password: process.env.REDIS_PASSWORD,
       tls:      process.env.REDIS_TLS === "true",
+    },
+  },
+
+  // Durable incident memory (Postgres). Disabled unless DB_HOST is set —
+  // distinct from conversation memory (Redis cache); this is a long-lived record.
+  incidents: {
+    enabled: !!process.env.DB_HOST,
+    db: {
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT ?? "5432"),
+      user: process.env.DB_USERNAME,
+      password: process.env.DB_PASSWORD,
+      database: process.env.DB_NAME ?? "devops_agent",
+      sslMode: process.env.DB_SSL_MODE ?? "disable", // disable | require | verify-full
     },
   },
 

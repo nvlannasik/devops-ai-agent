@@ -40,9 +40,13 @@ export class MCPClient {
 
   private async connectWithRetry(attempt: number): Promise<void> {
     try {
+      const authToken = config.mcp.http.authToken;
       const transport =
         config.mcp.transport === "http"
-          ? new StreamableHTTPClientTransport(new URL(config.mcp.http.url))
+          ? new StreamableHTTPClientTransport(
+              new URL(config.mcp.http.url),
+              authToken ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } } : undefined
+            )
           : new StdioClientTransport({
               command: config.mcp.stdio.command,
               args: config.mcp.stdio.args,
@@ -77,6 +81,20 @@ export class MCPClient {
 
   getTools(): ToolDefinition[] {
     return this.tools;
+  }
+
+  // Real liveness check for /health: sends an MCP ping request (protocol built-in,
+  // auto-answered by the server SDK — cheaper than listTools). Short timeout so a dead
+  // server can't stall the probe. On failure, flips `connected` so the next tool call
+  // takes the reconnect path.
+  async ping(): Promise<boolean> {
+    try {
+      await this.client.ping({ timeout: 5000 });
+      return true;
+    } catch {
+      this.connected = false;
+      return false;
+    }
   }
 
   async callTool(name: string, input: Record<string, unknown>): Promise<string> {

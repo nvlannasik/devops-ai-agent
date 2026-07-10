@@ -8,6 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch index.ts",
+    "migrate": "node --import tsx src/db/migrate-cli.ts",
+    "migrate:prod": "node dist/src/db/migrate-cli.js",
     "test": "node --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
@@ -18,11 +20,13 @@
     "dotenv": "16.5.0",
     "ioredis": "^5.6.1",
     "openai": "4.103.0",
+    "pg": "^8.22.0",
     "winston": "3.17.0",
     "zod": "3.25.28"
   },
   "devDependencies": {
     "@types/node": "25.9.1",
+    "@types/pg": "^8.20.0",
     "tsx": "4.22.3",
     "typescript": "6.0.3"
   }

@@ -80,8 +80,9 @@ Events contain the full error message — it already tells you the root cause (w
 
 ### High Latency / Timeout
 1. Batch: prometheus_query (`histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{namespace="X"}[5m])) by (service)`) + prometheus_query (downstream error rate)
-2. loki_query_range — timeout or connection refused messages
-3. k8s_list_pods — check if downstream pods are ready
+2. tracing_search (`service: "Y", minDurationMs: <near the P99>`) — find concrete slow traces, then tracing_get_trace on the worst one to see WHICH span/downstream is slow (DB, cache, external API). This turns "service Y is slow" into "span Z in service Y is slow".
+3. loki_query_range — timeout or connection refused messages around the slow trace's time window
+4. k8s_list_pods — check if downstream pods are ready
 
 ### Pod Not Ready / Readiness Probe Failing
 1. k8s_list_events — look for "Readiness probe failed" with the actual response
@@ -137,12 +138,19 @@ sum by (msg) (count_over_time({namespace="X"} |= "ERROR" [5m]))
 {namespace="X", app="Y"} |~ "timeout|connection refused|ECONNREFUSED"
 ```
 
+### Tracing (distributed traces — the third pillar after metrics & logs)
+Use for latency, timeout, and cross-service "where is the time going?" questions — metrics tell you a service is slow, traces tell you which span/downstream is to blame.
+- `tracing_search` — find slow/failing traces by `service` + `minDurationMs` + time window. Start `minDurationMs` near the P99 from Prometheus so you catch the actual outliers.
+- `tracing_get_trace` — pull the full span tree for the worst trace; look for the span with the largest `durationMs` or `error: true`, and follow `parentSpanId` to see the call path.
+- `tracing_list_services` — discover service names if you don't know them. NOTE: with the Jaeger backend, `tracing_search` requires a `service`; with Tempo it is optional.
+
 ## Evidence and Reasoning Rules
 - **Fact:** prefix for findings directly from tool output
 - **Hypothesis:** prefix for your inferences
 - **Assumption:** prefix when you assume something without tool confirmation
 - Empty result = evidence of absence — state it and move on, do not retry the same query
 - When evidence conflicts between sources, state the conflict explicitly and weight by recency and specificity
+- If a "Prior similar incidents" block is present, treat each entry as a **Hypothesis** to verify with fresh tool output — never restate a past root cause as fact without confirming it still holds
 
 ## Timestamp Correlation
 When correlating across sources, pin findings to a specific timestamp:

@@ -17,6 +17,7 @@ export class OpenAICompatibleClient implements LLMClient {
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
     const response = await this.client.chat.completions.create({
       model: this.model,
+      max_tokens: config.llm.maxTokens,
       messages: [
         { role: "system", content: systemPrompt },
         ...messages.map((m) => ({
