@@ -1,10 +1,11 @@
 # Design — On-call Feedback Learning
 
-> **Status:** design discussion (2026-07-07). Goal: the agent learns from what on-call
-> engineers say in Slack alert threads (confirmed root causes, actions taken, outcomes),
-> stores it as **high-trust** knowledge, and recalls it on future similar incidents to
-> reduce hallucination and to make future remediation safer. This is the source of truth
-> for the feature; implementation follows §8.
+> **Status: v1 IMPLEMENTED (2026-07-14)** — steps 1–4 of §8 shipped (migration 002,
+> feedback store/recall, `@agent learn` router + extraction, confirmed-tier recall +
+> prompt framing). Step 5 (`reaction_added` trigger) and §10 v2 ideas remain. Goal: the
+> agent learns from what on-call engineers say in Slack alert threads (confirmed root
+> causes, actions taken, outcomes), stores it as **high-trust** knowledge, and recalls it
+> on future similar incidents to reduce hallucination and make future remediation safer.
 
 ## 1. Goal
 

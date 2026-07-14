@@ -31,7 +31,10 @@ export const config = {
       region: process.env.AWS_REGION ?? "ap-southeast-1",
       requestQueueName: process.env.SQS_REQUEST_QUEUE_NAME ?? "llm-request.fifo",
       responseQueueName: process.env.SQS_RESPONSE_QUEUE_NAME ?? "llm-response.fifo",
-      timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_SECONDS ?? "120") * 1000,
+      // must cover the worker's worst case: a reasoning model burning its token budget
+      // (~60-90s) PLUS the worker's one automatic 2x-budget retry — 120s lost the race
+      // by 23s in testing (worker delivered a good answer the agent had already abandoned)
+      timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_SECONDS ?? "240") * 1000,
       pollWaitSeconds: parseInt(process.env.SQS_POLL_WAIT_SECONDS ?? "10"),
     },
   },
@@ -82,4 +85,9 @@ export const config = {
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),
+
+  // tool-call rounds allowed for plain (non-investigation) mentions before the agent
+  // must answer with what it has — the deterministic scope guard for conversation mode.
+  // 2 covers the common flows exactly (discover → fetch); a 3rd round only ever fed wandering
+  mentionToolRounds: parseInt(process.env.MENTION_TOOL_ROUNDS ?? "2"),
 } as const;

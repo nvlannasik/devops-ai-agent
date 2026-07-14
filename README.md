@@ -36,7 +36,7 @@ npm test                       # unit tests
 
 ## Testing
 
-`npm test` runs `node --import tsx --test 'src/**/*.test.ts'` — Node's built-in test runner (Node >= 24), no extra dependencies. Test files (`*.test.ts`) are excluded from the production build, so `dist/` stays clean. Current coverage: history trimming with `tool_use`/`tool_result` pairing, tool-result truncation, conversation memory, the SQS response-release backoff, and incident-memory parsing/no-op guards.
+`npm test` runs `node --import tsx --test 'src/**/*.test.ts'` — Node's built-in test runner (Node >= 24), no extra dependencies. Test files (`*.test.ts`) are excluded from the production build, so `dist/` stays clean. Current coverage: history trimming with `tool_use`/`tool_result` pairing, tool-result truncation (head+tail), conversation memory, the SQS response-release backoff, incident-memory parsing/no-op guards, migrations, alert dedup, investigation-intent detection, namespace scope lock, and the fence-safe Slack splitter.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ npm test                       # unit tests
 | `SQS_REGION` | Required if private-llm | `ap-southeast-1` |
 | `SQS_REQUEST_QUEUE_NAME` | | `llm-request.fifo` |
 | `SQS_RESPONSE_QUEUE_NAME` | | `llm-response.fifo` |
-| `SQS_LLM_TIMEOUT_SECONDS` | Max wait for LLM response | `120` |
+| `SQS_LLM_TIMEOUT_SECONDS` | Max wait for LLM response — must cover a slow reasoning-model call plus the worker's one 2× retry | `240` |
 | `SQS_POLL_WAIT_SECONDS` | | `10` |
 | `AWS_ACCESS_KEY_ID` | Local dev only — use IRSA on EKS | — |
 | `MCP_TRANSPORT` | `stdio` or `http` | `stdio` |
@@ -79,6 +79,7 @@ npm test                       # unit tests
 | `REDIS_PASSWORD` | | — |
 | `REDIS_TLS` | | `false` |
 | `MAX_CONCURRENT_INVESTIGATIONS` | | `5` |
+| `MENTION_TOOL_ROUNDS` | Tool-call rounds for plain mentions (each round batches parallel calls); explicit investigation requests & alerts are uncapped. Budget resets per message | `2` |
 | `INVESTIGATION_TIMEOUT_SECONDS` | Wall-clock budget per investigation (bounds how long a slot is held) | `300` |
 | `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
 
@@ -98,6 +99,21 @@ After RCA is posted, follow-up messages are answered conversationally:
 @devops-agent show me the logs
 @devops-agent when did this start?
 ```
+
+### Teaching the Agent (`learn`)
+
+After an incident is discussed in its alert thread, anyone can teach the agent the
+confirmed conclusion:
+
+```
+(in the alert thread, after discussing the real cause/fix)
+@devops-agent learn
+```
+
+The agent extracts `{confirmed root cause, action taken, outcome}` from the thread,
+stores it as **human-confirmed** knowledge, and echoes what it learned (mention `learn`
+again after correcting the thread if it got it wrong). On the next similar incident the
+confirmed knowledge is injected as a strong prior — see Incident Memory below.
 
 ### Alertmanager Integration
 
@@ -154,6 +170,8 @@ Set `DB_HOST` (+ `DB_NAME`/`DB_USERNAME`/`DB_PASSWORD`/`DB_SSL_MODE`) to give th
 
 Past incidents are framed to the model as **hypotheses to verify**, not facts, to avoid anchoring on a stale root cause. Recall keys on exact label match (no vector search) — deploy a Postgres component alongside the agent.
 
+**Two trust tiers** (never flattened): agent RCAs are the *hypothesis* tier; `@agent learn` captures the **human-confirmed** tier (`incident_feedback` table — root cause, action taken, outcome, with provenance). On recall, confirmed knowledge is injected first as a *strong prior* ("check this hypothesis FIRST"), hypotheses stay "verify before reuse". Feedback is idempotent per trigger (unique `(incident_id, trigger_key)`), so a double-click or multi-pod delivery can't store twice.
+
 ### Database Migrations
 
 Schema lives in versioned `.sql` files under `migrations/` and is applied by a small framework-free runner (`src/db/migrate.ts`):
@@ -186,10 +204,13 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 | Alert Deduplication | Same alert processed once per 12h. With `MEMORY_BACKEND=redis` the claim is an atomic `SET NX` in Redis, so under multi-pod autoscaling only one pod investigates; in-memory fallback is single-pod only |
 | Readiness `/health` | Returns `503` (not `200`) when a configured dependency (MCP, Postgres, Redis) is unreachable, so K8s readiness probes stop routing to a pod that can't investigate |
 | Incident Memory | Durable (Postgres) — recalls prior RCAs for the same alert+namespace so recurring incidents aren't re-diagnosed from scratch. Disabled unless `DB_HOST` is set |
+| On-call Feedback Learning | `@agent learn` in an alert thread extracts the human-confirmed root cause/action/outcome into a trusted tier, recalled as a strong prior on future similar incidents |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Window | Tool results truncated to 8000 chars, history to 40 messages |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
 | Follow-up Mode | `markRcaSent` flag prevents RCA format on follow-ups |
+| Response-Mode Markers | Every entry point stamps a per-message marker (`[SOURCE: Alertmanager ...]` / `[USER MESSAGE ...]` / `[FOLLOW-UP ...]`) — alerts always investigate, plain mentions stay conversational |
+| Conversation Guards | Deterministic, for plain mentions: tool budget (`MENTION_TOOL_ROUNDS`), namespace scope lock (first tool round fixes the scope), log fan-out guard (>2 pods → ask instead of dump), RCA-format backstop (auto-reformat), fence-safe message splitting |
 | Prompt Caching | Anthropic ephemeral cache reduces token cost |
 | Parallel Tools | Independent tool calls executed in parallel |
 | Async Alert Webhook | `/alert` acks `200` immediately and investigates in the background — no Alertmanager timeout, notifications never wait behind another alert's investigation |
@@ -212,8 +233,11 @@ src/
 │   │   ├── claude.ts, openai-compatible.ts, sqs.ts
 │   │   ├── index.ts              # createLLMClient() factory
 │   │   └── types.ts
-│   ├── incidents/index.ts        # Durable incident memory (Postgres) — recall/store past RCAs
-│   ├── mcp/client.ts             # Reconnect + mutex
+│   ├── feedback/index.ts         # On-call learning: transcript builder + extraction JSON parser
+│   ├── incidents/index.ts        # Durable incident memory (Postgres) — RCAs + confirmed feedback
+│   ├── intent/index.ts           # wantsInvestigation() — full vs capped tool budget
+│   ├── mcp/client.ts             # Reconnect + mutex + ping
+│   ├── scope/index.ts            # Namespace scope lock helpers
 │   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
 │   └── prompts/system.ts         # Static prompt + time context
 ├── app/index.ts                  # Slack Bolt + Alertmanager webhook, /health readiness

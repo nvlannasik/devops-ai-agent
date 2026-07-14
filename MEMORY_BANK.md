@@ -33,10 +33,38 @@ Slack mention / Alertmanager webhook
 
 ## Key Design Decisions
 
-### Follow-up vs Investigation Mode
-- After RCA is posted, `markRcaSent(threadId)` stores `rca:{threadId}` in Redis
-- Follow-up messages are prepended with `[FOLLOW-UP — conversation mode, do NOT use RCA format]`
-- **Do not remove this prefix** — without it, LLM defaults to RCA format regardless of context
+### Response Mode = per-message markers (do not remove any of them)
+Distant system-prompt rules alone do NOT hold — the model defaults to RCA format for any
+first message. Every entry point stamps a marker; the system prompt keys its mode rules on them:
+- **Alert path** (`investigateAlertInBackground`) → `[SOURCE: Alertmanager webhook — automated incident investigation]` → investigation mode mandatory.
+- **Mention path** (`handleMention`) → `[USER MESSAGE — conversation mode by default ...]` → conversational unless the human explicitly asks to investigate. Added after testing showed "check status semua pod" produced a full Critical-severity RCA about a routine rolling deploy.
+- **Follow-up** (after `markRcaSent(threadId)` flags `rca:{threadId}`) → `[FOLLOW-UP — conversation mode, do NOT use RCA format]` prepended in `investigate()`.
+Prompt-side rules live in `prompts/system.md` §Response Mode (also forbids inventing an "incident" from routine activity like a rolling deploy).
+
+### Tool budget (deterministic scope guard for conversation mode)
+Prompt scope-rules alone did NOT stop the model from chasing anomalies (nginx logs full of
+"upstream timed out" → it wandered into `monitoring`/Prometheus/Loki on a plain "show me
+logs" question). Enforced in code instead:
+- `investigate(threadId, msg, { maxToolRounds })` — plain mentions get **3 tool rounds**; after that `llm.chat` is called with **no tools** + a `[TOOL BUDGET REACHED ...]` note appended to the last tool_results, so the model must answer from gathered data (anomaly → one line + offer to investigate).
+- If the model still emits `tool_use` with no tools offered, synthesized error tool_results keep the pairing intact and the loop continues (bounded by `MAX_ITERATIONS`).
+- `wantsInvestigation(text)` (`agent/intent/`, keyword regex en+id, unit-tested) grants the full budget for explicit requests ("investigate", "investigasi", "kenapa", "why", "rca", ...). Alert path always has the full budget.
+- All three LLM paths **omit the `tools` param when the array is empty** (claude.ts, openai-compatible.ts, and llm-worker/src/llm.ts) — some OpenAI-compatible backends reject `tools: []`. **llm-worker needs its own rebuild/redeploy for this.**
+- **Format backstop (deterministic):** even with the budget note, the model sometimes composed its FINAL answer in RCA format when tool results looked alarming (nginx logs full of errors → `response type=rca` for a "show me logs" mention). `handleMention` now detects `!wantsInvestigation && isRcaResponse(reply)` and calls `agent.reformatToConversation(reply)` — one tool-less LLM call with a **minimal** system prompt (the full one is what primes the RCA structure). Falls back to the original text on failure. This is the last line: prompt rules → budget note → programmatic reformat.
+- **Slack splitter (`utils/slack/split.ts`):** Slack hard-splits messages >~4000 chars and breaks ``` fences (continuation renders raw). Non-RCA mention replies are posted via `splitForSlack()` — newline-boundary chunks with fence re-balancing (close at chunk end, reopen at next chunk start). Unit-tested.
+- **Log fan-out guard (deterministic):** in conversation mode, `k8s_get_pod_logs` for > `MAX_LOG_FANOUT` (2) distinct pods in one round is refused with a synthesized "list the pods and ask the user" error (other calls in the round still execute). Stops "show me log metallb" (matches 8 pods) from dumping every pod's logs; the model asks which one instead.
+- **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested.
+- `MENTION_TOOL_ROUNDS` default is **2** (was 3): discover → fetch covers the common flows exactly; a 3rd round only ever fed wandering. Tunable via env without rebuild.
+
+### Reasoning-model token exhaustion (private-llm)
+The private LLM is a reasoning model: `completion_tokens` includes hidden thinking, which
+once consumed the ENTIRE 8096 budget → `finish_reason=length`, empty content, and the user
+got a blank-response fallback. Chain of defenses:
+- **llm-worker maps `finish_reason=length` → `max_tokens`** (was disguised as `end_turn`).
+- **llm-worker auto-retry safeguard:** empty content + `max_tokens` → one retry with **2× token budget** (`isEmptyTokenExhaustion`, unit-tested). Partial answers are never retried.
+- Agent's empty-response fallback names the fix (`LLM_MAX_TOKENS` / `LLM_REASONING_EFFORT`).
+- Tuning (worker env): raise `LLM_MAX_TOKENS` (16384 recommended), optionally `LLM_REASONING_EFFORT=low` (only sent when set; remove if the backend rejects it).
+- **Timeout coherence:** `SQS_LLM_TIMEOUT_SECONDS` default is **240** (was 120). A reasoning compose can take 60–90s, and the worker's 2× retry doubles that — 120s lost the race by 23s in testing (worker delivered a good answer 10:06:55; agent had timed out 10:06:32). The agent-side timeout must cover attempt + retry.
+- **Tool-result truncation keeps head AND tail** (`truncateToolResult`, 4k+4k): logs are chronological — head-only truncation silently dropped the recent lines that "show me the logs" needs.
 
 ### System Prompt from Markdown
 - `prompts/system.md` at project root — edit this file to update the prompt without rebuilding TypeScript
@@ -108,6 +136,16 @@ Slack mention / Alertmanager webhook
 - **Wiring:** owned by `DevOpsAgent` (alongside Redis/memory init), exposed as `recallIncidents(labels)` / `storeIncident(labels, rca)`. App calls them only on the **alert path** (`investigateAlertInBackground`) where `alert.labels` give `alertname`/`namespace`; recall + store are best-effort (`.catch`) so a DB failure never breaks an investigation. Mentions have no labels → not stored.
 - **Recall = exact label match, no vector DB** (`// ponytail:` add embeddings only if too coarse). Past incidents framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
+
+### On-call Feedback Learning (`@agent learn` — trust-tiered memory)
+Design: `docs/DESIGN_oncall_feedback_learning.md`. Two tiers, never flattened:
+**hypothesis** (agent RCA, `incidents`) vs **CONFIRMED** (human, `incident_feedback`).
+- **Trigger (v1): explicit** — `@agent learn` inside an alert thread (keyword-routed in `handleMention`, `/^learn\b/i`). No broad `message.channels` scope; the human decides what's worth learning. `reaction_added` (✅) is the planned second trigger; passive capture is v2.
+- **Flow:** thread → `findIncidentByThread(channel, thread_ts)` (linked since migration 002) → `conversations.replies` transcript (`buildTranscript`: humans vs agent labeled, tail-biased 6k cap) → ONE tool-less extraction LLM call (minimal system prompt) → `parseFeedbackJson` (tolerant: fences/prose, outcome normalized, null when nothing substantive) → `storeFeedback`.
+- **Idempotent:** `trigger_key` = ts of the learn message; unique `(incident_id, trigger_key)` → code `23505` mapped to "duplicate". Re-learning after a correction = new message ts = new row (latest rows win in recall).
+- **Recall renders CONFIRMED first** as a strong prior ("check this hypothesis FIRST, mention the past fix in Recommended Actions"), hypotheses after ("verify before reuse"). Framing lives in both the injected block and `prompts/system.md` Evidence Rules.
+- The ack echoes what was learned so on-call can correct mistakes (extraction quality mitigation). `raw_excerpt` stored for provenance.
+- Feeds Guarded Remediation later: `action_taken` history informs/annotates action proposals.
 
 ## LLM Providers
 
@@ -245,11 +283,16 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - [x] **Readiness `/health`** (503 when MCP/Postgres/Redis down)
 - [x] **Configurable `MAX_TOKENS` + model default refresh** (`claude-opus-4-8`)
 - [x] **MCP HTTP auth** (shared bearer token, constant-time check)
+- [x] **Migration 002** — `remediations` + `incident_feedback` tables, `incidents.thread_ts/channel`, `storeIncident` returns id (shared prerequisite for C + E)
+- [x] **Conversation-mode hardening** (chatbot UX for non-alert mentions) — response-mode markers, tool budget, namespace scope lock, log fan-out guard, RCA-format backstop, fence-safe Slack splitter, head+tail truncation, name-resolution/confirmation + 10-line log display rules
+- [x] **Reasoning-model resilience** (llm-worker) — `finish_reason=length` surfaced as `max_tokens`, empty-exhaustion auto-retry with 2× budget, `LLM_REASONING_EFFORT` passthrough, `SQS_LLM_TIMEOUT_SECONDS` default 240
+- [x] **MCP server ops polish** — startup upstream probe (non-fatal warn), `conciseCause` error trimming, no stack for expected errors; agent `/health` does a real MCP ping
 
 ### Next — ordered
 - [ ] **D. Resolved-alert loop** — handle Alertmanager `status: resolved` (currently skipped): post a "✅ resolved" update to the incident thread + record outcome in DB. Becomes a **feedback signal** for incident-memory quality. Small.
-- [ ] **C. Guarded Remediation** — agent executes actions (restart/scale/rollback) via the alert thread with a Slack **approval gate** + DB audit trail. Design agreed → **`docs/DESIGN_guarded_remediation.md`**. Depends on MCP write-tools + MCP auth (done).
-- [ ] **E. On-call feedback learning** — capture human-confirmed root causes/actions from alert threads (`@agent learn` / ✅ reaction) into a trusted `incident_feedback` tier; recall as strong prior. Design → **`docs/DESIGN_oncall_feedback_learning.md`**. Shares migration-002 prerequisites with C (`storeIncident` returns id, `thread_ts`/`channel` on incidents).
+- [ ] **C. Guarded Remediation** — agent executes actions (restart/scale/rollback) via the alert thread with a Slack **approval gate** + DB audit trail. Design agreed → **`docs/DESIGN_guarded_remediation.md`**. ✅ Step 1 done (migration 002: `remediations` table + partial unique index). Next: Step 2 (`k8s_rollout_restart` + `MCP_ENABLE_WRITE_TOOLS` in mcp-server).
+- [ ] **E. On-call feedback learning** — Design → **`docs/DESIGN_oncall_feedback_learning.md`**. ✅ **v1 shipped** (steps 1–4: migration 002, feedback store/recall, `@agent learn` router + extraction, confirmed-tier recall + prompt framing). Remaining: Step 5 (`reaction_added` ✅ trigger, needs `reactions:read`), then v2 ideas (passive capture, auto-trigger on resolve).
+- Migration **`002_remediations_and_feedback.sql`** ships the shared schema for C+E in one transaction; `store()` now takes an optional `{channel, threadTs}` and returns `incidents.id` (`Number()`-cast — pg returns BIGSERIAL as string).
 
 ### Parked (design captured, revisit when prioritized)
 - **FinOps** (cost Q&A, waste audit, cost-anomaly-as-incident, rightsizing) — mostly config/prompt via OpenCost→Prometheus; see **`docs/DESIGN_finops.md`**.

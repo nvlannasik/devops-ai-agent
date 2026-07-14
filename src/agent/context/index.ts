@@ -3,12 +3,15 @@ import type { Message, ContentBlock } from "../llm/types.js";
 // rough estimate: 1 token ≈ 4 chars
 const MAX_TOOL_RESULT_CHARS = 8000;  // ~2k tokens per tool result
 const MAX_HISTORY_MESSAGES = 40;     // keep last 40 messages
-const TRUNCATION_NOTICE = (remaining: number) => `...[truncated ${remaining} chars]`;
+const TRUNCATION_NOTICE = (remaining: number) => `\n...[truncated ${remaining} chars]...\n`;
 
 export function truncateToolResult(content: string): string {
   if (content.length <= MAX_TOOL_RESULT_CHARS) return content;
+  // keep head AND tail — logs are chronological, so the most recent lines live at the
+  // END; head-only truncation silently dropped exactly the lines "show me the logs" needs
+  const half = MAX_TOOL_RESULT_CHARS / 2;
   const remaining = content.length - MAX_TOOL_RESULT_CHARS;
-  return content.slice(0, MAX_TOOL_RESULT_CHARS) + TRUNCATION_NOTICE(remaining);
+  return content.slice(0, half) + TRUNCATION_NOTICE(remaining) + content.slice(-half);
 }
 
 // A user message carrying tool_result blocks is only valid when the assistant

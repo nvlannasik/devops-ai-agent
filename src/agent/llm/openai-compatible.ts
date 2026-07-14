@@ -25,10 +25,13 @@ export class OpenAICompatibleClient implements LLMClient {
           content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
         })),
       ],
-      tools: tools.map((t) => ({
-        type: "function" as const,
-        function: { name: t.name, description: t.description, parameters: t.inputSchema },
-      })),
+      // omit when the agent disables tools (tool budget reached) — some providers reject []
+      ...(tools.length > 0 && {
+        tools: tools.map((t) => ({
+          type: "function" as const,
+          function: { name: t.name, description: t.description, parameters: t.inputSchema },
+        })),
+      }),
     });
 
     const choice = response.choices[0];

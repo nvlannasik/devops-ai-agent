@@ -80,11 +80,12 @@ test("trimHistory enforces the 40-message window with valid pairing", () => {
   assertPairingValid(trimmed);
 });
 
-test("truncateToolResult appends an honest truncation notice", () => {
-  const long = "x".repeat(9000);
+test("truncateToolResult keeps head AND tail with an honest notice", () => {
+  const long = "H".repeat(5000) + "T".repeat(4000); // 9000 chars
   const out = truncateToolResult(long);
-  assert.ok(out.startsWith("x".repeat(8000)));
-  assert.match(out, /\.\.\.\[truncated 1000 chars\]$/);
+  assert.ok(out.startsWith("H".repeat(4000))); // head half kept
+  assert.ok(out.endsWith("T".repeat(4000)));   // tail half kept — recent log lines live here
+  assert.match(out, /\.\.\.\[truncated 1000 chars\]\.\.\./);
 });
 
 test("truncateToolResult leaves short content alone", () => {

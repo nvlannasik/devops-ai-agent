@@ -23,13 +23,16 @@ export class ClaudeClient implements LLMClient {
           cache_control: { type: "ephemeral" },
         },
       ],
-      // mark last tool to cache the entire tools array (tools rarely change mid-session)
-      tools: tools.map((t, i) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.inputSchema as Anthropic.Tool["input_schema"],
-        ...(i === tools.length - 1 ? { cache_control: { type: "ephemeral" } as const } : {}),
-      })),
+      // mark last tool to cache the entire tools array (tools rarely change mid-session);
+      // omit entirely when the agent disables tools (tool budget reached)
+      ...(tools.length > 0 && {
+        tools: tools.map((t, i) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema as Anthropic.Tool["input_schema"],
+          ...(i === tools.length - 1 ? { cache_control: { type: "ephemeral" } as const } : {}),
+        })),
+      }),
       messages: messages as Anthropic.MessageParam[],
     });
 

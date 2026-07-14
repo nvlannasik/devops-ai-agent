@@ -5,7 +5,11 @@ import { config } from "../config/index.js";
 import { DevOpsAgent } from "../agent/index.js";
 import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
+import { wantsInvestigation } from "../agent/intent/index.js";
+import { buildTranscript } from "../agent/feedback/index.js";
 import { buildRcaBlocks, isRcaResponse } from "../utils/slack/blocks.js";
+import { splitForSlack } from "../utils/slack/split.js";
+import { truncate } from "../utils/truncate/index.js";
 import logger from "../utils/logger/index.js";
 
 class Semaphore {
@@ -106,33 +110,101 @@ export class SlackApp {
     const threadId = event.thread_ts ?? event.ts;
     const text = event.text.replace(/<@[^>]+>/g, "").trim();
 
-    logger.info(`[slack] mention received — channel: ${event.channel}, thread: ${threadId}, user: ${event.user}`);
+    // log the raw text here — the Issue preview inside investigate() now starts with the
+    // [USER MESSAGE ...] marker, which eats the whole 120-char preview
+    logger.info(`[slack] mention received — channel: ${event.channel}, thread: ${threadId}, user: ${event.user}, text: ${truncate(text, 200)}`);
 
     if (!text) {
       await say({ text: "Hi! Describe the issue you want me to investigate.", thread_ts: threadId });
       return;
     }
 
-    await say({ text: "🔍 Investigating... I'll update you shortly.", thread_ts: threadId });
+    // `@agent learn` — on-call feedback learning: extract the thread's confirmed
+    // conclusion into durable memory. Separate flow, no agentic loop involved.
+    if (/^learn\b/i.test(text)) {
+      await this.handleLearn(event, client, threadId);
+      return;
+    }
+
+    await say({ text: "🤖 On it...", thread_ts: threadId });
+
+    // Per-message mode marker — same mechanism as the [FOLLOW-UP] prefix. Distant
+    // system-prompt rules alone don't hold: the model defaults to RCA format for any
+    // first message (see MEMORY_BANK). Only Alertmanager messages carry [SOURCE: ...].
+    const message =
+      `[USER MESSAGE — conversation mode by default: answer directly in Slack mrkdwn. ` +
+      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident.]\n${text}`;
+
+    // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 3);
+    // explicit investigation requests (and the alert webhook path) keep the full budget.
+    const investigation = wantsInvestigation(text);
+    const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
 
     await this.semaphore.acquire();
     try {
-      const rca = await this.agent.investigate(threadId, text);
-      const isRca = isRcaResponse(rca);
+      let reply = await this.agent.investigate(threadId, message, budget);
+      if (!investigation && isRcaResponse(reply)) {
+        // Deterministic format backstop — the model sometimes ignores the conversation-mode
+        // marker when tool results look alarming. Rewrite instead of shipping an incident card.
+        logger.warn(`[slack] conversation-mode mention returned RCA format — reformatting (thread ${threadId})`);
+        reply = await this.agent.reformatToConversation(reply).catch(() => reply);
+      }
+      const isRca = isRcaResponse(reply);
       logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
-      await client.chat.postMessage({
-        channel: event.channel,
-        thread_ts: threadId,
-        text: rca,
-        ...(isRca ? { blocks: buildRcaBlocks(rca) } : { mrkdwn: true }),
-      });
+      if (isRca) {
+        await client.chat.postMessage({
+          channel: event.channel,
+          thread_ts: threadId,
+          text: reply,
+          blocks: buildRcaBlocks(reply),
+        });
+      } else {
+        // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
+        // fence-safe, so displayed logs keep rendering as code blocks
+        for (const part of splitForSlack(reply)) {
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+        }
+      }
       if (isRca) await this.agent.markRcaSent(threadId);
-      await this.notifyIfLowConfidence(event.channel, threadId, rca);
+      await this.notifyIfLowConfidence(event.channel, threadId, reply);
     } catch (err) {
       logger.error(`[slack] investigation failed for thread ${threadId}: ${err}`);
       await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
     } finally {
       this.semaphore.release();
+    }
+  }
+
+  // `@agent learn` handler — see docs/DESIGN_oncall_feedback_learning.md.
+  private async handleLearn(
+    event: SlackEventMiddlewareArgs<"app_mention">["event"],
+    client: AllMiddlewareArgs["client"],
+    threadId: string
+  ): Promise<void> {
+    try {
+      if (!event.thread_ts) {
+        await client.chat.postMessage({
+          channel: event.channel,
+          thread_ts: threadId,
+          text: "Use `learn` inside an incident thread (reply to the alert I investigated), so I know which incident to learn from.",
+        });
+        return;
+      }
+
+      // channels:history / groups:history scopes are already required for the app
+      const replies = await client.conversations.replies({ channel: event.channel, ts: threadId, limit: 100 });
+      const transcript = buildTranscript(replies.messages ?? []);
+
+      const result = await this.agent.learnFromThread(event.channel, threadId, event.user ?? "unknown", event.ts, transcript);
+      await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: result, mrkdwn: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[slack] learn failed for thread ${threadId}: ${msg}`);
+      // missing_scope = reading the thread needs history scopes the app wasn't granted
+      const text = msg.includes("missing_scope")
+        ? "⚠️ I can't read this thread: the Slack app is missing the `channels:history` scope (`groups:history` for private channels). Add it under *OAuth & Permissions* and reinstall the app, then try `learn` again."
+        : `⚠️ Learn failed: ${msg}`;
+      await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true }).catch(() => {});
     }
   }
 
@@ -199,7 +271,12 @@ export class SlackApp {
       // Prepend any prior similar incidents so the agent can recognize a recurrence.
       // Best-effort: a recall failure must not block the investigation.
       const prior = await this.agent.recallIncidents(labels).catch(() => "");
-      const fullIssue = prior ? `${prior}\n\n---\n\n${issueText}` : issueText;
+      // The [SOURCE: ...] marker is the deterministic mode signal for the system prompt:
+      // only Alertmanager-driven messages carry it → mandatory investigation mode.
+      // Human mentions have no marker → conversation-first (see prompts/system.md).
+      const fullIssue =
+        `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
+        (prior ? `${prior}\n\n---\n\n${issueText}` : issueText);
 
       const rca = await this.agent.investigate(threadId, fullIssue);
       await this.app.client.chat.postMessage({
@@ -210,7 +287,7 @@ export class SlackApp {
       });
       if (isRcaResponse(rca)) {
         await this.agent.markRcaSent(threadId);
-        await this.agent.storeIncident(labels, rca).catch((e) =>
+        await this.agent.storeIncident(labels, rca, channel, threadId).catch((e) =>
           logger.error(`[slack] failed to store incident for thread ${threadId}: ${e}`)
         );
       }
