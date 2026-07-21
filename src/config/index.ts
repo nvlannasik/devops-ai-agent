@@ -12,6 +12,12 @@ export const config = {
     appToken: process.env.SLACK_APP_TOKEN,
     alertChannel: process.env.SLACK_ALERT_CHANNEL,
     oncallUsers: (process.env.SLACK_ONCALL_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    // who may approve/reject remediations — falls back to oncallUsers; both empty =
+    // any user may decide (warned in logs; still a human gate + server-side guardrails)
+    approverUsers: (process.env.SLACK_APPROVER_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    // emoji name that triggers learn-from-thread when reacted inside an investigated
+    // thread (needs reactions:read + the reaction_added event subscription)
+    learnReaction: process.env.SLACK_LEARN_REACTION ?? "white_check_mark",
   },
 
   llm: {

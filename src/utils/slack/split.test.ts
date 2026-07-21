@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitForSlack } from "./split.js";
+import { splitForSlack, toMrkdwn } from "./split.js";
 
 test("short messages pass through untouched", () => {
   assert.deepEqual(splitForSlack("hello"), ["hello"]);
@@ -27,4 +27,15 @@ test("re-balances code fences across the split", () => {
   }
   // continuation chunks that carry code start with a reopened fence
   assert.ok(chunks[1].startsWith("```"));
+});
+
+test("toMrkdwn converts **bold** to *bold* outside code fences only", () => {
+  assert.equal(toMrkdwn("status **replicas=2** ok"), "status *replicas=2* ok");
+  const fenced = "before **x**\n```\nkeep **raw** here\n```\nafter **y**";
+  assert.equal(toMrkdwn(fenced), "before *x*\n```\nkeep **raw** here\n```\nafter *y*");
+  assert.equal(toMrkdwn("already *bold* untouched"), "already *bold* untouched");
+});
+
+test("splitForSlack applies the mrkdwn conversion", () => {
+  assert.deepEqual(splitForSlack("**bold**"), ["*bold*"]);
 });

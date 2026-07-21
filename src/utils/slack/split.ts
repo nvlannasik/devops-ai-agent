@@ -3,7 +3,18 @@
 // newline boundaries and re-balance fences so every chunk renders correctly.
 const SLACK_MAX_CHARS = 3800; // stay under Slack's ~4000 split point, leave room for the closing fence
 
+// Slack mrkdwn bolds with *single* asterisks — the model keeps emitting Markdown
+// `**bold**`, which Slack renders literally. Convert outside code fences only,
+// so log excerpts / YAML in ``` blocks are never rewritten.
+export function toMrkdwn(text: string): string {
+  return text
+    .split("```")
+    .map((seg, i) => (i % 2 === 0 ? seg.replace(/\*\*([^*\n]+)\*\*/g, "*$1*") : seg))
+    .join("```");
+}
+
 export function splitForSlack(text: string, max = SLACK_MAX_CHARS): string[] {
+  text = toMrkdwn(text);
   if (text.length <= max) return [text];
 
   const chunks: string[] = [];

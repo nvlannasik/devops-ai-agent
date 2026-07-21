@@ -22,7 +22,7 @@ Slack mention / Alertmanager webhook
 
 - Node.js >= 24
 - A running [devops-mcp-server](../devops-mcp-server)
-- Slack app with scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`
+- Slack app with scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`
 
 ## Setup
 
@@ -48,6 +48,7 @@ npm test                       # unit tests
 | `SLACK_APP_TOKEN` | `xapp-...` for Socket Mode | optional |
 | `SLACK_ALERT_CHANNEL` | Channel ID for Alertmanager alerts | optional |
 | `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
+| `SLACK_APPROVER_USERS` | User IDs allowed to approve/reject remediations (falls back to `SLACK_ONCALL_USERS`; both empty = anyone, with a log warning) | optional |
 | `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` | `claude` |
 | `ANTHROPIC_API_KEY` | Required if claude | — |
 | `CLAUDE_MODEL` | | `claude-opus-4-8` |
@@ -115,6 +116,57 @@ stores it as **human-confirmed** knowledge, and echoes what it learned (mention 
 again after correcting the thread if it got it wrong). On the next similar incident the
 confirmed knowledge is injected as a strong prior — see Incident Memory below.
 
+Alternatively, react ✅ (`SLACK_LEARN_REACTION`) on any message inside the investigated
+thread — same flow, silent outside investigated threads. Needs the `reactions:read`
+scope + `reaction_added` event subscription.
+
+### Resolved alerts
+
+When Alertmanager sends `status: resolved` (`send_resolved: true` in the webhook config),
+the agent posts "✅ Alert resolved" into the incident thread, records `resolved_at` in the
+DB, and releases the dedup claim — so if the alert fires again later it gets a fresh
+investigation instead of being suppressed by the 12h dedup TTL.
+
+### Guarded Remediation (approval-gated execution)
+
+When the MCP server has write tools enabled (`MCP_ENABLE_WRITE_TOOLS=true` +
+`ALLOWED_REMEDIATION_NAMESPACES` there), the agent may propose **one** remediation after
+an RCA (alert-driven or mention-driven). Whitelisted actions:
+
+| Action | When proposed | Extra guardrails |
+|--------|---------------|------------------|
+| `k8s_rollout_restart` | transient faults a clean restart plausibly fixes | — |
+| `k8s_set_image` | RCA shows a wrong/nonexistent image AND evidence names a working one, or the user explicitly requests a tag | never invents tags; `container` optional (auto-resolved when the workload has one container) |
+| `k8s_set_resources` | OOMKilled / resource exhaustion | only provided values patched |
+| `k8s_scale` | under-capacity (load, HPA at max) | `MAX_SCALE_DELTA` bound, scale-to-zero refused |
+
+All support deployment/statefulset/daemonset (except `k8s_scale`: no daemonset). Flow:
+
+```
+RCA posted → agent proposes (separate LLM call, whitelist-validated)
+          → mandatory server-side dry-run (bad target / blocked namespace = no card)
+          → approval card in the thread:  [ ✅ Approve ]  [ 🚫 Reject ]
+          → approver clicks Approve → atomic claim (double-click/multi-pod safe)
+          → execute → card updated ✅/❌ → full audit trail in the `remediations` table
+          → 90s later: pod-status check posted into the thread (did the rollout converge?)
+```
+
+**Nothing ever executes without a human click.** Cards expire after 15 minutes (checked at
+click time). Approvers = `SLACK_APPROVER_USERS` (fallback `SLACK_ONCALL_USERS`) — the card
+@-mentions them so they get notified.
+Requires **Interactivity enabled** on the Slack app (works over Socket Mode — no public URL).
+
+**Recurrence shortcut:** when incident memory holds a CONFIRMED prior for the same alert
+and fresh evidence matches, the agent may reply concisely ("known recurrence + confirmed
+fix") instead of the full RCA card — incident store and the remediation proposal still run.
+
+> ⚠️ **GitOps guard:** the spec-mutating actions (`set_image`/`set_resources`/`scale`)
+> are **refused** on Flux- or Helm-managed workloads (detected via ownership labels) —
+> a direct patch would be reverted by the next reconcile / lost on the next `helm
+> upgrade`, so no card is posted and the error names where the real fix lives.
+> `rollout_restart` stays allowed (GitOps-safe). See `docs/DESIGN_guarded_remediation.md`
+> §10 for the planned PR-based flow for Flux-managed workloads.
+
 ### Alertmanager Integration
 
 ```yaml
@@ -122,7 +174,7 @@ receivers:
   - name: devops-ai-agent
     webhook_configs:
       - url: http://your-agent:3000/alert
-        send_resolved: false
+        send_resolved: true   # enables the resolved-alert loop (✅ thread update + dedup release)
 route:
   group_by: ["alertname", "namespace"]
   repeat_interval: 12h
@@ -205,6 +257,7 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 | Readiness `/health` | Returns `503` (not `200`) when a configured dependency (MCP, Postgres, Redis) is unreachable, so K8s readiness probes stop routing to a pod that can't investigate |
 | Incident Memory | Durable (Postgres) — recalls prior RCAs for the same alert+namespace so recurring incidents aren't re-diagnosed from scratch. Disabled unless `DB_HOST` is set |
 | On-call Feedback Learning | `@agent learn` in an alert thread extracts the human-confirmed root cause/action/outcome into a trusted tier, recalled as a strong prior on future similar incidents |
+| Guarded Remediation | Approval-gated restart / set-image / set-resources / scale after an RCA: whitelist + mandatory dry-run + Slack Approve/Reject buttons + atomic claim + audit trail. Off unless the MCP server enables write tools |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Window | Tool results truncated to 8000 chars, history to 40 messages |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
@@ -237,6 +290,7 @@ src/
 │   ├── incidents/index.ts        # Durable incident memory (Postgres) — RCAs + confirmed feedback
 │   ├── intent/index.ts           # wantsInvestigation() — full vs capped tool budget
 │   ├── mcp/client.ts             # Reconnect + mutex + ping
+│   ├── remediation/              # Guarded Remediation: proposal parser + row-flip store
 │   ├── scope/index.ts            # Namespace scope lock helpers
 │   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
 │   └── prompts/system.ts         # Static prompt + time context
@@ -263,10 +317,11 @@ Set `AWS_AUTH_MODE` to control how credentials are obtained (read by `entrypoint
 ## Slack App Setup
 
 1. [api.slack.com/apps](https://api.slack.com/apps) → Create App
-2. **OAuth & Permissions** → scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`
-3. **Event Subscriptions** → subscribe to `app_mention`
+2. **OAuth & Permissions** → scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`
+3. **Event Subscriptions** → subscribe to `app_mention`, `reaction_added`
 4. Copy Bot Token + Signing Secret to `.env`
 5. Socket Mode: enable + generate App Token with `connections:write`
+6. **Interactivity & Shortcuts** → toggle ON (needed for remediation Approve/Reject buttons; over Socket Mode no Request URL is required)
 
 ## Docker
 

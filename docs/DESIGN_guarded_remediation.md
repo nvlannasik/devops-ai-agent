@@ -1,8 +1,26 @@
 # Design — Guarded Remediation
 
-> **Status:** design agreed, ready for v1 implementation (2026-06-25). Open questions
-> from the first draft have been resolved (see Decisions summary). This is the source
-> of truth; implementation follows §8.
+> **Status: v1.1 IMPLEMENTED (2026-07-15)** — §8 steps 1–4 shipped, then extended beyond
+> the §7 minimal cut: **4 typed actions** (`k8s_rollout_restart` for
+> deployment/statefulset/daemonset, `k8s_set_image`, `k8s_set_resources`, `k8s_scale`
+> with `MAX_SCALE_DELTA` + scale-to-zero refused), **mention-driven investigations** also
+> get the flow (`remediations.incident_id` nullable), and **write tools are excluded from
+> the agentic loop** via the `[WRITE]` description-prefix convention (two layers: filtered
+> from the tools list + refused in executeToolCalls). Step 5 (RBAC review) is an ops task
+> before production use. **§10 records a known limitation for GitOps-managed workloads
+> (most of this cluster) and the PR-flow design that addresses it.** §11 lists v2. One deviation from §5.3: approve does a single
+> atomic flip `proposed → executing` (with `approved_by` recorded) instead of a two-step
+> approved→executing — same idempotency guarantees, fewer states in flight.
+>
+> **v1.2 (2026-07-16, from live testing):** every proposal null-path is logged (silent
+> no-card was undebuggable); `container` is **optional** in `k8s_set_image`/`k8s_set_resources`
+> — the MCP server auto-resolves single-container workloads and refuses multi-container ones
+> with the name list (the proposal model cannot know container names and guessed wrong);
+> proposal prompt: never guess container names, workload = controller name not pod name, an
+> explicit user request is sufficient evidence for any whitelisted action (user-given tag +
+> current repo from context); the approval card `<@mentions>` the approvers so they get
+> notified. The alert flow is now **format-agnostic**: a recognized recurrence may reply
+> concisely instead of the RCA template — incident store + proposal run either way.
 
 ## 1. Goal
 
@@ -213,7 +231,74 @@ Dependencies: Step 3 needs 1. Step 4 needs 2+3. Step 5 any time before deploy.
 - ⬜ Slack interactivity (Socket Mode `app.action` handlers) — new.
 - ⬜ Agent/MCP server RBAC reviewed for least-privilege write verbs — ops task.
 
-## 10. v2 (after v1 is proven)
+## 10. Known limitation / TECH DEBT — GitOps-managed workloads
+
+> Recorded 2026-07-15. The spec-mutating actions shipped in v1.1 assume the workload is
+> managed by direct `kubectl apply` / manual manifests. **In this cluster almost
+> everything is Flux-managed**, so this limitation applies to most targets.
+
+### The problem
+Flux continuously reconciles cluster state back to the git source (interval here: 5m).
+A direct patch on a Flux-managed workload is **silently reverted on the next reconcile**
+— the approval card reports success, then the change quietly disappears. A false-success
+remediation is worse than a refused one.
+
+Per-action impact:
+
+| Action | GitOps impact |
+|--------|---------------|
+| `k8s_rollout_restart` | ✅ **Safe** — the `restartedAt` annotation is not a field Flux/Helm manages (SSA field ownership); it survives reconciles |
+| `k8s_set_image` | ❌ Reverted on next reconcile |
+| `k8s_set_resources` | ❌ Reverted on next reconcile |
+| `k8s_scale` | ❌ Reverted (and additionally fought by HPA if one targets the workload) |
+
+### Near-term mitigation — ✅ SHIPPED (2026-07-17)
+Implemented as `assertNotGitOpsManaged` in the MCP server's guardrails (unit-tested),
+called by all three mutating handlers after reading the workload; also refuses plain
+Helm-managed workloads (`app.kubernetes.io/managed-by: Helm` — lost on the next
+`helm upgrade`). Original design:
+
+**Detect Flux ownership server-side and refuse the mutating actions with an explanatory
+error.** Flux-managed resources carry labels (`helm.toolkit.fluxcd.io/name` +
+`.../namespace` from helm-controller; `kustomize.toolkit.fluxcd.io/name` from
+kustomize-controller). The handlers already read the workload before patching — checking
+labels is one more condition. Refusal message names the owning HelmRelease so the human
+knows where the real fix lives. Dry-run then fails → **no misleading card is ever
+posted**. `k8s_rollout_restart` stays allowed.
+(Escape hatch if ever needed: `flux suspend` + patch + `resume` as a deliberate,
+human-driven emergency path — NOT automated in this phase.)
+
+### v2 design sketch — GitOps-aware remediation (PR flow)
+For Flux-managed workloads the remediation must change the **source**, not the cluster:
+
+```
+RCA → proposal → target is Flux-managed (labels) →
+  read the owning HelmRelease CRD (chart, values, sourceRef) →
+  locate the values file in the GitOps repo (env overlay) →
+  generate the change (e.g. values image.tag / resources / replicaCount) →
+  open a GitHub PR (branch + commit + PR body linking the incident thread) →
+  post the PR link in the Slack thread →
+  approval gate = PR review + merge (GitHub takes over from Slack buttons) →
+  Flux syncs after merge → agent can verify & report back in the thread
+```
+
+Notes / open questions to resolve before building:
+- **Workload → values mapping is the hard part**: which values key controls the image/
+  resources/replicas is chart-specific. For in-house charts, standardize a convention
+  (`image.tag`, `resources.*`, `replicaCount`) and only support charts that follow it;
+  refuse otherwise. Never guess.
+- **Repo/path resolution**: HelmRelease → `sourceRef` → GitRepository URL; the env overlay
+  path (e.g. `apps/dev/...` vs `apps/prd/...`) must be derived from cluster identity —
+  needs an explicit config map of cluster → overlay path.
+- **Credentials**: a GitHub App (scoped to the GitOps repo, PR-only permissions) over a
+  PAT. The MCP server should hold it (trust boundary), exposed as e.g. a
+  `[WRITE] gitops_propose_change` tool.
+- **Audit**: the `remediations` row records the PR URL as `result`; status maps to PR
+  lifecycle (proposed=PR open, succeeded=merged+synced, rejected=PR closed).
+- The Slack approval card is still useful as the *initiation* gate ("open this PR?"),
+  with the PR review as the second, stronger gate.
+
+## 11. v2 (after v1 is proven)
 - **Rate limiting** — max N remediations/hour/namespace via a Redis counter (`INCR remediation:{ns} EX 3600`), same pattern as dedup.
 - **Resolved-alert feedback loop** (roadmap §D) — when an alert resolves, update the `remediations` outcome: did the approved action actually fix it? This data enriches future `incidents` recall.
 - **Auto-remediation for low-risk + high-confidence** — e.g. confidence=High + action=restart + non-prod namespace → skip approval. **Explicit opt-in** via env (`ALLOW_AUTO_REMEDIATION_NAMESPACES`), never the default.

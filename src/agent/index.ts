@@ -8,6 +8,8 @@ import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
 import { trimHistory, sanitizeContentBlocks } from "./context/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
+import { RemediationStore } from "./remediation/index.js";
+import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
@@ -38,12 +40,14 @@ export class DevOpsAgent {
   private mcp: MCPClient;
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
+  private remediations: RemediationStore;
 
   constructor() {
     this.llm = createLLMClient();
     this.mcp = new MCPClient();
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
+    this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
   }
 
   async initialize(): Promise<void> {
@@ -61,6 +65,7 @@ export class DevOpsAgent {
       pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
       await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
       this.incidents = new IncidentMemory(pool);
+      this.remediations = new RemediationStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
@@ -110,7 +115,10 @@ export class DevOpsAgent {
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
 
-    const tools = this.mcp.getTools();
+    // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
+    // to execute state-changing actions on its own. Write tools are reachable only via
+    // the proposal dry-run and the human-approved execution path (direct callTool).
+    const tools = this.mcp.getTools().filter((t) => !t.description.startsWith("[WRITE]"));
     const systemPrompt = buildStaticSystemPrompt();
     let iterations = 0;
     let totalUsage = zeroUsage();
@@ -250,6 +258,16 @@ export class DevOpsAgent {
     return Promise.all(
       toolUses.map(async (toolUse) => {
         const { id, name, input } = toolUse;
+        // second layer of the write-tool exclusion (first: filtered from the tools list)
+        const def = this.mcp.getTools().find((t) => t.name === name);
+        if (def?.description.startsWith("[WRITE]")) {
+          logger.warn(`[${threadId}] blocked direct write-tool call: ${name}`);
+          return {
+            type: "tool_result" as const,
+            tool_use_id: id,
+            content: "Error: write tools require the human approval flow and cannot be called during an investigation.",
+          };
+        }
         const start = Date.now();
         logger.info(`[${threadId}] → tool: ${name} input: ${truncate(JSON.stringify(input))}`);
         try {
@@ -271,6 +289,110 @@ export class DevOpsAgent {
       .map((c) => c.text ?? "")
       .join("\n")
       .trim();
+  }
+
+  // ---- Guarded Remediation (docs/DESIGN_guarded_remediation.md) ----
+
+  // Propose at most one whitelisted action after an RCA. Returns null when: write tools
+  // aren't enabled on the MCP server (tool not discovered), the model proposes nothing,
+  // or a card is already active for this incident. A dry-run refusal returns the server's
+  // reason instead — the model DID want to act, and the human deserves to know why not
+  // (GitOps guard, blocked namespace, bad target). No card in any non-id case.
+  async proposeRemediation(
+    incidentId: number | null, // null = mention-driven investigation (no alert labels)
+    labels: Record<string, string>,
+    rca: string
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+    // write tools present at all? (server-side flag off = never propose)
+    if (!this.mcp.getTools().some((t) => t.description.startsWith("[WRITE]"))) return null;
+
+    const response = await this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM);
+    const text = this.extractText(response.content);
+    const proposal = parseProposal(text);
+    if (!proposal) {
+      logger.info(`[remediation] no actionable proposal from model: ${truncate(text, 200)}`);
+      return null;
+    }
+    // the specific proposed action must actually be registered on the server
+    if (!this.mcp.getTools().some((t) => t.name === proposal.action)) {
+      logger.info(`[remediation] proposed action ${proposal.action} is not registered on the MCP server`);
+      return null;
+    }
+
+    // Mandatory dry-run before any card — validates the target AND exercises the MCP
+    // server's namespace guardrails with zero side effects.
+    const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
+    if (dryRun.startsWith("Error:")) {
+      logger.info(`[remediation] dry-run refused for ${proposal.summary}: ${truncate(dryRun, 200)}`);
+      return { refused: dryRun.replace(/^Error:\s*/, "") };
+    }
+
+    // store the exact tool params + display fields — execution replays params verbatim
+    const id = await this.remediations.propose(incidentId, proposal.action, {
+      ...proposal.toolParams,
+      reason: proposal.reason,
+      summary: proposal.summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+
+    return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+  }
+
+  // Approve path: atomically claim the row (double-click / multi-pod safe), execute the
+  // whitelisted MCP tool, record the outcome. Returns the user-facing card text, plus the
+  // target workload on success so the app can schedule a post-remediation status check.
+  async executeRemediation(
+    id: number,
+    approvedBy: string
+  ): Promise<{ text: string; target?: { namespace: string; name: string } }> {
+    const claim = await this.remediations.claimForExecution(id, approvedBy);
+    if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
+    if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
+    if (claim === "taken") return { text: "⚠️ This remediation was already handled by another approver or process." };
+
+    // stored params = tool input + display fields; strip the display fields before the call
+    const { reason: _reason, summary, ...toolParams } = claim.params as Record<string, unknown> & { summary?: string };
+    const label = typeof summary === "string" ? summary : claim.action;
+    try {
+      const result = await this.mcp.callTool(claim.action, toolParams);
+      const ok = !result.startsWith("Error:");
+      await this.remediations.finish(id, ok, result);
+      if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
+      return {
+        text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
+        target: { namespace: String(toolParams.namespace ?? ""), name: String(toolParams.name ?? "") },
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.remediations.finish(id, false, msg);
+      return { text: `❌ *Remediation failed* — ${label}: ${truncate(msg, 300)}` };
+    }
+  }
+
+  // Post-remediation status check — deterministic, no LLM call: list the namespace's
+  // pods and keep the target workload's lines (pod names carry the workload prefix).
+  async remediationStatus(namespace: string, name: string): Promise<string> {
+    const out = await this.mcp.callTool("k8s_list_pods", { namespace });
+    const lines = out.split("\n").filter((l) => l.includes(name));
+    return lines.length > 0 ? lines.join("\n") : truncate(out, 500);
+  }
+
+  async rejectRemediation(id: number, by: string): Promise<string> {
+    const flipped = await this.remediations.reject(id, by);
+    return flipped ? `🚫 Remediation rejected by <@${by}>. Nothing was executed.` : "⚠️ Already handled (or expired).";
+  }
+
+  // D. resolved-alert loop: mark the incident resolved, return its Slack thread (or null).
+  async resolveIncident(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
+    return this.incidents.markResolved(labels);
+  }
+
+  // E. reaction-learn needs to know silently whether a thread maps to a stored incident.
+  async findIncidentForThread(channel: string, threadTs: string): Promise<number | null> {
+    return this.incidents.findIncidentByThread(channel, threadTs);
   }
 
   // On-call feedback learning (`@agent learn`): map the thread to its incident, run one
@@ -320,8 +442,10 @@ export class DevOpsAgent {
         {
           role: "user",
           content:
-            "Rewrite this as a short conversational Slack answer (mrkdwn). Keep the facts and any log excerpts. " +
-            "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions, impact, confidence). " +
+            "Rewrite this as a short conversational Slack answer (mrkdwn), at most ~10 short lines. Keep the facts and any log excerpts. " +
+            "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions/plans, risks, impact, confidence). " +
+            "Remove kubectl/helm command instructions entirely — execution happens via the approval card, never via the user's terminal. " +
+            'Remove any "do you want me to proceed" style closing question — if a change was requested, an approval card or a refusal follows this message automatically. ' +
             "End with at most one short offer to investigate if something looked genuinely wrong.\n\n---\n\n" +
             text,
         },
@@ -331,6 +455,14 @@ export class DevOpsAgent {
     );
     const out = this.extractText(response.content);
     return out || text;
+  }
+
+  // Remediation lifecycle events (card posted / refused / executed) happen OUTSIDE the
+  // LLM conversation — append them to thread memory so follow-ups stay coherent (the
+  // model once promised "I'll open an approval card" right after the server refused one,
+  // because it never saw the refusal).
+  async noteInThread(threadId: string, note: string): Promise<void> {
+    await this.memory.append(threadId, { role: "assistant", content: `[system note] ${note}` }).catch(() => {});
   }
 
   async markRcaSent(threadId: string): Promise<void> {

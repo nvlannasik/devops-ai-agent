@@ -84,3 +84,22 @@ test("findIncidentByThread maps the row id (pg returns BIGSERIAL as string)", as
   const empty = new IncidentMemory({ query: async () => ({ rows: [] }) } as any);
   assert.equal(await empty.findIncidentByThread("C1", "111.22"), null);
 });
+
+test("markResolved flips the newest unresolved incident and returns its thread", async () => {
+  let captured: { sql: string; params: unknown[] } | null = null;
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      captured = { sql, params };
+      return { rows: [{ channel: "C123", thread_ts: "1720.99" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+  const thread = await mem.markResolved({ alertname: "X", namespace: "ns" });
+  assert.deepEqual(thread, { channel: "C123", threadTs: "1720.99" });
+  assert.match(captured!.sql, /resolved_at IS NULL/);
+  assert.match(captured!.sql, /ORDER BY created_at DESC LIMIT 1/);
+
+  // no matching unresolved incident → null (and rows without a thread → null too)
+  const empty = new IncidentMemory({ query: async () => ({ rows: [] }) } as any);
+  assert.equal(await empty.markResolved({ alertname: "X" }), null);
+});

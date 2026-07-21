@@ -56,6 +56,7 @@ export class IncidentMemory {
           `## Previously CONFIRMED by on-call — same alert${namespace ? ` in namespace ${namespace}` : ""}`,
           ...lines,
           `These were confirmed by a human. Treat them as a strong prior, but verify the current state still matches before reusing.`,
+          `If fresh evidence confirms this is the same issue again, reply concisely: known recurrence + confirmed root cause + the evidence you verified + the concrete recommended fix (exact identifiers). No full RCA template needed.`,
         ].join("\n")
       );
     }
@@ -76,6 +77,30 @@ export class IncidentMemory {
     }
 
     return sections.join("\n\n");
+  }
+
+  // D. resolved-alert loop: mark the newest unresolved incident for this alert as
+  // resolved and return its Slack thread so the app can post the ✅ update there.
+  async markResolved(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
+    if (!this.pool) return null;
+    const alertname = labels.alertname;
+    if (!alertname) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `UPDATE incidents SET resolved_at = now()
+          WHERE id = (
+            SELECT id FROM incidents
+             WHERE alertname = $1 AND namespace IS NOT DISTINCT FROM $2 AND resolved_at IS NULL
+             ORDER BY created_at DESC LIMIT 1)
+          RETURNING channel, thread_ts`,
+        [alertname, labels.namespace ?? null]
+      );
+      if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
+      return { channel: rows[0].channel, threadTs: rows[0].thread_ts };
+    } catch (err) {
+      logger.error(`[incidents] markResolved failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
   }
 
   // Map a Slack thread back to its incident (threads are linked since migration 002).
@@ -136,9 +161,11 @@ export class IncidentMemory {
         [
           alertname,
           labels.namespace ?? null,
-          parseSeverity(rca),
+          // conversational recurrence replies have no RCA labels — fall back to the
+          // alert's own severity and the reply's opening as the recallable root cause
+          parseSeverity(rca) ?? labels.severity?.toLowerCase() ?? null,
           parseConfidence(rca),
-          extractRootCause(rca),
+          extractRootCause(rca) ?? (rca.replace(/\s+/g, " ").trim().slice(0, 300) || null),
           rca,
           slack?.channel ?? null,
           slack?.threadTs ?? null,
