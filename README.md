@@ -139,6 +139,7 @@ an RCA (alert-driven or mention-driven). Whitelisted actions:
 | `k8s_set_image` | RCA shows a wrong/nonexistent image AND evidence names a working one, or the user explicitly requests a tag | never invents tags; `container` optional (auto-resolved when the workload has one container) |
 | `k8s_set_resources` | OOMKilled / resource exhaustion | only provided values patched |
 | `k8s_scale` | under-capacity (load, HPA at max) | `MAX_SCALE_DELTA` bound, scale-to-zero refused |
+| `k8s_delete_pod` | ONE pod wedged/crash-looping while siblings are healthy | only controller-owned pods (ReplicaSet/StatefulSet/DaemonSet — the controller recreates it); GitOps-safe |
 
 All support deployment/statefulset/daemonset (except `k8s_scale`: no daemonset). Flow:
 
@@ -160,12 +161,15 @@ Requires **Interactivity enabled** on the Slack app (works over Socket Mode — 
 and fresh evidence matches, the agent may reply concisely ("known recurrence + confirmed
 fix") instead of the full RCA card — incident store and the remediation proposal still run.
 
-> ⚠️ **GitOps guard:** the spec-mutating actions (`set_image`/`set_resources`/`scale`)
-> are **refused** on Flux- or Helm-managed workloads (detected via ownership labels) —
-> a direct patch would be reverted by the next reconcile / lost on the next `helm
-> upgrade`, so no card is posted and the error names where the real fix lives.
-> `rollout_restart` stays allowed (GitOps-safe). See `docs/DESIGN_guarded_remediation.md`
-> §10 for the planned PR-based flow for Flux-managed workloads.
+> ⚠️ **GitOps guard:** on Flux/Helm-managed workloads a direct spec patch would be reverted
+> by the next reconcile, so the spec-mutating actions (`set_image`/`set_resources`/`scale`)
+> don't patch directly. `rollout_restart`/`delete_pod` stay allowed (reconcile-safe).
+> - **Flux HelmRelease + `GITOPS_REMEDIATION_ENABLED=true`:** the remediation opens a **PR**
+>   against the GitOps repo instead (image + scale; the card shows the diff, approve opens
+>   the PR, merge applies it). The PR is opened by the **llm-worker** — the private-network
+>   bridge to GitHub Enterprise. See `docs/DESIGN_gitops_pr_remediation.md`.
+> - **Otherwise** (flow disabled, Kustomize, or plain Helm): refused with the reason posted
+>   to the thread, naming where the real fix lives.
 
 ### Alertmanager Integration
 

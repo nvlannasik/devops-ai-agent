@@ -10,6 +10,9 @@ import { namespacesOf, outOfScope } from "./scope/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import { SqsGitOpsClient } from "./gitops/sqs.js";
+import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
+import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
@@ -41,6 +44,7 @@ export class DevOpsAgent {
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
   private remediations: RemediationStore;
+  private gitops: SqsGitOpsClient | null;
 
   constructor() {
     this.llm = createLLMClient();
@@ -48,6 +52,7 @@ export class DevOpsAgent {
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
     this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
+    this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
   }
 
   async initialize(): Promise<void> {
@@ -86,6 +91,25 @@ export class DevOpsAgent {
   // Durable cross-incident memory — recall returns "" when disabled or no prior match.
   recallIncidents(labels: Record<string, string>): Promise<string> {
     return this.incidents.recall(labels);
+  }
+
+  // Recall what was actually DONE about this alert before (past remediations + their PRs/
+  // outcomes) so the agent doesn't re-propose a fix that already ran. "" when none.
+  async recallRemediations(labels: Record<string, string>): Promise<string> {
+    const alertname = labels.alertname;
+    if (!alertname) return ""; // keyed by alert; mention-driven flows have no labels
+    const rows = await this.remediations.recallForAlert(alertname, labels.namespace, 3).catch(() => []);
+    if (rows.length === 0) return "";
+    const lines = rows.map((r) => {
+      const date = new Date(r.createdAt).toISOString().slice(0, 10);
+      const pr = r.result.startsWith("http") ? ` (PR: ${r.result})` : "";
+      return `- ${date}: ${r.summary} — ${r.status}${pr}`;
+    });
+    return [
+      `## Previously remediated — same alert${labels.namespace ? ` in namespace ${labels.namespace}` : ""}`,
+      ...lines,
+      `These are prior actions taken for this recurring issue. Prefer confirming whether the same fix still applies over proposing a brand-new one.`,
+    ].join("\n");
   }
 
   storeIncident(labels: Record<string, string>, rca: string, channel?: string, threadTs?: string): Promise<number | null> {
@@ -302,7 +326,11 @@ export class DevOpsAgent {
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
     labels: Record<string, string>,
     rca: string
-  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+  ): Promise<
+    | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
+    | { refused: string }
+    | null
+  > {
     // write tools present at all? (server-side flag off = never propose)
     if (!this.mcp.getTools().some((t) => t.description.startsWith("[WRITE]"))) return null;
 
@@ -327,6 +355,11 @@ export class DevOpsAgent {
       return { refused: dryRun.replace(/^Error:\s*/, "") };
     }
 
+    // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
+    // validation) — route to the GitOps PR flow instead of storing a direct-patch card.
+    const preview = parseGitOpsPreview(dryRun);
+    if (preview) return this.proposeGitOpsPr(incidentId, proposal, preview);
+
     // store the exact tool params + display fields — execution replays params verbatim
     const id = await this.remediations.propose(incidentId, proposal.action, {
       ...proposal.toolParams,
@@ -341,6 +374,84 @@ export class DevOpsAgent {
     return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
   }
 
+  // Auto-detect the GitOps overlay path for a HelmRelease from Flux's own config: HR CR →
+  // the Kustomization that applied it (kustomize.toolkit.fluxcd.io labels) → its spec.path
+  // (e.g. "apps/dev/applications"). Reuses the read-only k8s_get_custom_resources MCP tool.
+  // Best-effort: undefined on any miss → the worker falls back to its GITOPS_PATH_PREFIX.
+  private async resolveOverlayPath(hr: { name: string; namespace: string }): Promise<string | undefined> {
+    try {
+      const hrRes = await this.mcp.callTool("k8s_get_custom_resources", { ...FLUX_HELMRELEASE, namespace: hr.namespace, name: hr.name });
+      if (hrRes.startsWith("Error:")) {
+        logger.info(`[remediation] overlay auto-detect: can't read HelmRelease ${hr.namespace}/${hr.name} — ${truncate(hrRes, 200)} (needs RBAC get on helm.toolkit.fluxcd.io/helmreleases)`);
+        return undefined;
+      }
+      const ksRef = kustomizeRefOf(JSON.parse(hrRes));
+      if (!ksRef) {
+        logger.info(`[remediation] overlay auto-detect: HelmRelease ${hr.namespace}/${hr.name} has no kustomize.toolkit.fluxcd.io labels`);
+        return undefined;
+      }
+      const ksRes = await this.mcp.callTool("k8s_get_custom_resources", { ...FLUX_KUSTOMIZATION, namespace: ksRef.namespace, name: ksRef.name });
+      if (ksRes.startsWith("Error:")) {
+        logger.info(`[remediation] overlay auto-detect: can't read Kustomization ${ksRef.namespace}/${ksRef.name} — ${truncate(ksRes, 200)} (needs RBAC get on kustomize.toolkit.fluxcd.io/kustomizations)`);
+        return undefined;
+      }
+      const prefix = fluxPathToPrefix(JSON.parse(ksRes));
+      if (!prefix) {
+        logger.info(`[remediation] overlay auto-detect: Kustomization ${ksRef.namespace}/${ksRef.name} has no usable spec.path`);
+        return undefined;
+      }
+      logger.info(`[remediation] overlay path auto-detected: ${prefix} (via Flux Kustomization ${ksRef.namespace}/${ksRef.name})`);
+      return prefix;
+    } catch (err) {
+      logger.info(`[remediation] overlay path auto-detect failed for ${hr.namespace}/${hr.name}: ${err instanceof Error ? err.message : err}`);
+      return undefined;
+    }
+  }
+
+  // GitOps PR branch of proposeRemediation: ask the worker (over SQS) to prepare the PR
+  // (dry_run → diff), then store a PR-flavored remediation so the approve path opens it.
+  private async proposeGitOpsPr(
+    incidentId: number | null,
+    proposal: Proposal,
+    preview: GitOpsPreview
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
+    if (!this.gitops) {
+      return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
+    }
+    const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    let payload;
+    try {
+      payload = await this.gitops.request({ op: "dry_run", helmRelease: preview.helmRelease, action: preview.action, container: preview.container, changes: preview.changes, pathPrefix });
+    } catch (err) {
+      logger.error(`[remediation] gitops dry-run failed: ${err instanceof Error ? err.message : err}`);
+      return { refused: `couldn't prepare the GitOps PR: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!payload.ok) {
+      logger.info(`[remediation] gitops dry-run refused: ${payload.reason}`);
+      return { refused: payload.reason };
+    }
+    if (payload.op !== "dry_run") return null; // defensive: worker returned the wrong op
+
+    const summary = `open a GitOps PR — ${proposal.summary} (\`${payload.valuesKey}\` in \`${payload.path}\`)`;
+    const id = await this.remediations.propose(incidentId, proposal.action, {
+      gitops: true,
+      helmRelease: preview.helmRelease,
+      action: preview.action,
+      container: preview.container,
+      changes: preview.changes,
+      pathPrefix, // replay the same overlay scope on open_pr
+      path: payload.path,
+      valuesKey: payload.valuesKey,
+      reason: proposal.reason,
+      summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] gitops not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+    return { id, proposal: { ...proposal, summary }, dryRunSummary: payload.diff, gitOps: { path: payload.path, valuesKey: payload.valuesKey, helmRelease: preview.helmRelease } };
+  }
+
   // Approve path: atomically claim the row (double-click / multi-pod safe), execute the
   // whitelisted MCP tool, record the outcome. Returns the user-facing card text, plus the
   // target workload on success so the app can schedule a post-remediation status check.
@@ -353,6 +464,9 @@ export class DevOpsAgent {
     if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
     if (claim === "taken") return { text: "⚠️ This remediation was already handled by another approver or process." };
 
+    // GitOps PR remediations open a PR via the worker instead of patching the cluster
+    if ((claim.params as { gitops?: boolean }).gitops) return this.executeGitOpsPr(id, approvedBy, claim.params);
+
     // stored params = tool input + display fields; strip the display fields before the call
     const { reason: _reason, summary, ...toolParams } = claim.params as Record<string, unknown> & { summary?: string };
     const label = typeof summary === "string" ? summary : claim.action;
@@ -361,14 +475,45 @@ export class DevOpsAgent {
       const ok = !result.startsWith("Error:");
       await this.remediations.finish(id, ok, result);
       if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
+      // delete_pod targets a pod, not a workload — drop the random suffix so the 90s
+      // status check matches the REPLACEMENT pod (same ReplicaSet hash / StatefulSet base)
+      const targetName = String(toolParams.name ?? String(toolParams.pod ?? "").replace(/-[a-z0-9]+$/, ""));
       return {
         text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
-        target: { namespace: String(toolParams.namespace ?? ""), name: String(toolParams.name ?? "") },
+        target: { namespace: String(toolParams.namespace ?? ""), name: targetName },
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.remediations.finish(id, false, msg);
       return { text: `❌ *Remediation failed* — ${label}: ${truncate(msg, 300)}` };
+    }
+  }
+
+  // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
+  // target — nothing is live until the PR merges + Flux syncs, so there's no 90s pod check.
+  private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string }> {
+    const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
+    const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
+    if (!this.gitops) {
+      await this.remediations.finish(id, false, "gitops client not available");
+      return { text: `❌ *PR not opened* — ${label}: the GitOps PR client is not enabled on this agent.` };
+    }
+    try {
+      const payload = await this.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });
+      if (!payload.ok) {
+        await this.remediations.finish(id, false, payload.reason);
+        return { text: `❌ *PR not opened* — ${label}: ${truncate(payload.reason, 300)}` };
+      }
+      if (payload.op !== "open_pr") {
+        await this.remediations.finish(id, false, "unexpected worker response");
+        return { text: `❌ *PR not opened* — ${label}: unexpected worker response.` };
+      }
+      await this.remediations.finish(id, true, payload.prUrl);
+      return { text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.remediations.finish(id, false, msg);
+      return { text: `❌ *PR not opened* — ${label}: ${truncate(msg, 300)}` };
     }
   }
 
@@ -476,6 +621,7 @@ export class DevOpsAgent {
   async shutdown(): Promise<void> {
     await this.mcp.disconnect();
     await this.llm.shutdown?.();
+    await this.gitops?.shutdown();
     await this.incidents.close();
   }
 }

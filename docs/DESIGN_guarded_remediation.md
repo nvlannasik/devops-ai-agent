@@ -21,6 +21,12 @@
 > current repo from context); the approval card `<@mentions>` the approvers so they get
 > notified. The alert flow is now **format-agnostic**: a recognized recurrence may reply
 > concisely instead of the RCA template — incident store + proposal run either way.
+>
+> **v1.3 (2026-07-22):** 5th action **`k8s_delete_pod`** — delete ONE wedged pod so its
+> controller recreates it. Server refuses pods without a recreating controller
+> (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement = outage). GitOps-safe
+> like restart (recreation is reconcile-safe) → not behind the GitOps guard. Proposal rule:
+> only when one pod is sick while siblings are healthy; whole-workload issues → restart.
 
 ## 1. Goal
 
@@ -268,7 +274,16 @@ posted**. `k8s_rollout_restart` stays allowed.
 (Escape hatch if ever needed: `flux suspend` + patch + `resume` as a deliberate,
 human-driven emergency path — NOT automated in this phase.)
 
-### v2 design sketch — GitOps-aware remediation (PR flow)
+### v2 — GitOps-aware remediation (PR flow) — ✅ IMPLEMENTED (2026-07-23)
+**Now shipped as its own design + code: `DESIGN_gitops_pr_remediation.md`.** Several of the
+open questions below were resolved differently than this original sketch — read that doc as
+the source of truth. Key deviations: GitHub is reachable only from the private network, so
+the PR is opened by the **llm-worker over SQS** (not an MCP tool in the cluster); auth is a
+**PAT** for the initial phase (App later); the values key is found by **only changing a key
+already set** in the HelmRelease values (no per-chart convention needed) and the file by
+**grepping the current value** (no cluster→overlay config); **image + scale** first
+(set_resources deferred). The original sketch, kept for context:
+
 For Flux-managed workloads the remediation must change the **source**, not the cluster:
 
 ```

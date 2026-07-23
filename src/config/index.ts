@@ -45,6 +45,16 @@ export const config = {
     },
   },
 
+  // GitOps PR-flow remediation (DESIGN_gitops_pr_remediation.md). When enabled, a Flux
+  // HelmRelease-managed workload's remediation opens a PR via the llm-worker's gitops
+  // handler over SQS (request queue below; responses share the LLM response queue, routed
+  // by requestId). The agent holds NO GitHub credentials — those live in the worker.
+  gitops: {
+    enabled: process.env.GITOPS_REMEDIATION_ENABLED === "true",
+    requestQueueName: process.env.SQS_GITOPS_REQUEST_QUEUE_NAME ?? "gitops-request.fifo",
+    timeoutMs: parseInt(process.env.SQS_GITOPS_TIMEOUT_SECONDS ?? "120") * 1000,
+  },
+
   mcp: {
     transport: (process.env.MCP_TRANSPORT ?? "stdio") as "stdio" | "http",
     stdio: {

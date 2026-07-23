@@ -355,15 +355,20 @@ export class SlackApp {
   ): Promise<void> {
     await this.semaphore.acquire();
     try {
-      // Prepend any prior similar incidents so the agent can recognize a recurrence.
-      // Best-effort: a recall failure must not block the investigation.
-      const prior = await this.agent.recallIncidents(labels).catch(() => "");
+      // Prepend prior similar incidents AND what was remediated about them before, so the
+      // agent recognizes a recurrence and its prior fix. Best-effort — recall failures must
+      // not block the investigation.
+      const [priorIncidents, priorRemediations] = await Promise.all([
+        this.agent.recallIncidents(labels).catch(() => ""),
+        this.agent.recallRemediations(labels).catch(() => ""),
+      ]);
+      const memory = [priorIncidents, priorRemediations].filter(Boolean).join("\n\n");
       // The [SOURCE: ...] marker is the deterministic mode signal for the system prompt:
       // only Alertmanager-driven messages carry it → mandatory investigation mode.
       // Human mentions have no marker → conversation-first (see prompts/system.md).
       const fullIssue =
         `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
-        (prior ? `${prior}\n\n---\n\n${issueText}` : issueText);
+        (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
       const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue));
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
@@ -386,9 +391,10 @@ export class SlackApp {
       });
       // Guarded Remediation: best-effort, after the response is posted — never blocks or
       // breaks the investigation flow. Nothing executes without an approval click.
-      // The CONFIRMED prior goes into the proposal context too — a recurrence's proven
-      // fix ("change tag to X") is exactly what the proposal model needs.
-      const proposalContext = prior ? `${prior.slice(0, 1200)}\n\n---\n\n${rca}` : rca;
+      // Prior incidents + prior remediations go into the proposal context too — a
+      // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
+      // proposal model needs to avoid re-proposing.
+      const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
       if (incidentId) void this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext);
       await this.notifyIfLowConfidence(channel, threadId, rca);
     } catch (err) {
@@ -432,13 +438,14 @@ export class SlackApp {
       }
       // mention the approvers so the card actually notifies them (same list the buttons enforce)
       const approvers = config.slack.approverUsers.length > 0 ? config.slack.approverUsers : config.slack.oncallUsers;
+      const gitOps = "gitOps" in proposed ? proposed.gitOps : undefined;
       await this.app.client.chat.postMessage({
         channel,
         thread_ts: threadId,
-        text: `🔧 Proposed remediation: ${proposed.proposal.summary} — approve or reject`,
-        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers),
+        text: `${gitOps ? "🔀 Proposed GitOps PR" : "🔧 Proposed remediation"}: ${proposed.proposal.summary} — approve or reject`,
+        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps),
       });
-      logger.info(`[remediation] approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
+      logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
       logger.error(`[remediation] proposal flow failed for incident ${incidentId}: ${err instanceof Error ? err.message : err}`);

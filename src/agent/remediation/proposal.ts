@@ -27,6 +27,7 @@ const Scale = z.object({
 // container optional: the MCP server auto-resolves it for single-container workloads —
 // a model that guesses a container name is worse than one that omits it
 const SetImage = z.object({ namespace: s, workload: s, kind: kinds, container: s.optional(), image: s });
+const DeletePod = z.object({ namespace: s, pod: s });
 const SetResources = z
   .object({
     namespace: s,
@@ -110,6 +111,19 @@ export function parseProposal(text: string): Proposal | null {
         summary: `update resources of ${container ? `container \`${container}\` in ` : ""}${kind} \`${namespace}/${workload}\` (${changes.join(", ")})`,
       };
     }
+    case "k8s_delete_pod": {
+      const p = DeletePod.safeParse(raw);
+      if (!p.success) return null;
+      const { namespace, pod } = p.data;
+      return {
+        action: "k8s_delete_pod",
+        namespace,
+        name: pod,
+        reason,
+        toolParams: { namespace, pod },
+        summary: `delete pod \`${namespace}/${pod}\` (its controller recreates it)`,
+      };
+    }
     default:
       return null; // action null / unknown / non-whitelisted
   }
@@ -134,6 +148,8 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     "   — ONLY for OOMKilled / resource-exhaustion RCAs; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
     '4. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":N,"reason":"..."}\n' +
     "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
+    '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +
+    "   — ONLY when ONE specific pod is wedged (stuck, crash-looping, not Ready) while its siblings are healthy — its controller recreates it fresh. Use the exact pod name from the context; prefer k8s_rollout_restart when ALL pods of the workload are affected\n" +
     'If the fix requires anything else, or you are not confident, output {"action": null}.\n' +
     '"workload" is the Deployment/StatefulSet/DaemonSet name — NOT a pod name (strip replicaset/pod hash suffixes like "-84fcf9b4db-r2ddw").\n' +
     '"container" is optional: include it ONLY if the container name literally appears in the context; otherwise omit it (single-container workloads are auto-resolved). NEVER guess a container name from the workload name.\n' +

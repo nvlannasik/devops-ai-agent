@@ -74,6 +74,16 @@ test("scale parses; zero replicas and daemonset are rejected", () => {
   assert.equal(parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"daemonset","replicas":2}'), null);
 });
 
+test("delete_pod parses; pod name goes to toolParams.pod (not name)", () => {
+  const p = parseProposal(
+    '{"action":"k8s_delete_pod","namespace":"dev-auth","pod":"dev-auth-svc-be-84fcf9b4db-r2ddw","reason":"single pod wedged"}'
+  );
+  assert.equal(p?.action, "k8s_delete_pod");
+  assert.deepEqual(p?.toolParams, { namespace: "dev-auth", pod: "dev-auth-svc-be-84fcf9b4db-r2ddw" });
+  assert.match(p!.summary, /delete pod `dev-auth\/dev-auth-svc-be-84fcf9b4db-r2ddw`/);
+  assert.equal(parseProposal('{"action":"k8s_delete_pod","namespace":"dev-auth"}'), null); // no pod name
+});
+
 test("action null / non-whitelisted / incomplete / garbage are dropped", () => {
   assert.equal(parseProposal('{"action": null}'), null);
   assert.equal(parseProposal('{"action":"k8s_delete_namespace","namespace":"x","workload":"y"}'), null);
@@ -112,4 +122,20 @@ test("losing the flip distinguishes 'taken' from 'expired'", async () => {
   } as any);
   assert.equal(await expired.claimForExecution(5, "U1"), "expired");
   assert.deepEqual(calls, ["UPDATE", "SELECT", "UPDATE"]); // claim → inspect → close out as expired
+});
+
+test("recallForAlert joins remediations to incidents and maps rows", async () => {
+  let sql = "";
+  const pool = {
+    query: async (q: string, params: unknown[]) => {
+      sql = q;
+      assert.deepEqual(params, ["KubernetesPodNotHealthy", "dev-auth", 3]);
+      return { rows: [{ summary: "set image → repo:v2", status: "succeeded", result: "https://ghe/pr/1", created_at: "2026-07-23T10:00:00Z" }] };
+    },
+  } as any;
+  const rows = await new RemediationStore(pool).recallForAlert("KubernetesPodNotHealthy", "dev-auth");
+  assert.match(sql, /JOIN incidents i ON r.incident_id = i.id/);
+  assert.match(sql, /status IN \('succeeded', 'failed'\)/);
+  assert.deepEqual(rows[0], { summary: "set image → repo:v2", status: "succeeded", result: "https://ghe/pr/1", createdAt: "2026-07-23T10:00:00Z" });
+  assert.deepEqual(await new RemediationStore(null).recallForAlert("X", "y"), []); // no pool → []
 });

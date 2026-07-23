@@ -78,4 +78,33 @@ export class RemediationStore {
       .query(`UPDATE remediations SET status = $2, result = $3 WHERE id = $1`, [id, ok ? "succeeded" : "failed", result.slice(0, 2000)])
       .catch((e) => logger.error(`[remediation] finish failed: ${e instanceof Error ? e.message : e}`));
   }
+
+  // Agent memory: past executed remediations for the same alert (joined via the incident),
+  // so a recurring incident recalls what was actually done about it before (+ the PR/result).
+  async recallForAlert(
+    alertname: string,
+    namespace: string | undefined,
+    limit = 3
+  ): Promise<Array<{ summary: string; status: string; result: string; createdAt: string }>> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT r.params->>'summary' AS summary, r.status, r.result, r.created_at
+           FROM remediations r JOIN incidents i ON r.incident_id = i.id
+          WHERE i.alertname = $1 AND i.namespace IS NOT DISTINCT FROM $2
+            AND r.status IN ('succeeded', 'failed')
+          ORDER BY r.created_at DESC LIMIT $3`,
+        [alertname, namespace ?? null, limit]
+      );
+      return rows.map((r: { summary: string | null; status: string; result: string | null; created_at: string }) => ({
+        summary: r.summary ?? "(remediation)",
+        status: r.status,
+        result: r.result ?? "",
+        createdAt: r.created_at,
+      }));
+    } catch (err) {
+      logger.error(`[remediation] recallForAlert failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
+  }
 }
