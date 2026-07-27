@@ -113,6 +113,36 @@ got a blank-response fallback. Chain of defenses:
 - Reuses the **one shared Redis connection** (`src/redis.ts` singleton, `getRedis()`), same client as conversation memory — zero new deps, zero extra connection. `shouldProcess()` is now **async** (Redis call); caller `await`s it in `handleAlert`.
 - `dedup/index.test.ts` covers the in-memory fallback path (first-vs-repeat, label-order stability, TTL expiry).
 
+### Alert Correlation (one investigation per Alertmanager group)
+`src/agent/correlation/index.ts` (pure, unit-tested). **One Alertmanager webhook = one group**
+(its `group_by`, typically `alertname`+`namespace`), so every alert in the payload shares a
+root cause. `handleAlert` now investigates the group **once** instead of looping per-alert —
+N crashlooping pods used to spawn N threads / N investigations / N remediation cards / N× LLM cost.
+- **Group identity** = `groupIdentity(payload)`: prefer Alertmanager's `commonLabels`, then
+  `groupLabels`, else the computed `commonLabels(alerts)` (label intersection), else the first
+  alert's labels. Guaranteed non-empty (an empty key would collide unrelated groups in Redis).
+  For a **single** alert this is its full labels → identical behavior to before.
+- Dedup, `storeIncident`, `resolveIncident`, and remediation all key on this group identity —
+  which is exactly the `(alertname, namespace)` granularity recall already used, so grouping
+  *aligns* the thread with the recall key instead of fragmenting it per pod.
+- `buildGroupAlertText` lists the affected pods (capped at 10, `+N more`) in the issue text so
+  the investigation sees every target; the identity labels drop `pod` for a multi-pod group, so
+  the pod list in the **text** is how the agent learns which pods to `describe_pod`.
+- Resolved path (`handleResolvedAlert(groupLabels, resolved)`): a group with **no firing alerts
+  left** runs the resolved loop once (clear dedup + `resolveIncident` + ✅). A mixed payload with
+  any firing alert is still treated as an active group.
+- **Deliberately NOT** correlating across different alertnames/webhooks (node-down fan-out) —
+  that heuristic risks merging unrelated incidents (Tier-3 backlog).
+
+### Alert Webhook Auth (`ALERT_WEBHOOK_TOKEN`)
+`POST /alert` now triggers investigations **and** remediation proposals, so an open port is a
+real trust boundary. `_authorizeAlert` requires `Authorization: Bearer <ALERT_WEBHOOK_TOKEN>`
+when the env var is set; unset = open + a **startup warning** (backward-compat, same policy as
+`MCP_AUTH_TOKEN`). Compare via `timingSafeEqualStr` (`src/utils/auth/index.ts`: sha256 →
+`crypto.timingSafeEqual`, constant-time, never leaks token length). Alertmanager sends it via
+`http_config.authorization.credentials`. `/health` stays unauthenticated for probes.
+`utils/auth` is unit-tested (`timingSafeEqualStr` match/mismatch/length-safety, `bearerToken` parsing).
+
 ### Readiness `/health`
 - `GET /health` calls `agent.healthCheck()` → checks MCP (`isConnected()` flag) + Postgres (`SELECT 1`, only if incidents enabled) + Redis (`PING`, only if backend=redis).
 - Returns **`503`** when any configured dependency is down, `200` + `{checks}` when all up — so K8s readiness probes stop routing to a pod that can't investigate. Wire `readinessProbe: httpGet /health` in the Deployment.
@@ -248,6 +278,7 @@ src/
 │   ├── index.ts                  # Orchestrator — agentic loop, parallel tool calls
 │   ├── confidence/index.ts       # parseConfidence() — anchored regex, no false positives
 │   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks()
+│   ├── correlation/index.ts      # groupIdentity(), commonLabels(), buildGroupAlertText() — one investigation per Alertmanager group
 │   ├── dedup/index.ts            # AlertDeduplicator: fingerprint + TTL
 │   ├── llm/
 │   │   ├── index.ts              # createLLMClient() factory
@@ -264,6 +295,7 @@ src/
 ├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
 ├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
 └── utils/
+    ├── auth/index.ts             # timingSafeEqualStr(), bearerToken() — /alert webhook auth
     ├── logger/index.ts           # Winston, LOG_LEVEL support
     └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()
 ```
@@ -311,7 +343,8 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - Trade-off: after the `200` ack a crash loses the in-flight RCA (not the alert — it's already in Slack); Alertmanager `repeat_interval` + in-memory dedup reset on restart re-trigger it. Graceful-shutdown drain of in-flight investigations is a possible follow-up.
 
 ## Alertmanager Config Notes
-- `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace
+- `group_by: ["alertname", "namespace"]` — one webhook per alert+namespace. **Load-bearing for correlation:** the agent treats each webhook payload as one group and investigates it once (see *Alert Correlation*). Widen `group_by` → coarser incidents; per-pod grouping (adding `pod`) defeats correlation.
+- `http_config.authorization.credentials: <ALERT_WEBHOOK_TOKEN>` on the webhook_config — must equal the agent's `ALERT_WEBHOOK_TOKEN` (see *Alert Webhook Auth*). Omit only if the token is unset.
 - `repeat_interval: 12h` — agent dedup TTL matches this
 - **`send_resolved: true` required for the resolved-alert loop** (D) — without it the agent never sees `status: resolved`, threads stay open and the dedup claim holds for the full TTL
 - Label templating in `labels:` block NOT resolved by Prometheus — use `annotations:` only
@@ -338,7 +371,7 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - [x] **D. Resolved-alert loop** ✅ shipped — `status: resolved` now: releases the dedup claim (`AlertDeduplicator.clear` — a re-fire re-investigates instead of being suppressed 12h), marks the newest unresolved incident (`markResolved`, migration `003_resolved_at.sql`), posts "✅ Alert resolved" into the thread with a learn-reaction hint.
 - [ ] **C. Guarded Remediation** — Design → **`docs/DESIGN_guarded_remediation.md`**. ✅ **v1.1 shipped**: schema + proposal flow + approval buttons + **4 typed actions** (`k8s_rollout_restart` dep/sts/ds, `k8s_set_image`, `k8s_set_resources`, `k8s_scale` with `MAX_SCALE_DELTA` + no scale-to-zero) + mention-path support (`incident_id` nullable) + write tools excluded from the agentic loop (`[WRITE]` prefix convention). Remaining: Step 5 (ops: least-privilege RBAC — now needs `patch` on deployments/statefulsets/daemonsets + `get` in allowed namespaces), then v2 (rollback action, rate limiting, resolved-loop outcome tracking).
   - ✅ **GitOps guard shipped (2026-07-17, design doc §10):** the MCP server refuses direct spec-mutating patches on Flux-managed workloads (`kustomize.toolkit.fluxcd.io/name` / `helm.toolkit.fluxcd.io/name` labels — error names the owning object) and plain Helm-managed ones (`app.kubernetes.io/managed-by: Helm`); `rollout_restart`/`delete_pod` stay allowed.
-  - ✅ **GitOps PR flow shipped (2026-07-23, `DESIGN_gitops_pr_remediation.md`, IMPLEMENTED):** for a Flux HelmRelease the dry-run returns a structured PR preview → agent opens a **PR** via the llm-worker over SQS (GHE is private-network-only). PAT auth for the initial phase; image + scale (set_resources deferred). See the Guarded Remediation section above for the runtime path. Remaining: ops (mount PAT in worker, create `gitops` queue), set_resources resolver, live E2E.
+  - ✅ **GitOps PR flow shipped (2026-07-23, `DESIGN_gitops_pr_remediation.md`, IMPLEMENTED):** for a Flux HelmRelease the dry-run returns a structured PR preview → agent opens a **PR** via the llm-worker over SQS (GHE is private-network-only). PAT auth for the initial phase; all 3 mutating actions supported (image/scale single-scalar, set_resources nested via parent-stack). See the Guarded Remediation section above for the runtime path. Remaining: ops (mount PAT in worker, create `gitops` queue, RBAC for Flux CRDs), live E2E.
 - [x] **E. On-call feedback learning** ✅ steps 1–5 shipped — v1 (migration 002, feedback store/recall, `@agent learn` router + extraction, confirmed-tier recall + prompt framing) + step 5: `reaction_added` trigger (`SLACK_LEARN_REACTION` default `white_check_mark`; needs `reactions:read` + event subscription). Reaction-learn is **silent** when the thread has no stored incident or was already learned (`trigger_key = reaction:<message ts>`); the reaction payload has no `thread_ts` → resolved via `conversations.replies(ts, limit 1)`. Remaining: v2 ideas (passive capture).
 - Migration **`002_remediations_and_feedback.sql`** ships the shared schema for C+E in one transaction; `store()` now takes an optional `{channel, threadTs}` and returns `incidents.id` (`Number()`-cast — pg returns BIGSERIAL as string).
 
@@ -346,11 +379,29 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - **FinOps** (cost Q&A, waste audit, cost-anomaly-as-incident, rightsizing) — mostly config/prompt via OpenCost→Prometheus; see **`docs/DESIGN_finops.md`**.
 - **VM/baremetal execution** via Ansible-backed MCP tools — deemed too complex for now; K8s + observability scope only. Key notes: whitelist = curated playbooks (never generic exec), `--check` = dry-run, plain-CLI-vs-AWX decides the architecture.
 
+### Tech debt — Loki + tracing paths untested live (env not ready)
+The investigation prompt already HAS the observability playbooks — Failure Mode Playbooks
+(error-rate → `loki_query_range` LogQL; latency → `tracing_search` → `tracing_get_trace` →
+`loki_query_range`), a Loki LogQL-patterns section, a tracing section with the Jaeger-vs-Tempo
+nuance — and the tool names in the prompt MATCH the registered MCP tools (verified). BUT the
+Loki/Jaeger backends aren't set up in the target env yet, so these paths are **untested against
+real data**. Two concrete risks to resolve when the env is ready:
+1. **LogQL label schema** — `prompts/system.md` assumes `{namespace="X", app="Y"}`; real Loki
+   may key on `pod`/`container`/`job`/`compose_service`/etc. A mismatch returns empty → the
+   agent concludes "no logs" while logs exist. Verify the actual label schema and tune the
+   LogQL patterns in the prompt.
+2. **Tracing** — only triggers on the latency playbook; `tracing_search` (Jaeger) needs the
+   exact `service` (the prompt tells it to `tracing_list_services` first). Verify vs the real
+   Jaeger/Tempo backend.
+When ready: live-test both scenarios → tune the prompt → encode as the first golden cases in
+the eval framework. (Prompt is theory until exercised against real Loki/Jaeger.)
+
 ### Tier 3 — skip until justified (YAGNI)
 - [ ] Semantic/vector recall for incident memory (exact-label match is enough until incidents number in the hundreds)
-- [ ] Alert correlation/grouping — one investigation when many pods fail in the same namespace
+- [x] **Alert correlation/grouping** ✅ shipped — one investigation per Alertmanager group (see *Alert Correlation* below)
 - [ ] Self-metrics endpoint (agent exposes its own Prometheus metrics; token usage already logged)
 - [ ] `/clear` Slack command to reset thread history
 - [ ] Configurable confidence threshold via env var
-- [ ] Webhook auth for the `/alert` endpoint (Alertmanager → agent; distinct from MCP auth)
+- [x] **Webhook auth for the `/alert` endpoint** ✅ shipped — `ALERT_WEBHOOK_TOKEN` bearer gate (see *Alert Webhook Auth* below)
 - [ ] Graceful-shutdown drain of in-flight investigations
+- [ ] Cross-alertname correlation (node-down fan-out → KubeNodeNotReady + many KubePodNotReady across namespaces into one incident) — needs a time-window + shared-cause heuristic; risk of merging unrelated incidents. Revisit only if same-group correlation proves insufficient.

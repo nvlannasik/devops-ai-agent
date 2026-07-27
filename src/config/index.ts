@@ -20,6 +20,14 @@ export const config = {
     learnReaction: process.env.SLACK_LEARN_REACTION ?? "white_check_mark",
   },
 
+  // Shared secret required on POST /alert (Authorization: Bearer <token>). The endpoint
+  // triggers investigations AND remediation proposals, so an open port is a real trust
+  // boundary. Unset = open + a startup warning (backward-compat, same policy as MCP_AUTH_TOKEN).
+  // Configure the sender via Alertmanager `http_config.authorization.credentials`.
+  alertWebhook: {
+    token: process.env.ALERT_WEBHOOK_TOKEN,
+  },
+
   llm: {
     provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible" | "private-llm",
     // Output token ceiling for claude + openai-compatible. SQS path's limit lives in llm-worker.

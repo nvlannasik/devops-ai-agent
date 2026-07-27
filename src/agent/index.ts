@@ -17,7 +17,8 @@ import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
-import logger from "../utils/logger/index.js";
+import logger, { errDetail } from "../utils/logger/index.js";
+import { withTrace } from "../utils/trace/index.js";
 
 const MAX_ITERATIONS = 10;
 // conversation mode: max distinct pods whose logs may be fetched in one round — a generic
@@ -116,7 +117,14 @@ export class DevOpsAgent {
     return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined);
   }
 
-  async investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
+  // Everything below runs inside the trace context so outbound SQS requests carry the
+  // threadId — that is what lets you grep one id across the agent log, the llm-worker
+  // log, and the Slack thread when an answer comes out wrong.
+  investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
+    return withTrace(threadId, () => this.runInvestigation(threadId, userMessage, opts));
+  }
+
+  private async runInvestigation(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
@@ -160,8 +168,23 @@ export class DevOpsAgent {
       logger.debug(`[${threadId}] LLM call #${iterations} (history: ${messages.length} messages)`);
 
       const llmStart = Date.now();
-      const response = await this.llm.chat(messages, toolsDisabled ? [] : tools, systemPrompt);
+      let response;
+      try {
+        response = await this.llm.chat(messages, toolsDisabled ? [] : tools, systemPrompt);
+      } catch (err) {
+        // the LLM call is the one hop that leaves this process; without this line a
+        // worker/queue failure surfaced only as a generic Slack error with no context
+        logger.error(`[${threadId}] LLM call #${iterations} failed after ${Date.now() - llmStart}ms: ${errDetail(err)}`);
+        throw err;
+      }
       const llmMs = Date.now() - llmStart;
+
+      // what the model actually produced — the missing piece when Slack shows garbage but
+      // the logs only say "stop=end_turn"
+      logger.debug(
+        `[${threadId}] LLM #${iterations} content: [${response.content.map((c) => c.type).join(", ") || "empty"}]` +
+        (this.extractText(response.content) ? ` text="${truncate(this.extractText(response.content), 200)}"` : "")
+      );
 
       if (response.usage) {
         totalUsage = addUsage(totalUsage, response.usage);
@@ -193,6 +216,15 @@ export class DevOpsAgent {
             return "⚠️ The model hit its output-token limit before writing the answer (its reasoning consumed the whole budget). Try again — or raise `LLM_MAX_TOKENS` / set `LLM_REASONING_EFFORT=low` on the llm-worker.";
           }
           return "⚠️ The investigation finished but the model returned an empty response. Please re-run or rephrase the request.";
+        }
+        // A model that echoes our own content-block JSON as prose means its tool-call
+        // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
+        // Log it here — otherwise the only symptom is a wall of JSON in Slack.
+        if (/^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/.test(summary)) {
+          logger.warn(
+            `[${threadId}] final answer looks like a serialized content array — the backend is likely ` +
+            `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`
+          );
         }
         return summary;
       }
@@ -421,7 +453,7 @@ export class DevOpsAgent {
     const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
     let payload;
     try {
-      payload = await this.gitops.request({ op: "dry_run", helmRelease: preview.helmRelease, action: preview.action, container: preview.container, changes: preview.changes, pathPrefix });
+      payload = await this.gitops.request({ op: "dry_run", helmRelease: preview.helmRelease, action: preview.action, container: preview.container, component: preview.component, changes: preview.changes, pathPrefix });
     } catch (err) {
       logger.error(`[remediation] gitops dry-run failed: ${err instanceof Error ? err.message : err}`);
       return { refused: `couldn't prepare the GitOps PR: ${err instanceof Error ? err.message : String(err)}` };
@@ -438,6 +470,7 @@ export class DevOpsAgent {
       helmRelease: preview.helmRelease,
       action: preview.action,
       container: preview.container,
+      component: preview.component,
       changes: preview.changes,
       pathPrefix, // replay the same overlay scope on open_pr
       path: payload.path,
@@ -492,14 +525,14 @@ export class DevOpsAgent {
   // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
   // target — nothing is live until the PR merges + Flux syncs, so there's no 90s pod check.
   private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string }> {
-    const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
+    const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; component?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
     const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
     if (!this.gitops) {
       await this.remediations.finish(id, false, "gitops client not available");
       return { text: `❌ *PR not opened* — ${label}: the GitOps PR client is not enabled on this agent.` };
     }
     try {
-      const payload = await this.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });
+      const payload = await this.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });
       if (!payload.ok) {
         await this.remediations.finish(id, false, payload.reason);
         return { text: `❌ *PR not opened* — ${label}: ${truncate(payload.reason, 300)}` };

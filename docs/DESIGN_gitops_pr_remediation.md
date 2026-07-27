@@ -6,7 +6,8 @@
 > all GitHub operations run in the **llm-worker** (the private-network SQS bridge) — NOT the
 > cluster. **Remaining before production use:** ops step 5 (mount a repo-scoped PAT — chosen
 > for the initial phase — in the worker, create the `gitops` queue, branch protection);
-> `set_resources` PR resolver (image + scale only); live E2E test on a real GHE + Flux repo.
+> live E2E test on a real GHE + Flux repo. All 3 mutating actions (image / scale /
+> set_resources) are resolver-supported.
 
 ## 1. Goal
 
@@ -97,8 +98,35 @@ The agent sends `pathPrefix` in the gitops request; the worker scopes `listYamlF
 → only the dev overlay's `release.yaml` → unique HR file, no ambiguity, and the correct
 per-env file. Applications vs systems is handled automatically (each HR points at its own
 Kustomization/path). Best-effort: on any miss the worker falls back to `GITOPS_PATH_PREFIX`.
-Caveat: the remediated value must live in the overlay (image tags do; put replicaCount/
-resources there too if you want to remediate them).
+
+### 3.4 Value only in base → ADD it to the overlay (don't refuse over a trivial gap)
+
+Overlays override base per-env; a value may be set only in **base** (e.g. `replicaCount`,
+resources), so a per-env edit finds nothing in the overlay. Rather than refuse "not set
+inline" over that, the worker: (a) derives the base prefix from the overlay prefix
+(`apps/dev/systems` → `apps/base/systems`, env segment → `base`), fetches the base HR file;
+(b) learns the value's **path** from base by KEY (not value — so it works even if the cluster
+drifted from base); (c) **adds** that path to the overlay's `spec.values` via the `yaml`
+Document API (`setIn` — creates the nested key cleanly, preserves the rest), overriding base
+for that environment only. Safe by construction — the path is copied from base, never guessed
+from the chart schema (still "only-change/add an existing key"). Scope: **scale + resources**
+(image tags essentially always live in overlays already). Refuses if the value is in neither
+overlay nor base (a genuine chart default) or if the base path is ambiguous. This is the one
+place a `yaml` dependency is used — in-overlay edits stay line-based (minimal diff).
+
+### 3.5 Multi-component charts → disambiguate by the workload's component
+
+A chart may render several components each with their own `replicaCount`/`resources` (e.g.
+`values.controller.replicaCount` + `values.proxy.replicaCount`). The remediation targets a
+specific workload, which maps to a specific component. The MCP guard reads the workload's
+`app.kubernetes.io/component` label and passes it through (preview → agent request → resolver).
+When several values paths match, the resolver keeps only the one whose path contains that
+component key (`narrowByComponent`). Layered with the edit path's value-match, that's two
+disambiguation signals. Fail-safe: if the component doesn't narrow to exactly one (label
+absent, or component not a values sub-key), it **refuses — never guesses**. (Edits already
+disambiguate by value when components hold different current values; the component signal
+covers the same-value case.) `// ponytail:` label-only; a workload-name → component fallback
+could be added if charts omit the label.
 
 ## 4. Network topology (GitHub Enterprise is private-network only)
 
@@ -259,10 +287,10 @@ action, currentValue, newValue }` → `{ requestId, diff | prUrl | error }`, rou
 | Step | Repo/zone | Task |
 |------|------|------|
 | 1 | `devops-mcp-server` | ✅ **DONE (2026-07-23).** GitOps guard is now `gitOpsVerdict` (structured: `managed`/`prEligible`/`source`/`helmRelease`). The 3 mutating handlers, on a Flux HelmRelease + **dry-run**, return a structured PR preview `{gitOpsPrEligible, source, helmRelease, workload, action, container?, changes:[{field,from,to}], message}`; on execute (or Kustomize/plain-Helm) they refuse. Unit-tested. |
-| 2 | `llm-worker` → `src/gitops/` | ✅ **DONE (2026-07-23).** `github-app.ts` (`node:crypto` RS256 JWT → installation token, configurable `apiUrl`), `github-client.ts` (thin tree/contents/branch/PR client over `fetch`, token cached), `resolve.ts` (locate HelmRelease file + line-based one-scalar edit for **image + scale**; `set_resources` deferred; refuses on ambiguity). No `yaml` dep — targeted line edit keeps diffs minimal. JWT + resolver unit-tested with fixtures. |
+| 2 | `llm-worker` → `src/gitops/` | ✅ **DONE (2026-07-23).** `github-app.ts` (`node:crypto` RS256 JWT → installation token, configurable `apiUrl`), `github-client.ts` (thin tree/contents/branch/PR client over `fetch`, token cached), `resolve.ts` (locate HelmRelease file + line-based edit: **image/scale** single scalar, **set_resources** nested leaves via an indentation-tracked parent stack — `limits.memory` vs `requests.memory` — with multi-change support; refuses on ambiguity). No `yaml` dep — targeted line edit keeps diffs minimal. JWT + resolver unit-tested with fixtures. |
 | 3 | `llm-worker` | ✅ **DONE (2026-07-23).** Generic `pollLoop` extracted from `startWorker` (LLM path untouched); a second loop runs on the `gitops` queue when `config.gitops.enabled`. `processGitOpsMessage` (parse → `runGitOps` → publish on the shared response queue) + `runGitOps`/`githubBackend` (dry_run → diff, open_pr → branch+commit+PR). `parseGitOpsRequest` + orchestration unit-tested (fake backend). |
 | 4 | `devops-ai-agent` | ✅ **DONE (2026-07-23).** `SqsGitOpsClient` (standalone, mirrors `SQSLLMClient` — not a shared base, to keep the LLM critical path untouched); `parseGitOpsPreview` detects the MCP PR preview and `proposeRemediation` routes to `proposeGitOpsPr` (SQS `dry_run` → store PR-flavored remediation); `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (SQS `open_pr` → PR URL in `result`, no 90s check); GitOps card variant (diff block + file/key). Gated on `GITOPS_REMEDIATION_ENABLED`. Preview parser + card unit-tested. |
-| 5 | Ops | Auth: **PAT** (initial phase) scoped to the GitOps repo (`contents`+`pull_requests` write), or a GitHub App; mount it **into the llm-worker pod** (`GITHUB_TOKEN` / the App key). Create the `gitops` SQS queue; branch protection / required review on the repo. |
+| 5 | Ops | Auth: **PAT** (initial phase) scoped to the GitOps repo (`contents`+`pull_requests` write), or a GitHub App; mount it **into the llm-worker pod** (`GITHUB_TOKEN` / the App key). Create the `gitops` SQS queue; branch protection / required review on the repo. **RBAC (MCP server SA):** the overlay auto-detect (§3.3) needs `get` on `helm.toolkit.fluxcd.io/helmreleases` + `kustomize.toolkit.fluxcd.io/kustomizations` (ClusterRole — HRs/Kustomizations live in `flux-system`/`flux-app`); without it the detect fails and the worker refuses on base+overlay ambiguity. |
 
 Steps 2–3 are the bulk (the private-net handler). Step 4 is glue on the existing flow.
 Start with `set_image` (most standardized values key), then `scale`, then `set_resources` —

@@ -10,7 +10,9 @@ import {
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
-import logger from "../../utils/logger/index.js";
+import logger, { errDetail } from "../../utils/logger/index.js";
+import { truncate } from "../../utils/truncate/index.js";
+import { currentTrace } from "../../utils/trace/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
 
 const FIFO_ATTRS = { FifoQueue: "true", ContentBasedDeduplication: "false" };
@@ -27,6 +29,31 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function releaseVisibilitySeconds(receiveCount: number): number {
   return receiveCount > RELEASE_FAST_LIMIT ? ORPHAN_BACKOFF_SEC : 0;
+}
+
+/**
+ * Parse a response-queue body, returning null for anything unroutable.
+ *
+ * The shared response queue is the agent's ONLY path for LLM answers, and a body that
+ * can't be parsed (or has no requestId) can never be routed to a waiter. Left unguarded,
+ * `JSON.parse` threw out of routeMessage, aborted the rest of the receive batch (up to 9
+ * valid responses skipped), and left the bad message undeleted — so it came straight back
+ * and the dispatcher hot-looped on it while every in-flight investigation timed out.
+ * llm-worker has guarded its own request queue this way since the poison-pill fix;
+ * this is the same guard on the reply side. Shared by both SQS dispatchers.
+ */
+export function parseResponseBody(body: string | undefined): { requestId: string; response?: unknown; error?: string } | null {
+  if (!body) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const requestId = (parsed as { requestId?: unknown }).requestId;
+  if (typeof requestId !== "string" || requestId.length === 0) return null;
+  return parsed as { requestId: string; response?: unknown; error?: string };
 }
 
 async function resolveQueueUrl(sqs: SQSClient, queueName: string): Promise<string> {
@@ -97,20 +124,31 @@ export class SQSLLMClient implements LLMClient {
       });
     });
 
+    // traceId = the Slack threadId of the running investigation (undefined outside one).
+    // It is what joins this agent log line to the llm-worker's log for the same call.
+    const traceId = currentTrace();
+
     try {
       await this.sqs.send(new SendMessageCommand({
         QueueUrl: this.requestQueueUrl,
-        MessageBody: JSON.stringify({ requestId, messages, tools, systemPrompt }),
+        MessageBody: JSON.stringify({ requestId, messages, tools, systemPrompt, traceId }),
         MessageGroupId: requestId,
         MessageDeduplicationId: requestId,
       }));
     } catch (err) {
+      logger.error(`[sqs-llm] publish failed requestId=${requestId}${traceId ? ` trace=${traceId}` : ""}: ${errDetail(err)}`);
       const waiter = this.pending.get(requestId);
       this.pending.delete(requestId);
+      this.tombstone(requestId); // never published, but keep the id owned so a stray reply is dropped
       waiter?.reject(err instanceof Error ? err : new Error(String(err)));
+      return responsePromise;
     }
 
-    logger.debug(`[sqs-llm] request published requestId=${requestId}`);
+    // info, not debug: this is the ONLY line that maps a Slack thread to a worker requestId
+    logger.info(
+      `[sqs-llm] → requestId=${requestId}${traceId ? ` trace=${traceId}` : ""} ` +
+      `msgs=${messages.length} tools=${tools.length} awaiting=${this.pending.size}`
+    );
     return responsePromise;
   }
 
@@ -158,11 +196,15 @@ export class SQSLLMClient implements LLMClient {
         this.purgeExpiredTombstones();
 
         for (const msg of result.Messages ?? []) {
-          await this.routeMessage(msg);
+          // per-message isolation: one bad receipt handle or a transient SQS error on
+          // message 1 must not skip messages 2..10 in the same batch
+          await this.routeMessage(msg).catch((err) =>
+            logger.error(`[sqs-llm] routing failed (message left for redelivery): ${errDetail(err)}`)
+          );
         }
       } catch (err) {
         if (this.abort.signal.aborted) break;
-        logger.error(`[sqs-llm] dispatcher error: ${err} — retrying in 2s`);
+        logger.error(`[sqs-llm] dispatcher error — retrying in 2s: ${errDetail(err)}`);
         await sleep(2000);
       }
     }
@@ -170,15 +212,31 @@ export class SQSLLMClient implements LLMClient {
   }
 
   private async routeMessage(msg: { Body?: string; ReceiptHandle?: string; Attributes?: Record<string, string> }): Promise<void> {
-    const body = JSON.parse(msg.Body!) as { requestId: string; response?: LLMResponse; error?: string };
+    const body = parseResponseBody(msg.Body) as { requestId: string; response?: LLMResponse; error?: string } | null;
+    if (!body) {
+      // unroutable forever — delete it rather than let it wedge the queue (see parseResponseBody)
+      logger.error(`[sqs-llm] unroutable response body — deleting: ${truncate(msg.Body ?? "(empty)", 200)}`);
+      await this.deleteMessage(msg.ReceiptHandle!);
+      return;
+    }
     const waiter = this.pending.get(body.requestId);
 
     if (waiter) {
       await this.deleteMessage(msg.ReceiptHandle!);
       this.pending.delete(body.requestId);
       this.tombstone(body.requestId); // guard against a duplicate redelivery
-      if (body.error) waiter.reject(new Error(`LLM worker error: ${body.error}`));
-      else waiter.resolve(body.response!);
+      if (body.error) {
+        logger.warn(`[sqs-llm] ← error requestId=${body.requestId}: ${body.error}`);
+        waiter.reject(new Error(`LLM worker error: ${body.error}`));
+      } else if (!body.response) {
+        // an envelope with neither response nor error is a worker bug — fail the waiter
+        // loudly instead of resolving `undefined` into the agentic loop
+        logger.error(`[sqs-llm] ← empty envelope requestId=${body.requestId} (no response, no error)`);
+        waiter.reject(new Error(`LLM worker returned an empty envelope for requestId=${body.requestId}`));
+      } else {
+        logger.debug(`[sqs-llm] ← ok requestId=${body.requestId} stop=${body.response.stopReason}`);
+        waiter.resolve(body.response);
+      }
       return;
     }
 

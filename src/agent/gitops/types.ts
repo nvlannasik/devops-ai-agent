@@ -13,6 +13,7 @@ export interface GitOpsRequestBody {
   helmRelease: { name: string; namespace: string };
   action: string;
   container?: string;
+  component?: string; // chart component (multi-component values disambiguation)
   changes: GitOpsChange[];
   pathPrefix?: string; // repo subtree, auto-detected from the Flux Kustomization spec.path
   incident?: { summary?: string; threadUrl?: string };

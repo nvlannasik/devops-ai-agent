@@ -10,8 +10,9 @@ import {
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
-import logger from "../../utils/logger/index.js";
-import { releaseVisibilitySeconds } from "../llm/sqs.js";
+import logger, { errDetail } from "../../utils/logger/index.js";
+import { truncate } from "../../utils/truncate/index.js";
+import { releaseVisibilitySeconds, parseResponseBody } from "../llm/sqs.js";
 import type { GitOpsRequestBody, GitOpsPayload } from "./types.js";
 
 // SQS RPC client for the GitOps PR flow. Deliberately mirrors SQSLLMClient's dispatcher
@@ -129,10 +130,15 @@ export class SqsGitOpsClient {
           { abortSignal: this.abort.signal }
         );
         this.purgeExpiredTombstones();
-        for (const msg of result.Messages ?? []) await this.routeMessage(msg);
+        // per-message isolation: one bad message must not skip the rest of the batch
+        for (const msg of result.Messages ?? []) {
+          await this.routeMessage(msg).catch((err) =>
+            logger.error(`[sqs-gitops] routing failed (message left for redelivery): ${errDetail(err)}`)
+          );
+        }
       } catch (err) {
         if (this.abort.signal.aborted) break;
-        logger.error(`[sqs-gitops] dispatcher error: ${err} — retrying in 2s`);
+        logger.error(`[sqs-gitops] dispatcher error — retrying in 2s: ${errDetail(err)}`);
         await sleep(2000);
       }
     }
@@ -140,15 +146,27 @@ export class SqsGitOpsClient {
   }
 
   private async routeMessage(msg: { Body?: string; ReceiptHandle?: string; Attributes?: Record<string, string> }): Promise<void> {
-    const body = JSON.parse(msg.Body!) as { requestId: string; response?: GitOpsPayload; error?: string };
+    const body = parseResponseBody(msg.Body) as { requestId: string; response?: GitOpsPayload; error?: string } | null;
+    if (!body) {
+      logger.error(`[sqs-gitops] unroutable response body — deleting: ${truncate(msg.Body ?? "(empty)", 200)}`);
+      await this.deleteMessage(msg.ReceiptHandle!);
+      return;
+    }
     const waiter = this.pending.get(body.requestId);
 
     if (waiter) {
       await this.deleteMessage(msg.ReceiptHandle!);
       this.pending.delete(body.requestId);
       this.tombstone(body.requestId);
-      if (body.error) waiter.reject(new Error(`GitOps worker error: ${body.error}`));
-      else waiter.resolve(body.response!);
+      if (body.error) {
+        logger.warn(`[sqs-gitops] ← error requestId=${body.requestId}: ${body.error}`);
+        waiter.reject(new Error(`GitOps worker error: ${body.error}`));
+      } else if (!body.response) {
+        logger.error(`[sqs-gitops] ← empty envelope requestId=${body.requestId} (no response, no error)`);
+        waiter.reject(new Error(`GitOps worker returned an empty envelope for requestId=${body.requestId}`));
+      } else {
+        waiter.resolve(body.response);
+      }
       return;
     }
 

@@ -2,6 +2,45 @@ import OpenAI from "openai";
 import { config } from "../../config/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition, ContentBlock } from "./types.js";
 
+// Our Message[] is Anthropic-shaped; an OpenAI-compatible backend needs native
+// tool_calls / role:"tool". This used to be `JSON.stringify(m.content)` — which fed the
+// literal `[{"type":"tool_use",...}]` to the model as TEXT. A big model ignores the noise;
+// a small one imitates it and answers with that JSON instead of calling a tool, which the
+// agent then posts to Slack verbatim (and re-stringifies next turn → nested escaping).
+// Kept in sync with llm-worker/src/llm.ts (separate repos, no shared module). Exported for tests.
+export function toOpenAIMessages(messages: Message[]): OpenAI.Chat.ChatCompletionMessageParam[] {
+  const out: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+    const text = m.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("\n");
+
+    if (m.role === "assistant") {
+      const toolCalls = m.content
+        .filter((b) => b.type === "tool_use")
+        .map((b) => ({
+          id: b.id ?? "",
+          type: "function" as const,
+          function: { name: b.name ?? "", arguments: JSON.stringify(b.input ?? {}) },
+        }));
+      out.push({ role: "assistant", content: text, ...(toolCalls.length > 0 && { tool_calls: toolCalls }) });
+      continue;
+    }
+    // user turn: tool results must come FIRST — OpenAI requires every tool message to
+    // follow the assistant turn that requested it, before any new user text
+    for (const b of m.content.filter((b) => b.type === "tool_result")) {
+      out.push({ role: "tool", tool_call_id: b.tool_use_id ?? "", content: b.content ?? "" });
+    }
+    if (text) out.push({ role: "user", content: text });
+  }
+  return out;
+}
+
 export class OpenAICompatibleClient implements LLMClient {
   private client: OpenAI;
   private model: string;
@@ -18,13 +57,7 @@ export class OpenAICompatibleClient implements LLMClient {
     const response = await this.client.chat.completions.create({
       model: this.model,
       max_tokens: config.llm.maxTokens,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...messages.map((m) => ({
-          role: m.role,
-          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-        })),
-      ],
+      messages: [{ role: "system", content: systemPrompt }, ...toOpenAIMessages(messages)],
       // omit when the agent disables tools (tool budget reached) — some providers reject []
       ...(tools.length > 0 && {
         tools: tools.map((t) => ({
@@ -52,7 +85,10 @@ export class OpenAICompatibleClient implements LLMClient {
       }
     }
 
-    const stopReason = choice.finish_reason === "tool_calls" ? "tool_use" : "end_turn";
+    // "length" = cut off by the token limit. Mapping it to end_turn posts a truncated RCA
+    // to Slack as if it were complete; the loop already handles max_tokens (agent/index.ts).
+    const stopReason =
+      choice.finish_reason === "tool_calls" ? "tool_use" : choice.finish_reason === "length" ? "max_tokens" : "end_turn";
     return {
       content,
       stopReason: stopReason as LLMResponse["stopReason"],

@@ -47,6 +47,7 @@ npm test                       # unit tests
 | `SLACK_SIGNING_SECRET` | For HTTP mode | required |
 | `SLACK_APP_TOKEN` | `xapp-...` for Socket Mode | optional |
 | `SLACK_ALERT_CHANNEL` | Channel ID for Alertmanager alerts | optional |
+| `ALERT_WEBHOOK_TOKEN` | Shared secret required on `POST /alert` (`Authorization: Bearer <token>`). Unset = open + a startup warning. Set it on the Alertmanager side via `http_config.authorization.credentials` | — |
 | `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
 | `SLACK_APPROVER_USERS` | User IDs allowed to approve/reject remediations (falls back to `SLACK_ONCALL_USERS`; both empty = anyone, with a log warning) | optional |
 | `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` | `claude` |
@@ -179,11 +180,19 @@ receivers:
     webhook_configs:
       - url: http://your-agent:3000/alert
         send_resolved: true   # enables the resolved-alert loop (✅ thread update + dedup release)
+        http_config:
+          authorization:       # must equal the agent's ALERT_WEBHOOK_TOKEN (omit if unset)
+            credentials: <ALERT_WEBHOOK_TOKEN>
 route:
-  group_by: ["alertname", "namespace"]
+  group_by: ["alertname", "namespace"]   # one webhook per group → the agent investigates the group ONCE
   repeat_interval: 12h
   receiver: devops-ai-agent
 ```
+
+Each webhook the agent receives is one Alertmanager **group** (`group_by`). All alerts in it
+share a root cause, so the agent correlates them into **one** thread / investigation /
+remediation card — N crashlooping pods no longer spawn N of everything. Correlation across
+different alertnames (e.g. a node-down fan-out) is deliberately not attempted.
 
 ## RCA Output (Slack Block Kit)
 
@@ -261,7 +270,8 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 | Readiness `/health` | Returns `503` (not `200`) when a configured dependency (MCP, Postgres, Redis) is unreachable, so K8s readiness probes stop routing to a pod that can't investigate |
 | Incident Memory | Durable (Postgres) — recalls prior RCAs for the same alert+namespace so recurring incidents aren't re-diagnosed from scratch. Disabled unless `DB_HOST` is set |
 | On-call Feedback Learning | `@agent learn` in an alert thread extracts the human-confirmed root cause/action/outcome into a trusted tier, recalled as a strong prior on future similar incidents |
-| Guarded Remediation | Approval-gated restart / set-image / set-resources / scale after an RCA: whitelist + mandatory dry-run + Slack Approve/Reject buttons + atomic claim + audit trail. Off unless the MCP server enables write tools |
+| Guarded Remediation | Approval-gated restart / set-image / set-resources / scale / delete-pod after an RCA: whitelist + mandatory dry-run + Slack Approve/Reject buttons + atomic claim + audit trail. Off unless the MCP server enables write tools. Flux HelmRelease workloads route to a **GitOps PR** (via the llm-worker); the overlay path is auto-detected from the Flux Kustomization |
+| Remediation memory | Past executed remediations (+ their PRs/outcomes) for the same alert are recalled into future investigations & proposals, so a recurrence's proven fix isn't re-proposed. All remediations persist in the `remediations` table (change from→to, file, PR URL, status) |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Window | Tool results truncated to 8000 chars, history to 40 messages |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |

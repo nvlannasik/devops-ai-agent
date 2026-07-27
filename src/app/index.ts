@@ -7,6 +7,8 @@ import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
+import { groupIdentity, buildGroupAlertText, type AlertItem } from "../agent/correlation/index.js";
+import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
@@ -102,7 +104,16 @@ export class SlackApp {
 
   // Mount /alert and /health onto any Express router (used by both modes)
   private _mountAlertRoute(router: express.IRouter): void {
+    if (!config.alertWebhook.token) {
+      logger.warn(
+        "ALERT_WEBHOOK_TOKEN not set — /alert is UNAUTHENTICATED. Anyone who can reach this port can trigger investigations and remediation proposals. Set it and configure Alertmanager http_config.authorization.credentials."
+      );
+    }
     router.post("/alert", (req: Request, res: Response) => {
+      if (!this._authorizeAlert(req)) {
+        res.status(401).json({ ok: false, error: "unauthorized" });
+        return;
+      }
       const payload = req.body as AlertmanagerPayload;
       if (!payload || !Array.isArray(payload.alerts)) {
         res.status(400).json({ ok: false, error: "invalid alertmanager payload" });
@@ -127,6 +138,15 @@ export class SlackApp {
         res.status(503).json({ ok: false, mode, error: err instanceof Error ? err.message : String(err) });
       }
     });
+  }
+
+  // Bearer-token gate for /alert. Unset token = open (a startup warning is logged once).
+  // Constant-time compare so a wrong token never leaks length/prefix via timing.
+  private _authorizeAlert(req: Request): boolean {
+    const expected = config.alertWebhook.token;
+    if (!expected) return true;
+    const provided = bearerToken(req.header("authorization"));
+    return provided !== null && timingSafeEqualStr(provided, expected);
   }
 
   private async handleMention(args: AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">): Promise<void> {
@@ -273,50 +293,59 @@ export class SlackApp {
     const channel = config.slack.alertChannel;
     if (!channel) { logger.warn("SLACK_ALERT_CHANNEL not set, skipping"); return; }
 
-    logger.info(`[slack] alert webhook received — ${payload.alerts.length} alert(s)`);
+    // One Alertmanager webhook = one group (its `group_by`, typically alertname+namespace).
+    // Correlate: investigate the whole group ONCE. N crashlooping pods share a root cause —
+    // a thread/investigation/remediation-card per pod was noise + N× LLM cost.
+    const firing = payload.alerts.filter((a) => a.status === "firing");
+    const resolved = payload.alerts.filter((a) => a.status === "resolved");
+    logger.info(`[slack] alert webhook received — ${firing.length} firing, ${resolved.length} resolved`);
 
-    for (const alert of payload.alerts) {
-      const alertName = alert.labels.alertname ?? "Unknown";
-      if (alert.status !== "firing") {
-        if (alert.status === "resolved") void this.handleResolvedAlert(alert);
-        else logger.debug(`[slack] skipping non-firing alert: ${alertName} (${alert.status})`);
-        continue;
-      }
-      if (!(await this.dedup.shouldProcess(alert.labels))) {
-        logger.info(`[slack] duplicate alert suppressed: ${alertName}`);
-        continue;
-      }
-
-      const severity = alert.labels.severity ?? "unknown";
-      logger.info(`[slack] processing alert: ${alertName} severity=${severity}`);
-
-      const issueText = this.buildAlertText(alert);
-
-      // Post the alert + investigating notice up front so it shows in Slack
-      // immediately — never gated behind another alert's multi-minute investigation.
-      const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
-      const threadId = posted.ts!;
-      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
-
-      // Fire-and-forget — the LLM run must not delay the next alert's notification.
-      // Concurrency stays bounded by the semaphore inside the background task.
-      void this.investigateAlertInBackground(channel, threadId, issueText, alert.labels);
+    // No firing alerts left = the group recovered. Run the resolved loop once on the group.
+    if (firing.length === 0) {
+      if (resolved.length > 0) void this.handleResolvedAlert(groupIdentity(payload, resolved), resolved);
+      return;
     }
+
+    const groupLabels = groupIdentity(payload, firing);
+    const alertName = groupLabels.alertname ?? firing[0].labels.alertname ?? "Unknown";
+
+    // Dedup on the GROUP identity: a re-fire of the same group (12h repeat_interval) is
+    // suppressed as a unit, and under agent autoscaling only the first replica investigates.
+    if (!(await this.dedup.shouldProcess(groupLabels))) {
+      logger.info(`[slack] duplicate alert group suppressed: ${alertName} (${firing.length} firing)`);
+      return;
+    }
+
+    const severity = groupLabels.severity ?? firing[0].labels.severity ?? "unknown";
+    logger.info(`[slack] processing alert group: ${alertName} severity=${severity} firing=${firing.length}`);
+
+    const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
+
+    // Post the alert + investigating notice up front so it shows in Slack immediately.
+    const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
+    const threadId = posted.ts!;
+    await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+
+    // Fire-and-forget — the LLM run must not delay the webhook ack.
+    // Concurrency stays bounded by the semaphore inside the background task.
+    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels);
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
   // mark the incident resolved in the DB, and close the Slack thread with a ✅.
-  private async handleResolvedAlert(alert: AlertmanagerPayload["alerts"][number]): Promise<void> {
-    const alertName = alert.labels.alertname ?? "Unknown";
+  // Operates on the GROUP identity so it lines up with the group-level firing claim.
+  private async handleResolvedAlert(groupLabels: Record<string, string>, resolved: AlertItem[]): Promise<void> {
+    const alertName = groupLabels.alertname ?? "Unknown";
     try {
-      await this.dedup.clear(alert.labels);
-      const thread = await this.agent.resolveIncident(alert.labels);
+      await this.dedup.clear(groupLabels);
+      const thread = await this.agent.resolveIncident(groupLabels);
       if (!thread) {
         logger.debug(`[slack] resolved alert ${alertName} has no stored unresolved incident — dedup cleared only`);
         return;
       }
-      const endedAt = alert.endsAt ? ` at \`${new Date(alert.endsAt).toISOString()}\`` : "";
-      const ns = alert.labels.namespace ? ` in \`${alert.labels.namespace}\`` : "";
+      const ends = resolved.map((a) => a.endsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
+      const endedAt = ends.length > 0 ? ` at \`${new Date(Math.max(...ends)).toISOString()}\`` : "";
+      const ns = groupLabels.namespace ? ` in \`${groupLabels.namespace}\`` : "";
       await this.app.client.chat.postMessage({
         channel: thread.channel,
         thread_ts: thread.threadTs,
@@ -327,24 +356,6 @@ export class SlackApp {
     } catch (err) {
       logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${err instanceof Error ? err.message : err}`);
     }
-  }
-
-  private buildAlertText(alert: AlertmanagerPayload["alerts"][number]): string {
-    const alertName = alert.labels.alertname ?? "Unknown";
-    const severity = alert.labels.severity ?? "unknown";
-    const emoji = ({ critical: "🔴", warning: "🟡", info: "🔵" } as Record<string, string>)[severity] ?? "⚪";
-
-    const lines: string[] = [
-      `🚨 *${alertName}*`,
-      `*Severity:* ${emoji} \`${severity}\``,
-    ];
-    if (alert.annotations?.summary)     lines.push(`*Summary:* ${alert.annotations.summary}`);
-    if (alert.annotations?.description) lines.push(`*Description:* ${alert.annotations.description}`);
-    if (alert.labels.namespace)         lines.push(`*Namespace:* \`${alert.labels.namespace}\``);
-    if (alert.labels.pod)               lines.push(`*Pod:* \`${alert.labels.pod}\``);
-    if (alert.startsAt)                 lines.push(`*Firing since:* \`${new Date(alert.startsAt).toISOString()}\` (unix: \`${Math.floor(new Date(alert.startsAt).getTime() / 1000)}\`)`);
-
-    return lines.join("\n");
   }
 
   private async investigateAlertInBackground(
@@ -584,11 +595,10 @@ export class SlackApp {
 }
 
 interface AlertmanagerPayload {
-  alerts: Array<{
-    status: "firing" | "resolved";
-    labels: Record<string, string>;
-    annotations?: Record<string, string>;
-    startsAt?: string;
-    endsAt?: string;
-  }>;
+  // Alertmanager sends one POST per group: `groupLabels` = the `group_by` values,
+  // `commonLabels`/`commonAnnotations` = what every alert in the group shares.
+  groupLabels?: Record<string, string>;
+  commonLabels?: Record<string, string>;
+  commonAnnotations?: Record<string, string>;
+  alerts: AlertItem[];
 }

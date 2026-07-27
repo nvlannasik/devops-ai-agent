@@ -61,24 +61,28 @@ Always check pod status before requesting logs:
 
 | Pod Status | Can Get Logs? | Action |
 |---|---|---|
-| Pending / Unknown | No | Use k8s_list_events with field_selector for that pod |
+| Pending / Unknown | No | k8s_list_events (field_selector) + k8s_describe_node for the scheduling reason |
 | Running / Succeeded | Yes | k8s_get_pod_logs |
-| CrashLoopBackOff / OOMKilled | Partial | k8s_get_pod_logs with tail_lines: 200 |
+| CrashLoopBackOff / OOMKilled | Partial | **k8s_describe_pod first** (exact reason from state/lastState), then k8s_get_pod_logs with **previous: true** (crashed instance), tail_lines: 200 |
 | Terminating | Maybe | Try k8s_get_pod_logs, check events if empty |
+
+For any "why is this pod unhealthy?" question, **k8s_describe_pod** gives the structured reason
+(termination/waiting reason, exit code, conditions, configured limits) — reach for it before
+guessing from logs. It carries no live CPU/memory usage; use Prometheus for that.
 
 ## Failure Mode Playbooks
 
 Use these to prioritize your first tool calls based on the reported symptom.
 
 ### CrashLoopBackOff
-1. k8s_list_events (field_selector for the pod) — confirm crash reason
-2. k8s_get_pod_logs (tail_lines: 200) — find panic/fatal/OOM message
-3. prometheus_query — check memory vs limit: `container_memory_working_set_bytes{pod="X"} / container_spec_memory_limit_bytes{pod="X"}`
+1. k8s_describe_pod — the ground-truth reason: container `state` = "Waiting: CrashLoopBackOff" and `lastState` = "Terminated: <reason> (exit <code>)", plus the pod's `recentEvents`. OOMKilled/exit 137 → memory; exit 1/2 → app error; "Error"/config reasons → misconfig. This tells you which branch to chase before reading logs
+2. k8s_get_pod_logs with **`previous: true`** (tail_lines: 200) — the crash message lives in the DEAD container instance, not the fresh restart. Without `previous` you get the new container's (often empty) logs and miss the panic/fatal/OOM line
+3. prometheus_query — memory vs limit: `container_memory_working_set_bytes{pod="X"} / container_spec_memory_limit_bytes{pod="X"}`
 
 ### OOMKilled
-1. k8s_list_events — confirm OOMKilled reason
-2. prometheus_query_range — memory trend: `container_memory_working_set_bytes{namespace="X",pod=~"service.*"}` (look for steady climb)
-3. k8s_get_pod_logs — check for memory leak indicators before the kill
+1. k8s_describe_pod — confirm `lastState` = "Terminated: OOMKilled (exit 137)" and read the container's configured memory **limit** (the `resources` field) — the kill happens at that limit
+2. prometheus_query_range — memory trend: `container_memory_working_set_bytes{namespace="X",pod=~"service.*"}` (look for steady climb toward the limit)
+3. k8s_get_pod_logs with `previous: true` — check for memory leak indicators in the killed instance before the kill
 
 ### ImagePullBackOff / ErrImagePull
 Events contain the full error message — it already tells you the root cause (wrong tag, missing secret, registry unreachable). Read the event message, no further tool calls needed to confirm.
@@ -95,22 +99,52 @@ Events contain the full error message — it already tells you the root cause (w
 4. k8s_list_pods — check if downstream pods are ready
 
 ### Pod Not Ready / Readiness Probe Failing
-1. k8s_list_events — look for "Readiness probe failed" with the actual response
-2. k8s_get_pod_logs — what was the application doing when the probe failed?
-3. prometheus_query — check if the upstream dependency (DB, cache, external API) has elevated error rates
+1. k8s_describe_pod — `conditions` (Ready / ContainersReady) + each container's `state`; a failing probe shows as a not-ready container even while Running
+2. k8s_list_events — look for "Readiness probe failed" with the actual response
+3. k8s_get_pod_logs — what was the application doing when the probe failed?
+
+### Pod Pending / Unschedulable
+1. k8s_list_events (field_selector for the pod) — the scheduler's message ("Insufficient cpu/memory", node affinity/selector, untolerated taint)
+2. k8s_describe_node (the target node, or a candidate node) — `conditions` (MemoryPressure / DiskPressure / PIDPressure / Ready), `taints`, `unschedulable`, and capacity vs allocatable; a pressured / tainted / NotReady node explains the failure to schedule
 
 ### Service Unavailable / No Traffic
-1. k8s_list_pods — check ready status and restart counts
-2. k8s_list_services + k8s_list_ingresses — confirm routing config is intact
-3. prometheus_query (`sum(rate(http_requests_total{namespace="X"}[5m])) by (service)`) — confirm traffic truly dropped or was never routed
+1. k8s_get_endpoints (the Service name) — **readyCount = 0 means the Service has NO healthy backend pods** → the direct cause of 503 / connection-refused when the Service exists but routes nowhere
+2. k8s_list_pods — ready status + restart counts of the backend pods (why are they not ready?)
+3. k8s_list_services + k8s_list_ingresses — confirm the routing config (selector, ports) is intact
+4. If backends ARE ready but traffic still fails: k8s_list_network_policies — a deny-all or missing allow rule can silently block traffic
+
+### Deployment Stuck / Rollout Not Progressing
+1. k8s_get_rollout_status — desired vs updated/ready/available; `complete: false` + a condition like Progressing=False `ProgressDeadlineExceeded` confirms a stalled rollout
+2. k8s_list_replicasets — the new RS vs the old one; if the new RS has 0 ready, its pods are failing → k8s_describe_pod one of them for the reason
+3. k8s_list_events — image pull / quota / scheduling errors on the new pods
+
+### PVC Pending / Volume Trouble
+1. k8s_list_pvcs — confirm the claim is Pending (not Bound)
+2. k8s_list_storageclasses — is there a default class? is the provisioner correct? (Pending + no default class = the usual cause)
+3. k8s_list_pvs — Failed/Released PV, or none Available matching the claim
+
+### Forbidden / Permission Denied
+1. k8s_get_sa_permissions (the ServiceAccount from the error, e.g. `system:serviceaccount:ns:name`) — its bound roles + resolved rules; check whether the needed apiGroup/resource/verb is granted
+2. If missing: the fix is an RBAC Role/ClusterRole rule — state the exact apiGroup/resource/verb needed
 
 ## Tool Usage Reference
 
 ### Kubernetes
+- `k8s_describe_pod` — ONE pod's full status: container state/lastState (OOMKilled + exit code, CrashLoopBackOff, ImagePullBackOff), conditions, QoS, configured requests/limits, **and the pod's recentEvents** (BackOff/Unhealthy/FailedMount — often the smoking gun). The RCA workhorse for crash/OOM/not-ready
+- `k8s_get_pod_logs` — set **`previous: true`** for a crashed/restarting pod (the dead instance's logs hold the crash reason); `since_seconds` narrows to a recent window
+- `k8s_describe_node` — ONE node's conditions (MemoryPressure/DiskPressure/PIDPressure/Ready), taints, capacity vs allocatable — for Pending pods / node incidents
+- `k8s_get_endpoints` — ready vs not-ready backends behind a Service (readyCount=0 → 503 cause)
+- `k8s_get_rollout_status` — is a Deployment/StatefulSet/DaemonSet done rolling out? (desired vs ready + conditions)
+- `k8s_list_replicasets` — rollout history (active vs stale RS, failed old RS)
+- `k8s_list_pvs` / `k8s_list_storageclasses` — storage (PVC Pending → no default class / broken provisioner)
+- `k8s_list_network_policies` — traffic-blocked investigations
+- `k8s_list_pdbs` — disruptionsAllowed=0 blocks node drain / stalls rollouts
+- `k8s_get_sa_permissions` — `forbidden` RCA: a ServiceAccount's bound roles + resolved rules
 - `k8s_list_events` with `since_minutes: 60` — prefer this over fetching all events for a namespace
 - `field_selector: "involvedObject.name=<name>"` — focus events on a specific pod or deployment
 - `k8s_list_hpas` — check when investigating sudden scaling events or throttling
 - `k8s_list_configmaps` / `k8s_list_secrets` — check for config changes when errors correlate with a recent deploy
+- `k8s_get_resource` — get ANY resource by `api_version`+`kind` (full object by `name`, or a list) when there's no dedicated tool for the kind; `k8s_list_api_resources` to discover which apiVersions the cluster serves
 
 ### Prometheus — PromQL Patterns
 ```

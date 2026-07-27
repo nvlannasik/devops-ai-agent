@@ -10,6 +10,7 @@ export interface GitOpsPreview {
   workload: string;
   action: string;
   container?: string;
+  component?: string; // chart component from app.kubernetes.io/component (multi-component disambiguation)
   changes: GitOpsChange[];
   message: string;
 }

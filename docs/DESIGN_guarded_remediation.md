@@ -281,8 +281,8 @@ the source of truth. Key deviations: GitHub is reachable only from the private n
 the PR is opened by the **llm-worker over SQS** (not an MCP tool in the cluster); auth is a
 **PAT** for the initial phase (App later); the values key is found by **only changing a key
 already set** in the HelmRelease values (no per-chart convention needed) and the file by
-**grepping the current value** (no cluster→overlay config); **image + scale** first
-(set_resources deferred). The original sketch, kept for context:
+**grepping the current value** (no cluster→overlay config); all 3 mutating actions
+(image / scale / set_resources) resolver-supported. The original sketch, kept for context:
 
 For Flux-managed workloads the remediation must change the **source**, not the cluster:
 
