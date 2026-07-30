@@ -143,3 +143,5 @@ vite.config.ts.timestamp-*
 .vite/
 
 .DS_Store
+# subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
