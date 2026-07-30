@@ -42,16 +42,24 @@ export function toOpenAIMessages(messages: Message[]): OpenAI.Chat.ChatCompletio
   return out;
 }
 
+// Per-instance overrides — see ClaudeOptions. This is also how an aggregator such as
+// OpenRouter is registered: it is an ordinary OpenAI-compatible backend, not a special case.
+export interface OpenAICompatibleOptions {
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+}
+
 export class OpenAICompatibleClient implements LLMClient {
   private client: OpenAI;
-  private model: string;
+  readonly model: string;
 
-  constructor() {
+  constructor(opts: OpenAICompatibleOptions = {}) {
     this.client = new OpenAI({
-      baseURL: config.llm.openaiCompatible.baseUrl,
-      apiKey: config.llm.openaiCompatible.apiKey,
+      baseURL: opts.baseUrl ?? config.llm.openaiCompatible.baseUrl,
+      apiKey: opts.apiKey ?? config.llm.openaiCompatible.apiKey,
     });
-    this.model = config.llm.openaiCompatible.model;
+    this.model = opts.model ?? config.llm.openaiCompatible.model;
   }
 
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
