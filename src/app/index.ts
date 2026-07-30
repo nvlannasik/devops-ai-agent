@@ -14,6 +14,7 @@ import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
+import { withRoute } from "../utils/trace/index.js";
 
 // how long after a successful remediation to post the pod-status check into the thread
 // ponytail: fixed 90s covers a typical rolling update; env var if workloads need more
@@ -190,7 +191,14 @@ export class SlackApp {
     try {
       // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
       // format detection when the model bolds the RCA labels with **
-      let reply = toMrkdwn(await this.agent.investigate(threadId, message, budget));
+      // Conversation-mode mentions are the cheap tier. Investigation requests and the alert
+      // path stay heavy by omission — default heavy is deliberate, so a new LLM call added
+      // later gets the strong model rather than a silent downgrade.
+      let reply = toMrkdwn(
+        investigation
+          ? await this.agent.investigate(threadId, message, budget)
+          : await withRoute("light", () => this.agent.investigate(threadId, message, budget))
+      );
       if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
         // Deterministic format backstop — the model sometimes ignores the conversation-mode
         // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a

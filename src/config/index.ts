@@ -29,7 +29,8 @@ export const config = {
   },
 
   llm: {
-    provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible" | "private-llm",
+    provider: (process.env.LLM_PROVIDER ?? "claude") as
+      "claude" | "openai-compatible" | "private-llm" | "router",
     // Output token ceiling for claude + openai-compatible. SQS path's limit lives in llm-worker.
     maxTokens: parseInt(process.env.MAX_TOKENS ?? "8096"),
     claude: {
