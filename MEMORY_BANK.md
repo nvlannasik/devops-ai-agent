@@ -243,6 +243,92 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 | `claude` | `ClaudeClient` | Anthropic SDK, prompt caching |
 | `openai-compatible` | `OpenAICompatibleClient` | Any OpenAI-compatible API |
 | `private-llm` | `SQSLLMClient` | Event-driven via SQS, for strict private networks |
+| `router` | `RouterLLMClient` | Workload-routed, up-only failover across the other three — see below |
+
+### LLM Router (workload routing + up-only failover)
+`LLM_PROVIDER=router` selects `RouterLLMClient` (`src/agent/llm/router.ts`), a fourth branch in
+`createLLMClient()` (`src/agent/llm/index.ts`) alongside `claude`/`openai-compatible`/`private-llm`.
+It carries no LLM logic of its own — it holds instances of the three existing clients and picks
+which one answers a given call. Full design: `docs/superpowers/specs/2026-07-30-llm-router-design.md`.
+
+**Registry (`src/agent/llm/registry.ts`).** Backends are declared with indexed env vars
+`LLM_BACKEND_<N>_NAME|KIND|MODEL|BASE_URL|KEY` (`KIND` is one of `claude`, `openai-compatible`,
+`private-llm`; only `private-llm` needs no extra fields — its queues/credentials come from the
+existing SQS/AWS config, shared by every replica). The backend **name is a value, never part of a
+key** — adding a backend never means inventing a new env var name, and routes reference the name so
+renumbering indices never breaks routing. Each field is its **own** env var rather than one JSON/YAML
+blob, specifically so `_KEY` can come from a K8s Secret while `_NAME`/`_KIND`/`_MODEL`/`_BASE_URL`
+come from the HelmRelease's plain `extraEnvVars` — a blob containing a key would force the whole blob
+into a Secret. Indices are scanned 1→20 and must be **contiguous from 1** (a gap throws — most likely
+a copy/paste or deleted-entry mistake, caught at boot instead of silently skipping a backend).
+Whitespace-only values are rejected. A backend name may not appear in both `LLM_ROUTE_HEAVY` and
+`LLM_ROUTE_LIGHT`, nor twice within the same list — each backend is tried at most once per `chat()`.
+
+**Routes.** `LLM_ROUTE_HEAVY` is required (comma-separated backend names). `LLM_ROUTE_LIGHT` is
+optional — when unset, light-marked calls fall straight through to the heavy chain, which reduces the
+router to failover-only across strong backends and is a legitimate way to run it (no separate off
+switch needed).
+
+**Routing signal (`withRoute`/`currentRouteContext`, `src/utils/trace/index.ts`).** `chat()`'s
+signature carries no workload parameter, and it must not — that would touch three client
+implementations and every call site for a concern none of them own. Reuses the exact
+`AsyncLocalStorage` pattern already built for `traceId`: `withRoute(route, fn)` stores a mutable
+`{ route, escalated }` context over the async subtree. **Default is heavy; light must be requested
+explicitly.** Exactly two call sites opt into light: conversation-mode mentions in `handleMention`
+(`src/app/index.ts`) and `reformatToConversation` (`src/agent/index.ts`). Everything else — alert
+investigation, remediation proposal parsing, feedback extraction — stays heavy untouched. The
+asymmetry is deliberate: anyone adding a new LLM call later gets the strong model by default, not a
+silent downgrade. Reading the `[USER MESSAGE ...]` prompt marker to infer route was considered and
+rejected — markers are prompt text, so a rename would silently disable routing with no error, and
+`reformatToConversation` uses a minimal system prompt with no marker at all.
+
+**Three failure signals** (`router.ts`, all pre-existing failure modes in this codebase, none new):
+1. a thrown error (network, 5xx, timeout, SQS deadline);
+2. an empty response (small reasoning models exhausting their token budget on hidden thinking — see
+   *Reasoning-model token exhaustion* above);
+3. a response that is raw serialized content-block JSON (the same regex detector `agent/index.ts`
+   already used, reused not rewritten).
+
+A `stopReason: "tool_use"` response legitimately carries no text and is deliberately **not** treated
+as empty — treating it as a failure would escalate every single tool round of every investigation.
+Signal 3's meaning was corrected during this work: the JSON originally seen in Slack was our own bug
+(`JSON.stringify` in `toOpenAIMessages`, since fixed — see *Anthropic content blocks → OpenAI chat*
+below), not evidence the model is weak. Today it means **this backend's tool-call channel is dead** —
+either our translation regressed, or the backend runs without a tool-call parser (e.g. vLLM started
+without `--enable-auto-tool-choice --tool-call-parser`). Escalating on it is right either way, but it
+does mean a translation regression would be masked by quietly falling up to the expensive model —
+mitigated by logging this case at `warn` with its own distinct message naming the likely cause, never
+folded into the generic failover line.
+
+**Direction — one-directional, up only. This is the single rule that must never be "improved" into
+bidirectional failover.** The effective chain for `light` is the light list followed by the heavy
+list; the effective chain for `heavy` is the heavy list alone — heavy **never** descends into light.
+Lateral failover between strong backends (e.g. `opus` → a second heavy entry) is preserved, since
+that isn't a capability downgrade. The reason is asymmetric risk, not convenience: a failed strong
+model is a visible outage — it throws, the investigation fails loudly, someone notices immediately. A
+weak model answering a complex investigation may not throw at all — it can return a confident, wrong
+RCA that gets posted straight to Slack, and nobody notices until the fix doesn't work. Falling up
+trades an outage for a slower answer; falling down would trade a visible failure for an invisible
+one. This is enforced by `router.test.ts`'s "heavy throws → the error propagates and light is never
+called" case — without a test asserting it, the rule lives only in this document and the next person
+who finds bidirectional failover "more robust" will change it with nothing objecting.
+
+**Stickiness.** Each backend is tried at most once per `chat()` call — the underlying clients already
+retry/backoff on their own, stacking router-level retries would only slow the failure down. Once one
+call in an investigation crosses from light into the heavy tier, `ctx.escalated` flips true on the
+shared route context and every remaining call in that investigation skips the light tier entirely,
+going straight to heavy. Without this a multi-round investigation against a dead light backend would
+pay one wasted light attempt per round.
+
+**Boot-time validation.** `parseRegistry` runs once at startup inside `createLLMClient()`, not lazily
+on first request — an env-var typo (bad `KIND`, missing required field, duplicate name, a route
+naming an unregistered backend, empty `LLM_ROUTE_HEAVY`) throws and stops the pod, so the failure
+shows up as a pod that won't come up rather than the first alert of the day silently misrouting.
+`RouterLLMClient.shutdown()` calls every registered backend's optional `shutdown()` with
+`Promise.allSettled` — one failing backend (e.g. `SQSLLMClient`'s queue teardown) can't leak the
+others on restart.
+
+Spec: `docs/superpowers/specs/2026-07-30-llm-router-design.md`.
 
 ### Anthropic content blocks → OpenAI chat (`toOpenAIMessages`)
 Both OpenAI-shaped paths (`openai-compatible.ts` here, `llm.ts` in llm-worker) must translate

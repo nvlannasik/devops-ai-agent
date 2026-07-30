@@ -29,6 +29,7 @@ Deeper design in `docs/` (e.g. `DESIGN_guarded_remediation.md`).
 - **Logging:** use `errDetail(err)` from `utils/logger`, not `${err}` (which drops the stack). Investigations run inside `withTrace(threadId, …)` so SQS requests carry `traceId` — that's the join key between the agent log, the llm-worker log, and the Slack thread.
 - **Cluster/GitOps drift** returns `drift` from the worker instead of a plain refusal; the agent proposes `flux_reconcile` (restore what Git declares), still approval-gated.
 - **Domain guardrail:** `## Scope of Work` in `prompts/system.md` + a scope clause in BOTH per-message markers (`[USER MESSAGE ...]` in `app/index.ts`, `[FOLLOW-UP ...]` in `agent/index.ts`). The prompt section alone doesn't hold on a small model — off-topic asks ("debug this code") got answered. Change all three together.
+- **LLM router:** failover is **up-only** (light → heavy, never the reverse) — a weak model fails by answering confidently, not by throwing. `router.test.ts` is what enforces it. Backends come from indexed `LLM_BACKEND_<N>_*` env vars validated at boot.
 
 ## Working style
 - Chat in Indonesian; keep technical/English terms untranslated. **Docs are written in English.**
