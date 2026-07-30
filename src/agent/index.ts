@@ -12,6 +12,7 @@ import { RemediationStore } from "./remediation/index.js";
 import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
+import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
@@ -142,7 +143,7 @@ export class DevOpsAgent {
     // for first message: prepend time context
     // for follow-up: prepend explicit mode instruction so LLM doesn't default to RCA format
     const messageToAppend = isFollowUp
-      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format]\n${userMessage}`
+      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
       : `${buildTimeContext()}\n\n${userMessage}`;
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
@@ -446,7 +447,8 @@ export class DevOpsAgent {
     incidentId: number | null,
     proposal: Proposal,
     preview: GitOpsPreview
-  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
+    // gitOps is absent on the drift branch: that proposes a Flux reconcile, not a PR
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
     if (!this.gitops) {
       return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
     }
@@ -459,6 +461,10 @@ export class DevOpsAgent {
       return { refused: `couldn't prepare the GitOps PR: ${err instanceof Error ? err.message : String(err)}` };
     }
     if (!payload.ok) {
+      // Drift is a finding, not a refusal: the repo DOES declare this key, the cluster just
+      // isn't running it. A PR would write a value nobody declared; the repo is the source
+      // of truth, so propose restoring it instead.
+      if (payload.drift) return this.proposeFluxReconcile(incidentId, proposal, preview, payload.drift);
       logger.info(`[remediation] gitops dry-run refused: ${payload.reason}`);
       return { refused: payload.reason };
     }
@@ -483,6 +489,65 @@ export class DevOpsAgent {
       return null;
     }
     return { id, proposal: { ...proposal, summary }, dryRunSummary: payload.diff, gitOps: { path: payload.path, valuesKey: payload.valuesKey, helmRelease: preview.helmRelease } };
+  }
+
+  // Cluster drifted from Git (someone patched the cluster directly). Propose a Flux
+  // reconcile: it restores what the repo declares instead of encoding the drifted value.
+  // Same approval card as everything else — a human still decides, because the drifted
+  // value is occasionally the intended one (in which case they want a PR, not a reconcile).
+  private async proposeFluxReconcile(
+    incidentId: number | null,
+    proposal: Proposal,
+    preview: GitOpsPreview,
+    drift: GitOpsDrift
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+    const target = this.workloadOf(preview.workload);
+    if (!target) return { refused: `cluster/GitOps drift detected but the workload reference \`${preview.workload}\` could not be parsed.` };
+    // an older MCP server won't have the tool — say so instead of proposing a dead action
+    if (!this.mcp.getTools().some((t) => t.name === "flux_reconcile")) {
+      return {
+        refused:
+          `cluster/GitOps drift: \`${drift.valuesKey}\` is \`${drift.gitValue}\` in \`${drift.path}\` but the cluster runs ` +
+          `\`${drift.clusterValue}\`. Run \`flux reconcile helmrelease ${preview.helmRelease.namespace}/${preview.helmRelease.name} --force\` ` +
+          `to restore the declared state (the agent's flux_reconcile tool is not available on this MCP server).`,
+      };
+    }
+
+    const toolParams = { namespace: target.namespace, name: target.name, kind: target.kind };
+    const dryRun = await this.mcp.callTool("flux_reconcile", { ...toolParams, dry_run: true });
+    if (dryRun.startsWith("Error:")) {
+      logger.info(`[remediation] flux_reconcile dry-run refused: ${truncate(dryRun, 200)}`);
+      return { refused: dryRun.replace(/^Error:\s*/, "") };
+    }
+
+    const summary =
+      `Flux reconcile \`${preview.helmRelease.namespace}/${preview.helmRelease.name}\` — restore \`${drift.valuesKey}\` ` +
+      `to \`${drift.gitValue}\` (cluster drifted to \`${drift.clusterValue}\`)`;
+    logger.warn(
+      `[remediation] cluster/GitOps drift on ${preview.workload}: ${drift.valuesKey} git=${drift.gitValue} ` +
+      `cluster=${drift.clusterValue} (${drift.path}) — proposing flux_reconcile`
+    );
+    const id = await this.remediations.propose(incidentId, "flux_reconcile", {
+      ...toolParams,
+      reason: `cluster drifted from the GitOps repo: ${drift.valuesKey} is ${drift.gitValue} in ${drift.path}, cluster is running ${drift.clusterValue}`,
+      summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] flux_reconcile not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+    return {
+      id,
+      proposal: { ...proposal, action: "flux_reconcile", namespace: target.namespace, name: target.name, toolParams, summary },
+      dryRunSummary: truncate(dryRun, 400),
+    };
+  }
+
+  // "deployment/ns/name" (the MCP preview's workload reference) → its parts.
+  private workloadOf(ref: string): { kind: string; namespace: string; name: string } | null {
+    const [kind, namespace, ...rest] = ref.split("/");
+    if (!kind || !namespace || rest.length === 0) return null;
+    return { kind, namespace, name: rest.join("/") };
   }
 
   // Approve path: atomically claim the row (double-click / multi-pod safe), execute the

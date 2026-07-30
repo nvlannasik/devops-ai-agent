@@ -38,8 +38,21 @@ Distant system-prompt rules alone do NOT hold — the model defaults to RCA form
 first message. Every entry point stamps a marker; the system prompt keys its mode rules on them:
 - **Alert path** (`investigateAlertInBackground`) → `[SOURCE: Alertmanager webhook — automated incident investigation]` → investigation mode mandatory.
 - **Mention path** (`handleMention`) → `[USER MESSAGE — conversation mode by default ...]` → conversational unless the human explicitly asks to investigate. Added after testing showed "check status semua pod" produced a full Critical-severity RCA about a routine rolling deploy.
-- **Follow-up** (after `markRcaSent(threadId)` flags `rca:{threadId}`) → `[FOLLOW-UP — conversation mode, do NOT use RCA format]` prepended in `investigate()`.
+- **Follow-up** (after `markRcaSent(threadId)` flags `rca:{threadId}`) → `[FOLLOW-UP — conversation mode, do NOT use RCA format ...]` prepended in `investigate()`.
 Prompt-side rules live in `prompts/system.md` §Response Mode (also forbids inventing an "incident" from routine activity like a rolling deploy).
+
+### Domain guardrail (out-of-scope requests)
+The markers above pick the *format*; nothing picked the *topic*. A mention like "tolong debug
+code ini" was answered as a normal coding question — the agent has a general-purpose LLM behind
+it and no rule said the DevOps role was exclusive. Three places, changed together:
+- `prompts/system.md` §**Scope of Work** (placed FIRST, before §Response Mode): in scope = the connected clusters, workloads, observability data, incidents, deploys, GitOps state. Out = source code, general programming, systems with no tools behind them, everything non-infra. Explicit rule that pasted code/stack traces don't make a request in scope — read what is being *asked* ("this pod keeps OOMKilling, here's the log" = in; "debug this function" = out, even if it runs in a pod). Decline = one line in the user's language, no partial help; mixed message = answer the in-scope half, decline the rest; genuinely unsure = one clarifying question.
+- `[USER MESSAGE ...]` marker (`app/index.ts`) carries the scope clause too — same reason the mode rules are duplicated there: a distant prompt section alone doesn't hold on a small model.
+- `[FOLLOW-UP ...]` marker (`agent/index.ts`) as well, so a thread can't drift off-topic after the first answer.
+
+No deterministic backstop here (unlike the RCA-format leak): classifying the *input* by regex
+would false-positive on legitimate asks ("debug the deployment"), and out-of-scope isn't
+detectable from the output. If the small model still leaks, the next rung is a cheap
+classifier call before the loop, not keyword matching.
 
 ### Tool budget (deterministic scope guard for conversation mode)
 Prompt scope-rules alone did NOT stop the model from chasing anomalies (nginx logs full of
@@ -184,8 +197,10 @@ Design: `docs/DESIGN_oncall_feedback_learning.md`. Two tiers, never flattened:
 - Rendering gate = `isRcaResponse(t) && extractSection(t, "Root Cause")` (`extractSection` exported for this) — `isRcaResponse` alone let through texts that rendered as an empty card.
 
 ### Guarded Remediation (approval-gated execution)
-Design: `docs/DESIGN_guarded_remediation.md`. 5 typed actions (`k8s_rollout_restart`,
-`k8s_set_image`, `k8s_set_resources`, `k8s_scale`, `k8s_delete_pod`). `k8s_delete_pod`
+Design: `docs/DESIGN_guarded_remediation.md`. 6 typed actions (`k8s_rollout_restart`,
+`k8s_set_image`, `k8s_set_resources`, `k8s_scale`, `k8s_delete_pod`, `flux_reconcile`).
+`flux_reconcile` is proposed only by the **drift path** (below), never by the proposal LLM —
+it is not in `parseProposal`'s whitelist. `k8s_delete_pod`
 (v1.3) deletes ONE wedged pod so its controller recreates it — refused for pods without a
 recreating controller (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement =
 outage); GitOps-safe like restart, so NOT behind the GitOps guard. Needs RBAC
@@ -212,6 +227,12 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - **Approval card mentions the approvers** (`<@Uxx>` in the section block → real Slack notification): `SLACK_APPROVER_USERS` fallback `SLACK_ONCALL_USERS`; both empty = no mention line.
 - **GitOps overlay path is auto-detected from Flux** (`resolveOverlayPath`, `gitops/overlay.ts`): a Flux HelmRelease workload's HR CR carries `kustomize.toolkit.fluxcd.io/{name,namespace}` labels (the HR CR is applied by kustomize-controller, so it — unlike the Helm-rendered workload — has them). The agent reads the HR CR → the Kustomization CR → `spec.path` (e.g. `apps/dev/applications`) via the read-only `k8s_get_custom_resources` tool, and sends it as `pathPrefix` in the gitops request so the worker scopes the file search to the right per-env overlay (dev/stg/prd, applications vs systems — all automatic, zero config). Best-effort → falls back to the worker's `GITOPS_PATH_PREFIX`. This also resolves the base+overlay ambiguity (both define the HR; the prefix picks the overlay). **Detection itself needs no manifest change** — Flux auto-adds `helm.toolkit.fluxcd.io/name` to Flux-managed workloads (plain `helm install` like a standalone ingress-nginx lacks it → correctly refused).
 - **GitOps PR flow (v2, `DESIGN_gitops_pr_remediation.md`, opt-in `GITOPS_REMEDIATION_ENABLED`):** for a Flux HelmRelease-managed workload the MCP dry-run returns a structured PR preview (not a plain refusal). `parseGitOpsPreview` detects it → `proposeGitOpsPr` asks the **llm-worker** over a second SQS queue (`SqsGitOpsClient`) to prepare the PR (`dry_run` → diff), stores a PR-flavored remediation (`params.gitops=true` + helmRelease/action/changes/path/valuesKey), and posts a GitOps card variant (diff block + file/key). Approve → `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (`open_pr` → PR URL in `result`; **no 90s status check** — nothing is live until merge+Flux sync). `SqsGitOpsClient` is a **standalone mirror** of `SQSLLMClient` (NOT a shared base — the LLM client is the battle-tested critical path; two dispatchers cooperate via the shared response queue's release-non-owned mechanism). The agent holds **no GitHub credentials** — those live in the worker. GitOps action names in the preview/request are the SHORT forms (`set_image`/`scale`/`set_resources`), distinct from the DB `action` column's tool name (`k8s_set_image`).
+- **Cluster/GitOps drift → `flux_reconcile`, not a PR.** Someone changes the cluster directly (`kubectl set image` on a Flux-managed workload); an alert fires; the RCA is fine; then the remediation died with *"the value is not set in the overlay and can't be auto-added for this action — set it in the overlay values first"*. That message was wrong: the incident context's `from` is the **drifted cluster value**, which naturally isn't in Git, and the worker's line search (key AND value) couldn't tell that apart from "the key isn't there". The worker now returns `drift:{path, valuesKey, gitValue, clusterValue}` (see llm-worker `detectDrift`), and `proposeGitOpsPr` branches to `proposeFluxReconcile` **before** treating it as a refusal:
+  - proposes the MCP `flux_reconcile` write tool on the workload (parsed out of the preview's `kind/ns/name` by `workloadOf`), after the same mandatory dry-run;
+  - card reads *"Flux reconcile `ns/name` — restore `image.tag` to `v1.4.0` (cluster drifted to `v9.9.9`)"*;
+  - **still approval-gated** — the drifted value is occasionally the intended one, in which case the human wants a PR declaring it, not a reconcile discarding it;
+  - if the MCP server is older and lacks the tool, the refusal text spells out the `flux reconcile helmrelease <ns>/<name> --force` command instead.
+  Direction is fixed on purpose: the GitOps repo is the source of truth, so a reconcile RESTORES what Git declares rather than writing the drifted value into Git.
 - **Post-remediation status check** — 90s after a successful execution (`STATUS_CHECK_DELAY_MS`), the app posts the target workload's pod status into the thread (deterministic: `k8s_list_pods` filtered by workload-name prefix, no LLM call). `executeRemediation` returns `{ text, target? }` for this. `// ponytail:` in-process timer, lost on pod restart within the window.
 - **Proposal context = head+tail of the RCA** (`buildProposalPrompt`), never head-only: long RCAs put the concrete fix in Recommended Actions at the END — a head-only `slice(0,4000)` cut it off and the model proposed nothing. The alert path also prepends the CONFIRMED prior (first 1200 chars) — a recurrence's proven fix is exactly what the proposal model needs. A user request without a concrete value (e.g. "ganti image tag" with no tag) correctly yields `{"action": null}` — never-invent beats a guessed card.
 
@@ -223,9 +244,30 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 | `openai-compatible` | `OpenAICompatibleClient` | Any OpenAI-compatible API |
 | `private-llm` | `SQSLLMClient` | Event-driven via SQS, for strict private networks |
 
+### Anthropic content blocks → OpenAI chat (`toOpenAIMessages`)
+Both OpenAI-shaped paths (`openai-compatible.ts` here, `llm.ts` in llm-worker) must translate
+our Anthropic-style `Message[]` into native OpenAI: `tool_use` → `assistant.tool_calls[]`,
+`tool_result` → `role:"tool"` with `tool_call_id`, tool messages emitted **before** any new
+user text in the same turn.
+- **This was `JSON.stringify(m.content)` in both files.** The literal `[{"type":"tool_use",...}]`
+  reached the model as TEXT; a small private LLM imitated it and answered with that JSON
+  instead of calling a tool. `finish_reason` was then `stop`, so the agent treated it as the
+  final answer and posted the raw array to Slack — which re-entered history and got
+  stringified again, so escaping nested one layer deeper every turn.
+- Two copies in two repos, no shared module: **keep them in sync**.
+- `openai-compatible.ts` also maps `finish_reason: "length"` → `max_tokens` (it mapped
+  everything non-tool to `end_turn`, so a truncated RCA was posted as if complete even though
+  the agentic loop already had a `max_tokens` handler).
+- Malformed tool-call arguments keep the `tool_use` block with `input: {}` + a warning
+  (dropping it would break tool_use/tool_result pairing); the tool's schema then corrects the model.
+- The final answer is checked against `/^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/` and a
+  warning names the likely cause (backend tool-call parser off) — otherwise the only symptom
+  is a wall of JSON in Slack with nothing in the log.
+
 ### Private LLM via SQS
-- Agent publishes `{ requestId, messages, tools, systemPrompt }` to the shared SQS Request Queue
+- Agent publishes `{ requestId, messages, tools, systemPrompt, traceId? }` to the shared SQS Request Queue
 - **Shared response queue + one dispatcher per process:** a single `dispatchLoop()` per replica polls the shared response queue and routes each message to the waiting `chat()` call via `Map<requestId, waiter>` (`pending`). Replaces the old design where every concurrent investigation polled independently and **skipped non-matching messages without releasing them** — leaving them invisible for the whole visibility timeout and stalling the rightful waiter.
+- **Poison-pill guard on the reply side (`parseResponseBody`, shared by both dispatchers).** `routeMessage` used a bare `JSON.parse(msg.Body!)`. One unparseable body on the shared response queue threw out of `routeMessage`, **aborted the rest of the receive batch (up to 9 valid responses skipped)**, and left the bad message undeleted — so it came straight back and the dispatcher hot-looped on it every 2s while every in-flight investigation timed out. Unroutable bodies (bad JSON, no `requestId`) are now deleted with the body logged, each message is routed inside its own try/catch, and an envelope with neither `response` nor `error` rejects the waiter loudly instead of resolving `undefined` into the agentic loop. The identical bug existed in `gitops/sqs.ts`.
 - SQS has no selective receive, so a replica can pull another replica's response. Routing in `routeMessage()`:
   - ours & awaited → delete + resolve/reject
   - ours & already done (timed out) → delete — `issued` tombstone (TTL 2× timeout) recognises our own late/duplicate responses so they aren't bounced around
@@ -329,11 +371,26 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 11. **Proposal model guessed the container name** from the workload name → dry-run refused every `set_image`. Fixed structurally: `container` optional end-to-end, MCP server auto-resolves single-container workloads (`findContainer`, unit-tested).
 12. **Model emits Markdown `**bold**`, Slack renders it literally** — Slack mrkdwn bolds with *single* asterisks. `toMrkdwn()` (in `utils/slack/split.ts`, fence-aware so log excerpts stay raw) normalizes every investigate() response up front — also fixes RCA-format detection when the model bolds the labels with `**`.
 13. **CONFIRMED prior context broke the alert RCA format** — model shortcut to "known issue" replies; two reformat-to-RCA attempts produced garbage (see *Alert flow is format-agnostic*). Fixed by making the pipeline format-agnostic and allowing the concise recurrence reply on purpose. Garbage rows stored during testing were cleaned manually from `incidents`.
+14. **Private LLM answered with our own content-block JSON** — `JSON.stringify(m.content)` in `openai-compatible.ts` (and the worker's `llm.ts`) put `[{"type":"tool_use",...}]` into the prompt as text; the small model copied it, the agent posted it to Slack, and the escaping nested one level deeper each turn. Fixed by `toOpenAIMessages` on both sides.
+15. **One bad message on the shared response queue wedged the dispatcher** — unguarded `JSON.parse` in `routeMessage` (both `llm/sqs.ts` and `gitops/sqs.ts`); see the poison-pill note under *Private LLM via SQS*.
+16. **A failed Slack post silently lost an alert for 12h** — `handleAlert` claims the dedup key BEFORE posting; if `chat.postMessage` threw (`channel_not_found`, `not_in_channel`, `invalid_auth`, rate limit) the claim sat for its full TTL and Alertmanager's repeat was suppressed, so a real incident was never investigated. The claim is now released on post failure with an explicit log.
+17. **A corrupt Redis conversation entry wedged a thread permanently** — `ConversationMemory.get` parsed without a guard, and `append()` calls `get()`, so every message in that thread failed with an opaque parse error. Now logs and starts fresh.
+18. **MCP reconnect masked the original tool error** — if the reconnect also failed, only the connect error surfaced. Both are reported now, and the tool name is in every MCP log line.
+19. **Malformed tool-call arguments killed the investigation** with `Unexpected token` naming no tool — now kept as an empty-input `tool_use` + warning.
+
+## Observability
+- `logger` (`utils/logger/index.ts`) exports **`errDetail(err)`** — `${err}` in a template prints only `Error: message` and drops every frame. Use `errDetail` in catch blocks; `format.errors({stack:true})` handles Errors logged directly.
+- **`traceId` = the Slack `threadId`**, carried implicitly via `AsyncLocalStorage` (`utils/trace/index.ts`) so `SQSLLMClient` can stamp it on outbound requests without growing `LLMClient.chat()`'s signature for a logging concern. `investigate()` wraps the run in `withTrace`. One grep now spans Slack thread → agent log → llm-worker log:
+  ```
+  [sqs-llm] → requestId=abc-123 trace=1785135868.123 msgs=7 tools=24 awaiting=2
+  ```
+- The LLM response's content-block types (+ a text preview) are logged per iteration — previously the log said only `stop=end_turn`, so garbled Slack output had no trace at all.
+- Does NOT reach the MCP server: `StreamableHTTPClientTransport` takes headers only at construction. Join on tool name + input + timestamp.
 
 ## Testing
 - `npm test` → `node --import tsx --test 'src/**/*.test.ts'` (Node >= 24 built-in runner + tsx, zero new deps)
 - Test files (`*.test.ts`) excluded from `tsc` build so `dist/` stays clean
-- Covered so far: `trimToWindow`/`trimHistory` pairing invariants, `truncateToolResult`, `sanitizeContentBlocks`, `ConversationMemory` (in-memory backend)
+- Covered so far: `trimToWindow`/`trimHistory` pairing invariants, `truncateToolResult`, `sanitizeContentBlocks`, `ConversationMemory` (in-memory backend), `toOpenAIMessages` (tool round-trip + ordering), `parseResponseBody` (poison-pill), `releaseVisibilitySeconds`, `parseProposal`, Slack split/mrkdwn/Block Kit, gitops overlay + preview
 
 ### Alert Webhook is Async (do not re-block it)
 - `POST /alert` validates the payload, returns `200` **immediately**, then processes in the background

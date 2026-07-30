@@ -114,6 +114,40 @@ from the chart schema (still "only-change/add an existing key"). Scope: **scale 
 overlay nor base (a genuine chart default) or if the base path is ambiguous. This is the one
 place a `yaml` dependency is used — in-overlay edits stay line-based (minimal diff).
 
+### 3.4b Cluster drifted from Git → reconcile, don't PR
+
+§3.1's trick — "find the line whose value equals the workload's CURRENT value" — assumes the
+cluster still matches Git. It doesn't when somebody edits the cluster directly
+(`kubectl set image` on a Flux-managed workload). The incident context's `from` is then the
+**drifted** value, which of course appears nowhere in the repo, and the value-matching search
+comes back empty — indistinguishable from "the overlay never set this key". In practice that
+surfaced as a wrong, unactionable refusal:
+
+> Remediation not proposed — the value is not set in the overlay and can't be auto-added for
+> this action — set it in the overlay values first
+
+**The failed lookup is itself the drift signal.** When the value search finds nothing, the
+resolver re-scans by KEY alone (`findKeyLines`). Exactly one hit whose value differs from the
+cluster's ⇒ drift, returned as `{ok:false, reason, drift:{path, valuesKey, gitValue, clusterValue}}`.
+Checked BEFORE the §3.4 base fallback — the key is right here, it just disagrees. Ambiguous
+matches stay silent and fall through (never guesses).
+
+The agent branches on `drift` before treating the reply as a refusal and proposes
+**`flux_reconcile`** instead of a PR: annotate the owning HelmRelease with
+`reconcile.fluxcd.io/{requestedAt,forceAt}` (= `flux reconcile helmrelease --force`) so Flux
+re-applies what the repo declares. `forceAt` matters — `requestedAt` alone only re-evaluates
+the release; in-cluster drift is reverted by the forced helm upgrade.
+
+Direction is deliberate: **the repo is the source of truth**, so the fix restores Git's value
+rather than writing the drifted value into Git. It stays approval-gated because the drifted
+value is occasionally the intended one — in which case the human wants a PR declaring it, and
+the card shows both values so they can tell.
+
+`flux_reconcile` is the one spec-affecting write tool the GitOps guard does not refuse: it
+introduces no new state. Its namespace guard runs on the **workload's** namespace (HelmReleases
+live in the permanently-blocked `flux-system`) and the target release is derived from the
+workload's own Flux labels, never named by the caller.
+
 ### 3.5 Multi-component charts → disambiguate by the workload's component
 
 A chart may render several components each with their own `replicaCount`/`resources` (e.g.
@@ -291,6 +325,8 @@ action, currentValue, newValue }` → `{ requestId, diff | prUrl | error }`, rou
 | 3 | `llm-worker` | ✅ **DONE (2026-07-23).** Generic `pollLoop` extracted from `startWorker` (LLM path untouched); a second loop runs on the `gitops` queue when `config.gitops.enabled`. `processGitOpsMessage` (parse → `runGitOps` → publish on the shared response queue) + `runGitOps`/`githubBackend` (dry_run → diff, open_pr → branch+commit+PR). `parseGitOpsRequest` + orchestration unit-tested (fake backend). |
 | 4 | `devops-ai-agent` | ✅ **DONE (2026-07-23).** `SqsGitOpsClient` (standalone, mirrors `SQSLLMClient` — not a shared base, to keep the LLM critical path untouched); `parseGitOpsPreview` detects the MCP PR preview and `proposeRemediation` routes to `proposeGitOpsPr` (SQS `dry_run` → store PR-flavored remediation); `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (SQS `open_pr` → PR URL in `result`, no 90s check); GitOps card variant (diff block + file/key). Gated on `GITOPS_REMEDIATION_ENABLED`. Preview parser + card unit-tested. |
 | 5 | Ops | Auth: **PAT** (initial phase) scoped to the GitOps repo (`contents`+`pull_requests` write), or a GitHub App; mount it **into the llm-worker pod** (`GITHUB_TOKEN` / the App key). Create the `gitops` SQS queue; branch protection / required review on the repo. **RBAC (MCP server SA):** the overlay auto-detect (§3.3) needs `get` on `helm.toolkit.fluxcd.io/helmreleases` + `kustomize.toolkit.fluxcd.io/kustomizations` (ClusterRole — HRs/Kustomizations live in `flux-system`/`flux-app`); without it the detect fails and the worker refuses on base+overlay ambiguity. |
+| 6 | all three | ✅ **DONE (2026-07-28).** Drift → reconcile (§3.4b): `detectDrift`/`findKeyLines` in the worker's `resolve.ts` + `drift` on the refusal payload; `flux_reconcile` write tool in the MCP server (workload-derived HelmRelease, workload-namespace guard, CRD-discovered API version, `requestedAt`+`forceAt`); `proposeFluxReconcile` in the agent. Drift detection unit-tested (set_image, scale, absent-key negative case). |
+| 7 | Ops | **RBAC for `flux_reconcile`:** `patch` on `helm.toolkit.fluxcd.io/helmreleases` (was `get` only) — added to the **dev** overlay in `gitops-devops-ai-manifest`; **stg/prd still pending**. The existing `get` on `customresourcedefinitions` covers the API-version discovery. |
 
 Steps 2–3 are the bulk (the private-net handler). Step 4 is glue on the existing flow.
 Start with `set_image` (most standardized values key), then `scale`, then `set_resources` —

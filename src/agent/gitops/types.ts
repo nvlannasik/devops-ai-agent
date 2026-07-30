@@ -19,7 +19,17 @@ export interface GitOpsRequestBody {
   incident?: { summary?: string; threadUrl?: string };
 }
 
+// The repo declares this key, but the cluster is running a different value — somebody
+// changed the cluster outside GitOps. The repo is the source of truth, so the answer is a
+// Flux reconcile, not a PR that would encode a value nobody declared.
+export interface GitOpsDrift {
+  path: string; // repo file that declares the value
+  valuesKey: string;
+  gitValue: string;
+  clusterValue: string;
+}
+
 export type GitOpsPayload =
   | { ok: true; op: "dry_run"; path: string; valuesKey: string; before: string; after: string; diff: string }
   | { ok: true; op: "open_pr"; path: string; prUrl: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; drift?: GitOpsDrift };

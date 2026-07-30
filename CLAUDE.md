@@ -25,6 +25,10 @@ Deeper design in `docs/` (e.g. `DESIGN_guarded_remediation.md`).
 - **`/alert` is async:** acks 200 immediately, investigates in the background. Don't re-block it.
 - **System prompt** lives in `prompts/system.md` — editable without rebuild.
 - **Incident memory = Postgres** (durable, `DB_*`), schema via `migrations/*.sql`. **Conversation memory = Redis** (24h cache). Don't conflate them.
+- **`toOpenAIMessages` (`agent/llm/openai-compatible.ts`)** must stay in sync with llm-worker's copy. Never flatten content blocks with `JSON.stringify` — a small model imitates the JSON it sees instead of calling a tool, and the output ends up in Slack.
+- **Logging:** use `errDetail(err)` from `utils/logger`, not `${err}` (which drops the stack). Investigations run inside `withTrace(threadId, …)` so SQS requests carry `traceId` — that's the join key between the agent log, the llm-worker log, and the Slack thread.
+- **Cluster/GitOps drift** returns `drift` from the worker instead of a plain refusal; the agent proposes `flux_reconcile` (restore what Git declares), still approval-gated.
+- **Domain guardrail:** `## Scope of Work` in `prompts/system.md` + a scope clause in BOTH per-message markers (`[USER MESSAGE ...]` in `app/index.ts`, `[FOLLOW-UP ...]` in `agent/index.ts`). The prompt section alone doesn't hold on a small model — off-topic asks ("debug this code") got answered. Change all three together.
 
 ## Working style
 - Chat in Indonesian; keep technical/English terms untranslated. **Docs are written in English.**

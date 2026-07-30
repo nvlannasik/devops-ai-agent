@@ -27,6 +27,17 @@
 > (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement = outage). GitOps-safe
 > like restart (recreation is reconcile-safe) → not behind the GitOps guard. Proposal rule:
 > only when one pod is sick while siblings are healthy; whole-workload issues → restart.
+>
+> **v1.4 (2026-07-28):** 6th action **`flux_reconcile`** — the only action that restores
+> state instead of introducing it. Proposed automatically when the GitOps resolver reports
+> **cluster/Git drift** (someone changed the cluster outside GitOps), which used to surface
+> as a wrong refusal — see `DESIGN_gitops_pr_remediation.md` §3.4b. It annotates the owning
+> HelmRelease with `reconcile.fluxcd.io/{requestedAt,forceAt}` so Flux re-applies the repo's
+> declared state. NOT in `parseProposal`'s whitelist: the drift path constructs it, the
+> proposal LLM cannot ask for it. Its namespace guard runs on the **workload's** namespace
+> (HelmReleases live in the always-blocked `flux-system`) and the target release is derived
+> from the workload's Flux labels, never named by the caller. Still approval-gated — the
+> drifted value is occasionally the intended one, and then the human wants a PR instead.
 
 ## 1. Goal
 

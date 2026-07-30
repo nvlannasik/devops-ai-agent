@@ -13,7 +13,7 @@ import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
-import logger from "../utils/logger/index.js";
+import logger, { errDetail } from "../utils/logger/index.js";
 
 // how long after a successful remediation to post the pod-status check into the thread
 // ponytail: fixed 90s covers a typical rolling update; env var if workloads need more
@@ -98,7 +98,7 @@ export class SlackApp {
 
     // catch-all error handler — surfaces silent Slack errors
     this.app.error(async (error) => {
-      logger.error(`[slack] unhandled error: ${error.message ?? error}`);
+      logger.error(`[slack] unhandled error: ${errDetail(error)}`);
     });
   }
 
@@ -124,7 +124,7 @@ export class SlackApp {
       // Notifications + investigations run in the background after this returns.
       res.status(200).json({ ok: true });
       this.handleAlert(payload).catch((err) =>
-        logger.error(`[slack] alert processing failed: ${err instanceof Error ? err.message : err}`)
+        logger.error(`[slack] alert processing failed: ${errDetail(err)}`)
       );
     });
 
@@ -177,7 +177,9 @@ export class SlackApp {
     // first message (see MEMORY_BANK). Only Alertmanager messages carry [SOURCE: ...].
     const message =
       `[USER MESSAGE — conversation mode by default: answer directly in Slack mrkdwn. ` +
-      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident.]\n${text}`;
+      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident. ` +
+      `If this is not about this cluster's workloads, observability data, incidents or deploys, decline in one line ` +
+      `per Scope of Work and answer nothing else — do not debug or explain code.]\n${text}`;
 
     // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 3);
     // explicit investigation requests (and the alert webhook path) keep the full budget.
@@ -223,7 +225,7 @@ export class SlackApp {
       void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
       await this.notifyIfLowConfidence(event.channel, threadId, reply);
     } catch (err) {
-      logger.error(`[slack] investigation failed for thread ${threadId}: ${err}`);
+      logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
     } finally {
       this.semaphore.release();
@@ -259,7 +261,9 @@ export class SlackApp {
       const text = msg.includes("missing_scope")
         ? "⚠️ I can't read this thread: the Slack app is missing the `channels:history` scope (`groups:history` for private channels). Add it under *OAuth & Permissions* and reinstall the app, then try `learn` again."
         : `⚠️ Learn failed: ${msg}`;
-      await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true }).catch(() => {});
+      await client.chat
+        .postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true })
+        .catch((e) => logger.error(`[slack] could not deliver the learn-failure notice to thread ${threadId}: ${errDetail(e)}`));
     }
   }
 
@@ -285,7 +289,7 @@ export class SlackApp {
       if (result.startsWith("📚 Already learned")) return; // repeat reactions stay silent too
       await client.chat.postMessage({ channel, thread_ts: threadTs, text: result, mrkdwn: true });
     } catch (err) {
-      logger.error(`[slack] reaction-learn failed in ${channel}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[slack] reaction-learn failed in ${channel}: ${errDetail(err)}`);
     }
   }
 
@@ -322,9 +326,23 @@ export class SlackApp {
     const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
 
     // Post the alert + investigating notice up front so it shows in Slack immediately.
-    const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
-    const threadId = posted.ts!;
-    await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+    // The dedup claim above is already taken at this point: if posting throws
+    // (channel_not_found, not_in_channel, invalid_auth, rate limit) the claim would sit
+    // there for its full 12h TTL and Alertmanager's repeat would be suppressed — a real
+    // incident silently never investigated. Release the claim so the next repeat retries.
+    let threadId: string;
+    try {
+      const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
+      threadId = posted.ts!;
+      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+    } catch (err) {
+      await this.dedup.clear(groupLabels).catch(() => {});
+      logger.error(
+        `[slack] could not post alert group ${alertName} to channel ${channel} — dedup claim released so the next ` +
+        `Alertmanager repeat retries; the alert is NOT investigated: ${errDetail(err)}`
+      );
+      return;
+    }
 
     // Fire-and-forget — the LLM run must not delay the webhook ack.
     // Concurrency stays bounded by the semaphore inside the background task.
@@ -354,7 +372,7 @@ export class SlackApp {
       });
       logger.info(`[slack] alert resolved: ${alertName} — thread updated, incident marked, dedup cleared`);
     } catch (err) {
-      logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${errDetail(err)}`);
     }
   }
 
@@ -397,7 +415,7 @@ export class SlackApp {
       }
       await this.agent.markRcaSent(threadId);
       const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId).catch((e) => {
-        logger.error(`[slack] failed to store incident for thread ${threadId}: ${e}`);
+        logger.error(`[slack] failed to store incident for thread ${threadId}: ${errDetail(e)}`);
         return null;
       });
       // Guarded Remediation: best-effort, after the response is posted — never blocks or
@@ -409,7 +427,7 @@ export class SlackApp {
       if (incidentId) void this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext);
       await this.notifyIfLowConfidence(channel, threadId, rca);
     } catch (err) {
-      logger.error(`[slack] background investigation failed for thread ${threadId}: ${err}`);
+      logger.error(`[slack] background investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await this.app.client.chat
         .postMessage({
           channel,
@@ -417,7 +435,7 @@ export class SlackApp {
           text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`,
           mrkdwn: true,
         })
-        .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${e}`));
+        .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${errDetail(e)}`));
     } finally {
       this.semaphore.release();
     }
@@ -459,7 +477,7 @@ export class SlackApp {
       logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
-      logger.error(`[remediation] proposal flow failed for incident ${incidentId}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[remediation] proposal flow failed for incident ${incidentId}: ${errDetail(err)}`);
     }
   }
 
@@ -475,7 +493,14 @@ export class SlackApp {
     const channel: string | undefined = body.channel?.id;
     const messageTs: string | undefined = body.message?.ts;
     const remediationId = parseInt(actionValue ?? "", 10);
-    if (!userId || !channel || !messageTs || !Number.isFinite(remediationId)) return;
+    if (!userId || !channel || !messageTs || !Number.isFinite(remediationId)) {
+      // a click that silently does nothing is the worst thing to debug — say why
+      logger.warn(
+        `[remediation] ignoring ${approve ? "approve" : "reject"} click with an incomplete payload ` +
+        `(user=${userId ?? "?"} channel=${channel ?? "?"} ts=${messageTs ?? "?"} value=${actionValue ?? "?"})`
+      );
+      return;
+    }
 
     try {
       // Approver gate: SLACK_APPROVER_USERS, falling back to SLACK_ONCALL_USERS.
@@ -519,8 +544,12 @@ export class SlackApp {
       }
     } catch (err) {
       const msg = `⚠️ Remediation handling failed: ${err instanceof Error ? err.message : String(err)}`;
-      logger.error(`[remediation] ${msg}`);
-      await client.chat.update({ channel, ts: messageTs, text: msg, blocks: remediationStatusBlocks(msg) }).catch(() => {});
+      logger.error(`[remediation] ${errDetail(err)}`);
+      // if this update is swallowed the card stays frozen mid-flight and the operator has
+      // no way to tell whether the action ran — say so in the log at least
+      await client.chat
+        .update({ channel, ts: messageTs, text: msg, blocks: remediationStatusBlocks(msg) })
+        .catch((e) => logger.error(`[remediation] card ${messageTs} left showing a stale state — update failed: ${errDetail(e)}`));
     }
   }
 
@@ -540,7 +569,7 @@ export class SlackApp {
         mrkdwn: true,
       });
     } catch (err) {
-      logger.error(`[remediation] status check failed for ${target.namespace}/${target.name}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[remediation] status check failed for ${target.namespace}/${target.name}: ${errDetail(err)}`);
     }
   }
 
