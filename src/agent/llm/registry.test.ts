@@ -124,3 +124,34 @@ test("buildBackends maps names to configured client instances", () => {
   assert.ok(m.get("or") instanceof OpenAICompatibleClient);
   assert.equal((m.get("or") as OpenAICompatibleClient).model, "qwen/qwen3-235b");
 });
+
+test("rejects a backend in both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT", () => {
+  assert.throws(
+    () => parseRegistry({ ...valid, LLM_ROUTE_LIGHT: "qwen,opus" }),
+    /opus.*both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT/
+  );
+});
+
+test("rejects a duplicate within LLM_ROUTE_HEAVY", () => {
+  assert.throws(
+    () => parseRegistry({ ...valid, LLM_ROUTE_HEAVY: "opus,or,opus" }),
+    /opus.*repeated in LLM_ROUTE_HEAVY/
+  );
+});
+
+test("rejects a duplicate within LLM_ROUTE_LIGHT", () => {
+  const env = {
+    LLM_BACKEND_1_NAME: "a",
+    LLM_BACKEND_1_KIND: "private-llm",
+    LLM_BACKEND_2_NAME: "b",
+    LLM_BACKEND_2_KIND: "private-llm",
+    LLM_BACKEND_3_NAME: "c",
+    LLM_BACKEND_3_KIND: "private-llm",
+    LLM_ROUTE_HEAVY: "a",
+    LLM_ROUTE_LIGHT: "b,c,b",
+  } satisfies NodeJS.ProcessEnv;
+  assert.throws(
+    () => parseRegistry(env),
+    /b.*repeated in LLM_ROUTE_LIGHT/
+  );
+});

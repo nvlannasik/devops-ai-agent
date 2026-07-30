@@ -102,6 +102,25 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
     }
   }
 
+  // Each backend is tried at most once per chat() call. Overlaps or duplicates violate this.
+  for (const n of heavy) {
+    if (light.includes(n)) {
+      throw new Error(`backend "${n}" appears in both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT`);
+    }
+    const firstIdx = heavy.indexOf(n);
+    const lastIdx = heavy.lastIndexOf(n);
+    if (firstIdx !== lastIdx) {
+      throw new Error(`backend "${n}" is repeated in LLM_ROUTE_HEAVY`);
+    }
+  }
+  for (const n of light) {
+    const firstIdx = light.indexOf(n);
+    const lastIdx = light.lastIndexOf(n);
+    if (firstIdx !== lastIdx) {
+      throw new Error(`backend "${n}" is repeated in LLM_ROUTE_LIGHT`);
+    }
+  }
+
   return { backends, heavy, light };
 }
 

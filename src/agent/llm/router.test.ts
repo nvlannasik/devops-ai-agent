@@ -157,3 +157,43 @@ test("shutdown reaches every backend even when one throws", async () => {
   await new RouterLLMClient(m, ["a", "b"], []).shutdown();
   assert.deepEqual(stopped.sort(), ["a", "b"]);
 });
+
+test("withRoute('heavy') uses the heavy chain and never touches light", async () => {
+  const calls: string[] = [];
+  const r = build(calls, fake(answer("L"), calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  const res = await withRoute("heavy", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["heavy1"]);
+  assert.equal(res.content[0].text, "H");
+  assert.ok(!calls.includes("light1"));
+});
+
+test("two light backends where first fails and second succeeds does NOT set escalated", async () => {
+  const calls: string[] = [];
+  let light1CallCount = 0;
+  const light1: LLMClient = {
+    async chat() {
+      calls.push("light1");
+      light1CallCount++;
+      if (light1CallCount === 1) throw new Error("transient failure");
+      return answer("L1");
+    },
+  };
+  const light2 = fake(answer("L2"), calls, "light2");
+  const heavy1 = fake(answer("H"), calls, "heavy1");
+
+  const m = new Map<string, LLMClient>([["light1", light1], ["light2", light2], ["heavy1", heavy1]]);
+  const r = new RouterLLMClient(m, ["heavy1"], ["light1", "light2"]);
+
+  await withRoute("light", async () => {
+    // First call: light1 fails, light2 succeeds. This is a lateral hop within light tier.
+    const res1 = await r.chat([], [], "sys");
+    assert.deepEqual(calls, ["light1", "light2"]);
+    assert.equal(res1.content[0].text, "L2");
+
+    // Second call in same context: escalation was NOT set (it was a lateral hop, not a tier crossing),
+    // so we try light1 first again. This time it succeeds.
+    const res2 = await r.chat([], [], "sys");
+    assert.deepEqual(calls, ["light1", "light2", "light1"]);
+    assert.equal(res2.content[0].text, "L1");
+  });
+});
