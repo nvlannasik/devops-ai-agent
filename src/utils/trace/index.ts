@@ -16,3 +16,22 @@ export const traceSuffix = (): string => {
   const id = store.getStore();
   return id ? ` trace=${id}` : "";
 };
+
+// Workload class for the LLM router, carried the same way and for the same reason as the
+// trace id above: adding a parameter to LLMClient.chat() would grow 3 implementations and
+// every call site for a concern none of them own. `escalated` is mutable on purpose — once
+// one call in an investigation falls up to the heavy tier, the rest skip the light tier
+// instead of paying a failed attempt per round.
+export type LlmRoute = "heavy" | "light";
+
+export interface RouteContext {
+  route: LlmRoute;
+  escalated: boolean;
+}
+
+const routeStore = new AsyncLocalStorage<RouteContext>();
+
+export const withRoute = <T>(route: LlmRoute, fn: () => Promise<T>): Promise<T> =>
+  routeStore.run({ route, escalated: false }, fn);
+
+export const currentRouteContext = (): RouteContext | undefined => routeStore.getStore();
