@@ -28,10 +28,12 @@ test("parses indexed backends and routes", () => {
   assert.equal(r.backends[1].baseUrl, "https://openrouter.ai/api/v1");
 });
 
-test("stops at the first gap in the index", () => {
+test("rejects a gap in the index", () => {
   const { LLM_BACKEND_2_NAME, ...gapped } = valid;
-  const r = parseRegistry({ ...gapped, LLM_ROUTE_HEAVY: "opus", LLM_ROUTE_LIGHT: "" });
-  assert.deepEqual(r.backends.map((b) => b.name), ["opus"]);
+  assert.throws(
+    () => parseRegistry({ ...gapped, LLM_ROUTE_HEAVY: "opus,qwen", LLM_ROUTE_LIGHT: "" }),
+    /LLM_BACKEND_3_NAME is set but LLM_BACKEND_2_NAME is missing/
+  );
 });
 
 test("LLM_ROUTE_LIGHT is optional", () => {
@@ -83,6 +85,35 @@ test("rejects a route naming an unregistered backend", () => {
 
 test("rejects an empty registry", () => {
   assert.throws(() => parseRegistry({ LLM_ROUTE_HEAVY: "opus" }), /LLM_BACKEND_1_NAME/);
+});
+
+test("rejects whitespace-only KEY (e.g. trailing newline from Secret)", () => {
+  assert.throws(() => parseRegistry({ ...valid, LLM_BACKEND_1_KEY: "  \n  " }), /LLM_BACKEND_1_KEY/);
+});
+
+test("parses 20 contiguous backends (upper bound reachable)", () => {
+  const env: NodeJS.ProcessEnv = { LLM_ROUTE_HEAVY: "" };
+  for (let i = 1; i <= 20; i++) {
+    env[`LLM_BACKEND_${i}_NAME`] = `backend${i}`;
+    env[`LLM_BACKEND_${i}_KIND`] = "private-llm";
+    if (i === 1) env.LLM_ROUTE_HEAVY = "backend1";
+  }
+  const r = parseRegistry(env);
+  assert.equal(r.backends.length, 20);
+  assert.equal(r.backends[19].name, "backend20");
+});
+
+test("ignores backends beyond index 20", () => {
+  const env: NodeJS.ProcessEnv = {
+    LLM_BACKEND_1_NAME: "first",
+    LLM_BACKEND_1_KIND: "private-llm",
+    LLM_BACKEND_21_NAME: "beyond",
+    LLM_BACKEND_21_KIND: "private-llm",
+    LLM_ROUTE_HEAVY: "first",
+  };
+  const r = parseRegistry(env);
+  assert.equal(r.backends.length, 1);
+  assert.equal(r.backends[0].name, "first");
 });
 
 test("buildBackends maps names to configured client instances", () => {

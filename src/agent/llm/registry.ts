@@ -50,9 +50,23 @@ function assertFields(spec: BackendSpec, i: number): void {
 // that refuses to start, not as the first alert of the day failing.
 export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
   const backends: BackendSpec[] = [];
-  for (let i = 1; ; i++) {
+  let lastSetIndex = 0;
+
+  // Scan indices 1–20. Enforce contiguity: a missing NAME between two defined ones is an error
+  // (most likely a copy/paste mistake or deleted middle entry). Contiguity is caught deliberately
+  // so misconfigured indices fail at pod boot, not when first invoked.
+  for (let i = 1; i <= 20; i++) {
     const name = env[`LLM_BACKEND_${i}_NAME`]?.trim();
-    if (!name) break;
+    if (!name) {
+      continue;
+    }
+    if (i > lastSetIndex + 1) {
+      throw new Error(
+        `LLM_BACKEND_${i}_NAME is set but LLM_BACKEND_${lastSetIndex + 1}_NAME is missing — backend indices must be contiguous starting at 1`
+      );
+    }
+    lastSetIndex = i;
+
     const kind = env[`LLM_BACKEND_${i}_KIND`]?.trim() as BackendKind | undefined;
     if (!kind || !KINDS.includes(kind)) {
       throw new Error(
@@ -65,9 +79,9 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
     const spec: BackendSpec = {
       name,
       kind,
-      model: env[`LLM_BACKEND_${i}_MODEL`],
-      baseUrl: env[`LLM_BACKEND_${i}_BASE_URL`],
-      apiKey: env[`LLM_BACKEND_${i}_KEY`],
+      model: env[`LLM_BACKEND_${i}_MODEL`]?.trim(),
+      baseUrl: env[`LLM_BACKEND_${i}_BASE_URL`]?.trim(),
+      apiKey: env[`LLM_BACKEND_${i}_KEY`]?.trim(),
     };
     assertFields(spec, i);
     backends.push(spec);
