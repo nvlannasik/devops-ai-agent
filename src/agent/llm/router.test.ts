@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RouterLLMClient } from "./router.js";
 import { withRoute } from "../../utils/trace/index.js";
-import type { LLMClient, LLMResponse } from "./types.js";
+import type { LLMClient, LLMResponse, Message } from "./types.js";
 
 // A fake backend is a plain object — that is the whole point of injecting the map.
 function fake(res: LLMResponse | (() => never), calls: string[], name: string): LLMClient {
@@ -165,6 +165,53 @@ test("withRoute('heavy') uses the heavy chain and never touches light", async ()
   assert.deepEqual(calls, ["heavy1"]);
   assert.equal(res.content[0].text, "H");
   assert.ok(!calls.includes("light1"));
+});
+
+// Production runs up to MAX_CONCURRENT_INVESTIGATIONS flows against ONE RouterLLMClient.
+// Every other test here is sequential, so a module-level `{route, escalated}` singleton would
+// pass all of them. This one interleaves two flows on purpose: A escalates, then B must still
+// start at its light backend. With shared state, B's second call skips light and this fails.
+test("escalation in one flow does not leak into a concurrent one", async () => {
+  const calls: string[] = [];
+  const aEscalated = Promise.withResolvers<void>();
+  const bStarted = Promise.withResolvers<void>();
+  const flowOf = (messages: Message[]) => messages[0].content as string;
+
+  const light: LLMClient = {
+    async chat(messages) {
+      const flow = flowOf(messages);
+      calls.push(`light:${flow}`);
+      if (flow === "A") throw new Error("light down for A");
+      return answer(`L-${flow}`);
+    },
+  };
+  const heavy: LLMClient = {
+    async chat(messages) {
+      calls.push(`heavy:${flowOf(messages)}`);
+      return answer(`H-${flowOf(messages)}`);
+    },
+  };
+  const m = new Map<string, LLMClient>([["light1", light], ["heavy1", heavy]]);
+  const r = new RouterLLMClient(m, ["heavy1"], ["light1"]);
+  const say = (flow: string) => r.chat([{ role: "user", content: flow }], [], "sys");
+
+  await Promise.all([
+    withRoute("light", async () => {
+      await say("A"); // light fails -> heavy; escalated = true for THIS context only
+      aEscalated.resolve();
+      await bStarted.promise;
+      await say("A"); // sticky: straight to heavy
+    }),
+    withRoute("light", async () => {
+      await aEscalated.promise;
+      await say("B"); // light succeeds
+      bStarted.resolve();
+      await say("B"); // must STILL try light — A's escalation is not ours
+    }),
+  ]);
+
+  assert.deepEqual(calls.filter((c) => c.endsWith(":A")), ["light:A", "heavy:A", "heavy:A"]);
+  assert.deepEqual(calls.filter((c) => c.endsWith(":B")), ["light:B", "light:B"]);
 });
 
 test("two light backends where first fails and second succeeds does NOT set escalated", async () => {

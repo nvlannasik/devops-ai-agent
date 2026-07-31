@@ -2,12 +2,14 @@ import logger, { errDetail } from "../../utils/logger/index.js";
 import { currentRouteContext, traceSuffix } from "../../utils/trace/index.js";
 import type { ContentBlock, LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
 
-// Same detector as the one in agent/index.ts. Its meaning is NOT "the model is weak" — the
-// garbled JSON once seen in Slack was our own bug (JSON.stringify over content blocks in
-// toOpenAIMessages, since fixed). Today it means this backend's tool-call channel is dead:
-// either our translation regressed, or the backend runs without a tool-call parser
+// A model echoing our own content-block JSON back as prose. Its meaning is NOT "the model is
+// weak" — the garbled JSON once seen in Slack was our own bug (JSON.stringify over content
+// blocks in toOpenAIMessages, since fixed). Today it means this backend's tool-call channel is
+// dead: either our translation regressed, or the backend runs without a tool-call parser
 // (e.g. vLLM without --enable-auto-tool-choice --tool-call-parser).
-const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
+// Also used by agent/index.ts to log the same symptom on the final answer — one detector, so
+// the two cannot drift apart.
+export const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
 
 const textOf = (content: ContentBlock[]): string =>
   content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
@@ -43,7 +45,8 @@ export class RouterLLMClient implements LLMClient {
 
   // Failover is one-directional: light may escalate into heavy, heavy never descends into
   // light. Lateral failover between strong backends is preserved because that is not a
-  // capability downgrade. See DESIGN doc §7 before making this bidirectional.
+  // capability downgrade. Read docs/superpowers/specs/2026-07-30-llm-router-design.md §7
+  // before making this bidirectional.
   private chain(): { names: string[]; route: "heavy" | "light" } {
     const ctx = currentRouteContext();
     if (!ctx || ctx.route === "heavy" || ctx.escalated) return { names: this.heavy, route: "heavy" };

@@ -309,16 +309,22 @@ model is a visible outage — it throws, the investigation fails loudly, someone
 weak model answering a complex investigation may not throw at all — it can return a confident, wrong
 RCA that gets posted straight to Slack, and nobody notices until the fix doesn't work. Falling up
 trades an outage for a slower answer; falling down would trade a visible failure for an invisible
-one. This is enforced by `router.test.ts`'s "heavy throws → the error propagates and light is never
-called" case — without a test asserting it, the rule lives only in this document and the next person
-who finds bidirectional failover "more robust" will change it with nothing objecting.
+one. This is enforced by `router.test.ts`'s "a throwing heavy backend propagates and NEVER falls down
+to light" case, plus "withRoute('heavy') uses the heavy chain and never touches light" — without
+tests asserting it, the rule lives only in this document and the next person who finds bidirectional
+failover "more robust" will change it with nothing objecting.
 
 **Stickiness.** Each backend is tried at most once per `chat()` call — the underlying clients already
-retry/backoff on their own, stacking router-level retries would only slow the failure down. Once one
-call in an investigation crosses from light into the heavy tier, `ctx.escalated` flips true on the
-shared route context and every remaining call in that investigation skips the light tier entirely,
-going straight to heavy. Without this a multi-round investigation against a dead light backend would
-pay one wasted light attempt per round.
+retry/backoff on their own, stacking router-level retries would only slow the failure down (route
+lists may not overlap; `parseRegistry` rejects a name appearing in both). `ctx.escalated` flips true
+only when a call **succeeds on a backend past the end of the light list** — i.e. it actually crossed
+into the heavy tier. A lateral hop within light (`light1` fails, `light2` answers) does not set it,
+and neither does a chain that exhausts entirely, so the next call re-pays the light attempt. Once
+set, every remaining call in that investigation skips the light tier and goes straight to heavy;
+without it a multi-round investigation against a dead light backend would pay one wasted light
+attempt per round. The context lives in `AsyncLocalStorage`, so concurrent investigations sharing the
+one `RouterLLMClient` never see each other's flag — asserted by "escalation in one flow does not leak
+into a concurrent one", the only test that fails if the context is replaced by a module-level object.
 
 **Boot-time validation.** `parseRegistry` runs once at startup inside `createLLMClient()`, not lazily
 on first request — an env-var typo (bad `KIND`, missing required field, duplicate name, a route
@@ -326,7 +332,16 @@ naming an unregistered backend, empty `LLM_ROUTE_HEAVY`) throws and stops the po
 shows up as a pod that won't come up rather than the first alert of the day silently misrouting.
 `RouterLLMClient.shutdown()` calls every registered backend's optional `shutdown()` with
 `Promise.allSettled` — one failing backend (e.g. `SQSLLMClient`'s queue teardown) can't leak the
-others on restart.
+others on restart. `createLLMClient()` also rejects an unknown `LLM_PROVIDER` instead of falling
+through to `claude` — same rule, so `LLM_PROVIDER=rooter` stops the pod rather than quietly running
+on a provider nobody selected.
+
+**Per-backend knobs are name, kind, model, base URL and key — nothing else.** A backend has no own
+`maxTokens`: `MAX_TOKENS` stays global (`config.llm.maxTokens`) and applies to every `claude` and
+`openai-compatible` backend alike, while a `private-llm` backend gets its ceiling from the
+llm-worker's own `LLM_MAX_TOKENS`. Adding a new public backend (DeepSeek, Mistral, an OpenRouter
+entry) is therefore three env vars plus a key, with no code change — but if two of them need
+different output ceilings, `MAX_TOKENS` is the thing that has to grow a per-index override first.
 
 Spec: `docs/superpowers/specs/2026-07-30-llm-router-design.md`.
 

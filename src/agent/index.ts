@@ -1,4 +1,5 @@
 import { createLLMClient } from "./llm/index.js";
+import { SERIALIZED_BLOCKS } from "./llm/router.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -221,7 +222,7 @@ export class DevOpsAgent {
         // A model that echoes our own content-block JSON as prose means its tool-call
         // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
         // Log it here — otherwise the only symptom is a wall of JSON in Slack.
-        if (/^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/.test(summary)) {
+        if (SERIALIZED_BLOCKS.test(summary)) {
           logger.warn(
             `[${threadId}] final answer looks like a serialized content array — the backend is likely ` +
             `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`
