@@ -1,8 +1,9 @@
 # LLM Router — workload routing and one-directional failover
 
 **Date:** 2026-07-30
-**Status:** Implemented on `feat/llm-router` (§1–§9). Wired into the dev overlay but **not deployed** —
-see the deploy precondition in §9 *Manual verification*.
+**Status:** Implemented and merged to `main` (§1–§9). Wired into the dev overlay on the GitOps repo's
+`feat/llm-router` branch, which is **deliberately unmerged** — that repo's `main` is what Flux
+reconciles, so merging it there is the deploy. See the deploy precondition in §9 *Manual verification*.
 **Scope:** `devops-ai-agent` only. No changes to `devops-mcp-server`, `llm-worker`, or the GitOps repo beyond
 env wiring in the agent's HelmRelease.
 
