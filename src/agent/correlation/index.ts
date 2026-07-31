@@ -47,6 +47,17 @@ export function groupIdentity(
 
 const SEVERITY_EMOJI: Record<string, string> = { critical: "🔴", warning: "🟡", info: "🔵" };
 
+// Common rule packs (awesome-prometheus-alerts and friends) template the raw value and a Go
+// map dump onto the end of the description: "\n  VALUE = 2\n  LABELS = map[pod:x uid:y ...]".
+// The map is unreadable in Slack and duplicates the fields rendered below, so cut it here —
+// the labels come back structured on the *Labels:* line, which the LLM reads just as well.
+const ANNOTATION_NOISE = /\n\s*(VALUE|LABELS)\s*=[\s\S]*$/;
+const clean = (s: string): string => s.replace(ANNOTATION_NOISE, "").trim();
+
+// Labels that already have their own field above, plus `uid` — a Kubernetes object UID is
+// unqueryable for a human and for the model, and it changes on every pod restart.
+const OWN_FIELD_LABELS = new Set(["alertname", "severity", "namespace", "pod", "container", "uid"]);
+
 /**
  * Slack text for a firing group. For a single alert this reads like the old per-alert
  * message; for N>1 it lists the affected pods (capped) so the investigation sees every
@@ -67,8 +78,8 @@ export function buildGroupAlertText(
     `🚨 *${alertName}*${n > 1 ? ` — ${n} alerts` : ""}`,
     `*Severity:* ${emoji} \`${severity}\``,
   ];
-  if (ann.summary) lines.push(`*Summary:* ${ann.summary}`);
-  if (ann.description) lines.push(`*Description:* ${ann.description}`);
+  if (ann.summary) lines.push(`*Summary:* ${clean(ann.summary)}`);
+  if (ann.description) lines.push(`*Description:* ${clean(ann.description)}`);
 
   const namespace = groupLabels.namespace ?? alerts[0]?.labels.namespace;
   if (namespace) lines.push(`*Namespace:* \`${namespace}\``);
@@ -82,6 +93,13 @@ export function buildGroupAlertText(
     lines.push(`*Affected pods (${pods.length}):* ${shown}${more}`);
   }
 
+  // Group-wide labels only. For an OOMKill the container is the single most important field
+  // and today it exists only inside the description prose; but a group spanning two different
+  // containers has no one container to name, and commonLabels has already dropped the ones
+  // that differ. groupLabels wins where Alertmanager computed it.
+  const shared = { ...commonLabels(alerts), ...groupLabels };
+  if (shared.container) lines.push(`*Container:* \`${shared.container}\``);
+
   // Number.isFinite drops a malformed startsAt — otherwise NaN reaches new Date().toISOString()
   // and THROWS, which in handleAlert would drop the alert AND leave it dedup-suppressed for 12h.
   const starts = alerts.map((a) => a.startsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
@@ -89,6 +107,15 @@ export function buildGroupAlertText(
     const earliest = Math.min(...starts);
     lines.push(`*Firing since:* \`${new Date(earliest).toISOString()}\` (unix: \`${Math.floor(earliest / 1000)}\`)`);
   }
+
+  // Whatever the fields above didn't cover — cluster, job, instance, and anything relabeling
+  // added. This is what the stripped LABELS map carried, minus the duplication: the model
+  // still gets the full label set to query on. Sorted so the same alert always renders the
+  // same text regardless of label insertion order.
+  const rest = Object.entries(shared)
+    .filter(([k, v]) => v && !OWN_FIELD_LABELS.has(k))
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (rest.length > 0) lines.push(`*Labels:* ${rest.map(([k, v]) => `\`${k}=${v}\``).join(" ")}`);
 
   return lines.join("\n");
 }

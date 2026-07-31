@@ -141,6 +141,17 @@ N crashlooping pods used to spawn N threads / N investigations / N remediation c
 - `buildGroupAlertText` lists the affected pods (capped at 10, `+N more`) in the issue text so
   the investigation sees every target; the identity labels drop `pod` for a multi-pod group, so
   the pod list in the **text** is how the agent learns which pods to `describe_pod`.
+- **Its output has two readers: Slack and the LLM.** `app/index.ts` posts the string *and* feeds
+  the same string to `investigate()` — so nothing may be dropped for looking ugly, only
+  re-rendered. That is the rule behind the annotation cleanup: rule packs template
+  `\n VALUE = …\n LABELS = map[…]` onto the description, and the Go map is cut (`ANNOTATION_NOISE`)
+  only because a sorted `*Labels:*` line puts the same labels back in a readable form. `container`
+  is promoted to its own field — for an OOMKill it is the most important field and used to exist
+  only inside the prose — and is rendered from `commonLabels`, so a group spanning two containers
+  shows none rather than the first one's. Labels already rendered as fields are excluded, plus
+  `uid` (unqueryable, changes every restart). Summary/description prose is otherwise left alone:
+  stripping the `(instance …)` suffix would need parenthesis heuristics, and `instance` is the
+  node on node-level alerts.
 - Resolved path (`handleResolvedAlert(groupLabels, resolved)`): a group with **no firing alerts
   left** runs the resolved loop once (clear dedup + `resolveIncident` + ✅). A mixed payload with
   any firing alert is still treated as an active group.

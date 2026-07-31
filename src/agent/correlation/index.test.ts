@@ -81,3 +81,70 @@ test("buildGroupAlertText caps the pod list at 10 with a +N more suffix", () => 
   assert.match(text, /\*Affected pods \(14\):\*/);
   assert.match(text, /\+4 more/);
 });
+
+// The real KubernetesContainerOomKiller payload that motivated this: the rule templates a raw
+// value and a Go map onto the description, and the container — the field that matters most for
+// an OOMKill — was reachable only by reading that map or the prose.
+const oomLabels = {
+  alertname: "KubernetesContainerOomKiller",
+  cluster_name: "kubernetes-cluster-dev",
+  container: "frr",
+  instance: "kube-state-metrics.kube-system.svc.cluster.local:8080",
+  job: "kube-state-metrics",
+  namespace: "metallb-system",
+  pod: "metallb-frr-k8s-tzllj",
+  severity: "warning",
+  uid: "53f79bfc-74e0-499f-8086-3240f8061926",
+};
+const oomAlert = alert(oomLabels, {
+  startsAt: "2026-07-28T23:48:28.872Z",
+  annotations: {
+    summary: "Kubernetes Container oom killer (instance kube-state-metrics.kube-system.svc.cluster.local:8080)",
+    description:
+      "Container frr in pod metallb-system/metallb-frr-k8s-tzllj has been OOMKilled 2 times in the last 10 minutes.\n" +
+      "  VALUE = 2\n" +
+      "  LABELS = map[cluster_name:kubernetes-cluster-dev container:frr instance:kube-state-metrics.kube-system.svc.cluster.local:8080 job:kube-state-metrics namespace:metallb-system pod:metallb-frr-k8s-tzllj uid:53f79bfc-74e0-499f-8086-3240f8061926]",
+  },
+});
+
+test("buildGroupAlertText strips the templated VALUE/LABELS tail from the description", () => {
+  const text = buildGroupAlertText(oomLabels, [oomAlert]);
+  assert.doesNotMatch(text, /VALUE =/);
+  assert.doesNotMatch(text, /map\[/);
+  // the sentence before the tail survives intact
+  assert.match(text, /\*Description:\* Container frr in pod metallb-system\/metallb-frr-k8s-tzllj has been OOMKilled 2 times in the last 10 minutes\.$/m);
+});
+
+test("buildGroupAlertText promotes container to its own field", () => {
+  assert.match(buildGroupAlertText(oomLabels, [oomAlert]), /\*Container:\* `frr`/);
+});
+
+test("buildGroupAlertText renders leftover labels sorted, without the ones already shown", () => {
+  const text = buildGroupAlertText(oomLabels, [oomAlert]);
+  const line = text.split("\n").find((l) => l.startsWith("*Labels:*"));
+  assert.equal(
+    line,
+    "*Labels:* `cluster_name=kubernetes-cluster-dev` " +
+      "`instance=kube-state-metrics.kube-system.svc.cluster.local:8080` `job=kube-state-metrics`"
+  );
+  // uid is unqueryable and changes every restart; the rest already have their own field
+  for (const dup of ["uid=", "pod=", "namespace=", "container=", "severity=", "alertname="]) {
+    assert.ok(!line!.includes(dup), `${dup} should not be repeated on the Labels line`);
+  }
+});
+
+test("buildGroupAlertText omits Container when the group spans more than one", () => {
+  const two = [
+    alert({ alertname: "X", namespace: "prod", severity: "warning", pod: "p-a", container: "frr" }),
+    alert({ alertname: "X", namespace: "prod", severity: "warning", pod: "p-b", container: "speaker" }),
+  ];
+  const text = buildGroupAlertText({ alertname: "X", namespace: "prod", severity: "warning" }, two);
+  assert.doesNotMatch(text, /\*Container:\*/);
+  assert.match(text, /\*Affected pods \(2\):\*/);
+});
+
+test("buildGroupAlertText omits the Labels line when nothing is left over", () => {
+  const bare = alert({ alertname: "X", namespace: "prod", severity: "warning", pod: "p" });
+  const text = buildGroupAlertText({ alertname: "X", namespace: "prod", severity: "warning" }, [bare]);
+  assert.doesNotMatch(text, /\*Labels:\*/);
+});
