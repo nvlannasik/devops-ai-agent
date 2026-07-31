@@ -1,4 +1,5 @@
 import { createLLMClient } from "./llm/index.js";
+import { SERIALIZED_BLOCKS } from "./llm/router.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -19,7 +20,7 @@ import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
-import { withTrace } from "../utils/trace/index.js";
+import { withRoute, withTrace } from "../utils/trace/index.js";
 
 const MAX_ITERATIONS = 10;
 // conversation mode: max distinct pods whose logs may be fetched in one round — a generic
@@ -221,7 +222,7 @@ export class DevOpsAgent {
         // A model that echoes our own content-block JSON as prose means its tool-call
         // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
         // Log it here — otherwise the only symptom is a wall of JSON in Slack.
-        if (/^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/.test(summary)) {
+        if (SERIALIZED_BLOCKS.test(summary)) {
           logger.warn(
             `[${threadId}] final answer looks like a serialized content array — the backend is likely ` +
             `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`
@@ -680,24 +681,26 @@ export class DevOpsAgent {
   // an RCA-shaped reply into a plain conversational answer. Deliberately uses a minimal
   // system prompt — the full one is what primes the RCA structure we're removing.
   async reformatToConversation(text: string): Promise<string> {
-    const response = await this.llm.chat(
-      [
-        {
-          role: "user",
-          content:
-            "Rewrite this as a short conversational Slack answer (mrkdwn), at most ~10 short lines. Keep the facts and any log excerpts. " +
-            "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions/plans, risks, impact, confidence). " +
-            "Remove kubectl/helm command instructions entirely — execution happens via the approval card, never via the user's terminal. " +
-            'Remove any "do you want me to proceed" style closing question — if a change was requested, an approval card or a refusal follows this message automatically. ' +
-            "End with at most one short offer to investigate if something looked genuinely wrong.\n\n---\n\n" +
-            text,
-        },
-      ],
-      [],
-      "You reformat DevOps chatbot replies for Slack. Output only the rewritten reply in Slack mrkdwn."
-    );
-    const out = this.extractText(response.content);
-    return out || text;
+    return withRoute("light", async () => {
+      const response = await this.llm.chat(
+        [
+          {
+            role: "user",
+            content:
+              "Rewrite this as a short conversational Slack answer (mrkdwn), at most ~10 short lines. Keep the facts and any log excerpts. " +
+              "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions/plans, risks, impact, confidence). " +
+              "Remove kubectl/helm command instructions entirely — execution happens via the approval card, never via the user's terminal. " +
+              'Remove any "do you want me to proceed" style closing question — if a change was requested, an approval card or a refusal follows this message automatically. ' +
+              "End with at most one short offer to investigate if something looked genuinely wrong.\n\n---\n\n" +
+              text,
+          },
+        ],
+        [],
+        "You reformat DevOps chatbot replies for Slack. Output only the rewritten reply in Slack mrkdwn."
+      );
+      const out = this.extractText(response.content);
+      return out || text;
+    });
   }
 
   // Remediation lifecycle events (card posted / refused / executed) happen OUTSIDE the
