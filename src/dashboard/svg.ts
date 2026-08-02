@@ -7,9 +7,10 @@ export interface Point {
 
 // A hand-rolled bar chart. Forty lines beats a charting dependency for one chart, and it
 // renders server-side so the page needs no JavaScript at all.
-export function barChart(points: Point[], opts: { width?: number; height?: number } = {}): string {
+export function barChart(points: Point[], opts: { width?: number; height?: number; label?: string } = {}): string {
   const w = opts.width ?? 720;
   const h = opts.height ?? 180;
+  const chartLabel = opts.label ?? "chart";
   const pad = { top: 8, right: 8, bottom: 22, left: 8 };
   const plotH = h - pad.top - pad.bottom;
   const plotW = w - pad.left - pad.right;
@@ -31,11 +32,11 @@ export function barChart(points: Point[], opts: { width?: number; height?: numbe
       const y = pad.top + plotH - barH;
       return (
         `<rect x="${x}" y="${y}" width="${Math.round(barW)}" height="${barH}" rx="2" class="chart-bar">` +
-        `<title>${esc(p.label)}: ${p.value}</title></rect>` +
+        `<title>${esc(p.label)}: ${esc(p.value)}</title></rect>` +
         `<text x="${Math.round(x + barW / 2)}" y="${h - 6}" class="chart-label" text-anchor="middle">${esc(p.label)}</text>`
       );
     })
     .join("");
 
-  return `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="incidents per week">${bars}</svg>`;
+  return `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="${chartLabel}">${bars}</svg>`;
 }

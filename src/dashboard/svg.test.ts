@@ -30,3 +30,12 @@ test("barChart survives a single point and an all-zero series", () => {
 test("barChart escapes its labels", () => {
   assert.match(barChart([{ label: `<b>`, value: 1 }]), /&lt;b&gt;/);
 });
+
+test("barChart escapes string values (e.g. from Postgres int8)", () => {
+  // Postgres bigint/int8 columns are returned as strings at runtime, even though
+  // TypeScript says number. This test verifies defense-in-depth escaping.
+  const stringValue = "<script>alert(1)</script>" as unknown as number;
+  const svg = barChart([{ label: "malicious", value: stringValue }]);
+  assert.match(svg, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(svg, /<script>/);
+});
