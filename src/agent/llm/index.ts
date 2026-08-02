@@ -15,7 +15,10 @@ export function createLLMClient(): LLMClient {
       // parseRegistry throws on a bad registry, and this runs at boot — an env-var typo must
       // stop the pod, not the first alert of the day.
       const { backends, heavy, light } = parseRegistry(process.env);
-      return new RouterLLMClient(buildBackends(backends), heavy, light);
+      // name -> configured model, so the router can attribute each response to the model
+      // that actually answered (LLM_BACKEND_<N>_MODEL never reaches `config`, only here).
+      const models = new Map(backends.map((b) => [b.name, b.model]));
+      return new RouterLLMClient(buildBackends(backends), heavy, light, models);
     }
     case "openai-compatible":
       return new OpenAICompatibleClient();

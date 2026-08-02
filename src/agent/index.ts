@@ -198,7 +198,7 @@ export class DevOpsAgent {
           threadTs: threadId,
           backend: response.backend ?? null,
           route: response.route ?? null,
-          model: config.llm.claude.model ?? null,
+          model: response.model ?? null,
           usage: response.usage,
         });
         logger.debug(
