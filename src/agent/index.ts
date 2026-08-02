@@ -3,6 +3,7 @@ import { SERIALIZED_BLOCKS } from "./llm/router.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
+import { UsageStore } from "./usage/index.js";
 import { createPool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
@@ -46,6 +47,7 @@ export class DevOpsAgent {
   private mcp: MCPClient;
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
+  private usage: UsageStore;
   private remediations: RemediationStore;
   private gitops: SqsGitOpsClient | null;
 
@@ -54,6 +56,7 @@ export class DevOpsAgent {
     this.mcp = new MCPClient();
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
+    this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
     this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
   }
@@ -72,7 +75,8 @@ export class DevOpsAgent {
       const pool = createPool();
       pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
       await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
-      this.incidents = new IncidentMemory(pool);
+      this.usage = new UsageStore(pool);
+      this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
@@ -190,6 +194,13 @@ export class DevOpsAgent {
 
       if (response.usage) {
         totalUsage = addUsage(totalUsage, response.usage);
+        void this.usage.record({
+          threadTs: threadId,
+          backend: response.backend ?? null,
+          route: response.route ?? null,
+          model: config.llm.claude.model ?? null,
+          usage: response.usage,
+        });
         logger.debug(
           `[${threadId}] LLM #${iterations} ${llmMs}ms | ` +
           `in=${response.usage.inputTokens} out=${response.usage.outputTokens} ` +

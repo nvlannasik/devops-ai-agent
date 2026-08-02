@@ -68,7 +68,7 @@ export class RouterLLMClient implements LLMClient {
         if (!failure) {
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop
           if (route === "light" && i >= this.light.length && ctx) ctx.escalated = true;
-          return res;
+          return { ...res, backend: name, route };
         }
         if (failure.toolChannelDead) {
           logger.warn(

@@ -43,6 +43,10 @@ export interface LLMResponse {
   content: ContentBlock[];
   stopReason: "end_turn" | "tool_use" | "max_tokens";
   usage?: TokenUsage;
+  // Which registered backend answered, and on which chain. Set only by RouterLLMClient —
+  // the direct providers leave these undefined, and llm_usage stores NULL for them.
+  backend?: string;
+  route?: "light" | "heavy";
 }
 
 export interface LLMClient {
