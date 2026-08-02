@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { UsageStore } from "./index.js";
+import logger from "../../utils/logger/index.js";
 
 type Call = { sql: string; params: unknown[] };
 const stubPool = (calls: Call[], fail = false) =>
@@ -49,13 +50,19 @@ test("a failing insert is swallowed, never thrown", async () => {
   );
 });
 
-test("no pool configured is a no-op, not a crash", async () => {
+// `assert.doesNotReject` alone can't tell "correctly skipped" apart from "attempted and
+// swallowed": with pool=null, calling `this.pool.query(...)` would throw a TypeError that
+// record()'s own try/catch catches and logs via logger.warn — same non-rejecting outcome.
+// Asserting zero warn calls proves the `if (!this.pool) return;` guard actually ran.
+test("no pool configured is a no-op — no query attempted, nothing logged", async (t) => {
+  const warn = t.mock.method(logger, "warn");
   await assert.doesNotReject(() =>
     new UsageStore(null).record({
       threadTs: "t", backend: null, route: null, model: null,
       usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 },
     })
   );
+  assert.equal(warn.mock.callCount(), 0);
 });
 
 // The backfill must never steal rows from an earlier incident in the same thread,
@@ -66,4 +73,11 @@ test("linkToIncident only claims rows that are not yet linked", async () => {
   assert.match(calls[0].sql, /UPDATE llm_usage/);
   assert.match(calls[0].sql, /incident_id IS NULL/);
   assert.deepEqual(calls[0].params, [42, "1785282508.001"]);
+});
+
+// Same shape, same distinction as record()'s null-pool test above.
+test("linkToIncident: no pool configured is a no-op — no query attempted, nothing logged", async (t) => {
+  const warn = t.mock.method(logger, "warn");
+  await assert.doesNotReject(() => new UsageStore(null).linkToIncident(42, "1785282508.001"));
+  assert.equal(warn.mock.callCount(), 0);
 });

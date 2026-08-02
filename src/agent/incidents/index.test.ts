@@ -51,6 +51,28 @@ test("store returns the inserted id and persists the Slack thread link", async (
   assert.deepEqual(captured!.params.slice(-2), ["C123", "1720.99"]); // channel, thread_ts
 });
 
+test("store fires onStored with the inserted id and thread ts (the usage backfill link)", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "42" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store({ alertname: "X" }, SAMPLE_RCA, { channel: "C123", threadTs: "1720.99" });
+
+  assert.equal(id, 42);
+  assert.deepEqual(calls, [[42, "1720.99"]]);
+});
+
+test("store does NOT fire onStored without a Slack thread — nothing to link", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "42" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store({ alertname: "X" }, SAMPLE_RCA); // no slack argument
+
+  assert.equal(id, 42);
+  assert.deepEqual(calls, []);
+});
+
 test("recall returns '' without an alertname to key on", async () => {
   // a fake pool would never be hit because the alertname guard returns first
   const mem = new IncidentMemory({ query: async () => assert.fail("should not query") } as any);
