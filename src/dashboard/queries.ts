@@ -39,6 +39,11 @@ const WINDOW = "30 days";
 // than e.g. structuredClone-ing on every read) means a consumer that mutates in place —
 // sorts an array, annotates a field — gets a loud TypeError instead of silently
 // corrupting what every other viewer sees for up to 60s. No per-request copy cost.
+//
+// Recurses into children before freezing the parent, with no cycle guard — assumes the
+// object graph is acyclic. True for Overview today (plain data: arrays of records with
+// no self-references); would recurse forever on a cyclic graph, so don't reuse this on
+// a shape that isn't a tree.
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.getOwnPropertyNames(value)) {
