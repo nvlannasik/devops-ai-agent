@@ -30,6 +30,7 @@ Deeper design in `docs/` (e.g. `DESIGN_guarded_remediation.md`).
 - **Cluster/GitOps drift** returns `drift` from the worker instead of a plain refusal; the agent proposes `flux_reconcile` (restore what Git declares), still approval-gated.
 - **Domain guardrail:** `## Scope of Work` in `prompts/system.md` + a scope clause in BOTH per-message markers (`[USER MESSAGE ...]` in `app/index.ts`, `[FOLLOW-UP ...]` in `agent/index.ts`). The prompt section alone doesn't hold on a small model — off-topic asks ("debug this code") got answered. Change all three together.
 - **LLM router:** failover is **up-only** (light → heavy, never the reverse) — a weak model fails by answering confidently, not by throwing. `router.test.ts` is what enforces it. Backends come from indexed `LLM_BACKEND_<N>_*` env vars validated at boot.
+- **Dashboard has no auth by design** (`src/dashboard/`, `DASHBOARD_ENABLED`): the second port is a *network* boundary, not an auth boundary — never add an Ingress rule for it without putting an auth proxy in front. It is also the one component exempt from "a config mistake stops the pod": a failed listener logs and the agent keeps investigating.
 
 ## Working style
 - Chat in Indonesian; keep technical/English terms untranslated. **Docs are written in English.**

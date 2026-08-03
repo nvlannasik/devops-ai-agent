@@ -191,6 +191,26 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 - **Recall = exact label match, no vector DB** (`// ponytail:` add embeddings only if too coarse). Past incidents framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
 
+### Incident Dashboard (`src/dashboard/`, phase 1)
+Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
+default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
+`docs/superpowers/specs/2026-08-03-dashboard-design.md`.
+
+**Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
+one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
+the result is silently lost. Every query carries a `LIMIT` (page size 50, hard cap 200) and the
+overview aggregates are cached for 60s, because with no auth in front a held-down refresh key is
+otherwise unthrottled load on the same event loop that handles alerts.
+
+**Nothing rendered is trusted input.** `rca`/`root_cause` are LLM output and the labels come from
+Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
+security-relevant one in this module.
+
+**`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
+`incident_id` is NULL at insert — the usage rows are written during the investigation, the
+incident row only exists after — and is backfilled by `IncidentMemory.store()` via the
+`onStored` callback. Rows for conversation-mode replies stay NULL forever, which is correct.
+
 ### On-call Feedback Learning (`@agent learn` — trust-tiered memory)
 Design: `docs/DESIGN_oncall_feedback_learning.md`. Two tiers, never flattened:
 **hypothesis** (agent RCA, `incidents`) vs **CONFIRMED** (human, `incident_feedback`).

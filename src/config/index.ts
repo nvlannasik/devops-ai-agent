@@ -109,6 +109,14 @@ export const config = {
     },
   },
 
+  // Read-only incident dashboard on its own port. Off unless asked for — the agent must
+  // be unchanged for anyone not using it. There is no auth: the port simply is not routed
+  // by the Ingress (see docs/superpowers/specs/2026-08-03-dashboard-design.md §3.1).
+  dashboard: {
+    enabled: process.env.DASHBOARD_ENABLED === "true",
+    port: parseInt(process.env.DASHBOARD_PORT ?? "3001"),
+  },
+
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),
 
   // tool-call rounds allowed for plain (non-investigation) mentions before the agent
