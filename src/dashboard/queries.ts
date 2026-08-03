@@ -35,6 +35,20 @@ const CACHE_TTL_MS = 60_000;
 // injection the day someone makes the window configurable
 const WINDOW = "30 days";
 
+// The cache stores one shared object and hands it to every caller. Freezing it (rather
+// than e.g. structuredClone-ing on every read) means a consumer that mutates in place —
+// sorts an array, annotates a field — gets a loud TypeError instead of silently
+// corrupting what every other viewer sees for up to 60s. No per-request copy cost.
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export class DashboardQueries {
   private readonly pool: Pool | null;
   private cache: { at: number; value: Overview } | null = null;
@@ -56,7 +70,11 @@ export class DashboardQueries {
       // enforced by Postgres, so a runaway query dies at the server rather than
       // occupying the event loop that also handles alerts
       this.pool.on("connect", (c) => {
-        void c.query("SET statement_timeout = 3000").catch(() => {});
+        void c.query("SET statement_timeout = 3000").catch((err: unknown) =>
+          logger.warn(
+            `[dashboard] SET statement_timeout failed — connection has no statement_timeout: ${errDetail(err)}`
+          )
+        );
       });
     } else {
       this.pool = null;
@@ -88,18 +106,29 @@ export class DashboardQueries {
         [WINDOW]
       ),
       this.pool.query(
+        // no GROUP BY — this aggregate is always exactly one row. The LIMIT is
+        // redundant here but present anyway: a rule you have to re-derive at each
+        // call site is a rule that erodes; one you can grep for does not.
         `SELECT count(*)::int AS total, count(resolved_at)::int AS resolved
-           FROM incidents WHERE created_at >= now() - $1::interval`,
+           FROM incidents WHERE created_at >= now() - $1::interval
+          LIMIT 1`,
         [WINDOW]
       ),
       this.pool.query(
+        // `status` is plain TEXT with no CHECK constraint, so nothing in the schema
+        // bounds how many distinct values GROUP BY can return. 20 is far above any
+        // realistic status vocabulary (succeeded/failed/pending/...) but still caps
+        // the worst case of a runaway/garbage value column.
         `SELECT status, count(*)::int AS n FROM remediations
-          WHERE created_at >= now() - $1::interval GROUP BY status`,
+          WHERE created_at >= now() - $1::interval GROUP BY status
+          LIMIT 20`,
         [WINDOW]
       ),
       this.pool.query(
+        // same reasoning as remediations.status: `outcome` is unconstrained TEXT.
         `SELECT coalesce(outcome, 'unknown') AS outcome, count(*)::int AS n
-           FROM incident_feedback WHERE created_at >= now() - $1::interval GROUP BY 1`,
+           FROM incident_feedback WHERE created_at >= now() - $1::interval GROUP BY 1
+          LIMIT 20`,
         [WINDOW]
       ),
     ]);
@@ -114,8 +143,8 @@ export class DashboardQueries {
       remediationFailed: byStatus.failed ?? 0,
       feedback: Object.fromEntries(feedback.rows.map((r: any) => [r.outcome, r.n])),
     };
-    this.cache = { at: Date.now(), value };
-    return value;
+    this.cache = { at: Date.now(), value: deepFreeze(value) };
+    return this.cache.value;
   }
 
   async list(f: Filters): Promise<{ rows: IncidentRow[]; hasMore: boolean }> {
@@ -142,9 +171,12 @@ export class DashboardQueries {
   async detail(id: number) {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
+      // filtered on the primary key, so this is already at most one row — the LIMIT
+      // is redundant but present for the same reason as the totals query above.
       `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence,
               root_cause, rca, channel, thread_ts
-         FROM incidents WHERE id = $1`,
+         FROM incidents WHERE id = $1
+        LIMIT 1`,
       [id]
     );
     if (rows.length === 0) return null;

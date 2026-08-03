@@ -33,6 +33,47 @@ test("list reports hasMore and trims the extra row back off", async () => {
   assert.equal(out.rows.length, 50);
 });
 
+// The two tests above are each individually satisfiable by a regression that breaks the
+// other half: a stub with a fixed row count doesn't notice if the "+1" stops being
+// requested, and a params check doesn't notice if the trim-back-to-pageSize stops
+// happening. This stub actually honours limit/offset, so it pins over-fetch and trim
+// *together* across three shapes: more rows exist beyond the page, fewer rows exist
+// than a full page, and exactly one page's worth exists (the edge case: hasMore must
+// be false even though pageSize+1 was requested).
+const poolWithAvailableRows = (total: number) =>
+  ({
+    query: async (_sql: string, params: unknown[] = []) => {
+      const limit = params.at(-2) as number;
+      const offset = params.at(-1) as number;
+      const n = Math.max(0, Math.min(limit, total - offset));
+      return { rows: Array.from({ length: n }, (_, i) => ({ id: offset + i })) };
+    },
+    end: async () => {},
+    on: () => {},
+  }) as never;
+
+test("list composes over-fetch and trim together: full page, partial page, exactly-one-page", async () => {
+  const pageSize = 50;
+
+  const full = await new DashboardQueries(poolWithAvailableRows(120)).list(
+    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
+  );
+  assert.equal(full.rows.length, pageSize);
+  assert.equal(full.hasMore, true);
+
+  const partial = await new DashboardQueries(poolWithAvailableRows(30)).list(
+    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
+  );
+  assert.equal(partial.rows.length, 30);
+  assert.equal(partial.hasMore, false);
+
+  const exactlyOnePage = await new DashboardQueries(poolWithAvailableRows(pageSize)).list(
+    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
+  );
+  assert.equal(exactlyOnePage.rows.length, pageSize);
+  assert.equal(exactlyOnePage.hasMore, false, "exactly pageSize rows available must not report a next page");
+});
+
 test("absent filters become SQL NULLs so the predicate short-circuits", async () => {
   const calls: Call[] = [];
   await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("")));
@@ -70,4 +111,19 @@ test("overview is cached for 60s: a second call issues no new queries", async ()
   const afterFirst = calls.length;
   await q.overview();
   assert.equal(calls.length, afterFirst, "second overview() must be served from cache");
+});
+
+// The cache hands out one shared object. If a consumer (e.g. a render path that sorts
+// or annotates in place) could mutate it, that corruption would be visible to every
+// other viewer for up to 60s. It must be frozen deeply enough that both an array
+// mutation and a top-level field reassignment throw instead of silently succeeding.
+test("overview()'s returned object is deep-frozen: mutating it throws, the cache is not corrupted", async () => {
+  const q = new DashboardQueries(stub([]));
+  const first = await q.overview();
+  assert.throws(() => (first.weekly as unknown[]).push({ label: "x", value: 1 }));
+  assert.throws(() => {
+    (first as { totalIncidents: number }).totalIncidents = 999999;
+  });
+  const second = await q.overview();
+  assert.equal(second.totalIncidents, 0, "the failed mutation must not have reached the cached value");
 });
