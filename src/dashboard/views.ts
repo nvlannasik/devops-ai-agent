@@ -107,7 +107,7 @@ export function listPage(rows: IncidentRow[], f: Filters, hasMore: boolean): str
        <label>Alert<input type="text" name="alertname" value="${esc(f.alertname)}" placeholder="KubePodCrashLooping"></label>
        <label>Namespace<input type="text" name="namespace" value="${esc(f.namespace)}" placeholder="prod"></label>
        <label>Severity<select name="severity">
-         ${sel("", f.severity, "any")}${sel("critical", f.severity, "critical")}${sel("warning", f.severity, "warning")}${sel("info", f.severity, "info")}
+         ${sel("", f.severity ?? "", "any")}${sel("critical", f.severity ?? "", "critical")}${sel("warning", f.severity ?? "", "warning")}${sel("info", f.severity ?? "", "info")}
        </select></label>
        <label>State<select name="resolved">
          ${sel("", f.resolved === null ? "" : String(f.resolved), "any")}
@@ -130,10 +130,13 @@ export function detailPage(d: {
   feedback: FeedbackRow[];
 }): string {
   const i = d.incident;
-  // app_redirect needs no workspace domain, so the deep link costs no configuration
+  // app_redirect needs no workspace domain, so the deep link costs no configuration.
+  // encodeURIComponent() first (safe *inside* the URL — a stray & or # in a component
+  // can't inject a second query param or a fragment), then esc() on the whole string
+  // (safe *inside* the href attribute). Both layers are required; neither is redundant.
   const slack =
     i.channel && i.thread_ts
-      ? `<a href="${esc(`https://slack.com/app_redirect?channel=${i.channel}&message_ts=${i.thread_ts}`)}">Open the Slack thread →</a>`
+      ? `<a href="${esc(`https://slack.com/app_redirect?channel=${encodeURIComponent(i.channel)}&message_ts=${encodeURIComponent(i.thread_ts)}`)}">Open the Slack thread →</a>`
       : "";
 
   const remediations =

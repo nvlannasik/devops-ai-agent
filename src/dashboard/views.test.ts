@@ -60,11 +60,41 @@ test("detailPage omits the Slack link when the incident has no thread", () => {
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /app_redirect/);
 });
 
+// URL-construction defect, not attribute breakout: esc() alone HTML-escapes the whole
+// URL string but never URL-encodes the components, so a raw "&" or "#" from Slack
+// survives into the href, the browser un-escapes "&amp;" back to "&" at click time, and
+// the value grows a second live query parameter (or a fragment) that "wins" over ours.
+test("detailPage URL-encodes channel/thread_ts so an embedded & cannot inject a second query parameter", () => {
+  const incident: IncidentDetail = {
+    ...row, rca: "x", channel: "C123", thread_ts: "1785282508.001&channel=EVILCHAN",
+  };
+  const html = detailPage({ incident, remediations: [], feedback: [] });
+  assert.doesNotMatch(html, /channel=EVILCHAN/);
+  assert.match(html, /message_ts=1785282508\.001%26channel%3DEVILCHAN/);
+});
+
+test("detailPage URL-encodes channel/thread_ts so an embedded # cannot inject a fragment", () => {
+  const incident: IncidentDetail = {
+    ...row, rca: "x", channel: "C123", thread_ts: "1785282508.001#evil",
+  };
+  const html = detailPage({ incident, remediations: [], feedback: [] });
+  assert.doesNotMatch(html, /message_ts=1785282508\.001#evil/);
+  assert.match(html, /message_ts=1785282508\.001%23evil/);
+});
+
 test("listPage keeps the active filters in the form and in the pager link", () => {
   const f = parseFilters(new URLSearchParams("alertname=KubePodCrashLooping&page=2"));
   const html = listPage([row], f, true);
   assert.match(html, /value="KubePodCrashLooping"/);
   assert.match(html, /page=3/);
+});
+
+test("listPage's severity select marks \"any\" selected when no severity filter is set", () => {
+  const f = parseFilters(new URLSearchParams(""));
+  const html = listPage([], f, false);
+  const severityBlock = html.match(/<select name="severity">([\s\S]*?)<\/select>/);
+  assert.ok(severityBlock, "severity select should be present");
+  assert.match(severityBlock![1], /<option value="" selected>any<\/option>/);
 });
 
 test("errorPage states the problem without leaking a stack trace", () => {
