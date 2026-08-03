@@ -14,8 +14,18 @@ export function matchRoute(pathname: string): Route {
   if (p === "" || p === "/") return { kind: "overview" };
   if (p === "/healthz") return { kind: "health" };
   if (p === "/incidents") return { kind: "list" };
-  const m = /^\/incidents\/(\d+)$/.exec(p);
-  if (m) return { kind: "detail", id: Number(m[1]) };
+  // digit count capped at 15: any 15-digit string is < 10^15, safely under
+  // Number.MAX_SAFE_INTEGER (~9.007e15, 16 digits) — so isSafeInteger below is never the
+  // thing doing the rejecting for an in-bound match, it is defense in depth. Without the
+  // cap, a 40-digit id parses to a huge-but-finite float and a 309+ digit id parses to
+  // Infinity — both are "digits only" and would otherwise reach queries.detail(id) as a
+  // bound parameter, where Postgres rejects them as invalid integer input (500) instead
+  // of this being the 404 a nonsense id deserves.
+  const m = /^\/incidents\/(\d{1,15})$/.exec(p);
+  if (m) {
+    const id = Number(m[1]);
+    if (Number.isSafeInteger(id)) return { kind: "detail", id };
+  }
   return { kind: "notfound" };
 }
 
@@ -30,7 +40,21 @@ export class DashboardServer {
   async start(): Promise<void> {
     if (!config.dashboard.enabled) return;
 
-    this.server = http.createServer((req, res) => void this.handle(req, res));
+    this.server = http.createServer((req, res) => {
+      // Backstop, not the primary defense (handle() already catches internally around
+      // both URL parsing and query execution). `handle()` is async and this callback
+      // discards its returned promise — without this .catch, any future edit that adds
+      // a throwing line outside handle()'s own try blocks becomes an unhandled rejection
+      // again, and Node has no process-level handler for one: it kills the whole agent
+      // over a single malformed request. Keep this even though it should never fire.
+      this.handle(req, res).catch((err) => {
+        logger.error(`[dashboard] unhandled error in request handler (agent unaffected): ${errDetail(err)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+          res.end("Internal error");
+        }
+      });
+    });
 
     // Deliberately NOT fatal, unlike the config validation at boot. That rule exists for
     // things that make the agent unable to do its job; a port conflict on a statistics
@@ -61,8 +85,20 @@ export class DashboardServer {
     // read-only by contract: nothing here mutates, so nothing but GET is accepted
     if (req.method !== "GET") return send(405, errorPage("Method not allowed", "This dashboard is read-only."));
 
-    const url = new URL(req.url ?? "/", `http://localhost:${config.dashboard.port}`);
-    const route = matchRoute(url.pathname);
+    let url: URL;
+    let route: Route;
+    try {
+      // `new URL()` needs no I/O to throw: Node's HTTP parser accepts request-targets
+      // (e.g. an absolute-form URI with a malformed authority) that this constructor
+      // rejects with a TypeError — routine internet-scanner noise, no auth bypass needed
+      // since this listener has none. Caught here, deliberately separate from the query
+      // try below, so a parse failure is its own 400 rather than the query layer's 500.
+      url = new URL(req.url ?? "/", `http://localhost:${config.dashboard.port}`);
+      route = matchRoute(url.pathname);
+    } catch (err) {
+      logger.error(`[dashboard] malformed request-target ${req.url ?? "?"}: ${errDetail(err)}`);
+      return send(400, errorPage("Bad request", "The request could not be parsed."));
+    }
 
     if (route.kind === "health") return send(200, "ok", "text/plain; charset=utf-8");
 
