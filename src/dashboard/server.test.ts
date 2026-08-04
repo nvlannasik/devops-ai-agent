@@ -162,3 +162,18 @@ test("start() never rejects, even handed a port that cannot be listened on", asy
   await assert.doesNotReject(() => dashboard.stop());
   dashboardConfig.port = saved;
 });
+
+test("matchRoute recognises the topology page", () => {
+  assert.deepEqual(matchRoute("/topology"), { kind: "topology" });
+  assert.deepEqual(matchRoute("/topology/"), { kind: "topology" });
+});
+
+// The point of this page is that it works while the database is down — that is when someone
+// is most likely to open it.
+test("/topology renders with no database configured", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /topology HTTP/1.1");
+    assert.match(res.split("\r\n")[0] ?? "", /^HTTP\/1\.1 200\b/);
+    assert.match(res, /Dependency map/);
+  });
+});

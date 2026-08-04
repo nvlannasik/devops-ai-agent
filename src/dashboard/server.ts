@@ -3,10 +3,11 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters } from "./filters.js";
-import { detailPage, errorPage, listPage, overviewPage } from "./views.js";
+import { detailPage, errorPage, listPage, overviewPage, topologyPage } from "./views.js";
+import { buildTopology } from "./topology.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" }
   | { kind: "detail"; id: number };
 
 export function matchRoute(pathname: string): Route {
@@ -14,6 +15,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "" || p === "/") return { kind: "overview" };
   if (p === "/healthz") return { kind: "health" };
   if (p === "/incidents") return { kind: "list" };
+  if (p === "/topology") return { kind: "topology" };
   // digit count capped at 15: any 15-digit string is < 10^15, safely under
   // Number.MAX_SAFE_INTEGER (~9.007e15, 16 digits) — so isSafeInteger below is never the
   // thing doing the rejecting for an in-bound match, it is defense in depth. Without the
@@ -128,6 +130,10 @@ export class DashboardServer {
     // unrelated path rides the "no database configured" 200 (or, worse, reaches the query
     // layer once a database IS configured) instead of a plain not-found
     if (route.kind === "notfound") return send(404, errorPage("Not found", "No such page."));
+
+    // deliberately before the database gate: this page reads no database, which makes it the
+    // one page that still works while Postgres is down — which is when it is most wanted
+    if (route.kind === "topology") return send(200, topologyPage(buildTopology()));
 
     if (!this.queries.enabled) {
       return send(200, errorPage("No database configured", "Set DB_HOST to enable incident history."));

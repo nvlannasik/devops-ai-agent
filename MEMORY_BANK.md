@@ -206,6 +206,19 @@ otherwise unthrottled load on the same event loop that handles alerts.
 Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
 security-relevant one in this module.
 
+**`/topology`** renders the agent's declared dependencies from `config` — no probe, no outbound
+call, no database read, so it is the one page that still works while Postgres is down. Design:
+`docs/superpowers/specs/2026-08-04-topology-design.md`.
+
+`buildTopology()` (`src/dashboard/topology.ts`) **is the allowlist**: it names every field it
+emits, one at a time. It must never iterate the config object and never filter a known-bad set
+out of it — the config holds every secret this service has, the dashboard has no authentication,
+and a denylist stops being correct the moment someone adds the next secret, silently. Secrets
+render as "set"/"not set"; endpoints go through `redactUrl()` (userinfo and query stripped).
+`topology.test.ts` seeds every secret-bearing env var with a sentinel and fails if one reaches
+either the data structure or the rendered HTML — that test is what keeps the allowlist honest
+as the config grows.
+
 **`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
 `incident_id` is NULL at insert — the usage rows are written during the investigation, the
 incident row only exists after — and is backfilled by `IncidentMemory.store()` via the
