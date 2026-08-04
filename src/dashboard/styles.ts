@@ -111,18 +111,33 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .topo-label { fill: var(--text); font-size: 11px; font-family: var(--font); }
 .topo-edge { stroke: var(--border); stroke-width: 1.5; }
 
-/* Distinct per-group fills so the three groups read apart by colour, not just position.
-   Deliberately the neutral surface/border tokens, not --info/--ok/--warning: those invert
-   enough between light and dark mode that pairing one with the default (var(--text)) label
-   colour reads fine in one theme and poorly in the other — the same class of bug the
-   .topo-self selector above just had. --surface/--surface-2/--border all track theme
-   luminance the same direction var(--text) already contrasts safely against, so no
-   per-class label-colour override is needed here. */
-.topo-in { fill: var(--surface); }
-.topo-out { fill: var(--surface-2); }
-.topo-backend { fill: var(--border); }
+/* Group identity lives on STROKE, not fill. A first attempt varied fill instead
+   (--surface/--surface-2/--border) and measured out at only 1.10-1.27:1 contrast between
+   adjacent groups — nowhere near WCAG's 3:1 bar for adjacent UI elements, because those
+   three tokens are deliberately close to each other (they're a subtle background-layer
+   ramp, not a set of distinguishable hues). Fills stay exactly those neutral values —
+   that's what keeps the default var(--text) label legible in both themes (see the .topo-in
+   / .topo-out / .topo-backend rules below) — and the stroke below carries the entire
+   group-vs-group distinction instead. Splitting the two constraints this way means neither
+   can break the other again, which is what both of this task's colour bugs had in common.
+
+   --warning was tried for the stroke and rejected: computed against every one of
+   --surface/--surface-2/--border in light mode it tops out at 2.57:1 (surface), 2.34:1
+   (surface-2), 2.02:1 (border) — below 3:1 against all three, not just the one it ended up
+   paired with. --ok also fails specifically against --border (2.68:1), which is why it's
+   not used for .topo-backend below. WCAG contrast, stroke vs the box's own fill, computed
+   from the hex values above (light / dark):
+     .topo-in              info     / surface    4.17:1 / 6.93:1
+     .topo-out              ok      / surface-2  3.09:1 / 7.12:1
+     .topo-backend          critical/ border      3.68:1 / 4.57:1
+     .topo-backend-worker   accent  / border      4.47:1 / 4.97:1
+   all >= 3:1 in both colour schemes. */
+.topo-in { fill: var(--surface); stroke: var(--info); stroke-width: 2; }
+.topo-out { fill: var(--surface-2); stroke: var(--ok); stroke-width: 2; }
+.topo-backend { fill: var(--border); stroke: var(--critical); stroke-width: 2; }
 /* The one fact this diagram exists to make obvious (design §4.2): only private-llm
-   backends traverse SQS to llm-worker. An accent stroke groups them without touching fill
-   or text colour, so it carries no cross-theme contrast risk. */
-.topo-backend-worker { stroke: var(--accent); stroke-width: 2; }
+   backends traverse SQS to llm-worker. --accent keeps this visually distinct from the
+   plain --critical backend stroke above (and from --info/--ok used elsewhere); the fill
+   stays the same var(--border) inherited from .topo-backend, so only the stroke changes. */
+.topo-backend-worker { stroke: var(--accent); stroke-width: 2.5; }
 `;

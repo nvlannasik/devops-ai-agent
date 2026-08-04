@@ -48,3 +48,33 @@ test("many backends do not overflow the canvas", () => {
   const heights = [...svg.matchAll(/viewBox="0 0 (\d+) (\d+)"/g)].map((m) => Number(m[2]));
   assert.ok(heights[0] > 300, "the canvas should grow with the backend count");
 });
+
+// design §4.2: the one fact this diagram exists to make obvious — only private-llm
+// backends traverse SQS to llm-worker. BackendNode.viaWorker was populated correctly but
+// never read by the rendering layer until this fix; nothing at the render layer pinned it
+// down, so the fix was one silent revert away from being undone. This test failed (see
+// task-2-report.md's mutation check) when the label/class logic was reverted to its
+// pre-fix form, confirming it actually exercises the fix rather than passing regardless.
+test("the diagram states each backend's path and classes via-worker backends apart from direct ones", () => {
+  const mixed: Topology = {
+    ...base,
+    backends: [
+      { name: "direct1", kind: "claude", model: "m", endpoint: "https://x", route: "heavy", viaWorker: false },
+      { name: "worker1", kind: "private-llm", model: "m", endpoint: "via llm-worker (SQS)", route: "light", viaWorker: true },
+    ],
+  };
+  const svg = topologyDiagram(mixed);
+
+  // Each backend's own <rect>...<text> pair, not a substring match against the whole
+  // document — a row can mix direct and via-worker backends, so label and class must be
+  // checked together, per box, not just "does this string appear somewhere".
+  const boxes = svg.split("<rect").slice(1).map((s) => "<rect" + s);
+  const direct = boxes.find((b) => b.includes(">direct1 (heavy · direct)<"));
+  const worker = boxes.find((b) => b.includes(">worker1 (light · via llm-worker)<"));
+
+  assert.ok(direct, "the direct backend's label should state its path");
+  assert.ok(worker, "the via-worker backend's label should state its path");
+  assert.match(direct!, /class="topo-box topo-backend"/);
+  assert.doesNotMatch(direct!, /topo-backend-worker/);
+  assert.match(worker!, /class="topo-box topo-backend topo-backend-worker"/);
+});
