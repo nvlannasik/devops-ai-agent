@@ -35,7 +35,7 @@ function incidentTable(rows: IncidentRow[]): string {
     .map(
       (r) => `<tr>
       <td class="when">${esc(fmtDate(r.created_at))}</td>
-      <td><a href="/incidents/${r.id}">${esc(r.alertname)}</a><div class="meta">${esc(r.root_cause ?? "")}</div></td>
+      <td><a href="/incidents/${esc(r.id)}">${esc(r.alertname)}</a><div class="meta">${esc(r.root_cause ?? "")}</div></td>
       <td>${esc(r.namespace ?? "—")}</td>
       <td>${severityPill(r.severity)}</td>
       <td>${r.resolved_at ? `<span class="pill resolved">resolved</span>` : `<span class="meta">firing</span>`}</td>

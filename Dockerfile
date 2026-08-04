@@ -71,6 +71,7 @@ COPY prompts/ ./prompts/
 COPY migrations/ ./migrations/
 
 EXPOSE 3000
+EXPOSE 3001
 
 # entrypoint.sh generate ~/.aws/config dari env vars, lalu exec CMD
 ENTRYPOINT ["/entrypoint.sh"]

@@ -100,11 +100,15 @@ test("detail returns null for an id that does not exist", async () => {
 // inspects the actual SQL text, so it fails loudly the next time someone adds a query
 // without a LIMIT — do not delete it as redundant with the tests above, none of which
 // look at the SQL text itself.
-test("overview() and detail() emit LIMIT on every query", async () => {
+// list() MUST be in here: it is the only query whose row count is driven by a URL, so it is
+// the one the rule exists for. An earlier version of this test called overview() and detail()
+// only — it covered 8 of 9 statements and missed the one that mattered.
+test("every query this module can emit carries a LIMIT", async () => {
   const calls: Call[] = [];
   const q = new DashboardQueries(stub(calls, () => [{ id: 1 }])); // 1 row so detail's follow-ups fire
   await q.overview();
   await q.detail(1);
+  await q.list(parseFilters(new URLSearchParams("")));
   assert.ok(calls.length > 0);
   for (const c of calls) assert.match(c.sql, /\bLIMIT\b/i, `missing LIMIT: ${c.sql}`);
 });

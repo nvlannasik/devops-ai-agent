@@ -14,9 +14,13 @@ async function main() {
     // graceful shutdown
     const shutdown = async (signal: string) => {
       logger.info(`Received ${signal}, shutting down...`);
-      await dashboard.stop();
+      // dashboard LAST: it is auxiliary, and it is the one holding connections that can be
+      // stuck on an unreachable database. Shutting it down first let a single open browser
+      // tab delay slack.stop() and agent.shutdown() past the grace period, so Slack kept
+      // delivering to a terminating pod and the SQS dispatcher never drained.
       await slack.stop();
       await agent.shutdown();
+      await dashboard.stop();
       process.exit(0);
     };
 

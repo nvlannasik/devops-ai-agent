@@ -102,3 +102,58 @@ test("errorPage states the problem without leaking a stack trace", () => {
   assert.match(html, /Database unavailable/);
   assert.match(html, /connection refused/);
 });
+
+// The four interpolation sites that had no test. Each of these was mutation-checked: remove
+// the esc() it guards and this test goes red. Without them, escaping was pinned only on
+// detailPage's rca/alertname — while incidentTable, which renders on BOTH / and /incidents
+// and carries root_cause (LLM output, named as such by the spec), was unguarded.
+const HOSTILE = `<img src=x onerror="alert(1)">`;
+
+test("incidentTable escapes alertname and root_cause on the list page", () => {
+  const nasty: IncidentRow = { ...row, alertname: HOSTILE, root_cause: HOSTILE };
+  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("incidentTable escapes on the overview page too, not just the list", () => {
+  const nasty: IncidentRow = { ...row, alertname: HOSTILE, root_cause: HOSTILE };
+  const html = overviewPage(emptyOverview, [nasty]);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("the severity pill escapes its label", () => {
+  const nasty: IncidentRow = { ...row, severity: HOSTILE };
+  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  assert.doesNotMatch(html, /<img src=x/);
+});
+
+test("the remediation status pill and its params JSON are escaped", () => {
+  const incident: IncidentDetail = { ...row, rca: "fine", channel: null, thread_ts: null };
+  const html = detailPage({
+    incident,
+    remediations: [
+      {
+        action: "k8s_set_image",
+        params: { workload: HOSTILE },
+        status: HOSTILE,
+        approved_by: null,
+        result: null,
+        created_at: new Date("2026-07-28T23:48:00Z"),
+        executed_at: null,
+      },
+    ],
+    feedback: [],
+  });
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+// node-postgres returns BIGSERIAL as a string, so IncidentRow.id being typed `number` is not
+// a runtime guarantee — the same reasoning that made esc(p.value) a finding in svg.ts.
+test("the incident link escapes its id rather than trusting the number type", () => {
+  const nasty = { ...row, id: `1"><script>alert(1)</script>` as unknown as number };
+  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
+});

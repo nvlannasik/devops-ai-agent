@@ -70,7 +70,9 @@ export class DashboardQueries {
     if (pool !== undefined) {
       this.pool = pool;
     } else if (config.incidents.enabled) {
-      this.pool = createPool(3);
+      // 5s slot wait: with max 3 and no auth in front, a burst otherwise queues waiters
+      // with no timer at all, holding HTTP requests open indefinitely
+      this.pool = createPool(3, 5000);
       this.pool.on("error", (err: Error) => logger.error(`[dashboard] pool error: ${err.message}`));
       // enforced by Postgres, so a runaway query dies at the server rather than
       // occupying the event loop that also handles alerts

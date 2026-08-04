@@ -89,3 +89,76 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 
   await dashboard.stop();
 });
+
+// One live server for the HTTP-level contracts below. Each of these was mutation-checked:
+// delete the behaviour it pins and the test goes red. Before them, the notfound-before-DB-gate
+// ordering and the GET-only rule were both enforced by nothing — and a missing notfound guard
+// is worse than a wrong status code, because "notfound" then falls through the switch, handle()
+// resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
+async function withServer<T>(fn: (port: number) => Promise<T>): Promise<T> {
+  const dashboardConfig = config.dashboard as unknown as { enabled: boolean; port: number };
+  dashboardConfig.enabled = true;
+  dashboardConfig.port = 0;
+  const dashboard = new DashboardServer(new DashboardQueries(null));
+  await dashboard.start();
+  const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
+  try {
+    return await fn(address.port);
+  } finally {
+    await dashboard.stop();
+  }
+}
+
+const raw = (port: number, requestLine: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const sock = net.connect(port, "127.0.0.1", () => {
+      sock.write(`${requestLine}\r\nHost: x\r\nConnection: close\r\n\r\n`);
+    });
+    let data = "";
+    sock.on("data", (d) => (data += d));
+    sock.on("end", () => resolve(data));
+    sock.on("error", reject);
+    sock.setTimeout(5000, () => reject(new Error("socket timed out — handler never ended the response")));
+  });
+
+test("an unknown path 404s even with no database configured", async () => {
+  await withServer(async (port) => {
+    for (const path of ["/admin", "/incidents/abc", "/../etc/passwd"]) {
+      const res = await raw(port, `GET ${path} HTTP/1.1`);
+      assert.match(res.split("\r\n")[0] ?? "", /^HTTP\/1\.1 404\b/, `${path} should 404`);
+    }
+  });
+});
+
+test("anything but GET is refused — the dashboard is read-only by contract", async () => {
+  await withServer(async (port) => {
+    for (const verb of ["POST", "PUT", "DELETE", "PATCH"]) {
+      const res = await raw(port, `${verb} /incidents HTTP/1.1`);
+      assert.match(res.split("\r\n")[0] ?? "", /^HTTP\/1\.1 405\b/, `${verb} should 405`);
+    }
+  });
+});
+
+// The pages run no JavaScript at all, so declaring that in a header turns a future missed
+// esc() from an exploit into inert text.
+test("responses carry a no-JS CSP and nosniff", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET / HTTP/1.1");
+    assert.match(res, /content-security-policy: default-src 'none'; style-src 'unsafe-inline'/i);
+    assert.match(res, /x-content-type-options: nosniff/i);
+  });
+});
+
+// A bad port used to throw ERR_SOCKET_BAD_PORT synchronously out of listen(), rejecting
+// start() and taking the pod down through main()'s catch — the exact outcome the dashboard
+// is exempted from causing. Config now clamps it, and start() survives one anyway.
+test("start() never rejects, even handed a port that cannot be listened on", async () => {
+  const dashboardConfig = config.dashboard as unknown as { enabled: boolean; port: number };
+  const saved = dashboardConfig.port;
+  dashboardConfig.enabled = true;
+  dashboardConfig.port = 99999; // out of range: listen() throws synchronously
+  const dashboard = new DashboardServer(new DashboardQueries(null));
+  await assert.doesNotReject(() => dashboard.start());
+  await assert.doesNotReject(() => dashboard.stop());
+  dashboardConfig.port = saved;
+});

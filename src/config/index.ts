@@ -2,6 +2,24 @@ import "dotenv/config";
 
 const env = process.env.NODE_ENV || "dev";
 
+export const DASHBOARD_PORT_DEFAULT = 3001;
+
+// `parseInt(x ?? "3001")` guards only the UNSET case: an empty string, a typo, or an
+// out-of-range number all survive it, and http.Server.listen() then throws
+// ERR_SOCKET_BAD_PORT synchronously — which used to take the whole pod down over a
+// statistics page. Everything else in this file may fail loud at boot; the dashboard
+// specifically may not (design §8), so a bad value falls back and says so.
+export function dashboardPort(raw: string | undefined): number {
+  if (raw === undefined) return DASHBOARD_PORT_DEFAULT;
+  const n = Number(raw.trim());
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+  console.warn(
+    `[config] DASHBOARD_PORT="${raw}" is not a port number (1-65535) — ` +
+    `falling back to ${DASHBOARD_PORT_DEFAULT}`
+  );
+  return DASHBOARD_PORT_DEFAULT;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -114,7 +132,7 @@ export const config = {
   // by the Ingress (see docs/superpowers/specs/2026-08-03-dashboard-design.md §3.1).
   dashboard: {
     enabled: process.env.DASHBOARD_ENABLED === "true",
-    port: parseInt(process.env.DASHBOARD_PORT ?? "3001"),
+    port: dashboardPort(process.env.DASHBOARD_PORT),
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),

@@ -65,20 +65,42 @@ export class DashboardServer {
     });
 
     await new Promise<void>((resolve) => {
-      this.server!.listen(config.dashboard.port, () => {
-        logger.info(
-          `[dashboard] listening on :${config.dashboard.port} ` +
-          `(read-only, no auth — must not be routed by the Ingress)`
-        );
+      // listen() throws SYNCHRONOUSLY on a bad port number (ERR_SOCKET_BAD_PORT), and a
+      // synchronous throw in here rejects the promise instead of reaching the "error"
+      // handler above — which only ever sees ASYNC bind failures like EADDRINUSE. A
+      // rejected start() propagates to main()'s catch and exits the pod: the exact
+      // outcome the exemption in the design's §8 exists to prevent. Config validation
+      // makes a bad port unreachable; this makes it survivable anyway.
+      try {
+        this.server!.listen(config.dashboard.port, () => {
+          logger.info(
+            `[dashboard] listening on :${config.dashboard.port} ` +
+            `(read-only, no auth — must not be routed by the Ingress)`
+          );
+          resolve();
+        });
+        this.server!.once("error", () => resolve());
+      } catch (err) {
+        logger.error(`[dashboard] could not listen, dashboard disabled (agent unaffected): ${errDetail(err)}`);
+        this.server = null;
         resolve();
-      });
-      this.server!.once("error", () => resolve());
+      }
     });
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const send = (code: number, body: string, type = "text/html; charset=utf-8") => {
-      res.writeHead(code, { "content-type": type, "cache-control": "no-store" });
+      res.writeHead(code, {
+        "content-type": type,
+        "cache-control": "no-store",
+        // These pages run no JavaScript at all — views.test.ts asserts it. Saying so in a
+        // header turns the whole XSS class from "every esc() call must stay correct
+        // forever" into "a missed escape is inert". Cheap insurance on the one surface
+        // that renders LLM output with no authentication in front of it.
+        // style-src 'unsafe-inline' is required by the inline <style> block.
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+        "x-content-type-options": "nosniff",
+      });
       res.end(body);
     };
 
@@ -139,8 +161,27 @@ export class DashboardServer {
     }
   }
 
-  async stop(): Promise<void> {
-    await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
+  // Bounded on purpose. `server.close()` waits for in-flight requests, and a dashboard
+  // request can be stuck on a pool that is waiting on an unreachable Postgres —
+  // statement_timeout is server-side and cannot fire when the server is what is missing.
+  // Unbounded, one open browser tab would hold the whole shutdown past the grace period
+  // and Slack would keep delivering to a terminating pod. The auxiliary surface does not
+  // get to delay the critical ones: it is also shut down last (see index.ts).
+  async stop(timeoutMs = 3000): Promise<void> {
+    const server = this.server;
+    if (server) {
+      await Promise.race([
+        new Promise<void>((resolve) => server.close(() => resolve())),
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            logger.warn(`[dashboard] did not close within ${timeoutMs}ms — forcing connections shut`);
+            server.closeAllConnections();
+            resolve();
+          }, timeoutMs).unref()
+        ),
+      ]);
+      this.server = null;
+    }
     await this.queries.close();
   }
 }

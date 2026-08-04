@@ -38,5 +38,5 @@ export function barChart(points: Point[], opts: { width?: number; height?: numbe
     })
     .join("");
 
-  return `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="${chartLabel}">${bars}</svg>`;
+  return `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="${esc(chartLabel)}">${bars}</svg>`;
 }
