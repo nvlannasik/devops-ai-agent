@@ -1,8 +1,10 @@
 import { esc, fmtDate, fmtInt, fmtPct } from "./html.js";
 import { barChart } from "./svg.js";
+import { topologyDiagram } from "./topology-svg.js";
 import { STYLES } from "./styles.js";
 import type { Filters } from "./filters.js";
 import type { FeedbackRow, IncidentDetail, IncidentRow, Overview, RemediationRow } from "./queries.js";
+import type { BackendNode, Node as TopoNode, Topology } from "./topology.js";
 
 export function layout(title: string, body: string): string {
   return `<!doctype html>
@@ -14,7 +16,7 @@ export function layout(title: string, body: string): string {
 </head><body>
 <header class="top">
   <span class="brand">DevOps AI Agent</span>
-  <nav><a href="/">Overview</a><a href="/incidents">Incidents</a></nav>
+  <nav><a href="/">Overview</a><a href="/incidents">Incidents</a><a href="/topology">Topology</a></nav>
 </header>
 <main>${body}</main>
 </body></html>`;
@@ -186,4 +188,60 @@ export function detailPage(d: {
 
 export function errorPage(title: string, message: string): string {
   return layout(title, `<h1>${esc(title)}</h1><p class="empty">${esc(message)}</p>`);
+}
+
+const nodeRows = (nodes: TopoNode[]): string =>
+  nodes.length === 0
+    ? `<p class="empty">Nothing configured.</p>`
+    : `<table><thead><tr><th>Dependency</th><th>Endpoint</th><th>Notes</th></tr></thead><tbody>` +
+      nodes
+        .map(
+          (n) => `<tr><td>${esc(n.label)}</td>` +
+            `<td class="mono">${esc(n.detail)}</td>` +
+            `<td class="meta">${esc(n.meta)}${n.configured ? "" : ` <span class="pill warning">not configured</span>`}</td></tr>`
+        )
+        .join("") +
+      `</tbody></table>`;
+
+const backendRows = (backends: BackendNode[]): string =>
+  `<table><thead><tr><th>Backend</th><th>Kind</th><th>Model</th><th>Route</th><th>Reached via</th></tr></thead><tbody>` +
+  backends
+    .map(
+      (b) => `<tr><td>${esc(b.name)}</td><td>${esc(b.kind)}</td><td class="mono">${esc(b.model)}</td>` +
+        `<td><span class="pill ${b.route === "heavy" ? "critical" : b.route === "light" ? "info" : ""}">${esc(b.route)}</span></td>` +
+        `<td class="mono">${esc(b.endpoint)}</td></tr>`
+    )
+    .join("") +
+  `</tbody></table>`;
+
+export function topologyPage(t: Topology): string {
+  // The brief's original version rendered only the bare provider name for the three
+  // non-router providers ("Provider claude — one client, no routing."). Task 1's review
+  // added `activeClient` (populated for claude / openai-compatible / private-llm, undefined
+  // for router — the router's answer is `backends[]` instead) precisely so this page could
+  // show the one active client, not merely name it (design §4.2). Reusing nodeRows() here —
+  // the same helper the inbound/outbound tables use — means this table and those tables
+  // can never render a node's fields differently from one another.
+  const router =
+    t.provider !== "router"
+      ? `<p class="meta">Provider <code>${esc(t.provider)}</code> — one client, no routing.</p>` +
+        nodeRows(t.activeClient ? [t.activeClient] : [])
+      : t.registryError
+        ? `<p class="empty">Backend registry could not be read: ${esc(t.registryError)}</p>`
+        : backendRows(t.backends) +
+          `<p class="meta">Only <code>private-llm</code> backends traverse SQS to <code>llm-worker</code>; ` +
+          `<code>claude</code> and <code>openai-compatible</code> backends are called directly from the agent.</p>`;
+
+  return layout(
+    "Topology",
+    `<h1>Dependency map</h1>
+     <p class="meta">Read from this agent's own configuration. Nothing here is probed — no call leaves the process.</p>
+     <div class="card">${topologyDiagram(t)}</div>
+     <h2>Inbound</h2>
+     ${nodeRows(t.inbound)}
+     <h2>Outbound</h2>
+     ${nodeRows(t.outbound)}
+     <h2>LLM backends</h2>
+     ${router}`
+  );
 }

@@ -99,4 +99,10 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .chart-bar { fill: var(--accent); }
 .chart-bar:hover { filter: brightness(1.15); }
 .chart-label, .chart-empty { fill: var(--text-dim); font-size: 10px; font-family: var(--font); }
+
+.topo-box { fill: var(--surface-2); stroke: var(--border); }
+.topo-self { fill: var(--accent); }
+.topo-self + .topo-label, .topo-self ~ .topo-label { fill: #fff; }
+.topo-label { fill: var(--text); font-size: 11px; font-family: var(--font); }
+.topo-edge { stroke: var(--border); stroke-width: 1.5; }
 `;
