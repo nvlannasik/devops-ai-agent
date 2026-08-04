@@ -7,7 +7,10 @@ import logger from "../../utils/logger/index.js";
 // recognize recurring incidents instead of re-diagnosing from scratch every time.
 // Schema is owned by migrations/ (see src/db/migrate.ts), not created here.
 export class IncidentMemory {
-  constructor(private readonly pool: Pool | null) {}
+  constructor(
+    private readonly pool: Pool | null,
+    private readonly onStored?: (incidentId: number, threadTs: string) => void
+  ) {}
 
   // Recall prior knowledge for the same alert (+ namespace when present), in two trust
   // tiers that must never be flattened: human-CONFIRMED feedback (strong prior) and
@@ -171,7 +174,11 @@ export class IncidentMemory {
           slack?.threadTs ?? null,
         ]
       );
-      return Number(rows[0].id); // pg returns BIGSERIAL as string
+      const id = Number(rows[0].id);
+      // fire-and-forget: links this investigation's llm_usage rows to the incident they
+      // produced. Best-effort by contract — see UsageStore.
+      if (slack?.threadTs) this.onStored?.(id, slack.threadTs);
+      return id;
     } catch (err) {
       logger.error(`[incidents] store failed: ${err instanceof Error ? err.message : err}`);
       return null;

@@ -206,7 +206,20 @@ infrastructure here, and adding one is out of scope.
 | `DASHBOARD_ENABLED` | `false` | Off unless asked for; the agent must be unchanged for anyone not using it |
 | `DASHBOARD_PORT` | `3001` | Second listener, same process |
 
-The dev overlay sets `DASHBOARD_ENABLED=true` and adds the container port and a Service port.
+The dev overlay sets **only these two environment variables**. It adds no container port and no
+Service port, and that is deliberate on two counts. A `containerPort` is documentation rather than
+a gate — `kubectl port-forward pod/<name> <local>:3001` reaches a listening process whether or not
+the port is declared — so nothing is needed for the intended access path. A Service port would go
+further and *widen* in-cluster reach, letting any pod in any namespace hit the dashboard by Service
+DNS, on a surface with no authentication (§3.1).
+
+> **Do not "complete" this by adding `containerPorts` or `service.ports` to the dev overlay.**
+> `apps/dev/applications/devops-ai-agent/kustomization.yaml` declares `release.yaml` as a
+> `patches:` entry, and Kustomize has no schema for a HelmRelease's `spec.values.*`, so those
+> lists are replaced wholesale rather than merged. The base carries single-element lists holding
+> the agent's port **3000** — adding a 3001 entry to the overlay deletes 3000 from the Service and
+> takes down the Ingress path to Slack and `/alert`.
+
 **No Ingress rule** — that absence is the access control (§3.1). `stg` and `prd` stay unset until
 someone asks, so enabling it is always a deliberate act.
 

@@ -850,6 +850,9 @@ export interface Overview {
 }
 
 const CACHE_TTL_MS = 60_000;
+// passed as a bound parameter ($1::interval), never interpolated into the SQL text —
+// it is a constant today, and keeping it parameterised means it cannot become an
+// injection the day someone makes the window configurable
 const WINDOW = "30 days";
 
 export class DashboardQueries {
@@ -895,20 +898,24 @@ export class DashboardQueries {
       ),
       this.pool.query(
         `SELECT alertname, namespace, count(*)::int AS n, max(created_at) AS last_seen
-           FROM incidents WHERE created_at >= now() - interval '${WINDOW}'
-          GROUP BY alertname, namespace ORDER BY n DESC, last_seen DESC LIMIT 10`
+           FROM incidents WHERE created_at >= now() - $1::interval
+          GROUP BY alertname, namespace ORDER BY n DESC, last_seen DESC LIMIT 10`,
+        [WINDOW]
       ),
       this.pool.query(
         `SELECT count(*)::int AS total, count(resolved_at)::int AS resolved
-           FROM incidents WHERE created_at >= now() - interval '${WINDOW}'`
+           FROM incidents WHERE created_at >= now() - $1::interval`,
+        [WINDOW]
       ),
       this.pool.query(
         `SELECT status, count(*)::int AS n FROM remediations
-          WHERE created_at >= now() - interval '${WINDOW}' GROUP BY status`
+          WHERE created_at >= now() - $1::interval GROUP BY status`,
+        [WINDOW]
       ),
       this.pool.query(
         `SELECT coalesce(outcome, 'unknown') AS outcome, count(*)::int AS n
-           FROM incident_feedback WHERE created_at >= now() - interval '${WINDOW}' GROUP BY 1`
+           FROM incident_feedback WHERE created_at >= now() - $1::interval GROUP BY 1`,
+        [WINDOW]
       ),
     ]);
 

@@ -9,7 +9,15 @@ function pgSsl(mode: string): false | { rejectUnauthorized: boolean } {
   return false; // disable (default)
 }
 
-export function createPool(max = 5): Pool {
+// connectionTimeoutMillis bounds the wait for a FREE POOL SLOT, which `statement_timeout`
+// cannot: that one is server-side and never fires when the server is what is unreachable.
+// Without it, waiters queue forever — which is how one stuck dashboard query used to hold
+// an entire graceful shutdown open. Opt-in per caller so the agent's own pool keeps its
+// existing behaviour.
+export function createPool(max = 5, connectionTimeoutMillis?: number): Pool {
   const { host, port, user, password, database, sslMode } = config.incidents.db;
-  return new Pool({ host, port, user, password, database, ssl: pgSsl(sslMode), max });
+  return new Pool({
+    host, port, user, password, database, ssl: pgSsl(sslMode), max,
+    ...(connectionTimeoutMillis !== undefined && { connectionTimeoutMillis }),
+  });
 }

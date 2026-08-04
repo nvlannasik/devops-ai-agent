@@ -3,6 +3,7 @@ import { SERIALIZED_BLOCKS } from "./llm/router.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
+import { UsageStore } from "./usage/index.js";
 import { createPool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
@@ -17,7 +18,7 @@ import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
+import type { LLMClient, LLMResponse, Message, ContentBlock, TokenUsage } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
@@ -46,6 +47,7 @@ export class DevOpsAgent {
   private mcp: MCPClient;
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
+  private usage: UsageStore;
   private remediations: RemediationStore;
   private gitops: SqsGitOpsClient | null;
 
@@ -54,6 +56,7 @@ export class DevOpsAgent {
     this.mcp = new MCPClient();
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
+    this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
     this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
   }
@@ -72,7 +75,8 @@ export class DevOpsAgent {
       const pool = createPool();
       pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
       await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
-      this.incidents = new IncidentMemory(pool);
+      this.usage = new UsageStore(pool);
+      this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
@@ -190,6 +194,7 @@ export class DevOpsAgent {
 
       if (response.usage) {
         totalUsage = addUsage(totalUsage, response.usage);
+        this.recordUsage(threadId, response);
         logger.debug(
           `[${threadId}] LLM #${iterations} ${llmMs}ms | ` +
           `in=${response.usage.inputTokens} out=${response.usage.outputTokens} ` +
@@ -341,6 +346,21 @@ export class DevOpsAgent {
     );
   }
 
+  // One row per chat() call (per the llm_usage migration's own header comment) — every
+  // this.llm.chat() call site must go through this, not just the investigation loop.
+  // threadTs is null wherever the call site has no Slack thread to attribute to (proposal
+  // drafting, learn extraction, the conversation-mode reformat) — never invent one.
+  private recordUsage(threadTs: string | null, response: LLMResponse): void {
+    if (!response.usage) return;
+    void this.usage.record({
+      threadTs,
+      backend: response.backend ?? null,
+      route: response.route ?? null,
+      model: response.model ?? null,
+      usage: response.usage,
+    });
+  }
+
   private extractText(content: ContentBlock[]): string {
     return content
       .filter((c) => c.type === "text")
@@ -369,6 +389,7 @@ export class DevOpsAgent {
     if (!this.mcp.getTools().some((t) => t.description.startsWith("[WRITE]"))) return null;
 
     const response = await this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM);
+    this.recordUsage(null, response); // no Slack thread at this call site — never invent one
     const text = this.extractText(response.content);
     const proposal = parseProposal(text);
     if (!proposal) {
@@ -653,6 +674,7 @@ export class DevOpsAgent {
       [],
       EXTRACTION_SYSTEM
     );
+    this.recordUsage(threadTs, response);
     const extracted = parseFeedbackJson(this.extractText(response.content));
     if (!extracted) {
       return "🤷 I couldn't find a concrete conclusion in this thread yet. State the actual root cause / action taken in the thread, then mention me with `learn` again.";
@@ -698,6 +720,7 @@ export class DevOpsAgent {
         [],
         "You reformat DevOps chatbot replies for Slack. Output only the rewritten reply in Slack mrkdwn."
       );
+      this.recordUsage(null, response); // no Slack thread parameter at this call site — never invent one
       const out = this.extractText(response.content);
       return out || text;
     });

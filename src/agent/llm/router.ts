@@ -35,7 +35,11 @@ export class RouterLLMClient implements LLMClient {
   constructor(
     private readonly backends: Map<string, LLMClient>,
     private readonly heavy: string[],
-    private readonly light: string[]
+    private readonly light: string[],
+    // backend name -> its configured model (registry.ts BackendSpec.model). Absent/undefined
+    // for a backend with no configured model (e.g. private-llm) — chat() must pass that
+    // through as undefined, never substitute another backend's model.
+    private readonly models: Map<string, string | undefined> = new Map()
   ) {
     if (heavy.length === 0) throw new Error("router needs a non-empty heavy chain");
     for (const n of [...heavy, ...light]) {
@@ -68,7 +72,7 @@ export class RouterLLMClient implements LLMClient {
         if (!failure) {
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop
           if (route === "light" && i >= this.light.length && ctx) ctx.escalated = true;
-          return res;
+          return { ...res, backend: name, route, model: this.models.get(name) };
         }
         if (failure.toolChannelDead) {
           logger.warn(
