@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detailPage, listPage, overviewPage, errorPage, layout } from "./views.js";
+import { detailPage, listPage, overviewPage, errorPage, layout, topologyPage } from "./views.js";
 import { parseFilters } from "./filters.js";
 import type { IncidentDetail, IncidentRow, Overview } from "./queries.js";
+import type { Topology } from "./topology.js";
 
 const row: IncidentRow = {
   id: 1, created_at: new Date("2026-07-28T23:48:00Z"), resolved_at: null,
@@ -156,4 +157,55 @@ test("the incident link escapes its id rather than trusting the number type", ()
   const nasty = { ...row, id: `1"><script>alert(1)</script>` as unknown as number };
   const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
   assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
+});
+
+// topologyPage's own review found nodeRows() and backendRows() had no escaping coverage —
+// the secret-leak test in topology.test.ts proves sentinels don't leak, but its sentinels
+// are plain SENTINEL-* strings with no HTML-breaking characters, so it says nothing about
+// escaping. label/detail/meta and name/kind/model/route/endpoint carry
+// LLM_BACKEND_<N>_NAME/_MODEL, the Slack channel id, hostnames and queue names onto an
+// unauthenticated page — exactly as untrusted as everything else HOSTILE already covers.
+// Putting HOSTILE in every field of one row means removing esc() from ANY one of them
+// leaves it raw in the output and fails doesNotMatch, regardless of which field it was —
+// each was independently mutation-checked (see task-2-report.md's "Fix section").
+const baseTopology: Topology = {
+  inbound: [], outbound: [], provider: "router", backends: [], registryError: null,
+};
+
+test("nodeRows escapes label, detail, and meta on the topology page", () => {
+  const t: Topology = {
+    ...baseTopology,
+    inbound: [{ label: HOSTILE, detail: HOSTILE, meta: HOSTILE, configured: true }],
+  };
+  const html = topologyPage(t);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("nodeRows escapes the non-router activeClient row too", () => {
+  const t: Topology = {
+    ...baseTopology,
+    provider: "claude",
+    activeClient: { label: HOSTILE, detail: HOSTILE, meta: HOSTILE, configured: true },
+  };
+  const html = topologyPage(t);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("backendRows escapes name, kind, model, route, and endpoint", () => {
+  const t: Topology = {
+    ...baseTopology,
+    backends: [
+      {
+        name: HOSTILE, kind: HOSTILE as unknown as Topology["backends"][number]["kind"],
+        model: HOSTILE, endpoint: HOSTILE,
+        route: HOSTILE as unknown as Topology["backends"][number]["route"],
+        viaWorker: false,
+      },
+    ],
+  };
+  const html = topologyPage(t);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
 });

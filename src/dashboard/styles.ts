@@ -102,7 +102,27 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 
 .topo-box { fill: var(--surface-2); stroke: var(--border); }
 .topo-self { fill: var(--accent); }
-.topo-self + .topo-label, .topo-self ~ .topo-label { fill: #fff; }
+/* Immediate-sibling only. topologyDiagram() emits every <rect>/<text> as flat siblings of
+   <svg> (no per-row <g>), so the general-sibling combinator (~) would match every later
+   .topo-label in the document, not just this box's own — that made most of the diagram's
+   text render white-on-near-white in light mode. box() always emits a label as the very
+   next sibling of its own rect, so "+" alone is correct and sufficient. */
+.topo-self + .topo-label { fill: #fff; }
 .topo-label { fill: var(--text); font-size: 11px; font-family: var(--font); }
 .topo-edge { stroke: var(--border); stroke-width: 1.5; }
+
+/* Distinct per-group fills so the three groups read apart by colour, not just position.
+   Deliberately the neutral surface/border tokens, not --info/--ok/--warning: those invert
+   enough between light and dark mode that pairing one with the default (var(--text)) label
+   colour reads fine in one theme and poorly in the other — the same class of bug the
+   .topo-self selector above just had. --surface/--surface-2/--border all track theme
+   luminance the same direction var(--text) already contrasts safely against, so no
+   per-class label-colour override is needed here. */
+.topo-in { fill: var(--surface); }
+.topo-out { fill: var(--surface-2); }
+.topo-backend { fill: var(--border); }
+/* The one fact this diagram exists to make obvious (design §4.2): only private-llm
+   backends traverse SQS to llm-worker. An accent stroke groups them without touching fill
+   or text colour, so it carries no cross-theme contrast risk. */
+.topo-backend-worker { stroke: var(--accent); stroke-width: 2; }
 `;
