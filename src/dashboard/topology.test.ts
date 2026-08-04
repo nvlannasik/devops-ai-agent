@@ -18,6 +18,14 @@ const SECRETS: Record<string, string> = {
   DB_USERNAME: "SENTINEL-db-user",
   LLM_BACKEND_1_KEY: "SENTINEL-backend1-key",
   LLM_BACKEND_2_KEY: "SENTINEL-backend2-key",
+  // Free-form, operator-composed — not secret-shaped env vars like the ones above, but a
+  // credential passed as a CLI arg to a stdio wrapper script is an ordinary pattern (see the
+  // "MCP stdio command line rendered raw" finding). This file fixes MCP_TRANSPORT=http, so the
+  // stdio branch that would render these never runs here — that absence is exercised for real,
+  // with its own env, in topology.stdio.test.ts. Kept here too so nothing in this file's own
+  // rendering path ever echoes them regardless of transport.
+  MCP_STDIO_COMMAND: "SENTINEL-stdio-cmd",
+  MCP_STDIO_ARGS: "run-mcp.js,--api-key,SENTINEL-stdio-arg",
 };
 for (const [k, v] of Object.entries(SECRETS)) process.env[k] = v;
 
@@ -71,6 +79,19 @@ test("redactUrl handles the missing and the malformed case without throwing", ()
   assert.equal(redactUrl(undefined), "not configured");
   assert.equal(redactUrl(""), "not configured");
   assert.equal(redactUrl("://nonsense"), "(unparseable)");
+});
+
+// WHATWG URL only splits `user:pass@host` into username/password when `//` follows the scheme.
+// Without it, everything after the first `:` — including the password — becomes an opaque path
+// that u.username/u.password can't touch, and the "redacted" output used to echo it verbatim.
+test("redactUrl fails safe on a scheme-less credential (no // after the scheme)", () => {
+  const leaked = redactUrl("user:FAKE-TOKEN-abc123@gw.internal:8443/v1");
+  assert.equal(leaked, "(unparseable)");
+  assert.ok(!leaked.includes("FAKE-TOKEN-abc123"));
+});
+
+test("redactUrl fails safe on a bare hostname (no scheme at all)", () => {
+  assert.equal(redactUrl("gw.internal"), "(unparseable)");
 });
 
 // The single fact this page exists to make obvious: with the router active, only private-llm
