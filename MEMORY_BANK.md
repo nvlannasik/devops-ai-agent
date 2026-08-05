@@ -276,10 +276,37 @@ Non-obvious, and each one is load-bearing:
   selector it queries is derived from its own source and asserted against the rendered page; and
   the `data-live`/`data-drag` attributes it sets are the ones `styles.ts` reacts to.
 
+**RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
+`prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are
+the `•` character, and there are **no `#` headings at all**; a section is announced by a line that
+is entirely one bold run (`*📍 Root Cause*`). That is why the parser is hand-written rather than a
+dependency: a Markdown parser reads almost none of it correctly. `parseRca()` keys off whole-line
+bold runs (heading), `*Label:*` + content (field — the colon must sit immediately before the
+closing asterisk, or `*Impact: what breaks*` becomes a field), `•`/`-`/`N.` markers, and ` — ` as
+the claim/source split. Arguments (Root Cause, Impact) stay prose; Evidence, Ruled Out and
+Recommended Actions become two-column tables.
+- **Escape-then-markup is the invariant.** `esc()` runs on every fragment *before* a single tag is
+  added, so an escaped string provably holds no `<` or `>` and the tags that follow are this
+  module's own. There is no ordering in which model output can close a tag we opened. No attribute
+  value is ever built from parsed text. `rca.test.ts` mutation-checks each esc() call site.
+- **It degrades, never guesses.** Fewer than two titled sections → `parseRca` returns `null` and
+  the page renders the plain escaped block it used before. A model that ignores the format loses
+  its formatting, never its content. Same for a code fence: a section holding one is left as prose
+  rather than tabulated around a stack trace, and the fence is not scanned for bullets or headings.
+- **The italic rule is bounded on both sides, and its span must allow inner underscores.** Half the
+  identifiers on this page are snake_case, so an unbounded `/_(.+?)_/` mangles `k8s_list_pods`;
+  requiring whitespace/bracket before the opener is what prevents that. But excluding `_` from the
+  span only looks safer — it means `_k8s_list_pods_`, the exact form the template asks for, never
+  matches and the markers render as literal underscores.
+
 **`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
 `incident_id` is NULL at insert — the usage rows are written during the investigation, the
 incident row only exists after — and is backfilled by `IncidentMemory.store()` via the
 `onStored` callback. Rows for conversation-mode replies stay NULL forever, which is correct.
+The overview's **Token usage** section reads it: totals over the 30-day window, then a breakdown
+by **backend AND model** (collapsing to backend hides a re-point mid-window, which is the change
+someone reading the page is looking for). `sum()` over INTEGER widens to BIGINT and node-postgres
+returns BIGINT as a *string*, so every sum goes through `num()` — without it 12 + 7 renders 127.
 
 ### On-call Feedback Learning (`@agent learn` — trust-tiered memory)
 Design: `docs/DESIGN_oncall_feedback_learning.md`. Two tiers, never flattened:

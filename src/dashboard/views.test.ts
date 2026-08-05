@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, topologyPage } from "./views.js";
 import { parseFilters } from "./filters.js";
-import type { IncidentDetail, IncidentRow, Overview } from "./queries.js";
+import type { IncidentDetail, IncidentRow, Overview, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
 
 // Stands in for the per-response value server.ts mints. Fixed here so a test can assert the
@@ -17,6 +17,7 @@ const row: IncidentRow = {
 const emptyOverview: Overview = {
   weekly: [], recurring: [], totalIncidents: 0, resolvedIncidents: 0,
   remediationSucceeded: 0, remediationFailed: 0, feedback: {},
+  tokens: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, byBackend: [] },
 };
 
 test("layout emits a complete, self-contained document with inline styles", () => {
@@ -344,6 +345,107 @@ test("signed-in pages offer a way out, and the footer no longer claims there is 
   assert.doesNotMatch(html, /<a[^>]+href="\/logout"/);
   assert.doesNotMatch(html, /No authentication/i);
   assert.match(html, /This session ends after \d+ hours/);
+});
+
+// ---------- overview: figures, cost, and the analysis ----------
+
+const tokens: Tokens = {
+  calls: 412,
+  input: 1_204_889, output: 88_310, cacheRead: 950_004, cacheCreation: 12_003,
+  byBackend: [
+    { backend: "private-llm", model: "qwen3-32b", calls: 380, input: 1_100_000, output: 80_000, cacheRead: 0, cacheCreation: 0 },
+    { backend: "claude", model: "claude-opus-5", calls: 32, input: 104_889, output: 8_310, cacheRead: 950_004, cacheCreation: 12_003 },
+  ],
+};
+
+// The hero holds one composed object: the 30-day count set against the series it summarises.
+// While the outcome figures shared that frame they read as a caption to the chart, which is
+// the thing this split exists to undo — so the assertion is positional, not merely "present".
+test("the outcome figures are their own section, outside the hero", () => {
+  const html = overviewPage(emptyOverview, []);
+  const hero = html.slice(html.indexOf(`class="hero"`), html.indexOf("</section>"));
+  assert.match(hero, /class="hero-chart"/, "the chart stays in the hero");
+  assert.doesNotMatch(hero, /<dl class="stats">/, "the figures do not");
+  assert.ok(
+    html.indexOf("</section>") < html.indexOf("<h2>Outcomes</h2>"),
+    "Outcomes comes after the hero closes"
+  );
+  assert.ok(html.indexOf("<h2>Outcomes</h2>") < html.indexOf(`<dl class="stats">`));
+});
+
+test("token usage is its own section, in the order volume → outcome → cost", () => {
+  const html = overviewPage({ ...emptyOverview, tokens }, []);
+  assert.ok(html.indexOf("<h2>Outcomes</h2>") < html.indexOf("<h2>Token usage</h2>"));
+  assert.ok(html.indexOf("<h2>Token usage</h2>") < html.indexOf("<h2>Most recurring</h2>"));
+});
+
+test("token usage totals the window and breaks it down by backend AND model", () => {
+  const html = overviewPage({ ...emptyOverview, tokens }, []);
+  assert.match(html, /Total tokens<\/dt><dd>1,293,199/, "input + output, thousands-separated");
+  assert.match(html, /Cache reads<\/dt><dd>950,004<span>12,003 written<\/span>/);
+  assert.match(html, /LLM calls<\/dt><dd>412/);
+  // the model is what the router question is actually about — a heavy backend answering
+  // what a light one could have is only visible if the model is on the row
+  assert.match(html, /qwen3-32b/);
+  assert.match(html, /claude-opus-5/);
+  assert.equal([...html.matchAll(/<td class="primary">(?:private-llm|claude)<\/td>/g)].length, 2);
+});
+
+// A fresh deployment has an empty llm_usage table, and a zero-row table with five headers
+// reads as a broken query rather than a quiet system.
+test("token usage names the absence instead of rendering an empty table", () => {
+  const html = overviewPage(emptyOverview, []);
+  assert.match(html, /No LLM calls recorded in this window/);
+  assert.doesNotMatch(html, /<th>Backend<\/th>/);
+});
+
+// backend and model come from LLM_BACKEND_<N>_* env vars — the same trust level as every
+// other operator-supplied string on the topology page.
+test("the token table escapes the backend and model names", () => {
+  const html = overviewPage(
+    {
+      ...emptyOverview,
+      tokens: {
+        ...tokens,
+        byBackend: [{ backend: HOSTILE, model: HOSTILE, calls: 1, input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }],
+      },
+    },
+    []
+  );
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+// The join between detailPage and rca.ts. rca.test.ts pins the parser; this pins that the
+// page actually routes the RCA through it rather than printing the mrkdwn it was given.
+test("detailPage renders the RCA as sections, not as a wall of asterisks", () => {
+  const rca = [
+    "*🔴 Severity:* `Critical`",
+    "",
+    "*📍 Root Cause*",
+    "The memory limit sits below the working set.",
+    "",
+    "*📊 Evidence*",
+    "• Restarted 14 times, reason OOMKilled — _k8s_list_pods_ `prod/api-gateway`",
+    "",
+    "*🔧 Recommended Actions*",
+    "1. *Immediate:* raise the limit to 512Mi",
+  ].join("\n");
+  const html = detailPage({ incident: { ...row, rca, channel: null, thread_ts: null }, remediations: [], feedback: [] });
+  assert.match(html, /<h3 class="rca-head">Root Cause<\/h3>/);
+  assert.match(html, /<th>Finding<\/th><th>Source<\/th>/);
+  assert.match(html, /<th>Horizon<\/th><th>Action<\/th>/);
+  assert.match(html, /<dt>Severity<\/dt>/);
+  // and the source markers are gone from the visible text, not merely re-printed
+  assert.doesNotMatch(html, /\*📍 Root Cause\*/);
+});
+
+test("an incident with no RCA says so rather than rendering an empty analysis", () => {
+  const html = detailPage({
+    incident: { ...row, rca: "   ", channel: null, thread_ts: null },
+    remediations: [], feedback: [],
+  });
+  assert.match(html, /No analysis recorded/);
 });
 
 test("backendRows escapes name, kind, model, route, and endpoint", () => {

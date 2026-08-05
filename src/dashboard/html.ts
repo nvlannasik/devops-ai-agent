@@ -32,3 +32,9 @@ export function fmtPct(n: number, d: number): string {
 export function fmtInt(n: number): string {
   return n.toLocaleString("en-US");
 }
+
+// Lives here rather than in views.ts because rca.ts renders tables too, and views.ts already
+// imports rca.ts — a shared helper in either of those makes an import cycle. The wrapper is
+// what gives a wide table its own horizontal scroll instead of widening the page.
+export const table = (head: string, body: string): string =>
+  `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;

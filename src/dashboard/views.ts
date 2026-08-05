@@ -1,10 +1,11 @@
-import { esc, fmtDate, fmtInt, fmtPct } from "./html.js";
+import { esc, fmtDate, fmtInt, fmtPct, table } from "./html.js";
+import { renderRca } from "./rca.js";
 import { barChart } from "./svg.js";
 import { topologyDiagram } from "./topology-svg.js";
 import { TOPO_SCRIPT } from "./topology-script.js";
 import { STYLES } from "./styles.js";
 import type { Filters } from "./filters.js";
-import type { FeedbackRow, IncidentDetail, IncidentRow, Overview, RemediationRow } from "./queries.js";
+import type { FeedbackRow, IncidentDetail, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
@@ -113,16 +114,13 @@ const severityBadge = (s: string | null): string => (s ? badge(s) : dash);
 const empty = (headline: string, next: string): string =>
   `<p class="empty"><strong>${esc(headline)}</strong>${esc(next)}</p>`;
 
-const table = (head: string, body: string): string =>
-  `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
-
 interface Stat {
   label: string;
   value: string;
   sub?: string;
 }
-const statList = (items: Stat[], cls = "stats"): string =>
-  `<dl class="${cls}">` +
+const statList = (items: Stat[]): string =>
+  `<dl class="stats">` +
   items
     .map(
       (s) => `<div class="stat"><dt>${esc(s.label)}</dt><dd>${esc(s.value)}` +
@@ -149,6 +147,45 @@ function incidentTable(rows: IncidentRow[], whenEmpty: string): string {
   return table(`<th>When</th><th>Alert</th><th>Namespace</th><th>Severity</th><th>State</th>`, body);
 }
 
+// What the investigations cost. The stats are totals over the window; the table is per
+// backend AND model, because under the router "which model did that" is the question — a
+// heavy backend answering what a light one could have is the finding this section exists for.
+function tokenUsage(t: Tokens): string {
+  if (t.calls === 0) {
+    return empty(
+      "No LLM calls recorded in this window.",
+      "Accounting starts with the next investigation the agent runs."
+    );
+  }
+  const rows = t.byBackend
+    .map(
+      (b) => `<tr><td class="primary">${esc(b.backend)}</td>` +
+        `<td class="mono" translate="no">${esc(b.model)}</td>` +
+        `<td class="num">${fmtInt(b.calls)}</td>` +
+        `<td class="num">${fmtInt(b.input)}</td>` +
+        `<td class="num">${fmtInt(b.output)}</td>` +
+        `<td class="num">${fmtInt(b.cacheRead)}</td></tr>`
+    )
+    .join("");
+  return (
+    statList(
+      [
+        { label: "Total tokens", value: fmtInt(t.input + t.output), sub: "input + output" },
+        { label: "Input", value: fmtInt(t.input) },
+        { label: "Output", value: fmtInt(t.output) },
+        // Cache reads are the tokens that were NOT re-sent, so the pair reads as a saving
+        // and its price. Writes sit in the sub-line: you pay for them once, deliberately.
+        { label: "Cache reads", value: fmtInt(t.cacheRead), sub: `${fmtInt(t.cacheCreation)} written` },
+        { label: "LLM calls", value: fmtInt(t.calls) },
+      ]
+    ) +
+    table(
+      `<th>Backend</th><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache read</th>`,
+      rows
+    )
+  );
+}
+
 export function overviewPage(o: Overview, recent: IncidentRow[]): string {
   const remediationTotal = o.remediationSucceeded + o.remediationFailed;
   const feedbackTotal = Object.values(o.feedback).reduce((a, b) => a + b, 0);
@@ -166,11 +203,13 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
             .join("")
         );
 
+  // Volume, then outcome, then cost — each its own section, in the order the questions are
+  // asked. The hero holds one composed object and nothing else: the 30-day count set against
+  // the weekly series it summarises, because the count and the shape of it are one fact.
+  // The four supporting figures are a different fact — what happened to those incidents —
+  // and they were reading as a caption to the chart while they shared its frame.
   return layout(
     "Overview",
-    // One composed object, not a rank of identical tiles: the 30-day count set against the
-    // weekly series it summarises, with the supporting figures on a shelf underneath. The
-    // count and the shape of it are one fact and belong in one frame.
     `<section class="hero">
        <h1 class="eyebrow">Incidents · last 30 days</h1>
        <div class="hero-body">
@@ -180,13 +219,18 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
          </p>
          <div class="hero-chart">${barChart(o.weekly, { label: "incidents per week" })}</div>
        </div>
-       ${statList([
+     </section>
+     <h2>Outcomes</h2>
+     ${statList(
+       [
          { label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents), sub: `${o.resolvedIncidents} of ${o.totalIncidents}` },
          { label: "Remediation applied", value: fmtPct(o.remediationSucceeded, remediationTotal), sub: `${o.remediationSucceeded} of ${remediationTotal}` },
          { label: "On-call replies", value: fmtInt(feedbackTotal) },
          { label: "Confirmed fixed", value: fmtInt(o.feedback.resolved ?? 0), sub: "by on-call" },
-       ])}
-     </section>
+       ]
+     )}
+     <h2>Token usage</h2>
+     ${tokenUsage(o.tokens)}
      <h2>Most recurring</h2>
      ${recurring}
      <h2>Recent incidents<a href="/incidents">All incidents →</a></h2>
@@ -309,11 +353,14 @@ export function detailPage(d: {
          { label: "Confidence", value: i.confidence ?? "—" },
          { label: "Fired", value: fmtDate(i.created_at) },
          { label: "Resolved", value: fmtDate(i.resolved_at) },
-       ],
-       "stats boxed"
+       ]
      )}
      <h2>Root cause analysis</h2>
-     <div class="prose"><div class="prose-text">${esc(i.rca)}</div></div>
+     ${
+       i.rca && i.rca.trim()
+         ? renderRca(i.rca)
+         : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.")
+     }
      <h2>Remediation</h2>
      ${remediations}
      <h2>On-call feedback</h2>

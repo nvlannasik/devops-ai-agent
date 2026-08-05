@@ -21,12 +21,26 @@ export interface FeedbackRow {
   slack_user: string | null; confirmed_root_cause: string | null;
   action_taken: string | null; outcome: string | null; created_at: Date;
 }
+// llm_usage holds one row per chat() call, not per incident (see migrations/004) — which is
+// what makes "what does each backend cost us" answerable at all under the router. The totals
+// are a separate query rather than a sum of `byBackend`: that list is capped, so adding it up
+// would quietly under-report the moment a 21st backend/model pair appears.
+export interface TokenLine {
+  backend: string; model: string; calls: number;
+  input: number; output: number; cacheRead: number; cacheCreation: number;
+}
+export interface Tokens {
+  calls: number;
+  input: number; output: number; cacheRead: number; cacheCreation: number;
+  byBackend: TokenLine[];
+}
 export interface Overview {
   weekly: { label: string; value: number }[];
   recurring: { alertname: string; namespace: string | null; n: number; last_seen: Date }[];
   totalIncidents: number; resolvedIncidents: number;
   remediationSucceeded: number; remediationFailed: number;
   feedback: Record<string, number>;
+  tokens: Tokens;
 }
 
 const CACHE_TTL_MS = 60_000;
@@ -53,6 +67,15 @@ function deepFreeze<T>(value: T): T {
   }
   return value;
 }
+
+// pg returns BIGINT as a string, because a bigint can exceed what a JS number holds exactly.
+// Token counts cannot — a year of this agent's traffic is nine digits, and Number.MAX_SAFE_INTEGER
+// is sixteen — so the conversion is safe here and nowhere near safe in general. NaN and null
+// both land on 0 rather than propagating into a rendered "NaN".
+const num = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
 
 export class DashboardQueries {
   private readonly pool: Pool | null;
@@ -97,10 +120,11 @@ export class DashboardQueries {
     const empty: Overview = {
       weekly: [], recurring: [], totalIncidents: 0, resolvedIncidents: 0,
       remediationSucceeded: 0, remediationFailed: 0, feedback: {},
+      tokens: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, byBackend: [] },
     };
     if (!this.pool) return empty;
 
-    const [weekly, recurring, totals, remediation, feedback] = await Promise.all([
+    const [weekly, recurring, totals, remediation, feedback, tokens, tokenLines] = await Promise.all([
       this.pool.query(
         `SELECT to_char(date_trunc('week', created_at), 'MM-DD') AS label, count(*)::int AS n
            FROM incidents WHERE created_at >= now() - interval '12 weeks'
@@ -138,9 +162,41 @@ export class DashboardQueries {
           LIMIT 20`,
         [WINDOW]
       ),
+      this.pool.query(
+        // one row, same as the incident totals above — and the same redundant LIMIT, for
+        // the same reason. sum() over INTEGER widens to BIGINT, which pg hands back as a
+        // string; num() below is what turns it into a number rather than "12"+"7"="127".
+        `SELECT count(*)::int AS calls,
+                coalesce(sum(input_tokens), 0)::bigint          AS input,
+                coalesce(sum(output_tokens), 0)::bigint         AS output,
+                coalesce(sum(cache_read_tokens), 0)::bigint     AS cache_read,
+                coalesce(sum(cache_creation_tokens), 0)::bigint AS cache_creation
+           FROM llm_usage WHERE created_at >= now() - $1::interval
+          LIMIT 1`,
+        [WINDOW]
+      ),
+      this.pool.query(
+        // backend AND model: one backend can be re-pointed at a new model mid-window, and
+        // collapsing that hides exactly the change someone reading this page is looking for.
+        // Both are nullable TEXT, so both are coalesced — a NULL group would render as a
+        // blank row that looks like a bug. 20 caps a column nothing in the schema bounds.
+        `SELECT coalesce(backend, 'unknown') AS backend,
+                coalesce(model, 'unknown')   AS model,
+                count(*)::int AS calls,
+                coalesce(sum(input_tokens), 0)::bigint          AS input,
+                coalesce(sum(output_tokens), 0)::bigint         AS output,
+                coalesce(sum(cache_read_tokens), 0)::bigint     AS cache_read,
+                coalesce(sum(cache_creation_tokens), 0)::bigint AS cache_creation
+           FROM llm_usage WHERE created_at >= now() - $1::interval
+          GROUP BY 1, 2
+          ORDER BY sum(input_tokens) + sum(output_tokens) DESC
+          LIMIT 20`,
+        [WINDOW]
+      ),
     ]);
 
     const byStatus = Object.fromEntries(remediation.rows.map((r: any) => [r.status, r.n]));
+    const t = tokens.rows[0];
     const value: Overview = {
       weekly: weekly.rows.map((r: any) => ({ label: r.label, value: r.n })),
       recurring: recurring.rows,
@@ -149,6 +205,16 @@ export class DashboardQueries {
       remediationSucceeded: byStatus.succeeded ?? 0,
       remediationFailed: byStatus.failed ?? 0,
       feedback: Object.fromEntries(feedback.rows.map((r: any) => [r.outcome, r.n])),
+      tokens: {
+        calls: t?.calls ?? 0,
+        input: num(t?.input), output: num(t?.output),
+        cacheRead: num(t?.cache_read), cacheCreation: num(t?.cache_creation),
+        byBackend: tokenLines.rows.map((r: any) => ({
+          backend: r.backend, model: r.model, calls: r.calls,
+          input: num(r.input), output: num(r.output),
+          cacheRead: num(r.cache_read), cacheCreation: num(r.cache_creation),
+        })),
+      },
     };
     this.cache = { at: Date.now(), value: deepFreeze(value) };
     return this.cache.value;
