@@ -172,16 +172,17 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 .card.flush { padding: 0; overflow: hidden; }
 
 /* The overview's opening move is one composed object, not a rank of identical metric tiles:
-   the 30-day count set against the weekly series it summarises, with the supporting figures
-   on a shelf underneath. The count and its shape are one fact and belong in one frame. */
+   the 30-day count set against the weekly series it summarises. The count and its shape are
+   one fact and belong in one frame — and nothing else does, which is why the supporting
+   figures moved out to their own section rather than sitting on a shelf inside this one. */
 .hero {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-lg); padding: var(--sp-6) var(--sp-6) 0;
-  margin-bottom: var(--sp-8); overflow: hidden;
+  border-radius: var(--r-lg); padding: var(--sp-6);
+  overflow: hidden;
 }
 .hero-body {
   display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr);
-  gap: var(--sp-8); align-items: end; padding-bottom: var(--sp-5);
+  gap: var(--sp-8); align-items: end;
 }
 .hero-figure { margin: 0; display: flex; flex-direction: column; }
 .hero-value {
@@ -195,20 +196,19 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 }
 .hero-chart { min-width: 0; }
 
-/* One stat shelf, two homes: the hero's supporting figures and the incident fact bar.
-   They are the same kind of thing — a labelled value — so they are the same component. */
+/* One stat shelf, three homes: the overview's outcomes, its token totals, and the incident
+   fact bar. They are the same kind of thing — a labelled value — so they are one component.
+   auto-fit rather than a fixed count: four figures and five have to sit on the same grid.
+   The dividers are a 1px grid gap with the border colour showing through from behind, not a
+   border on each cell. A per-cell border cannot know it is at the start of a wrapped row —
+   five stats in a four-wide grid left the fifth with a rule on the wrong side and none above
+   it. The gap draws every divider the grid actually has, in both directions, and no others. */
 .stats {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
-  margin: 0; border-top: 1px solid var(--border);
+  gap: 1px; margin: 0; background: var(--border);
+  border: 1px solid var(--border); border-radius: var(--r); overflow: hidden;
 }
-.stats.boxed {
-  border: 1px solid var(--border); border-radius: var(--r);
-  background: var(--surface); overflow: hidden;
-}
-.stat { padding: var(--sp-4) var(--sp-5); border-left: 1px solid var(--border); min-width: 0; }
-.stat:first-child { border-left: 0; }
-.hero .stat { padding-left: 0; border-left: 0; }
-.hero .stat + .stat { padding-left: var(--sp-5); border-left: 1px solid var(--border); }
+.stat { padding: var(--sp-4) var(--sp-5); background: var(--surface); min-width: 0; }
 .stat dt {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
@@ -350,6 +350,53 @@ form.signout button {
   font-family: var(--font-prose); font-size: var(--fs-md); line-height: 1.7;
   max-width: 68ch; white-space: pre-wrap; overflow-wrap: break-word; text-wrap: pretty;
 }
+.prose-text + .prose-text, .prose-text + .rca-list, .prose-text + .rca-code { margin-top: var(--sp-4); }
+
+/* ---------- RCA ---------- */
+/* The RCA arrives as one string and comes apart into the sections its template declares, so
+   these headings sit a level below the page's own. They deliberately do NOT repeat the h2
+   treatment: a second rank of mono captions with hairlines would read as a second page rather
+   than as the inside of one section. Sentence case, UI face, no rule — quieter by design. */
+.rca-head {
+  font-size: var(--fs-base); font-weight: 620; letter-spacing: -.01em;
+  margin: var(--sp-6) 0 var(--sp-3);
+}
+.rca > .rca-head:first-child { margin-top: 0; }
+/* Severity and Confidence are stated inline in the RCA text, and the model writes a sentence
+   after the confidence level that exists nowhere else — the incidents table has the level and
+   not the reasoning. So they are rendered, and rendered small: the badges at the top of the
+   page are where those values are read, this is where they are explained. */
+.rca-fields {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6);
+  margin: 0 0 var(--sp-5);
+}
+.rca-fields > div { display: flex; gap: var(--sp-3); align-items: baseline; min-width: 0; }
+.rca-fields dt {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
+}
+.rca-fields dd { margin: 0; font-size: var(--fs-sm); min-width: 0; }
+/* Bulleted sections the template does not name. They keep the reading face — an unrecognised
+   section is still the agent's argument — but not the marker: the source already carries a •
+   and re-adding a disc would double it. */
+.rca-list {
+  font-family: var(--font-prose); font-size: var(--fs-md); line-height: 1.7;
+  max-width: 68ch; margin: 0; padding-left: var(--sp-5);
+}
+.rca-list li { margin-top: var(--sp-2); overflow-wrap: break-word; }
+.rca-list li:first-child { margin-top: 0; }
+/* Log excerpts and stack traces. The one place on this page where wrapping would destroy the
+   thing being read, so it scrolls instead. */
+.rca-code {
+  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.5;
+  background: var(--surface-2); border-radius: var(--r-sm);
+  padding: var(--sp-3) var(--sp-4); margin: 0; overflow-x: auto;
+}
+.rca-code code { font-size: inherit; }
+/* Evidence and Ruled Out put a whole claim in the leading column. Cells wrap by default, but
+   these ones need a ceiling too, or a long finding takes the table to the width of its
+   longest sentence and the source column is squeezed to one word per line. */
+.rca td.primary { max-width: 44ch; }
 
 /* ---------- empty, pager ---------- */
 .empty {
@@ -561,11 +608,11 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   header.top { gap: var(--sp-4); }
   header.top nav { gap: var(--sp-4); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
-  .hero { padding: var(--sp-5) var(--sp-5) 0; }
+  .hero { padding: var(--sp-5); }
   .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
-  .hero .stat, .hero .stat + .stat { padding-left: 0; border-left: 0; }
-  .hero .stat + .stat { border-top: 1px solid var(--border); }
+  .stat { padding: var(--sp-4); }
   .prose { padding: var(--sp-4); }
+  .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
   /* An SVG scales with its viewBox, so a 10px caption in a 720-unit chart renders near 4px on
      a phone. The per-bar counts go — every number is in the tables below, and each bar keeps
      its <title> — which frees the top gutter and lets the period labels grow back to legible. */

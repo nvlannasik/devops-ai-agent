@@ -113,6 +113,47 @@ test("every query this module can emit carries a LIMIT", async () => {
   for (const c of calls) assert.match(c.sql, /\bLIMIT\b/i, `missing LIMIT: ${c.sql}`);
 });
 
+// sum() over INTEGER widens to BIGINT, and node-postgres hands BIGINT back as a string
+// rather than lose precision. Without the coercion the totals still render — as "127" for
+// 12 + 7 — which is a wrong number that looks like a plausible one.
+test("token sums arrive as BIGINT strings and become numbers, not concatenations", async () => {
+  const usage = (sql: string): unknown[] => {
+    if (!sql.includes("FROM llm_usage")) return [];
+    const line = { input: "12", output: "7", cache_read: "5", cache_creation: "1" };
+    return sql.includes("GROUP BY")
+      ? [{ backend: "private-llm", model: "qwen3-32b", calls: 3, ...line }]
+      : [{ calls: 3, ...line }];
+  };
+  const o = await new DashboardQueries(stub([], usage)).overview();
+
+  assert.equal(o.tokens.input, 12);
+  assert.equal(o.tokens.output, 7);
+  assert.equal(o.tokens.input + o.tokens.output, 19, `string sums would total "127"`);
+  assert.equal(o.tokens.cacheRead, 5);
+  assert.equal(o.tokens.cacheCreation, 1);
+  assert.equal(o.tokens.byBackend[0].input, 12, "the per-backend rows widen the same way");
+  assert.equal(o.tokens.byBackend[0].backend, "private-llm");
+});
+
+test("a window with no LLM calls reports zeros rather than NaN", async () => {
+  const o = await new DashboardQueries(stub([])).overview();
+  assert.deepEqual(o.tokens, {
+    calls: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, byBackend: [],
+  });
+});
+
+// An interval spliced into the SQL text is an injection site the moment the window stops
+// being a module constant — which is exactly the change someone will make to add a range
+// picker. Bound as $1 it can never become one.
+test("the 30-day window is bound as a parameter, never interpolated into the SQL", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).overview();
+  const windowed = calls.filter((c) => c.sql.includes("$1::interval"));
+  assert.ok(windowed.length >= 5, "the recurring, totals, remediation, feedback and token queries");
+  for (const c of windowed) assert.deepEqual(c.params, ["30 days"], `not bound: ${c.sql}`);
+  for (const c of calls) assert.doesNotMatch(c.sql, /interval '30 days'/);
+});
+
 test("with no pool the dashboard reports itself disabled instead of throwing", async () => {
   const q = new DashboardQueries(null);
   assert.equal(q.enabled, false);
