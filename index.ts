@@ -9,7 +9,10 @@ async function main() {
     // and throws on a bad one — outside, that surfaces as a raw unhandled rejection
     const agent = new DevOpsAgent();
     const slack = new SlackApp(agent);
-    const dashboard = new DashboardServer();
+    // The arrow is the point: the dashboard reads the tool list per request, so it reflects
+    // whatever the agent is connected to now rather than what it had at boot (nothing, here —
+    // initialize() runs further down).
+    const dashboard = new DashboardServer(undefined, () => agent.mcpTools());
 
     // graceful shutdown
     const shutdown = async (signal: string) => {

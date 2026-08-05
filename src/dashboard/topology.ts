@@ -6,6 +6,11 @@ export interface Node {
   detail: string;   // already redacted — safe to render
   meta: string;     // secret presence and other flags, never a secret value
   configured: boolean;
+  // Stable handle for the diagram, which has to anchor an edge to ONE specific node: the
+  // private-llm backends hang off llm-worker, not off the agent. Matching on `label` would
+  // work until someone rewords it, and would fail silently by drawing the edge from the
+  // wrong place. Optional because only the nodes the diagram references need one.
+  id?: string;
 }
 
 export interface BackendNode {
@@ -17,11 +22,31 @@ export interface BackendNode {
   viaWorker: boolean;
 }
 
+export interface Tool {
+  name: string;
+  // The agent's OWN predicate for "this can change the cluster", read back rather than
+  // re-derived: agent/index.ts gates the write path on description.startsWith("[WRITE]").
+  // Reading the same test means the page cannot disagree with the thing it describes — a
+  // server that sends no description is non-write to the agent, and non-write here too.
+  write: boolean;
+}
+
+// A family of tools the MCP server told us it exposes, e.g. { name: "k8s", tools: [...] }.
+// NOT a connection: the agent has no idea what the MCP server's own Prometheus URL is —
+// that lives in another pod's config. What it does know, for free, is the tool list it
+// received on connect. The name is the tool-name prefix, verbatim, so a family the server
+// adds tomorrow appears here without anyone editing a mapping table.
+export interface Capability {
+  name: string;
+  tools: Tool[];
+}
+
 export interface Topology {
   inbound: Node[];
   outbound: Node[];
   provider: string;
   backends: BackendNode[];
+  capabilities: Capability[];
   registryError: string | null;
   // populated only when the provider is NOT "router" — the router's answer to "what LLM is
   // reachable" is the `backends` list instead. See activeClientNode().
@@ -29,6 +54,19 @@ export interface Topology {
 }
 
 const NOT_CONFIGURED = "not configured";
+
+// devops-mcp-server marks every mutating tool by prefixing its description. The agent reads
+// this to decide what needs approval; the dashboard reads it to say so out loud.
+const WRITE_PREFIX = "[WRITE]";
+
+// Structural, not the agent's ToolDefinition: this is the whole dependency the dashboard has
+// on the MCP client, and keeping it to the two fields actually read means neither module has
+// to import the other's types. `description` is optional because a page that renders on a
+// half-built input is the requirement here (see buildTopology's default below).
+export interface McpTool {
+  name: string;
+  description?: string;
+}
 
 // A base URL may legitimately carry credentials (https://user:pass@host/v1), and a query string
 // may carry a token. Host, port and path are what identify a dependency; nothing else is needed
@@ -63,6 +101,44 @@ export function redactUrl(raw: string | undefined): string {
 // Presence, never value. Every secret in this file goes through here.
 const present = (v: string | undefined): string => (v && v.trim() ? "set" : "not set");
 
+/**
+ * Tool names -> families, by the prefix before the first underscore. devops-mcp-server names
+ * every tool for its domain (`k8s_list_pods`, `prometheus_query`, `loki_query_range`,
+ * `tracing_search`), so the prefix IS the grouping — no lookup table, which is the point:
+ * a table would have to be edited every time the server grows a domain, and would silently
+ * bucket the new one as "other" until someone noticed.
+ *
+ * Sorted by size then name so the list is stable between renders (a Map preserves insertion
+ * order, which is server order, which is not something this page should depend on).
+ */
+export function toolFamilies(tools: readonly McpTool[]): Capability[] {
+  const fams = new Map<string, Tool[]>();
+  for (const t of tools) {
+    const i = t.name.indexOf("_");
+    // i > 0, not i >= 0: a name that STARTS with "_" has no prefix to speak of, and slicing
+    // at 0 would file every such tool under the empty string.
+    const family = i > 0 ? t.name.slice(0, i) : t.name;
+    const list = fams.get(family) ?? [];
+    list.push({ name: t.name, write: (t.description ?? "").startsWith(WRITE_PREFIX) });
+    fams.set(family, list);
+  }
+  return [...fams.entries()]
+    .map(([name, list]) => ({ name, tools: list.sort((a, b) => a.name.localeCompare(b.name)) }))
+    .sort((a, b) => b.tools.length - a.tools.length || a.name.localeCompare(b.name));
+}
+
+/**
+ * The anchor the diagram uses to link a box to its own row in the tables below. Both sides
+ * derive it from the same array position, so this is a contract between topology-svg.ts and
+ * views.ts — one definition, imported by both, rather than two string templates that can
+ * drift apart into links that quietly point at nothing.
+ *
+ * Positional, never label-derived: a node label is rendered text that may contain anything
+ * (topology-svg.test.ts feeds it a <script> tag), and slugging one would need escaping and
+ * could still collide. This is [a-z0-9-] by construction.
+ */
+export const rowId = (group: "in" | "out" | "backend" | "cap", i: number): string => `${group}-${i}`;
+
 // Number(garbage) is NaN, and NaN reaches a template string as the literal text "NaN" without
 // ever throwing — nothing catches it, it just looks wrong on the page. Every config number that
 // flows into rendered text goes through here instead.
@@ -72,8 +148,13 @@ const num = (n: number): string | number => (Number.isFinite(n) ? n : "?");
  * Config -> a plain structure. This function IS the allowlist: it names every field it emits,
  * one at a time. It must never iterate the config object and never filter a known-bad set out
  * of it — a denylist is correct only until the next secret is added, and it fails silently.
+ *
+ * `mcpTools` is the one input that is not config: the list the MCP client received from
+ * listTools() when it connected, held in memory since. Passed in rather than imported so the
+ * dashboard keeps no handle on the agent, and so the default (none discovered — the client
+ * is down, or has not connected yet) is a state this page renders rather than a crash.
  */
-export function buildTopology(): Topology {
+export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
   const inbound: Node[] = [
     {
       label: "Slack",
@@ -99,15 +180,6 @@ export function buildTopology(): Topology {
 
   const outbound: Node[] = [
     {
-      label: "devops-mcp-server",
-      detail: mcpDetail,
-      meta:
-        config.mcp.transport === "http"
-          ? `http, auth token ${present(config.mcp.http.authToken)}`
-          : "stdio",
-      configured: true,
-    },
-    {
       label: "Postgres (incident memory)",
       detail: config.incidents.enabled
         ? `${config.incidents.db.host}:${num(config.incidents.db.port)}/${config.incidents.db.database}`
@@ -125,6 +197,7 @@ export function buildTopology(): Topology {
       configured: config.memory.backend === "redis",
     },
     {
+      id: "llm-worker",
       label: "llm-worker (SQS)",
       detail: `${config.llm.sqs.requestQueueName} -> ${config.llm.sqs.responseQueueName}`,
       meta: `region ${config.llm.sqs.region}, timeout ${num(config.llm.sqs.timeoutMs / 1000)}s`,
@@ -136,6 +209,20 @@ export function buildTopology(): Topology {
       meta: `timeout ${num(config.gitops.timeoutMs / 1000)}s`,
       configured: config.gitops.enabled,
     },
+    // Last on purpose, and the diagram is why: its tool families hang off it in a cluster of
+    // their own, and only the bottom node of this column has a clear run downward — an edge
+    // leaving a node that has cards beneath it has to detour out the side. Nothing else reads
+    // this order (both tests find this node by label, and the table renders whatever it gets).
+    {
+      id: "devops-mcp-server",
+      label: "devops-mcp-server",
+      detail: mcpDetail,
+      meta:
+        config.mcp.transport === "http"
+          ? `http, auth token ${present(config.mcp.http.authToken)}`
+          : "stdio",
+      configured: true,
+    },
   ];
 
   const { backends, registryError } = routerBackends();
@@ -145,6 +232,7 @@ export function buildTopology(): Topology {
     outbound,
     provider: config.llm.provider,
     backends,
+    capabilities: toolFamilies(mcpTools),
     registryError,
     activeClient: activeClientNode(),
   };

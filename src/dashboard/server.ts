@@ -1,19 +1,34 @@
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters } from "./filters.js";
-import { detailPage, errorPage, listPage, overviewPage, topologyPage } from "./views.js";
+import { detailPage, errorPage, listPage, loginPage, overviewPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
+import type { McpTool } from "./topology.js";
+import {
+  LoginThrottle,
+  SESSION_COOKIE,
+  checkPassword,
+  clearedCookie,
+  cookieValue,
+  mintSession,
+  safeNext,
+  sessionCookie,
+  verifySession,
+} from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "login" | "logout" }
   | { kind: "detail"; id: number };
 
 export function matchRoute(pathname: string): Route {
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (p === "" || p === "/") return { kind: "overview" };
   if (p === "/healthz") return { kind: "health" };
+  if (p === "/login") return { kind: "login" };
+  if (p === "/logout") return { kind: "logout" };
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
   // digit count capped at 15: any 15-digit string is < 10^15, safely under
@@ -31,12 +46,50 @@ export function matchRoute(pathname: string): Route {
   return { kind: "notfound" };
 }
 
+// Which methods each route answers. Everything not named here is read-only and GET-only,
+// which is still true of every page: the two exceptions both act on the session, not on data.
+const METHODS: Partial<Record<Route["kind"], readonly string[]>> = {
+  login: ["GET", "POST"],
+  logout: ["POST"],
+};
+
+type Send = (code: number, body: string, type?: string, extra?: Record<string, string>) => void;
+type Redirect = (to: string, extra?: Record<string, string>) => void;
+
+// Every page but one runs no JavaScript at all — views.test.ts asserts it — and gets no
+// `script-src` whatsoever, which is the strongest form of the claim: `default-src 'none'`
+// already covers scripts, so a missed esc() on the incident pages (the ones that render LLM
+// output and Alertmanager labels) is inert rather than exploitable.
+//
+// /topology is the exception. Its pan/zoom needs a listener, so that ONE response names a
+// fresh nonce and the inline block carries it. Never 'unsafe-inline': that would hand the
+// exemption to any injected <script> too, and the nonce is what keeps it to ours.
+// style-src 'unsafe-inline' remains for the inline <style> block. form-action pins where the
+// password may be posted (it does NOT inherit from default-src), and frame-ancestors stops
+// the page being framed and clickjacked into a sign-out.
+const csp = (nonce?: string): string =>
+  "default-src 'none'; style-src 'unsafe-inline'; " +
+  (nonce ? `script-src 'nonce-${nonce}'; ` : "") +
+  "form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+// Per response, never reused: a nonce an attacker can predict is 'unsafe-inline' with extra
+// steps. base64url so the same string is legal both in the header and in the attribute.
+const newNonce = (): string => randomBytes(16).toString("base64url");
+
 export class DashboardServer {
   private server: http.Server | null = null;
   private readonly queries: DashboardQueries;
+  private readonly mcpTools: () => readonly McpTool[];
+  private readonly throttle = new LoginThrottle();
 
-  constructor(queries?: DashboardQueries) {
+  // A getter, not a snapshot: the dashboard starts before — and outlives — any given MCP
+  // connection, so a list captured at construction time would be permanently empty. McpTool is
+  // the dashboard's own two-field shape, not the agent's ToolDefinition — this is the whole
+  // dependency the dashboard has on the agent, and keeping it structural means neither side
+  // imports the other's types.
+  constructor(queries?: DashboardQueries, mcpTools?: () => readonly McpTool[]) {
     this.queries = queries ?? new DashboardQueries();
+    this.mcpTools = mcpTools ?? (() => []);
   }
 
   async start(): Promise<void> {
@@ -76,8 +129,10 @@ export class DashboardServer {
       try {
         this.server!.listen(config.dashboard.port, () => {
           logger.info(
-            `[dashboard] listening on :${config.dashboard.port} ` +
-            `(read-only, no auth — must not be routed by the Ingress)`
+            `[dashboard] listening on :${config.dashboard.port} (read-only, ` +
+            (config.dashboard.password
+              ? `password required)`
+              : `DASHBOARD_PASSWORD unset — serving 503 until it is set)`)
           );
           resolve();
         });
@@ -90,33 +145,106 @@ export class DashboardServer {
     });
   }
 
+  private authenticated(req: http.IncomingMessage, password: string): boolean {
+    return verifySession(cookieValue(req.headers.cookie, SESSION_COOKIE), password);
+  }
+
+  // 4 KiB for a form with two short fields. The cap is the point: without it, a request that
+  // announces no length can stream for as long as it likes into a process whose actual job is
+  // running investigations.
+  private async readBody(req: http.IncomingMessage, limit = 4096): Promise<string | null> {
+    // The declared length settles it before a byte is read; the running total below is for
+    // chunked bodies, which declare nothing.
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > limit) return null;
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    try {
+      for await (const chunk of req) {
+        size += (chunk as Buffer).length;
+        if (size > limit) {
+          // Paused, not destroyed: the caller still has to write a response onto this
+          // socket, and destroying the request resets the connection out from under it —
+          // the client then sees a dropped connection instead of being told what was wrong.
+          req.pause();
+          return null;
+        }
+        chunks.push(chunk as Buffer);
+      }
+    } catch {
+      // an aborted or reset upload — indistinguishable from a truncated form, and treated
+      // the same way: no credential, no session
+      return null;
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  }
+
+  private async login(req: http.IncomingMessage, password: string, send: Send, redirect: Redirect): Promise<void> {
+    const key = req.socket.remoteAddress ?? "unknown";
+
+    const waitMs = this.throttle.retryAfterMs(key);
+    if (waitMs > 0) {
+      const secs = Math.ceil(waitMs / 1000);
+      const wait = secs > 60 ? `${Math.ceil(secs / 60)} minutes` : `${secs} seconds`;
+      return send(429, loginPage({ error: `Too many sign-in attempts. Try again in ${wait}.` }), undefined, {
+        "retry-after": String(secs),
+      });
+    }
+
+    const body = await this.readBody(req);
+    if (body === null) {
+      return send(400, loginPage({ error: "That sign-in did not arrive intact. Try again." }));
+    }
+
+    const form = new URLSearchParams(body);
+    const next = safeNext(form.get("next"));
+    if (!checkPassword(form.get("password") ?? "", password)) {
+      this.throttle.fail(key);
+      // Bounded by the throttle above, so this cannot be used to flood the log — and it is
+      // the only record that anyone is trying the door.
+      logger.warn(`[dashboard] failed sign-in from ${key}`);
+      return send(401, loginPage({ error: "That password is not right. Check it and try again.", next }));
+    }
+
+    this.throttle.succeed(key);
+    logger.info(`[dashboard] sign-in from ${key}`);
+    return redirect(next, { "set-cookie": sessionCookie(mintSession(password), config.dashboard.cookieSecure) });
+  }
+
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const send = (code: number, body: string, type = "text/html; charset=utf-8") => {
+    const send = (
+      code: number,
+      body: string,
+      type = "text/html; charset=utf-8",
+      extra: Record<string, string> = {}
+    ) => {
       res.writeHead(code, {
         "content-type": type,
         "cache-control": "no-store",
-        // These pages run no JavaScript at all — views.test.ts asserts it. Saying so in a
-        // header turns the whole XSS class from "every esc() call must stay correct
-        // forever" into "a missed escape is inert". Cheap insurance on the one surface
-        // that renders LLM output with no authentication in front of it.
-        // style-src 'unsafe-inline' is required by the inline <style> block.
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+        // The script-free policy. /topology overrides it through `extra` with its own
+        // nonce — see csp() above for what each directive is holding down.
+        "content-security-policy": csp(),
         "x-content-type-options": "nosniff",
+        ...extra,
       });
       res.end(body);
     };
 
-    // read-only by contract: nothing here mutates, so nothing but GET is accepted
-    if (req.method !== "GET") return send(405, errorPage("Method not allowed", "This dashboard is read-only."));
+    // 303, not 302: after a POST it is the status that tells every browser to follow with a
+    // GET rather than repeating the password submission at the new location.
+    const redirect = (to: string, extra: Record<string, string> = {}) =>
+      send(303, "", "text/plain; charset=utf-8", { location: to, ...extra });
 
     let url: URL;
     let route: Route;
     try {
       // `new URL()` needs no I/O to throw: Node's HTTP parser accepts request-targets
       // (e.g. an absolute-form URI with a malformed authority) that this constructor
-      // rejects with a TypeError — routine internet-scanner noise, no auth bypass needed
-      // since this listener has none. Caught here, deliberately separate from the query
-      // try below, so a parse failure is its own 400 rather than the query layer's 500.
+      // rejects with a TypeError — routine internet-scanner noise. Caught here,
+      // deliberately separate from the query try below, so a parse failure is its own 400
+      // rather than the query layer's 500. Before the session check on purpose: a request
+      // this server cannot parse has no path to authenticate.
       url = new URL(req.url ?? "/", `http://localhost:${config.dashboard.port}`);
       route = matchRoute(url.pathname);
     } catch (err) {
@@ -124,7 +252,57 @@ export class DashboardServer {
       return send(400, errorPage("Bad request", "The request could not be parsed."));
     }
 
+    // Still read-only by contract — the two routes with a POST act on the session, not on
+    // data. Checked per route rather than globally so a POST to a page keeps saying 405.
+    const allowed = METHODS[route.kind] ?? ["GET"];
+    if (!allowed.includes(req.method ?? "")) {
+      return send(405, errorPage("Method not allowed", "This dashboard is read-only."), "text/html; charset=utf-8", {
+        allow: allowed.join(", "),
+      });
+    }
+
+    // Ahead of the password gate below: the probe decides whether this pod stays Ready, and
+    // a misconfigured dashboard must not be able to take the agent out of service. It reads
+    // nothing and reveals nothing.
     if (route.kind === "health") return send(200, "ok", "text/plain; charset=utf-8");
+
+    // Fail closed, and say why. Serving the incident history anonymously because a secret is
+    // missing is the one outcome worth an outage on this port — but only on this port: the
+    // dashboard is still the component that may not stop the pod (design §8).
+    const password = config.dashboard.password;
+    if (!password) {
+      return send(
+        503,
+        errorPage(
+          "Dashboard unavailable",
+          "DASHBOARD_PASSWORD is not set, so this dashboard cannot verify who is asking. Set it to enable sign-in.",
+          "bare"
+        )
+      );
+    }
+
+    if (route.kind === "login") {
+      if (req.method === "GET") {
+        // Already signed in: the form would be a dead end that re-asks for a password the
+        // browser is already holding.
+        if (this.authenticated(req, password)) return redirect(safeNext(url.searchParams.get("next")));
+        return send(200, loginPage({ next: safeNext(url.searchParams.get("next")) }));
+      }
+      return this.login(req, password, send, redirect);
+    }
+
+    if (route.kind === "logout") {
+      // Unconditional: signing out an already-signed-out browser is the outcome either way,
+      // and refusing it would only ever confuse someone whose session had just expired.
+      return redirect("/login", { "set-cookie": clearedCookie(config.dashboard.cookieSecure) });
+    }
+
+    if (!this.authenticated(req, password)) {
+      // The path is carried through the sign-in so a bookmarked incident survives a session
+      // expiring — safeNext() is what keeps that from becoming an open redirect.
+      const next = url.pathname + url.search;
+      return redirect(`/login?next=${encodeURIComponent(safeNext(next))}`);
+    }
 
     // resolved from the URL alone — must 404 before the database gate below, otherwise an
     // unrelated path rides the "no database configured" 200 (or, worse, reaches the query
@@ -133,7 +311,15 @@ export class DashboardServer {
 
     // deliberately before the database gate: this page reads no database, which makes it the
     // one page that still works while Postgres is down — which is when it is most wanted
-    if (route.kind === "topology") return send(200, topologyPage(buildTopology()));
+    if (route.kind === "topology") {
+      // The one place the two halves meet: the same nonce goes into the header and into the
+      // <script> tag. Minted here rather than per-page so there is exactly one of them and
+      // nothing has to agree about how it was generated.
+      const nonce = newNonce();
+      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce), "text/html; charset=utf-8", {
+        "content-security-policy": csp(nonce),
+      });
+    }
 
     if (!this.queries.enabled) {
       return send(200, errorPage("No database configured", "Set DB_HOST to enable incident history."));

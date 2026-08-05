@@ -18,6 +18,10 @@ const SECRETS: Record<string, string> = {
   DB_USERNAME: "SENTINEL-db-user",
   LLM_BACKEND_1_KEY: "SENTINEL-backend1-key",
   LLM_BACKEND_2_KEY: "SENTINEL-backend2-key",
+  // The credential that now guards this very page. Rendering it here would hand the next
+  // reader the key to every incident, and the topology page is the one that enumerates
+  // configuration for a living.
+  DASHBOARD_PASSWORD: "SENTINEL-dashboard-pass",
   // Free-form, operator-composed — not secret-shaped env vars like the ones above, but a
   // credential passed as a CLI arg to a stdio wrapper script is an ordinary pattern (see the
   // "MCP stdio command line rendered raw" finding). This file fixes MCP_TRANSPORT=http, so the
@@ -46,16 +50,17 @@ process.env.LLM_BACKEND_2_KIND = "private-llm";
 process.env.LLM_ROUTE_HEAVY = "sonnet";
 process.env.LLM_ROUTE_LIGHT = "qwen";
 
-const { buildTopology, redactUrl } = await import("./topology.js");
+const { buildTopology, redactUrl, toolFamilies } = await import("./topology.js");
 const { topologyPage } = await import("./views.js");
 
-// THE test this page exists to pass. The dashboard has no authentication, so anything rendered
-// here is readable by anything that can reach the port. An allowlist is only trustworthy if
-// something fails when it stops being one.
+// THE test this page exists to pass. A session gates the port now, but this page's job is to
+// enumerate configuration — one shared password between a leak and every credential the agent
+// holds is not a margin worth spending. An allowlist is only trustworthy if something fails
+// when it stops being one.
 test("no configured secret reaches the topology data or the rendered page", () => {
   const t = buildTopology();
   const serialised = JSON.stringify(t);
-  const html = topologyPage(t);
+  const html = topologyPage(t, "test-nonce");
   for (const [key, sentinel] of Object.entries(SECRETS)) {
     assert.ok(!serialised.includes(sentinel), `${key} leaked into the topology data`);
     assert.ok(!html.includes(sentinel), `${key} leaked into the rendered page`);
@@ -120,4 +125,69 @@ test("every inbound and outbound dependency is present, configured or not", () =
 
 test("buildTopology never throws, whatever the config says", () => {
   assert.doesNotThrow(() => buildTopology());
+});
+
+// The grouping is the prefix before the first underscore and nothing else — no lookup table,
+// so a domain devops-mcp-server grows tomorrow shows up on its own. Pinned here because the
+// alternative (a table) fails silently: it buckets the new domain as "other" and looks fine.
+test("toolFamilies groups by the prefix before the first underscore", () => {
+  const fams = toolFamilies([
+    { name: "k8s_list_pods" }, { name: "k8s_get_logs" }, { name: "k8s_describe" },
+    { name: "prometheus_query" }, { name: "prometheus_range" },
+    { name: "loki_query_range" },
+  ]);
+  assert.deepEqual(
+    fams.map((f) => [f.name, f.tools.map((t) => t.name)]),
+    [
+      ["k8s", ["k8s_describe", "k8s_get_logs", "k8s_list_pods"]],
+      ["prometheus", ["prometheus_query", "prometheus_range"]],
+      ["loki", ["loki_query_range"]],
+    ]
+  );
+});
+
+// The same predicate the agent gates its write path on (description.startsWith("[WRITE]")).
+// Read back rather than re-derived, so the page and the agent cannot disagree about which
+// tools can change the cluster — and a tool with no description is non-write to both.
+test("toolFamilies marks the tools that can change the cluster", () => {
+  const [fam] = toolFamilies([
+    { name: "k8s_list_pods", description: "List pods in a namespace." },
+    { name: "k8s_restart_deployment", description: "[WRITE] Restart a deployment." },
+    { name: "k8s_scale", description: undefined },
+  ]);
+  assert.deepEqual(
+    fam.tools,
+    [
+      { name: "k8s_list_pods", write: false },
+      { name: "k8s_restart_deployment", write: true },
+      { name: "k8s_scale", write: false },
+    ]
+  );
+});
+
+// Sort is size-then-name so the page does not reshuffle between two renders of the same
+// server — a Map preserves insertion order, which is whatever order listTools() happened to
+// return, which is not something a dashboard should depend on.
+test("toolFamilies sorts by size, then by name, and handles the no-prefix cases", () => {
+  const fams = toolFamilies([
+    { name: "zebra_a" }, { name: "alpha_a" },
+    // no underscore at all, and a leading underscore: both have no prefix to speak of, so the
+    // whole name is the family. Slicing at index 0 would file the second under "".
+    { name: "ping" }, { name: "_private" },
+  ]);
+  assert.deepEqual(fams.map((f) => f.name), ["_private", "alpha", "ping", "zebra"]);
+  assert.ok(fams.every((f) => f.tools.length === 1));
+});
+
+test("toolFamilies on a client that has not connected yet is empty, not an error", () => {
+  assert.deepEqual(toolFamilies([]), []);
+  assert.deepEqual(buildTopology().capabilities, []);
+});
+
+test("buildTopology carries the discovered tool list through to capabilities", () => {
+  const t = buildTopology([{ name: "k8s_list_pods" }, { name: "k8s_get_logs" }, { name: "loki_query" }]);
+  assert.deepEqual(
+    t.capabilities.map((c) => [c.name, c.tools.length]),
+    [["k8s", 2], ["loki", 1]]
+  );
 });
