@@ -194,17 +194,87 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
-`docs/superpowers/specs/2026-08-03-dashboard-design.md`.
+`docs/superpowers/specs/2026-08-03-dashboard-design.md`; §3.1 of that spec ("no auth") is
+superseded by `docs/DESIGN_dashboard_auth.md`.
+
+**Auth: one shared password, session in a signed cookie** (`src/dashboard/auth.ts`). The token is
+`v1.<exp>.<base64url hmac>` and the HMAC key is `scryptSync(DASHBOARD_PASSWORD, fixed salt)` — a
+*derived* key rather than a random one, so sessions survive a restart and are valid on every
+replica (a Map of session ids would sign everyone out on each rolling update, which lands during
+an incident, which is when the page is open). scrypt rather than a bare HMAC over the password
+because the token is two thirds public, so its signature is an offline oracle for the key.
+Rotating the password invalidates every session; that is the revocation mechanism.
+- **Unset password = 503 on every route but `/healthz`** — never anonymous content. The probe
+  stays open so a missing Secret cannot take the pod out of service.
+- Route order in `handle()`: parse → **method gate** (405, before auth: a stranger's POST and an
+  operator's get the same answer) → `/healthz` → 503 gate → `/login` → session gate → 404 →
+  `/topology` → DB gate. The 404 is deliberately *behind* the session now: an unauthenticated
+  caller learns nothing about which paths exist.
+- Cookie: `HttpOnly; SameSite=Strict; Secure` (`DASHBOARD_COOKIE_SECURE=false` only for plain
+  HTTP on a hostname — browsers exempt localhost, so a port-forward is unaffected).
+- `safeNext()` guards the post-login redirect (rejects `//host`, `/\host`, absolute URLs, control
+  characters) — it lands in a `Location` header and arrives from a URL anyone can send an operator.
+- `LoginThrottle` keyed on `remoteAddress`: 10 failures / 5 min → 429 + `Retry-After`. Behind a
+  proxy every client shares one bucket, deliberately — trusting `X-Forwarded-For` would make the
+  throttle decorative.
+- CSP gained `form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. `form-action` does
+  **not** inherit from `default-src`, so the login form worked without it; it is there to pin
+  where the password may be posted now that there is a session to steal. The policy is built by
+  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce and so gets a `script-src`
+  at all. Everywhere else there is no exemption, which is what keeps a missed `esc()` inert on
+  the pages that render an RCA.
 
 **Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
 one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
 the result is silently lost. Every query carries a `LIMIT` (page size 50, hard cap 200) and the
-overview aggregates are cached for 60s, because with no auth in front a held-down refresh key is
-otherwise unthrottled load on the same event loop that handles alerts.
+overview aggregates are cached for 60s: a held-down refresh key is otherwise unthrottled load on
+the same event loop that handles alerts, and a signed-in operator can hold one down as easily as
+a stranger could.
 
 **Nothing rendered is trusted input.** `rca`/`root_cause` are LLM output and the labels come from
 Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
 security-relevant one in this module.
+
+**`/topology`** renders the agent's declared dependencies from `config` — no probe, no outbound
+call, no database read, so it is the one page that still works while Postgres is down. Design:
+`docs/superpowers/specs/2026-08-04-topology-design.md`.
+
+`buildTopology()` (`src/dashboard/topology.ts`) **is the allowlist**: it names every field it
+emits, one at a time. It must never iterate the config object and never filter a known-bad set
+out of it — the config holds every secret this service has, one shared password stands between a
+leak and all of them, and a denylist stops being correct the moment someone adds the next secret,
+silently (`DASHBOARD_PASSWORD` is itself in the sentinel list). Secrets
+render as "set"/"not set"; endpoints go through `redactUrl()` (userinfo and query stripped).
+`topology.test.ts` seeds every secret-bearing env var with a sentinel and fails if one reaches
+either the data structure or the rendered HTML — that test is what keeps the allowlist honest
+as the config grows.
+
+**Interactive map (`src/dashboard/topology-script.ts`).** Drag to pan, ctrl/cmd + wheel or the
+toolbar to zoom; one inline `<script>` carrying a **per-response nonce** (`randomBytes(16)`,
+base64url), never `'unsafe-inline'` — see `docs/DESIGN_dashboard_auth.md`. It is progressive
+enhancement: the page still ships the script-free three-radio scale control, and the script
+removes it, flips `data-live="on"`, and drives the **`viewBox`** instead (not a CSS transform —
+the SVG keeps its own box, so a pointer position converts to user units by one ratio and pan
+needs no scroll container). With scripting off the map still renders, scales, and links.
+Non-obvious, and each one is load-bearing:
+- Pointer capture is taken **after 4px of movement**, not on `pointerdown` — capturing early
+  retargets the following `click`, and every box in the map is a link to its own table row. A
+  `dragged` flag (cleared by the click it swallows) stops a drag that ends on a box from also
+  opening it.
+- `aria-disabled`, not `disabled`, on the zoom buttons: a disabled button drops focus the moment
+  the keyboard reaches the limit, and the next Tab restarts from the top of the document.
+- **Ctrl/cmd + wheel only.** A bare wheel keeps scrolling the page — the map sits mid-document,
+  and a figure that swallowed the wheel would trap the reader every time the pointer crossed it.
+  `touch-action: pan-y` does the same job for one-finger drags on a phone.
+- A `focusin` handler pans a focused box back inside the viewBox. Nothing else can: the viewBox
+  clips it, so there is no scroll for the browser to do.
+- The script-free controls are removed **last**, after every listener is wired, so a throw on any
+  line leaves the page with a zoom control that still works.
+- `topology-script.test.ts` guards the cross-file couplings nothing else would catch: the script
+  can't close its own `<script>`; it builds no markup and evaluates no strings (the nonce buys
+  one trusted block, not a licence for that block to reopen the injection surface); every
+  selector it queries is derived from its own source and asserted against the rendered page; and
+  the `data-live`/`data-drag` attributes it sets are the ones `styles.ts` reacts to.
 
 **`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
 `incident_id` is NULL at insert — the usage rows are written during the investigation, the

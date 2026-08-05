@@ -145,3 +145,5 @@ vite.config.ts.timestamp-*
 .DS_Store
 # subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+# graphify build output — the workspace graph lives one level up, in riset/
+graphify-out/

@@ -18,7 +18,7 @@ import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import type { LLMClient, LLMResponse, Message, ContentBlock, TokenUsage } from "./llm/types.js";
+import type { LLMClient, LLMResponse, Message, ContentBlock, TokenUsage, ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
@@ -82,6 +82,13 @@ export class DevOpsAgent {
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
     }
+  }
+
+  // The tool list devops-mcp-server returned at connect, for the dashboard's dependency map.
+  // Read-only and already in memory — this makes no call. Empty before initialize() and after
+  // a failed connect, which is a state the dashboard renders rather than an error.
+  mcpTools(): ToolDefinition[] {
+    return this.mcp.getTools();
   }
 
   // Readiness check for /health — reports each enabled dependency. ok=false (→ 503) if any

@@ -128,11 +128,17 @@ export const config = {
   },
 
   // Read-only incident dashboard on its own port. Off unless asked for — the agent must
-  // be unchanged for anyone not using it. There is no auth: the port simply is not routed
-  // by the Ingress (see docs/superpowers/specs/2026-08-03-dashboard-design.md §3.1).
+  // be unchanged for anyone not using it. Behind a shared-password session (see
+  // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
+  // than serving incidents anonymously.
   dashboard: {
     enabled: process.env.DASHBOARD_ENABLED === "true",
     port: dashboardPort(process.env.DASHBOARD_PORT),
+    password: process.env.DASHBOARD_PASSWORD,
+    // Opt-out, not opt-in: a Secure cookie is dropped in silence over plain HTTP, and the
+    // symptom (a login page that keeps reappearing) points nowhere near the cause. Browsers
+    // exempt localhost, so a port-forward needs no change — only a plain-HTTP hostname does.
+    cookieSecure: process.env.DASHBOARD_COOKIE_SECURE !== "false",
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),

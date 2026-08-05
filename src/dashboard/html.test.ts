@@ -19,9 +19,12 @@ test("esc renders null and undefined as empty, never the string 'null'", () => {
   assert.equal(esc(0), "0");
 });
 
-test("fmtDate is readable and handles the missing case", () => {
-  assert.equal(fmtDate(new Date("2026-07-28T23:48:28.872Z")), "2026-07-28 23:48");
-  assert.equal(fmtDate("2026-07-28T23:48:28.872Z"), "2026-07-28 23:48");
+// The Z is load-bearing, not decoration: these timestamps sit beside kubectl and Loki output
+// and an on-call reads them from a machine that is not on UTC. Dropping it makes every time on
+// the dashboard silently ambiguous, so it is pinned here rather than left to taste.
+test("fmtDate is readable, marks its zone, and handles the missing case", () => {
+  assert.equal(fmtDate(new Date("2026-07-28T23:48:28.872Z")), "2026-07-28 23:48Z");
+  assert.equal(fmtDate("2026-07-28T23:48:28.872Z"), "2026-07-28 23:48Z");
   assert.equal(fmtDate(null), "—");
   assert.equal(fmtDate("not-a-date"), "—");
 });
