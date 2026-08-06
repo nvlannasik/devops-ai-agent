@@ -37,6 +37,45 @@ const ICON = {
       `<path d="M10.4 7.3 6.6 16.4"/><path d="M13.6 7.3l3.8 9.1"/>`
   ),
   signout: ico(`<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 16 4-4-4-4"/><path d="M14 12H4"/>`),
+
+  // Section and figure glyphs. Same rule as the rail's: each one is drawn from what it labels,
+  // and a glyph that would serve two different meanings is redrawn rather than reused. The
+  // pairs that DO repeat are deliberate — the wrench is remediation wherever remediation is
+  // named, the speech bubble is on-call, the chip is the model — because a reader who learns
+  // one on the overview should not have to relearn it on the incident page.
+  target: ico(`<circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.4"/>`),
+  chip: ico(
+    `<rect x="7" y="7" width="10" height="10" rx="1.7"/>` +
+      `<path d="M10 3.2v3.4"/><path d="M14 3.2v3.4"/><path d="M10 17.4v3.4"/><path d="M14 17.4v3.4"/>` +
+      `<path d="M3.2 10h3.4"/><path d="M3.2 14h3.4"/><path d="M17.4 10h3.4"/><path d="M17.4 14h3.4"/>`
+  ),
+  repeat: ico(
+    `<path d="m17 2.6 3.4 3.4L17 9.4"/><path d="M3.6 11.4V10a4 4 0 0 1 4-4h12.8"/>` +
+      `<path d="M7 21.4 3.6 18 7 14.6"/><path d="M20.4 12.6V14a4 4 0 0 1-4 4H3.6"/>`
+  ),
+  search: ico(`<circle cx="10.5" cy="10.5" r="7"/><path d="m20.5 20.5-5.1-5.1"/>`),
+  wrench: ico(
+    `<path d="M14.6 6.4a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.7-3.7a6 6 0 0 1-7.9 7.9l-6.8 6.8a2.1 2.1 0 0 1-3-3l6.8-6.8a6 6 0 0 1 7.9-7.9Z"/>`
+  ),
+  speech: ico(`<path d="M20.5 14.5a2 2 0 0 1-2 2H7.8L3.5 20.8V5.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z"/>`),
+  userCheck: ico(
+    `<path d="M15 20.5v-1.8a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1.8"/><circle cx="8.5" cy="7.2" r="3.7"/>` +
+      `<path d="m15.8 11.4 2.2 2.2 4-4.4"/>`
+  ),
+  check: ico(`<circle cx="12" cy="12" r="8.8"/><path d="m8.2 12.3 2.6 2.6 5-5.6"/>`),
+  layers: ico(`<path d="m12 2.6 9 4.9-9 4.9-9-4.9 9-4.9Z"/><path d="m3 13 9 4.9 9-4.9"/>`),
+  // The two arrows are a pair and are read as one: what went to the model, what came back.
+  // Same baseline, same head, mirrored — anything else and the reader has to check each.
+  inTokens: ico(`<path d="M12 3.4v11"/><path d="m7.6 10 4.4 4.4 4.4-4.4"/><path d="M4 20.2h16"/>`),
+  outTokens: ico(`<path d="M12 20.6v-11"/><path d="m7.6 14 4.4-4.4 4.4 4.4"/><path d="M4 3.8h16"/>`),
+  bolt: ico(`<path d="M13.2 2.4 4.4 13.6h7.1l-1 8 8.8-11.2h-7.1l1-8Z"/>`),
+  pulse: ico(`<path d="M2.6 12h4.2l2.8-7.4 4.2 15.4 2.8-8h4.8"/>`),
+  inbound: ico(`<path d="M20.6 12H8.2"/><path d="m12.6 7.2 5 4.8-5 4.8"/><path d="M3.6 4.2v15.6"/>`),
+  outbound: ico(`<path d="M3.4 12h12.4"/><path d="m11.4 7.2 5 4.8-5 4.8"/><path d="M20.4 4.2v15.6"/>`),
+  plug: ico(
+    `<path d="M12 21.6v-4.2"/><path d="M8.8 6.6V2.4"/><path d="M15.2 6.6V2.4"/>` +
+      `<path d="M5.8 12.4V6.6h12.4v5.8a5 5 0 0 1-5 5h-2.4a5 5 0 0 1-5-5Z"/>`
+  ),
 };
 
 const NAV = [
@@ -149,16 +188,25 @@ const severityBadge = (s: string | null): string => (s ? badge(s) : dash);
 const empty = (headline: string, next: string): string =>
   `<p class="empty"><strong>${esc(headline)}</strong>${esc(next)}</p>`;
 
+// A section heading with a glyph. The icon and the label are one flex item so h2's own gap —
+// which is sized for the distance out to the hairline — never lands between a picture and the
+// word it labels; a trailing link keeps working, it sorts past the hairline as before.
+const section = (icon: string, title: string, trailing = ""): string =>
+  `<h2><span class="sec">${icon}${esc(title)}</span>${trailing}</h2>`;
+
+// The icon is markup, not text, so it is passed pre-built by the caller rather than escaped
+// here — every value that came from a row or from the LLM still goes through esc().
 interface Stat {
   label: string;
   value: string;
   sub?: string;
+  icon?: string;
 }
 const statList = (items: Stat[]): string =>
   `<dl class="stats">` +
   items
     .map(
-      (s) => `<div class="stat"><dt>${esc(s.label)}</dt><dd>${esc(s.value)}` +
+      (s) => `<div class="stat"><dt>${s.icon ?? ""}${esc(s.label)}</dt><dd>${esc(s.value)}` +
         (s.sub ? `<span>${esc(s.sub)}</span>` : "") + `</dd></div>`
     )
     .join("") +
@@ -205,13 +253,13 @@ function tokenUsage(t: Tokens): string {
   return (
     statList(
       [
-        { label: "Total tokens", value: fmtInt(t.input + t.output), sub: "input + output" },
-        { label: "Input", value: fmtInt(t.input) },
-        { label: "Output", value: fmtInt(t.output) },
+        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: "input + output" },
+        { icon: ICON.inTokens, label: "Input", value: fmtInt(t.input) },
+        { icon: ICON.outTokens, label: "Output", value: fmtInt(t.output) },
         // Cache reads are the tokens that were NOT re-sent, so the pair reads as a saving
         // and its price. Writes sit in the sub-line: you pay for them once, deliberately.
-        { label: "Cache reads", value: fmtInt(t.cacheRead), sub: `${fmtInt(t.cacheCreation)} written` },
-        { label: "LLM calls", value: fmtInt(t.calls) },
+        { icon: ICON.bolt, label: "Cache reads", value: fmtInt(t.cacheRead), sub: `${fmtInt(t.cacheCreation)} written` },
+        { icon: ICON.pulse, label: "LLM calls", value: fmtInt(t.calls) },
       ]
     ) +
     table(
@@ -255,20 +303,20 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
          <div class="hero-chart">${barChart(o.weekly, { label: "incidents per week" })}</div>
        </div>
      </section>
-     <h2>Outcomes</h2>
+     ${section(ICON.target, "Outcomes")}
      ${statList(
        [
-         { label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents), sub: `${o.resolvedIncidents} of ${o.totalIncidents}` },
-         { label: "Remediation applied", value: fmtPct(o.remediationSucceeded, remediationTotal), sub: `${o.remediationSucceeded} of ${remediationTotal}` },
-         { label: "On-call replies", value: fmtInt(feedbackTotal) },
-         { label: "Confirmed fixed", value: fmtInt(o.feedback.resolved ?? 0), sub: "by on-call" },
+         { icon: ICON.check, label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents), sub: `${o.resolvedIncidents} of ${o.totalIncidents}` },
+         { icon: ICON.wrench, label: "Remediation applied", value: fmtPct(o.remediationSucceeded, remediationTotal), sub: `${o.remediationSucceeded} of ${remediationTotal}` },
+         { icon: ICON.speech, label: "On-call replies", value: fmtInt(feedbackTotal) },
+         { icon: ICON.userCheck, label: "Confirmed fixed", value: fmtInt(o.feedback.resolved ?? 0), sub: "by on-call" },
        ]
      )}
-     <h2>Token usage</h2>
+     ${section(ICON.chip, "Token usage")}
      ${tokenUsage(o.tokens)}
-     <h2>Most recurring</h2>
+     ${section(ICON.repeat, "Most recurring")}
      ${recurring}
-     <h2>Recent incidents<a href="/incidents">All incidents →</a></h2>
+     ${section(ICON.incidents, "Recent incidents", `<a href="/incidents">All incidents →</a>`)}
      ${incidentTable(recent, empty("No incidents yet.", "The agent posts here once it has investigated its first alert."))}`,
     "/"
   );
@@ -475,15 +523,15 @@ export function detailPage(d: {
          { label: "Resolved", value: fmtDate(i.resolved_at) },
        ]
      )}
-     <h2>Root cause analysis</h2>
+     ${section(ICON.search, "Root cause analysis")}
      ${
        i.rca && i.rca.trim()
          ? renderRca(i.rca)
          : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.")
      }
-     <h2>Remediation</h2>
+     ${section(ICON.wrench, "Remediation")}
      ${remediations}
-     <h2>On-call feedback</h2>
+     ${section(ICON.speech, "On-call feedback")}
      ${feedback}`,
     "/incidents"
   );
@@ -646,13 +694,13 @@ export function topologyPage(t: Topology, nonce: string): string {
        <code translate="no">devops-mcp-server</code> sent when the agent connected. Nothing here is
        probed — no call leaves the process.</p>
      ${zoom(topologyDiagram(t), nonce)}
-     <h2>Inbound</h2>
+     ${section(ICON.inbound, "Inbound")}
      ${nodeRows(t.inbound, "in")}
-     <h2>Outbound</h2>
+     ${section(ICON.outbound, "Outbound")}
      ${nodeRows(t.outbound, "out")}
-     <h2>MCP tools</h2>
+     ${section(ICON.plug, "MCP tools")}
      ${capabilityRows(t.capabilities)}
-     <h2>LLM backends</h2>
+     ${section(ICON.chip, "LLM backends")}
      ${router}`,
     "/topology"
   );

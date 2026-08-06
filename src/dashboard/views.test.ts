@@ -366,6 +366,16 @@ const tokens: Tokens = {
   ],
 };
 
+// Where a section heading starts. These assertions are about the ORDER of the sections, so
+// they must not also pin the heading's internal markup — a glyph moving in or out of the
+// caption is not a change to the page's sequence, and matching on `<h2>Outcomes</h2>` made
+// every one of them fail for that reason.
+const sectionAt = (html: string, title: string): number => {
+  const at = html.indexOf(`${title}</span></h2>`);
+  assert.notEqual(at, -1, `no section heading named ${title}`);
+  return at;
+};
+
 // The hero holds one composed object: the 30-day count set against the series it summarises.
 // While the outcome figures shared that frame they read as a caption to the chart, which is
 // the thing this split exists to undo — so the assertion is positional, not merely "present".
@@ -375,16 +385,16 @@ test("the outcome figures are their own section, outside the hero", () => {
   assert.match(hero, /class="hero-chart"/, "the chart stays in the hero");
   assert.doesNotMatch(hero, /<dl class="stats">/, "the figures do not");
   assert.ok(
-    html.indexOf("</section>") < html.indexOf("<h2>Outcomes</h2>"),
+    html.indexOf("</section>") < sectionAt(html, "Outcomes"),
     "Outcomes comes after the hero closes"
   );
-  assert.ok(html.indexOf("<h2>Outcomes</h2>") < html.indexOf(`<dl class="stats">`));
+  assert.ok(sectionAt(html, "Outcomes") < html.indexOf(`<dl class="stats">`));
 });
 
 test("token usage is its own section, in the order volume → outcome → cost", () => {
   const html = overviewPage({ ...emptyOverview, tokens }, []);
-  assert.ok(html.indexOf("<h2>Outcomes</h2>") < html.indexOf("<h2>Token usage</h2>"));
-  assert.ok(html.indexOf("<h2>Token usage</h2>") < html.indexOf("<h2>Most recurring</h2>"));
+  assert.ok(sectionAt(html, "Outcomes") < sectionAt(html, "Token usage"));
+  assert.ok(sectionAt(html, "Token usage") < sectionAt(html, "Most recurring"));
 });
 
 test("token usage totals the window and breaks it down by backend AND model", () => {
@@ -496,6 +506,55 @@ test("every icon is decorative and every label stays in the markup", () => {
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
   assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 4);
+});
+
+// ---------- section glyphs ----------
+
+// Every page's headings, so a glyph added to one page and forgotten on another fails here.
+const everyPage = (): [string, string][] => [
+  ["overview", overviewPage({ ...emptyOverview, tokens }, [row])],
+  ["detail", detailPage({ incident: { ...row, rca: "x", channel: "C1", thread_ts: "1.0" }, remediations: [], feedback: [] })],
+  ["topology", topologyPage(baseTopology, NONCE)],
+];
+
+// h2's own gap is the distance out to the hairline. Reusing it between a glyph and the word
+// the glyph labels put 16px there and the two stopped reading as one thing — so the pair is
+// wrapped in .sec and it is the wrapper, not the icon, that h2 spaces. A heading that puts
+// the icon back as a direct child of h2 renders with that gap and passes every other test.
+test("every section heading pairs its glyph with its label inside one flex item", () => {
+  for (const [page, html] of everyPage()) {
+    const headings = [...html.matchAll(/<h2>[\s\S]*?<\/h2>/g)].map(([h]) => h);
+    assert.ok(headings.length > 0, `${page} has no section headings`);
+    for (const h of headings) {
+      assert.match(h, /^<h2><span class="sec"><svg class="ico"[\s\S]*?<\/svg>[^<]+<\/span>/, `${page}: ${h}`);
+    }
+  }
+});
+
+// Same contract as the rail's icons, enforced across every glyph the dashboard now draws:
+// decorative, and no colour of its own. Both matter for a different reason — an icon that
+// announced itself would give a heading two names, and a hard-coded fill would spend colour
+// on decoration when colour is reserved here for severity, focus, and where you are.
+test("every glyph on every page is decorative and inherits its colour", () => {
+  for (const [page, html] of everyPage()) {
+    const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)].map(([t]) => t);
+    assert.ok(icons.length > 4, `${page} draws only the rail's icons`);
+    for (const tag of icons) {
+      assert.match(tag, /aria-hidden="true"/, `${page}: ${tag}`);
+      assert.match(tag, /focusable="false"/, `${page}: ${tag}`);
+      assert.match(tag, /stroke="currentColor"/, `${page}: ${tag}`);
+      assert.doesNotMatch(tag, /fill="(?!none)/, `${page}: a glyph must not carry its own colour`);
+    }
+  }
+});
+
+// A stat's icon is markup and its label is text, and they are concatenated into the same <dt>.
+// Escaping the icon would print the SVG source; not escaping the label would make every stat
+// an injection site the day one is built from a row instead of a literal.
+test("a stat renders its glyph as markup and its label as text", () => {
+  const html = overviewPage({ ...emptyOverview, tokens }, []);
+  assert.match(html, /<dt><svg class="ico"[\s\S]*?<\/svg>Total tokens<\/dt>/);
+  assert.doesNotMatch(html, /&lt;svg/, "the glyph is markup, not escaped source");
 });
 
 test("the rail marks where you are, and marks it once", () => {

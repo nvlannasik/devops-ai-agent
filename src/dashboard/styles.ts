@@ -197,6 +197,16 @@ h2 a {
   text-transform: none; letter-spacing: 0; color: var(--accent);
   text-decoration: none; white-space: nowrap;
 }
+/* The glyph and the label it labels are one unit, so they get their own gap: h2's is the
+   distance out to the hairline, and at 16px between a picture and its word the two read as
+   separate items. No colour of their own — they inherit the caption's dim, because a section
+   marker is orientation, not signal. */
+.sec { display: flex; align-items: center; gap: var(--sp-2); }
+h2 .ico, .stat dt .ico { width: 15px; height: 15px; }
+/* flex-start, not center: a stat label wraps to two lines in a narrow column, and centring
+   would float the glyph into the gutter between them instead of marking where the label
+   starts. On the common one-line case the two are the same to within a fraction of a pixel. */
+.stat dt { display: flex; align-items: flex-start; gap: var(--sp-2); }
 .meta { color: var(--text-dim); font-size: var(--fs-sm); }
 code, .mono { font-family: var(--font-data); font-size: .92em; }
 .num, .when { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
