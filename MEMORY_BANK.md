@@ -281,6 +281,25 @@ the left edge. Everything about it is constrained by **zero client JS outside `/
   sideways while `.table-wrap` scrolled nothing. `min-width` alone does not fix it. A test in
   `views.test.ts` pins both declarations.
 
+**Section and stat glyphs (`ICON` + `section()` in `views.ts`).** The same inline-`<svg>`
+mechanism as the rail, extended to every `<h2>` and to the overview's stat cards, so a page of
+identically-styled uppercase mono captions has landmarks to scan by. Three rules hold it
+together:
+- **A heading's glyph and its label are one flex item** — `section()` wraps them in
+  `<span class="sec">`, which is what `h2`'s own `gap` spaces. That gap is the distance out to
+  the `::after` hairline (16px); between a picture and the word it labels it reads as two
+  separate things. Putting the `<svg>` back as a direct child of `h2` renders wrong and passes
+  every test except the one that pins the wrapper.
+- **A glyph repeats only where the meaning repeats.** The wrench is remediation on the overview
+  stat and on the incident page's section; the speech bubble is on-call in both; the chip is the
+  model in Token usage and in LLM backends. Anything else gets its own drawing rather than a
+  reused near-match — a reader who learns one should not have to relearn it a page later.
+- **No glyph carries colour or an accessible name.** `stroke="currentColor"`, `fill="none"`,
+  `aria-hidden`, `focusable="false"` — colour here is reserved for severity, focus, and where you
+  are, and an announcing icon would give a heading two names. `Stat.icon` is optional and is
+  passed as markup, never through `esc()`; `Stat.label` still is. `views.test.ts` pins all of it
+  across all three pages at once, so a glyph added to one page and forgotten on another fails.
+
 **`/topology`** renders the agent's declared dependencies from `config` — no probe, no outbound
 call, no database read, so it is the one page that still works while Postgres is down. Design:
 `docs/superpowers/specs/2026-08-04-topology-design.md`.
