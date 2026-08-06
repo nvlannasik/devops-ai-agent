@@ -229,11 +229,57 @@ one slow dashboard query starve `storeIncident` of connections — the investiga
 the result is silently lost. Every query carries a `LIMIT` (page size 50, hard cap 200) and the
 overview aggregates are cached for 60s: a held-down refresh key is otherwise unthrottled load on
 the same event loop that handles alerts, and a signed-in operator can hold one down as easily as
-a stranger could.
+a stranger could. `queries.test.ts` asserts that mechanically over every emitted statement —
+a new query without a `LIMIT` fails the suite rather than the cluster.
+
+**Pagination (`/incidents`).** Ten rows a page, `PAGE_SIZE` in `filters.ts`, and **not
+adjustable** — there is no `pageSize` parameter and nothing about paging in the filter form.
+Page size is not a filter: a filter narrows *which* incidents you are looking at, paging only
+moves through them. The per-page `<select>` that used to sit in the filter bar conflated the
+two — it needed **Apply filters** to take effect and sat nowhere near the pager it governed —
+and at 50 rows the pager was a summary line under a screen and a half of scrolling, which is
+why nobody could find it. A constant also means no URL can widen the `LIMIT`.
+`list()` runs two queries concurrently: the page (over-fetched by
+one row, which is where `hasMore` comes from) and a **bounded** count —
+`SELECT count(*) FROM (SELECT 1 FROM incidents <same WHERE> LIMIT $n) c`, `COUNT_CAP = 5000`.
+An unbounded `COUNT(*)` is a full scan of a table that only grows, on a 3-connection pool with a
+3s timeout; the cap trades an exact number nobody reads past 5,000 for a bounded cost, and the
+page says `5,000+` when it hits the ceiling. Two consequences worth keeping straight:
+- The two queries share no snapshot, so a row inserted between them can make the count smaller
+  than what was just rendered. `total` is therefore `max(count, offset + rows.length)` — the
+  summary can never claim fewer incidents than the reader can see.
+- **Next is driven by the over-fetch, not by the count.** Past the ceiling the count is a floor
+  and would strand the reader; `hasMore` still knows there is another row.
+`Promise.all` order is load-bearing — rows first, count second; the tests read `calls[0]`.
+`pageWindow(current, last)` (`views.ts`) prints first, last, and ±2 around the current page,
+eliding the rest with `null` → `…`, but a *lone* hidden page is printed rather than elided (an
+ellipsis standing in for one number is longer than the number). The pager renders **below the
+table**, links carry the active filters forward, and `page=1` is omitted so a shared URL shows
+only what is actually on. Submitting the filter form drops `page` and so returns to page 1,
+which is what you want — page 6 of the old result set means nothing in the new one.
 
 **Nothing rendered is trusted input.** `rca`/`root_cause` are LLM output and the labels come from
 Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
 security-relevant one in this module.
+
+**The rail (`layout()` + `.rail` in `styles.ts`).** Navigation is a left sidebar, not a top bar:
+`<body>` is a two-column grid (`var(--rail-w) minmax(0, 1fr)`) and `body.bare` collapses it to
+one for sign-in and not-configured — without that class those pages would open 13.5rem short of
+the left edge. Everything about it is constrained by **zero client JS outside `/topology`**:
+- No hamburger, no toggle, no stored collapse state. The rail is CSS only, so it responds to the
+  viewport and nothing else: a full sidebar wide, a horizontal bar under 60rem, icons-only under
+  30rem.
+- Icons are hand-written inline `<svg>` (`ICON` in `views.ts`). `default-src 'none'` blocks an
+  icon font and a sprite `<use href>` alike, and a dependency for twelve paths is not worth it.
+  Each is `aria-hidden="true" focusable="false"` beside a real `<span class="lbl">`.
+- The icons-only breakpoint **clips the label, it does not delete it**: `clip-path: inset(50%)`,
+  so the text stays in the accessible name and a screen reader still reads "Incidents".
+- `main` and `footer.bottom` carry `width: 100%; min-width: 0`, and that is not restating a
+  default. They are flex items of the rail's `.pane` column with `margin: 0 auto`, and a flex
+  item with an auto cross-axis margin does not stretch — it takes fit-content, floored at
+  min-content, which on a phone is the width of the widest table. The whole page scrolled
+  sideways while `.table-wrap` scrolled nothing. `min-width` alone does not fix it. A test in
+  `views.test.ts` pins both declarations.
 
 **`/topology`** renders the agent's declared dependencies from `config` — no probe, no outbound
 call, no database read, so it is the one page that still works while Postgres is down. Design:
