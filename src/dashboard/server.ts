@@ -330,14 +330,13 @@ export class DashboardServer {
         case "overview": {
           const [o, recent] = await Promise.all([
             this.queries.overview(),
-            this.queries.list(parseFilters(new URLSearchParams("pageSize=10"))),
+            this.queries.list(parseFilters(new URLSearchParams())),
           ]);
           return send(200, overviewPage(o, recent.rows));
         }
         case "list": {
           const f = parseFilters(url.searchParams);
-          const { rows, hasMore } = await this.queries.list(f);
-          return send(200, listPage(rows, f, hasMore));
+          return send(200, listPage(await this.queries.list(f), f));
         }
         case "detail": {
           const d = await this.queries.detail(route.id);

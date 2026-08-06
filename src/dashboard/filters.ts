@@ -1,5 +1,8 @@
-export const PAGE_SIZE_DEFAULT = 50;
-export const PAGE_SIZE_MAX = 200;
+// One page is ten rows, everywhere, and it is not adjustable. Page size is not a filter: a
+// filter narrows which incidents you are looking at, paging only moves through them, and a
+// per-page control in the filter bar mixed the two — it needed Apply to take effect and it
+// sat nowhere near the pager it governed. Ten fits on a laptop screen without scrolling.
+export const PAGE_SIZE = 10;
 export const PAGE_MAX = 1000000; // a safe integer that exceeds any reasonable pagination need
 
 export interface Filters {
@@ -10,7 +13,6 @@ export interface Filters {
   severity: string | null;
   resolved: boolean | null;
   page: number;
-  pageSize: number;
 }
 
 const str = (p: URLSearchParams, k: string): string | null => {
@@ -60,8 +62,5 @@ export function parseFilters(params: URLSearchParams): Filters {
     // bigint overflow on OFFSET. unreasonable values (NaN, Infinity, too large) fall
     // back to 1, like other invalid pagination params.
     page: Math.max(1, Math.min(PAGE_MAX, int(params, "page", 1))),
-    // the clamp is a safety rail: an unbounded LIMIT runs on the same event loop as
-    // alert handling, and there is no auth in front of this
-    pageSize: Math.min(PAGE_SIZE_MAX, Math.max(1, int(params, "pageSize", PAGE_SIZE_DEFAULT))),
   };
 }

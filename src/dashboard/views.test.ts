@@ -1,9 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, topologyPage } from "./views.js";
-import { parseFilters } from "./filters.js";
-import type { IncidentDetail, IncidentRow, Overview, Tokens } from "./queries.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage } from "./views.js";
+import { PAGE_SIZE, parseFilters } from "./filters.js";
+import { STYLES } from "./styles.js";
+import type { IncidentDetail, IncidentPage, IncidentRow, Overview, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
+
+// The shape queries.list() hands the page. The defaults are the ordinary case — one short
+// page, counted exactly — so a test that is not about pagination does not have to state a
+// total it does not care about.
+const page = (rows: IncidentRow[], over: Partial<IncidentPage> = {}): IncidentPage => ({
+  rows, hasMore: false, total: rows.length, capped: false, ...over,
+});
 
 // Stands in for the per-response value server.ts mints. Fixed here so a test can assert the
 // nonce reached the markup; the real one is 16 random bytes and never repeats.
@@ -31,8 +39,8 @@ test("layout emits a complete, self-contained document with inline styles", () =
 // The whole point of phase 1 is that a fresh deployment is the normal first experience.
 test("every page renders on empty data without throwing", () => {
   assert.doesNotThrow(() => overviewPage(emptyOverview, []));
-  assert.doesNotThrow(() => listPage([], parseFilters(new URLSearchParams("")), false));
-  assert.match(listPage([], parseFilters(new URLSearchParams("")), false), /no incidents/i);
+  assert.doesNotThrow(() => listPage(page([]), parseFilters(new URLSearchParams(""))));
+  assert.match(listPage(page([]), parseFilters(new URLSearchParams(""))), /no incidents/i);
 });
 
 // THE security test at the render layer. rca is LLM output.
@@ -90,14 +98,14 @@ test("detailPage URL-encodes channel/thread_ts so an embedded # cannot inject a 
 
 test("listPage keeps the active filters in the form and in the pager link", () => {
   const f = parseFilters(new URLSearchParams("alertname=KubePodCrashLooping&page=2"));
-  const html = listPage([row], f, true);
+  const html = listPage(page([row], { hasMore: true, total: 140 }), f);
   assert.match(html, /value="KubePodCrashLooping"/);
   assert.match(html, /page=3/);
 });
 
 test("listPage's severity select marks \"any\" selected when no severity filter is set", () => {
   const f = parseFilters(new URLSearchParams(""));
-  const html = listPage([], f, false);
+  const html = listPage(page([]), f);
   const severityBlock = html.match(/<select name="severity">([\s\S]*?)<\/select>/);
   assert.ok(severityBlock, "severity select should be present");
   assert.match(severityBlock![1], /<option value="" selected>any<\/option>/);
@@ -117,7 +125,7 @@ const HOSTILE = `<img src=x onerror="alert(1)">`;
 
 test("incidentTable escapes alertname and root_cause on the list page", () => {
   const nasty: IncidentRow = { ...row, alertname: HOSTILE, root_cause: HOSTILE };
-  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  const html = listPage(page([nasty]), parseFilters(new URLSearchParams("")));
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
 });
@@ -131,7 +139,7 @@ test("incidentTable escapes on the overview page too, not just the list", () => 
 
 test("the severity pill escapes its label", () => {
   const nasty: IncidentRow = { ...row, severity: HOSTILE };
-  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  const html = listPage(page([nasty]), parseFilters(new URLSearchParams("")));
   assert.doesNotMatch(html, /<img src=x/);
 });
 
@@ -160,7 +168,7 @@ test("the remediation status pill and its params JSON are escaped", () => {
 // a runtime guarantee — the same reasoning that made esc(p.value) a finding in svg.ts.
 test("the incident link escapes its id rather than trusting the number type", () => {
   const nasty = { ...row, id: `1"><script>alert(1)</script>` as unknown as number };
-  const html = listPage([nasty], parseFilters(new URLSearchParams("")), false);
+  const html = listPage(page([nasty]), parseFilters(new URLSearchParams("")));
   assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
 });
 
@@ -303,7 +311,7 @@ test("the live toolbar ships hidden, labelled, and complete", () => {
 test("no page but topology carries a script", () => {
   assert.doesNotMatch(layout("Test", "<p>hi</p>"), /<script/);
   assert.doesNotMatch(overviewPage(emptyOverview, [row]), /<script/);
-  assert.doesNotMatch(listPage([row], parseFilters(new URLSearchParams("")), false), /<script/);
+  assert.doesNotMatch(listPage(page([row]), parseFilters(new URLSearchParams(""))), /<script/);
   assert.doesNotMatch(loginPage(), /<script/);
   assert.doesNotMatch(errorPage("Nope", "no"), /<script/);
 });
@@ -319,7 +327,7 @@ test("the sign-in page asks for one thing and offers no way around it", () => {
   // Nothing to navigate to and no session to end: the nav and the Sign out button would
   // both be controls that cannot do anything from here. Matched as markup — the prose of
   // the inline stylesheet mentions both by name.
-  assert.doesNotMatch(html, /<nav>|<form class="signout"/);
+  assert.doesNotMatch(html, /<nav\b|<form class="signout"/);
   assert.doesNotMatch(html, /<script|onclick=|javascript:/i);
 });
 
@@ -463,4 +471,188 @@ test("backendRows escapes name, kind, model, route, and endpoint", () => {
   const html = topologyPage(t, NONCE);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
+});
+
+// ---------- the rail ----------
+
+test("the rail carries every destination as an icon beside a text label", () => {
+  const html = layout("Test", "<p>hi</p>");
+  assert.match(html, /<header class="rail">/);
+  assert.match(html, /<nav aria-label="Primary">/);
+  for (const [href, label] of [["/", "Overview"], ["/incidents", "Incidents"], ["/topology", "Topology"]]) {
+    assert.match(html, new RegExp(`<a href="${href.replace("/", "\\/")}"[^>]*><svg class="ico"[\\s\\S]*?<span class="lbl">${label}<\\/span>`));
+  }
+});
+
+// The rail goes icon-only below 30rem by CLIPPING .lbl, not by removing it. That only stays
+// accessible while the text is in the markup and the glyph beside it is decorative — an icon
+// that announced itself would give the link two names, one of them a drawing.
+test("every icon is decorative and every label stays in the markup", () => {
+  const html = layout("Test", "<p>hi</p>");
+  const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
+  assert.equal(icons.length, 4, "three destinations and the sign-out button");
+  for (const [tag] of icons) {
+    assert.match(tag, /aria-hidden="true"/);
+    assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
+  }
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 4);
+});
+
+test("the rail marks where you are, and marks it once", () => {
+  const html = layout("Incidents", "<p>hi</p>", "/incidents");
+  assert.match(html, /<a href="\/incidents" aria-current="page">/);
+  // matched on the link, not on the bare attribute: the inline stylesheet selects on it too
+  assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
+  // "/" is the default argument, so a page that forgets to name itself must not light up
+  // the Overview link — the reader would be told they are somewhere they are not.
+  assert.doesNotMatch(layout("Test", "<p>hi</p>"), /<a href="[^"]*" aria-current/);
+});
+
+// The grid is `--rail-w 1fr`; with no rail rendered the first column would still be reserved,
+// opening the page 13.5rem short of the left edge. body.bare is what collapses it.
+test("a bare page renders no rail and says so on the body", () => {
+  const html = loginPage();
+  assert.match(html, /<body class="bare">/);
+  assert.doesNotMatch(html, /<header class="rail">/);
+  assert.match(layout("Test", "<p>hi</p>"), /<body>/, "a signed-in page is not bare");
+});
+
+test("the skip link stays first in the document, ahead of the rail", () => {
+  const html = layout("Test", "<p>hi</p>");
+  assert.ok(html.indexOf(`<a class="skip"`) < html.indexOf(`<header class="rail">`));
+});
+
+// The rail put main inside a flex column, and a flex item with an auto cross-axis margin does
+// not stretch — it takes fit-content, floored at min-content. On a phone that is the width of
+// the widest table, so main grew past the viewport and the whole page scrolled sideways while
+// .table-wrap scrolled nothing. min-width alone does not fix it; the definite width does.
+test("main and the footer are pinned to the pane rather than to their content", () => {
+  for (const sel of ["main", "footer.bottom"]) {
+    const rule = STYLES.match(new RegExp(`^${sel} \\{([^}]*)\\}`, "m"));
+    assert.ok(rule, `no ${sel} rule to check`);
+    assert.match(rule[1], /width: 100%/, `${sel} would take its fit-content width`);
+    assert.match(rule[1], /min-width: 0/, `${sel} would be floored at its min-content width`);
+  }
+});
+
+// ---------- pagination ----------
+
+const filters = (q: string) => parseFilters(new URLSearchParams(q));
+
+test("pageWindow keeps both ends and the neighbours of where you are", () => {
+  assert.deepEqual(pageWindow(6, 26), [1, null, 4, 5, 6, 7, 8, null, 26]);
+  // nothing to elide: the whole range fits
+  assert.deepEqual(pageWindow(3, 5), [1, 2, 3, 4, 5]);
+  assert.deepEqual(pageWindow(1, 1), [1]);
+});
+
+// An ellipsis standing in for exactly one page costs the same width as the page and hides a
+// destination for nothing.
+test("pageWindow prints a lone hidden page instead of eliding it", () => {
+  // 7 is the only page between the window and the end: printed, not replaced by an ellipsis
+  assert.deepEqual(pageWindow(4, 8), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(pageWindow(1, 5), [1, 2, 3, 4, 5]);
+  // two hidden pages is where eliding starts to pay for itself
+  assert.deepEqual(pageWindow(4, 9), [1, 2, 3, 4, 5, 6, null, 9]);
+});
+
+test("the pager numbers the pages and marks the current one as a non-link", () => {
+  const html = listPage(page([row], { hasMore: true, total: 140 }), filters("page=2"));
+  assert.match(html, /<nav class="pager" aria-label="Pagination">/);
+  assert.match(html, /<span class="cur" aria-current="page">2<\/span>/);
+  assert.match(html, /<a href="\/incidents" aria-label="Page 1">1<\/a>/);
+  assert.match(html, /aria-label="Page 3"/);
+});
+
+test("the pager says where in the range you are", () => {
+  const rows = Array.from({ length: PAGE_SIZE }, () => row);
+  const html = listPage(page(rows, { hasMore: true, total: 140 }), filters("page=2"));
+  assert.match(html, /Showing <b>11–20<\/b> of <b>140<\/b> incidents/);
+});
+
+// COUNT_CAP stops the count walking the table; past it the number is a floor, and a hard
+// "5,000" under a table that keeps producing next pages is a lie the reader cannot check.
+test("a capped count renders as a floor, not as an exact total", () => {
+  const html = listPage(page([row], { hasMore: true, total: 5000, capped: true }), filters(""));
+  assert.match(html, /of <b>5,000\+<\/b> incidents/);
+});
+
+test("the arrows carry rel and a name, and a dead one stops being a control", () => {
+  const first = listPage(page([row], { hasMore: true, total: 140 }), filters(""));
+  assert.match(first, /<span class="step off" aria-hidden="true">←<\/span>/, "no previous page from page 1");
+  assert.match(first, /<a class="step" href="[^"]+" rel="next" aria-label="Next page">→<\/a>/);
+
+  const end = listPage(page([row], { hasMore: false, total: 140 }), filters("page=3"));
+  assert.match(end, /rel="prev" aria-label="Previous page"/);
+  assert.match(end, /<span class="step off" aria-hidden="true">→<\/span>/, "hasMore, not the count, ends the run");
+});
+
+// hasMore comes from the over-fetch; the count can be at its ceiling and still not know how
+// many pages there are. The arrow has to follow the over-fetch or it goes dark too early.
+test("Next stays live past the count's ceiling", () => {
+  const html = listPage(page([row], { hasMore: true, total: 5000, capped: true }), filters("page=100"));
+  assert.match(html, /rel="next"/);
+});
+
+test("one page of rows gets the count and no controls", () => {
+  const html = listPage(page([row], { total: 1 }), filters(""));
+  assert.match(html, /of <b>1<\/b> incident</, "singular, and no controls to go with it");
+  assert.doesNotMatch(html, /<ul class="pages">/);
+});
+
+test("no rows means no pager at all", () => {
+  assert.doesNotMatch(listPage(page([]), filters("")), /class="pager"/);
+});
+
+// Every page link is the current query with one parameter changed. A pager that dropped the
+// filters would silently widen the search on the second click.
+test("page links carry the filters forward", () => {
+  const f = filters("namespace=prod&severity=critical&resolved=false&page=2");
+  const html = listPage(page([row], { hasMore: true, total: 400 }), f);
+  const next = html.match(/href="([^"]+)" rel="next"/);
+  assert.ok(next, "a next link should be present");
+  // the href is HTML-escaped in the markup — & is &amp; there, and only there
+  const q = new URLSearchParams(next[1].replace(/&amp;/g, "&").split("?")[1]);
+  assert.equal(q.get("namespace"), "prod");
+  assert.equal(q.get("severity"), "critical");
+  assert.equal(q.get("resolved"), "false");
+  assert.equal(q.get("page"), "3");
+});
+
+// A default restated in a URL is noise the reader has to look past to see which filters are on.
+test("page 1 is left out of the link", () => {
+  const html = listPage(page([row], { hasMore: true, total: 140 }), filters("page=2"));
+  assert.match(html, /<a href="\/incidents" aria-label="Page 1">/);
+});
+
+// Paging is not filtering. A per-page control inside the filter form needed Apply to take
+// effect and sat nowhere near the pager it governed — that is the shape being ruled out here,
+// along with any URL that could widen the LIMIT.
+test("nothing about paging lives in the filter form", () => {
+  const html = listPage(page([row], { hasMore: true, total: 140 }), filters(""));
+  const form = html.match(/<form class="filters"[\s\S]*?<\/form>/)![0];
+  assert.doesNotMatch(form, /pageSize|Per page|class="pager"/);
+  assert.doesNotMatch(html, /pageSize/, "the size is a constant, not a parameter");
+  // and the pager sits under the table, not above it
+  assert.ok(html.indexOf(`<table`) < html.indexOf(`<nav class="pager"`));
+  assert.ok(html.indexOf(`</form>`) < html.indexOf(`<nav class="pager"`));
+});
+
+// The size is what makes the pager visible at all: a 50-row page turns the common case into
+// one long scroll with a summary line at the bottom and no controls anywhere.
+test("a page holds ten rows", () => {
+  assert.equal(PAGE_SIZE, 10);
+  const html = listPage(page(Array.from({ length: PAGE_SIZE }, () => row), { hasMore: true, total: 25 }), filters(""));
+  assert.equal([...html.matchAll(/<td class="primary"><a href="\/incidents\//g)].length, PAGE_SIZE);
+  assert.match(html, /aria-label="Page 3"/, "25 incidents at ten a page is three pages");
+});
+
+// Two different absences: page 1 matched nothing, page 7 outlived the rows it pointed at.
+// The way out of the second is a link, not a suggestion to widen the filter.
+test("an out-of-range page offers the way back instead of blaming the filters", () => {
+  const html = listPage(page([], { total: 12 }), filters("namespace=prod&page=7"));
+  assert.match(html, /<strong>Nothing on page 7\.<\/strong>/);
+  assert.match(html, /matches 12 incidents/);
+  assert.match(html, /<a href="\/incidents\?namespace=prod">Go to the first page<\/a>/);
+  assert.doesNotMatch(html, /Widen the date range/);
 });

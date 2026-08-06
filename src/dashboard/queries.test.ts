@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DashboardQueries } from "./queries.js";
-import { parseFilters } from "./filters.js";
+import { COUNT_CAP, DashboardQueries } from "./queries.js";
+import { PAGE_SIZE, parseFilters } from "./filters.js";
 
 type Call = { sql: string; params: unknown[] };
 const stub = (calls: Call[], rowsFor: (sql: string) => unknown[] = () => []) =>
@@ -17,29 +17,29 @@ const stub = (calls: Call[], rowsFor: (sql: string) => unknown[] = () => []) =>
 test("list asks for one row more than the page size so it knows there is a next page", async () => {
   const calls: Call[] = [];
   const q = new DashboardQueries(stub(calls));
-  await q.list(parseFilters(new URLSearchParams("pageSize=50&page=2")));
+  await q.list(parseFilters(new URLSearchParams("page=2")));
 
   const limit = calls[0].params.at(-2);
   const offset = calls[0].params.at(-1);
-  assert.equal(limit, 51, "must over-fetch by one to detect hasMore without a COUNT");
-  assert.equal(offset, 50);
+  assert.equal(limit, PAGE_SIZE + 1, "must over-fetch by one to detect hasMore without a COUNT");
+  assert.equal(offset, PAGE_SIZE);
 });
 
 test("list reports hasMore and trims the extra row back off", async () => {
-  const rows = Array.from({ length: 51 }, (_, i) => ({ id: i }));
+  const rows = Array.from({ length: PAGE_SIZE + 1 }, (_, i) => ({ id: i }));
   const q = new DashboardQueries(stub([], () => rows));
-  const out = await q.list(parseFilters(new URLSearchParams("pageSize=50")));
+  const out = await q.list(parseFilters(new URLSearchParams("")));
   assert.equal(out.hasMore, true);
-  assert.equal(out.rows.length, 50);
+  assert.equal(out.rows.length, PAGE_SIZE);
 });
 
 // The two tests above are each individually satisfiable by a regression that breaks the
 // other half: a stub with a fixed row count doesn't notice if the "+1" stops being
-// requested, and a params check doesn't notice if the trim-back-to-pageSize stops
+// requested, and a params check doesn't notice if the trim-back-to-PAGE_SIZE stops
 // happening. This stub actually honours limit/offset, so it pins over-fetch and trim
 // *together* across three shapes: more rows exist beyond the page, fewer rows exist
 // than a full page, and exactly one page's worth exists (the edge case: hasMore must
-// be false even though pageSize+1 was requested).
+// be false even though PAGE_SIZE + 1 was requested).
 const poolWithAvailableRows = (total: number) =>
   ({
     query: async (_sql: string, params: unknown[] = []) => {
@@ -53,25 +53,19 @@ const poolWithAvailableRows = (total: number) =>
   }) as never;
 
 test("list composes over-fetch and trim together: full page, partial page, exactly-one-page", async () => {
-  const pageSize = 50;
+  const none = parseFilters(new URLSearchParams(""));
 
-  const full = await new DashboardQueries(poolWithAvailableRows(120)).list(
-    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
-  );
-  assert.equal(full.rows.length, pageSize);
+  const full = await new DashboardQueries(poolWithAvailableRows(PAGE_SIZE * 3)).list(none);
+  assert.equal(full.rows.length, PAGE_SIZE);
   assert.equal(full.hasMore, true);
 
-  const partial = await new DashboardQueries(poolWithAvailableRows(30)).list(
-    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
-  );
-  assert.equal(partial.rows.length, 30);
+  const partial = await new DashboardQueries(poolWithAvailableRows(PAGE_SIZE - 4)).list(none);
+  assert.equal(partial.rows.length, PAGE_SIZE - 4);
   assert.equal(partial.hasMore, false);
 
-  const exactlyOnePage = await new DashboardQueries(poolWithAvailableRows(pageSize)).list(
-    parseFilters(new URLSearchParams(`pageSize=${pageSize}`))
-  );
-  assert.equal(exactlyOnePage.rows.length, pageSize);
-  assert.equal(exactlyOnePage.hasMore, false, "exactly pageSize rows available must not report a next page");
+  const exactlyOnePage = await new DashboardQueries(poolWithAvailableRows(PAGE_SIZE)).list(none);
+  assert.equal(exactlyOnePage.rows.length, PAGE_SIZE);
+  assert.equal(exactlyOnePage.hasMore, false, "exactly PAGE_SIZE rows available must not report a next page");
 });
 
 test("absent filters become SQL NULLs so the predicate short-circuits", async () => {
@@ -184,4 +178,63 @@ test("overview()'s returned object is deep-frozen: mutating it throws, the cache
   });
   const second = await q.overview();
   assert.equal(second.totalIncidents, 0, "the failed mutation must not have reached the cached value");
+});
+
+// ---------- the bounded count ----------
+
+// An exact COUNT(*) over a filtered table is a full scan on the same event loop that handles
+// alerts, and nobody clicks through to page 400. The count walks at most COUNT_CAP rows and
+// then reports "this many or more" — a flat cost in exchange for a number no one reads.
+test("the count query is capped rather than an unbounded COUNT(*)", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("")));
+  assert.equal(calls.length, 2, "one page of rows, one count");
+  const count = calls[1];
+  assert.match(count.sql, /count\(\*\)/i);
+  assert.match(count.sql, /\bLIMIT\b/i, "the cap is what keeps this from scanning the table");
+  assert.equal(count.params.at(-1), COUNT_CAP);
+});
+
+// A page of rows under a total that excludes them is the failure this guards: the two queries
+// filter the same table and must filter it identically.
+test("the page and its count carry the same predicate and the same filter parameters", async () => {
+  const calls: Call[] = [];
+  const qs = "from=2026-07-01&alertname=X&namespace=prod&severity=critical&resolved=true";
+  await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams(qs)));
+  const [rows, count] = calls;
+  assert.deepEqual(count.params.slice(0, 6), rows.params.slice(0, 6));
+  const where = (sql: string) => sql.slice(sql.indexOf("WHERE")).replace(/\s+/g, " ");
+  assert.ok(where(count.sql).startsWith(where(rows.sql).split(" ORDER BY")[0]));
+});
+
+test("total counts the matching rows and says whether it counted them all", async () => {
+  const q = new DashboardQueries(stub([], (sql) => (sql.includes("count(*)") ? [{ n: 137 }] : [{ id: 1 }])));
+  const out = await q.list(parseFilters(new URLSearchParams("")));
+  assert.equal(out.total, 137);
+  assert.equal(out.capped, false);
+});
+
+test("a count that reaches the cap reports itself as a floor", async () => {
+  const q = new DashboardQueries(stub([], (sql) => (sql.includes("count(*)") ? [{ n: COUNT_CAP }] : [{ id: 1 }])));
+  const out = await q.list(parseFilters(new URLSearchParams("")));
+  assert.equal(out.total, COUNT_CAP);
+  assert.equal(out.capped, true, "the page renders this as \"5,000+\"");
+});
+
+// The two queries run concurrently and share no snapshot, so an insert landing between them
+// can return a count smaller than the page it is about to be printed under. "Showing 51–100
+// of 84" is a number the reader cannot unsee.
+test("total never falls below the rows the caller is already holding", async () => {
+  const stale = PAGE_SIZE * 2 - 3; // a count taken before the rows this page is about to show
+  const q = new DashboardQueries(
+    stub([], (sql) =>
+      sql.includes("count(*)") ? [{ n: stale }] : Array.from({ length: PAGE_SIZE }, (_, i) => ({ id: i })))
+  );
+  const out = await q.list(parseFilters(new URLSearchParams("page=2")));
+  assert.equal(out.total, PAGE_SIZE * 2, "one page of offset plus a full page of rows");
+});
+
+test("with no pool the list reports an empty, uncapped page instead of throwing", async () => {
+  const out = await new DashboardQueries(null).list(parseFilters(new URLSearchParams("")));
+  assert.deepEqual(out, { rows: [], hasMore: false, total: 0, capped: false });
 });

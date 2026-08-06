@@ -4,16 +4,45 @@ import { barChart } from "./svg.js";
 import { topologyDiagram } from "./topology-svg.js";
 import { TOPO_SCRIPT } from "./topology-script.js";
 import { STYLES } from "./styles.js";
+import { PAGE_SIZE } from "./filters.js";
 import type { Filters } from "./filters.js";
-import type { FeedbackRow, IncidentDetail, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
+import type {
+  FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
+} from "./queries.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 
+// Each glyph is drawn from the page it opens rather than picked off a generic set: a bar
+// series for the weekly chart the overview leads with, an alert triangle for a table whose
+// every row is one, three linked nodes for the dependency map. Inline because the CSP sends
+// `default-src 'none'` — an icon font or a sprite sheet is a fetch this page cannot make.
+// Stroked, not filled: at 18px a solid glyph reads as a blob.
+//
+// aria-hidden on every one of them. The icon is not the name of the destination; the text
+// beside it is, and that text stays in the markup even at the narrow breakpoint where CSS
+// clips it out of sight. That is what lets the rail go icon-only without going unlabelled.
+const ico = (paths: string): string =>
+  `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"` +
+  ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+
+const ICON = {
+  overview: ico(`<path d="M3 21h18"/><path d="M7 21v-7"/><path d="M12 21V4"/><path d="M17 21v-11"/>`),
+  incidents: ico(
+    `<path d="M10.3 4 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 4a1.9 1.9 0 0 0-3.4 0Z"/>` +
+      `<path d="M12 9.5v4"/><path d="M12 17.2h.01"/>`
+  ),
+  topology: ico(
+    `<circle cx="12" cy="5" r="2.6"/><circle cx="5" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6"/>` +
+      `<path d="M10.4 7.3 6.6 16.4"/><path d="M13.6 7.3l3.8 9.1"/>`
+  ),
+  signout: ico(`<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 16 4-4-4-4"/><path d="M14 12H4"/>`),
+};
+
 const NAV = [
-  { href: "/", label: "Overview" },
-  { href: "/incidents", label: "Incidents" },
-  { href: "/topology", label: "Topology" },
+  { href: "/", label: "Overview", icon: ICON.overview },
+  { href: "/incidents", label: "Incidents", icon: ICON.incidents },
+  { href: "/topology", label: "Topology", icon: ICON.topology },
 ];
 
 // The two theme-color values are the only colours written outside styles.ts, and they are
@@ -23,15 +52,22 @@ const NAV = [
 //
 // `chrome: "bare"` is for the pages you can reach without a session — the sign-in form and
 // the "not configured" notice. Navigation there is a row of links that all bounce straight
-// back to where you already are, and a Sign out button for a session you do not have.
+// back to where you already are, and a Sign out button for a session you do not have. So the
+// rail is not rendered at all rather than rendered empty: a bare column of chrome down the
+// side of a one-field form is a frame around nothing.
 export function layout(title: string, body: string, current = "", chrome: "full" | "bare" = "full"): string {
   const nav = NAV.map(
-    (n) => `<a href="${n.href}"${n.href === current ? ` aria-current="page"` : ""}>${n.label}</a>`
+    (n) => `<a href="${n.href}"${n.href === current ? ` aria-current="page"` : ""}>` +
+      `${n.icon}<span class="lbl">${n.label}</span></a>`
   ).join("");
-  const bar =
+  const rail =
     chrome === "full"
-      ? `<nav>${nav}</nav>` +
-        `<form class="signout" method="post" action="/logout"><button type="submit">Sign out</button></form>`
+      ? `<header class="rail">` +
+        `<span class="brand" translate="no">devops-ai-agent</span>` +
+        `<nav aria-label="Primary">${nav}</nav>` +
+        `<form class="signout" method="post" action="/logout">` +
+        `<button type="submit">${ICON.signout}<span class="lbl">Sign out</span></button></form>` +
+        `</header>`
       : "";
   const note =
     chrome === "full"
@@ -45,14 +81,13 @@ export function layout(title: string, body: string, current = "", chrome: "full"
 <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
 <title>${esc(title)} — DevOps AI Agent</title>
 <style>${STYLES}</style>
-</head><body>
+</head><body${chrome === "bare" ? ` class="bare"` : ""}>
 <a class="skip" href="#main">Skip to content</a>
-<header class="top">
-  <span class="brand" translate="no">devops-ai-agent</span>
-  ${bar}
-</header>
+${rail}
+<div class="pane">
 <main id="main">${body}</main>
 <footer class="bottom">${note} The password is one lock; not routing this port from the Ingress is the other. Keep both.</footer>
+</div>
 </body></html>`;
 }
 
@@ -239,23 +274,112 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
   );
 }
 
-export function listPage(rows: IncidentRow[], f: Filters, hasMore: boolean): string {
+// How many pages sit either side of the current one before the run is elided.
+const PAGE_SPAN = 2;
+
+/**
+ * The page numbers to offer: `1 … 4 5 [6] 7 8 … 26`. The first and last are always in the
+ * list, so both ends of the range stay one click away from anywhere in the middle.
+ *
+ * A run is only elided when eliding it saves a step. Exactly one hidden page renders as that
+ * page rather than as an ellipsis standing in for a single number — `1 … 3 4 5` costs the
+ * same width as `1 2 3 4 5` and hides a destination for nothing. `null` is the gap.
+ */
+export function pageWindow(current: number, last: number): (number | null)[] {
+  const want = new Set<number>([1, last]);
+  for (let p = current - PAGE_SPAN; p <= current + PAGE_SPAN; p++) {
+    if (p >= 1 && p <= last) want.add(p);
+  }
+  const out: (number | null)[] = [];
+  for (const p of [...want].sort((a, b) => a - b)) {
+    const prev = out.length > 0 ? out[out.length - 1] : null;
+    if (typeof prev === "number" && p - prev > 1) out.push(p - prev === 2 ? p - 1 : null);
+    out.push(p);
+  }
+  return out;
+}
+
+/**
+ * Where you are in the range, and every way out of it.
+ *
+ * The summary is rendered whenever there are rows, even on a single page — "3 incidents" is
+ * an answer, and a reader who filtered to nothing wants the count more than the controls.
+ * The controls appear only when there is somewhere to go.
+ */
+function pager(p: IncidentPage, f: Filters, qs: (page: number) => string): string {
+  if (p.rows.length === 0) return "";
+  const first = (f.page - 1) * PAGE_SIZE + 1;
+  const shown = first + p.rows.length - 1;
+  // The count is bounded (COUNT_CAP), so past the ceiling it is a floor and says so. "5,000+"
+  // is true; a hard 5,000 under a table that keeps producing next pages is not.
+  const total = `${fmtInt(p.total)}${p.capped ? "+" : ""}`;
+  const summary =
+    `<p class="pager-count">Showing <b>${esc(fmtInt(first))}–${esc(fmtInt(shown))}</b> of ` +
+    `<b>${esc(total)}</b> incident${p.total === 1 ? "" : "s"}</p>`;
+
+  const last = Math.max(1, Math.ceil(p.total / PAGE_SIZE), f.page);
+  if (last === 1 && !p.hasMore) return `<nav class="pager" aria-label="Pagination">${summary}</nav>`;
+
+  // A step that leads nowhere keeps its slot but stops being a control: no href, and hidden
+  // from assistive tech rather than announced as a link that does not go anywhere. Holding
+  // the position matters — the arrows are what a reader clicks repeatedly, and a Next that
+  // slides sideways as the row count changes is a target that moves under the pointer.
+  const step = (to: number, live: boolean, glyph: string, label: string, rel: string): string =>
+    live
+      ? `<li><a class="step" href="${esc(qs(to))}" rel="${rel}" aria-label="${label}">${glyph}</a></li>`
+      : `<li><span class="step off" aria-hidden="true">${glyph}</span></li>`;
+
+  const numbers = pageWindow(f.page, last)
+    .map((n) =>
+      n === null
+        ? `<li><span class="gap" aria-hidden="true">…</span></li>`
+        : n === f.page
+          ? `<li><span class="cur" aria-current="page">${esc(n)}</span></li>`
+          : `<li><a href="${esc(qs(n))}" aria-label="Page ${esc(n)}">${esc(n)}</a></li>`
+    )
+    .join("");
+
+  return (
+    `<nav class="pager" aria-label="Pagination">${summary}<ul class="pages">` +
+    step(f.page - 1, f.page > 1, "←", "Previous page", "prev") +
+    numbers +
+    // hasMore comes from the over-fetch, not from the count — so the last page is right even
+    // when the count has hit its ceiling and cannot say how many pages there really are.
+    step(f.page + 1, p.hasMore, "→", "Next page", "next") +
+    `</ul></nav>`
+  );
+}
+
+export function listPage(p: IncidentPage, f: Filters): string {
   const qs = (page: number): string => {
-    const p = new URLSearchParams();
-    if (f.from) p.set("from", f.from.toISOString().slice(0, 10));
-    if (f.to) p.set("to", f.to.toISOString().slice(0, 10));
-    if (f.alertname) p.set("alertname", f.alertname);
-    if (f.namespace) p.set("namespace", f.namespace);
-    if (f.severity) p.set("severity", f.severity);
-    if (f.resolved !== null) p.set("resolved", String(f.resolved));
-    p.set("page", String(page));
-    return `/incidents?${p.toString()}`;
+    const q = new URLSearchParams();
+    if (f.from) q.set("from", f.from.toISOString().slice(0, 10));
+    if (f.to) q.set("to", f.to.toISOString().slice(0, 10));
+    if (f.alertname) q.set("alertname", f.alertname);
+    if (f.namespace) q.set("namespace", f.namespace);
+    if (f.severity) q.set("severity", f.severity);
+    if (f.resolved !== null) q.set("resolved", String(f.resolved));
+    // page=1 is omitted: a link that restates the default is a query string the reader has to
+    // read past to see which filters are actually on.
+    if (page > 1) q.set("page", String(page));
+    const s = q.toString();
+    return s ? `/incidents?${s}` : "/incidents";
   };
 
   const sel = (v: string, cur: string | null, label: string): string =>
     `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(label)}</option>`;
 
   const filtered = !!(f.from || f.to || f.alertname || f.namespace || f.severity || f.resolved !== null);
+
+  // Two different absences. No rows on page 1 means the filters matched nothing; no rows on
+  // page 7 means the range ended earlier than the URL claims — usually a bookmark outliving
+  // the rows it pointed at — and the way out of that is a link, not a suggestion to filter.
+  const nothing =
+    f.page > 1
+      ? `<p class="empty"><strong>Nothing on page ${esc(f.page)}.</strong>` +
+        `This filter matches ${esc(fmtInt(p.total))} incident${p.total === 1 ? "" : "s"}. ` +
+        `<a href="${esc(qs(1))}">Go to the first page</a>.</p>`
+      : empty("No incidents match these filters.", "Widen the date range, or clear a filter to see more.");
 
   // The two free-text fields take identifiers, not words: autocomplete off (the browser has
   // no saved value that belongs in "Namespace"), autocapitalize off (a phone would send
@@ -283,12 +407,8 @@ export function listPage(rows: IncidentRow[], f: Filters, hasMore: boolean): str
          ${filtered ? `<a href="/incidents">Clear</a>` : ""}
        </div>
      </form>
-     ${incidentTable(rows, empty("No incidents match these filters.", "Widen the date range, or clear a filter to see more."))}
-     <div class="pager">
-       ${f.page > 1 ? `<a href="${esc(qs(f.page - 1))}">← Previous</a>` : ""}
-       ${hasMore ? `<a href="${esc(qs(f.page + 1))}">Next →</a>` : ""}
-       <span class="at">Page ${esc(f.page)}</span>
-     </div>`,
+     ${incidentTable(p.rows, nothing)}
+     ${pager(p, f, qs)}`,
     "/incidents"
   );
 }

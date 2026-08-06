@@ -31,11 +31,13 @@ export const STYLES = `
 
   --r-sm: 5px; --r: 10px; --r-lg: 14px;
   --maxw: 76rem;
+  --rail-w: 13.5rem;
   --spine-w: 3px;
-  /* The page gutter, and the notch allowance folded into it: the header is sticky, so on a
-     phone held in landscape it would otherwise run under the camera cutout. env() needs its
-     own fallback — without the 0px a browser that has never heard of safe areas throws the
-     whole declaration away and the page loses its gutter entirely. */
+  /* The page gutter, and the notch allowance folded into it: below 60rem the rail becomes a
+     sticky bar across the top, so on a phone held in landscape it would otherwise run under
+     the camera cutout. env() needs its own fallback — without the 0px a browser that has
+     never heard of safe areas throws the whole declaration away and the page loses its
+     gutter entirely. */
   --gutter: max(var(--sp-6), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
 
   --bg: #f4f6f9; --surface: #fff; --surface-2: #eceff4;
@@ -72,12 +74,20 @@ export const STYLES = `
 /* scrollbar-gutter keeps the reserved track on pages short enough not to scroll (topology)
    so the header and content do not jump sideways when you navigate from a long one. */
 html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; }
+/* The rail is a grid column, not an overlay: content sits BESIDE it and never under it, so
+   there is no z-index race and no scroll handler deciding when the two overlap. The single
+   .skip child is out of flow and takes no cell. */
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font-family: var(--font-ui); font-size: var(--fs-base); line-height: 1.55;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   accent-color: var(--accent);
+  min-height: 100vh;
+  display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr);
 }
+/* Sign-in and the "not configured" notice render no rail at all — one column, and the
+   grid has to be told, or the page opens 13.5rem short of the left edge. */
+body.bare { grid-template-columns: minmax(0, 1fr); }
 
 /* Links carry no colour by default. A table of fifty blue rows is fifty pieces of noise
    competing with the one red one — the underline is affordance enough, and the accent is
@@ -101,31 +111,61 @@ a, button, select, input, summary { touch-action: manipulation; }
 .skip:focus-visible { transform: none; }
 
 /* ---------- chrome ---------- */
-header.top {
-  position: sticky; top: 0; z-index: 10;
-  background: var(--surface); border-bottom: 1px solid var(--border);
-  padding: 0 var(--gutter);
-  display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap;
+/* A rail rather than a bar across the top. Three destinations are too few to earn a menu and
+   too many to keep re-reading horizontally: down the side they become a fixed spatial index —
+   the same three positions on every screen, all visible at once, none of them consuming the
+   vertical space the tables want. */
+.rail {
+  position: sticky; top: 0; align-self: start; height: 100vh;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  padding: var(--sp-5) var(--sp-3);
+  background: var(--surface); border-right: 1px solid var(--border);
 }
-@supports (backdrop-filter: blur(1px)) {
-  header.top { background: var(--glass); backdrop-filter: blur(14px) saturate(1.6); }
-}
-header.top .brand {
+.rail .brand {
   font-family: var(--font-data); font-size: var(--fs-sm); font-weight: 600;
-  letter-spacing: -.02em; padding: var(--sp-4) 0; white-space: nowrap;
+  letter-spacing: -.02em; padding: var(--sp-2) var(--sp-3) var(--sp-5);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-header.top nav { display: flex; gap: var(--sp-5); margin-left: auto; }
-header.top nav a {
-  color: var(--text-dim); font-size: var(--fs-sm); font-weight: 550;
-  text-decoration: none; padding: var(--sp-4) 0;
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
+.rail nav { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* Sign out is shaped exactly like a destination and coloured exactly like one — it is the
+   fourth thing in the rail and behaves as such — but it sits at the far end, held there by
+   the auto margin, because leaving is not one of the places you can go. */
+.rail nav a, form.signout button {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm);
+  font-size: var(--fs-sm); font-weight: 550; white-space: nowrap;
+  color: var(--text-dim); text-decoration: none;
 }
-header.top nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+/* The same mark the tables use for a row's severity, borrowed for the same job: a bar of ink
+   down the leading edge saying "this one". Colour is spent here because "where am I" is the
+   one question the chrome exists to answer. */
+.rail nav a[aria-current="page"] {
+  color: var(--text); background: var(--surface-2);
+  box-shadow: inset var(--spine-w) 0 0 var(--accent);
+}
+/* flex-shrink 0: a long label must squeeze the text, never the glyph — a 4px-wide triangle
+   is not an icon, it is a rendering fault. */
+.ico { width: 18px; height: 18px; flex: 0 0 auto; }
 
-main { max-width: var(--maxw); margin: 0 auto; padding: var(--sp-10) var(--gutter) var(--sp-12); }
+/* min-width 0 on a grid column that holds tables: without it the column's automatic minimum
+   size is its widest cell, and one long alert name widens the whole page instead of scrolling
+   inside its own .table-wrap. */
+.pane { min-width: 0; display: flex; flex-direction: column; }
+/* The 100% width is doing real work here, not restating a default. An auto cross-axis margin
+   is what centres main in the pane, and a flex item with one does not stretch — it takes its
+   fit-content width instead, which on a phone is the width of the widest table, so main grew
+   past the viewport and dragged the whole page into a horizontal scroll while .table-wrap sat
+   there scrolling nothing. A definite width plus min-width 0 pins main to the pane and hands
+   the overflow back to the wrap, where it belongs. */
+main {
+  width: 100%; min-width: 0; max-width: var(--maxw); margin: 0 auto;
+  padding: var(--sp-10) var(--gutter) var(--sp-12);
+}
 
+/* auto on top, 0 on the bottom: horizontally centred like main, and pushed to the foot of a
+   short page rather than left floating under a two-row table. */
 footer.bottom {
-  max-width: var(--maxw); margin: 0 auto;
+  width: 100%; min-width: 0; max-width: var(--maxw); margin: auto auto 0;
   padding: 0 var(--gutter) var(--sp-10);
   color: var(--text-dim); font-family: var(--font-data); font-size: var(--fs-2xs);
 }
@@ -326,11 +366,13 @@ form.filters button {
   font-size: var(--fs-sm); margin: 0 0 var(--sp-5);
 }
 /* Sign out is weighted like a nav link rather than a button: it is an exit, and the only
-   emphasised control in this stylesheet should be the one that gets you in. */
-form.signout { display: flex; align-items: center; margin-left: var(--sp-5); }
+   emphasised control in this stylesheet should be the one that gets you in. The shape comes
+   from the .rail nav a rule it shares a selector with; this adds only what a <button> needs
+   to stop looking like one. */
+form.signout { display: flex; margin-top: auto; }
 form.signout button {
-  font: inherit; font-size: var(--fs-sm); font-weight: 550; cursor: pointer;
-  color: var(--text-dim); background: none; border: 0; padding: var(--sp-2) 0;
+  font-family: inherit; line-height: inherit; cursor: pointer; text-align: left;
+  width: 100%; background: none; border: 0;
 }
 
 /* ---------- prose ---------- */
@@ -408,16 +450,48 @@ form.signout button {
   display: block; color: var(--text); font-size: var(--fs-md);
   font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--sp-2);
 }
+/* An empty state that offers a way out puts it in the sentence. This is the only link that
+   appears inside one, and it is the entire point of that copy — it gets the accent. */
+.empty a { color: var(--accent); font-weight: 550; }
+
+/* Where you are on the left, how to leave on the right. They wrap independently: on a phone
+   the summary takes the first line and the controls the second, rather than the controls
+   compressing to fit beside a sentence. */
 .pager {
-  display: flex; gap: var(--sp-3); align-items: center;
-  margin-top: var(--sp-5); font-size: var(--fs-sm);
+  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5);
+  align-items: center; justify-content: space-between; margin-top: var(--sp-5);
 }
-.pager a {
-  text-decoration: none; font-weight: 550;
-  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
-  padding: var(--sp-2) var(--sp-3); background: var(--surface);
+.pager-count { margin: 0; color: var(--text-dim); font-size: var(--fs-sm); }
+.pager-count b {
+  color: var(--text); font-weight: 600;
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
 }
-.pager .at { margin-left: auto; color: var(--text-dim); font-family: var(--font-data); }
+.pages {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1);
+  list-style: none; margin: 0; padding: 0;
+}
+/* One box, four states — link, current, dead step, ellipsis — sharing a single size, so the
+   row keeps its rhythm no matter which of them a position happens to hold. tabular-nums and
+   the min-width are what stop "1" and "18" from being different-sized versions of the same
+   control, which makes the whole strip twitch as you page through it. */
+.pages a, .pages .cur, .pages .step, .pages .gap {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 2.25rem; height: 2.25rem; padding: 0 var(--sp-2);
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  font-family: var(--font-data); font-size: var(--fs-sm); font-variant-numeric: tabular-nums;
+  color: var(--text-dim); text-decoration: none;
+}
+.pages a { color: var(--text); background: var(--surface); border-color: var(--border-strong); }
+/* The second and last place colour marks something other than severity: which page you are
+   on. It is the "current" case the accent is reserved for — the same signal the rail carries
+   down its own leading edge — and it sits below the table, far from the rows whose spines it
+   would otherwise be competing with. */
+.pages .cur { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+/* A step with nowhere to go keeps its slot and loses its affordance. Holding the position is
+   the point: the arrows are what gets clicked repeatedly, and one that slides sideways when
+   the last page is reached is a target that moves out from under the pointer. */
+.pages .step.off { opacity: .38; }
+.pages .gap { min-width: 1.5rem; padding: 0; }
 .title-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-6); }
 
 /* ---------- charts ---------- */
@@ -561,8 +635,10 @@ form.signout button {
    reason: --spine already carries the row's severity, and borrowing it here would swap a
    permanent signal for a transient one. */
 tbody tr:target { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* scroll-margin, not a scroll handler: an anchor jump would otherwise park the row under the
-   sticky header. The value is the header's height plus a line of air. */
+/* scroll-margin, not a scroll handler: below 60rem the rail is a sticky bar, and an anchor
+   jump would otherwise park the row underneath it. Unconditional because the cost on a wide
+   screen — where the rail is a column and overlaps nothing — is a row that lands a line lower
+   than the top of the viewport, which is where you would want it anyway. */
 tbody tr:target td { scroll-margin-top: 5rem; }
 
 /* The tool list a family expands into. Bare list, no bullets: these are identifiers, and a
@@ -586,11 +662,11 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   .topo-link:hover .topo-box { fill: var(--surface-2); }
   a:hover { text-decoration-color: var(--accent); }
   h2 a:hover { text-decoration: underline; }
-  header.top nav a:hover { color: var(--text); }
+  .rail nav a:hover { color: var(--text); background: var(--surface-2); }
   tbody tr:hover { background: var(--surface-2); }
   form.filters button:hover, .signin-form button:hover { filter: brightness(1.1); }
-  form.signout button:hover { color: var(--text); }
-  .pager a:hover { border-color: var(--accent); color: var(--accent); }
+  form.signout button:hover { color: var(--text); background: var(--surface-2); }
+  .pages a:hover { border-color: var(--accent); color: var(--accent); }
   .chart-bar:hover { fill: var(--text); }
   .chart-bar-current:hover { fill: none; stroke: var(--text); }
 }
@@ -601,12 +677,37 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
    text goes to 16px so tapping "Namespace" does not throw the layout off-screen. */
 @media (pointer: coarse) {
   form.filters input, form.filters select, .signin-form input { font-size: 16px; }
+  /* 44px: the floor for a target a finger has to hit. The pager especially — its controls sit
+     next to each other, so an undersized one is not merely hard to hit but easy to mis-hit. */
+  .rail nav a, form.signout button { min-height: 2.75rem; }
+  .pages a, .pages .cur, .pages .step { min-width: 2.75rem; height: 2.75rem; }
+}
+
+/* The rail lies down. Below this width a 13.5rem column is a third of the screen spent on
+   three links, so it becomes a sticky bar across the top — the same items, the same order,
+   the same current-page mark rotated a quarter turn onto the bottom edge. */
+@media (max-width: 60rem) {
+  body, body.bare { grid-template-columns: minmax(0, 1fr); }
+  .rail {
+    position: sticky; top: 0; z-index: 10; height: auto; align-self: stretch;
+    flex-direction: row; align-items: center; gap: var(--sp-2);
+    padding: var(--sp-2) var(--gutter);
+    border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  /* Only here: the bar now has content scrolling underneath it, which is the one condition
+     that makes a translucent background mean anything. The side rail never overlaps. */
+  @supports (backdrop-filter: blur(1px)) {
+    .rail { background: var(--glass); backdrop-filter: blur(14px) saturate(1.6); }
+  }
+  .rail .brand { padding: 0; margin-right: auto; }
+  .rail nav { flex-direction: row; gap: var(--sp-1); }
+  .rail nav a[aria-current="page"] { box-shadow: inset 0 -2px 0 var(--accent); }
+  form.signout { margin-top: 0; margin-left: var(--sp-2); }
+  form.signout button { width: auto; }
 }
 @media (max-width: 46rem) {
   :root { --gutter: max(var(--sp-4), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px)); }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
-  header.top { gap: var(--sp-4); }
-  header.top nav { gap: var(--sp-4); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .hero { padding: var(--sp-5); }
   .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
@@ -622,8 +723,19 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
      hold. The gesture a phone does have — one finger across the map — needs no instructions. */
   .topo-hint { display: none; }
 }
+/* Icons only, and the reason the icons exist. The label is CLIPPED, not removed: it stays in
+   the accessible name, so a screen reader still hears "Incidents" and voice control still
+   matches on it — the glyph is what a sighted reader navigates by at this width, never what
+   the destination is called. Deleting the text instead would leave four unnamed buttons. */
+@media (max-width: 30rem) {
+  .rail .lbl {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+  .rail nav a, form.signout button { gap: 0; padding: var(--sp-2); }
+}
 @media (prefers-reduced-motion: no-preference) {
-  a, .pager a, header.top nav a, form.filters button, .signin-form button,
+  a, .pages a, .rail nav a, form.filters button, .signin-form button,
   form.signout button, .topo-tools button, .chart-bar, tbody tr {
     transition: color .12s ease, background-color .12s ease, border-color .12s ease,
                 fill .12s ease, text-decoration-color .12s ease;

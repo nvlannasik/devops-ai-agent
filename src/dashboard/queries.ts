@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { createPool } from "../db/pool.js";
 import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
-import type { Filters } from "./filters.js";
+import { PAGE_SIZE, type Filters } from "./filters.js";
 
 export interface IncidentRow {
   id: number; created_at: Date; resolved_at: Date | null;
@@ -34,6 +34,16 @@ export interface Tokens {
   input: number; output: number; cacheRead: number; cacheCreation: number;
   byBackend: TokenLine[];
 }
+// `total` is what the pager numbers itself from, and it is BOUNDED (see COUNT_CAP): past the
+// cap it stops counting and `capped` says so, which the page renders as "5,000+". An exact
+// count over a filtered table is a full scan on the same event loop that handles alerts, and
+// nobody clicks to page 400 — the ceiling buys a flat cost and gives up a number no one reads.
+export interface IncidentPage {
+  rows: IncidentRow[];
+  hasMore: boolean;
+  total: number;
+  capped: boolean;
+}
 export interface Overview {
   weekly: { label: string; value: number }[];
   recurring: { alertname: string; namespace: string | null; n: number; last_seen: Date }[];
@@ -44,6 +54,19 @@ export interface Overview {
 }
 
 const CACHE_TTL_MS = 60_000;
+// How far the row count will walk before it gives up and reports "this many or more".
+export const COUNT_CAP = 5000;
+
+// One predicate, two queries. The page and its count MUST filter identically — a drifted
+// copy shows a page of rows under a total that does not include them — so there is one copy
+// and both interpolate it. It is a module constant with no input in it; $1..$6 are bound.
+const INCIDENT_WHERE = `WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+            AND ($2::timestamptz IS NULL OR created_at <  $2)
+            AND ($3::text IS NULL OR alertname = $3)
+            AND ($4::text IS NULL OR namespace = $4)
+            AND ($5::text IS NULL OR severity  = $5)
+            AND ($6::boolean IS NULL OR (resolved_at IS NOT NULL) = $6)`;
+
 // passed as a bound parameter ($1::interval), never interpolated into the SQL text —
 // it is a constant today, and keeping it parameterised means it cannot become an
 // injection the day someone makes the window configurable
@@ -220,25 +243,36 @@ export class DashboardQueries {
     return this.cache.value;
   }
 
-  async list(f: Filters): Promise<{ rows: IncidentRow[]; hasMore: boolean }> {
-    if (!this.pool) return { rows: [], hasMore: false };
-    // over-fetch by one: tells us whether a next page exists without a second COUNT(*)
-    const limit = f.pageSize + 1;
-    const { rows } = await this.pool.query(
-      `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence, root_cause
-         FROM incidents
-        WHERE ($1::timestamptz IS NULL OR created_at >= $1)
-          AND ($2::timestamptz IS NULL OR created_at <  $2)
-          AND ($3::text IS NULL OR alertname = $3)
-          AND ($4::text IS NULL OR namespace = $4)
-          AND ($5::text IS NULL OR severity  = $5)
-          AND ($6::boolean IS NULL OR (resolved_at IS NOT NULL) = $6)
-        ORDER BY created_at DESC
-        LIMIT $7 OFFSET $8`,
-      [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved, limit, (f.page - 1) * f.pageSize]
-    );
-    const hasMore = rows.length > f.pageSize;
-    return { rows: hasMore ? rows.slice(0, f.pageSize) : rows, hasMore };
+  async list(f: Filters): Promise<IncidentPage> {
+    if (!this.pool) return { rows: [], hasMore: false, total: 0, capped: false };
+    // over-fetch by one: tells us whether a next page exists without trusting the count below
+    const limit = PAGE_SIZE + 1;
+    const offset = (f.page - 1) * PAGE_SIZE;
+    const args = [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved];
+    // The rows query goes first and stays first: three tests read calls[0] for the filter
+    // parameters, the LIMIT and the OFFSET.
+    const [page, count] = await Promise.all([
+      this.pool.query(
+        `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence, root_cause
+           FROM incidents
+          ${INCIDENT_WHERE}
+          ORDER BY created_at DESC
+          LIMIT $7 OFFSET $8`,
+        [...args, limit, offset]
+      ),
+      this.pool.query(
+        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE} LIMIT $7) c`,
+        [...args, COUNT_CAP]
+      ),
+    ]);
+    const hasMore = page.rows.length > PAGE_SIZE;
+    const rows = hasMore ? page.rows.slice(0, PAGE_SIZE) : page.rows;
+    // Never below what the caller is holding. The two queries are concurrent and share no
+    // snapshot, so an insert landing between them can return a count smaller than the page
+    // it is about to be printed under — "Showing 51–100 of 84" is a number the reader cannot
+    // unsee. The floor costs nothing and makes the summary self-consistent by construction.
+    const total = Math.max(num(count.rows[0]?.n), offset + rows.length);
+    return { rows, hasMore, total, capped: total >= COUNT_CAP };
   }
 
   async detail(id: number) {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseFilters, PAGE_SIZE_MAX } from "./filters.js";
+import { parseFilters } from "./filters.js";
 
 const f = (qs: string) => parseFilters(new URLSearchParams(qs));
 
@@ -11,7 +11,6 @@ test("an empty query string yields the defaults", () => {
     { from: null, to: null, alertname: null, namespace: null, severity: null, resolved: null }
   );
   assert.equal(r.page, 1);
-  assert.equal(r.pageSize, 50);
 });
 
 test("filters are read into typed fields", () => {
@@ -52,13 +51,12 @@ test("resolved maps unrecognised values to null, not false", () => {
   assert.equal(f("resolved=unknown").resolved, null);
 });
 
-// The hard cap is a safety rail, not a preference: without it a crafted URL runs an
-// unbounded query on the same event loop that handles alerts.
-test("pageSize is clamped to the hard maximum and never below 1", () => {
-  assert.equal(f("pageSize=100000").pageSize, PAGE_SIZE_MAX);
-  assert.equal(f("pageSize=0").pageSize, 1);
-  assert.equal(f("pageSize=-5").pageSize, 1);
-  assert.equal(f("pageSize=abc").pageSize, 50);
+// Page size is a constant, not a parameter — there is no URL that can widen the query. The
+// LIMIT runs on the same event loop that handles alerts, so this is a safety rail as much as
+// a layout decision, and the parser must not grow a way around it.
+test("the page size cannot be set from the URL", () => {
+  assert.equal("pageSize" in f("pageSize=100000"), false);
+  assert.deepEqual(Object.keys(f("pageSize=500")), Object.keys(f("")));
 });
 
 test("page is at least 1", () => {
