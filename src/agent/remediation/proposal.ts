@@ -129,6 +129,51 @@ export function parseProposal(text: string): Proposal | null {
   }
 }
 
+// ---- Is this mention worth a proposal call at all? ----
+//
+// Every mention used to trigger one. "status check" on a healthy cluster therefore burned a
+// heavy LLM call to arrive at {"action": null} — and on the day the heavy chain was down to
+// one working backend it produced a page of stack traces instead. The alert path never asks
+// this question: an alert firing IS the evidence.
+//
+// Deliberately asymmetric. A false positive costs exactly what today costs — one call that
+// answers null — while a false negative silently drops a legitimate fix. So every rule below
+// is a reason to SPEND the call, and skipping is only what's left when none of them fire.
+
+// Verbs that ask for a change, English and Indonesian in one pattern because that is how the
+// humans here type. An explicit request is sufficient evidence on its own (buildProposalPrompt
+// says as much), so it has to survive this gate even on a perfectly healthy cluster.
+// The Indonesian half matches STEMS with up to four leading characters, because the affixes
+// carry the request: "perbaiki" arrives as "diperbaiki", "ganti" as "mengganti".
+const ACTION_INTENT =
+  /\b(restart|rollout|redeploy|deploy|scale|rollback|roll back|revert|delete|remove|patch|set|change|switch|update|upgrade|downgrade|increase|decrease|raise|lower|bump|resize|fix|apply|reconcile)\b|\b\w{0,4}(ganti|ubah|hapus|naik|turun|tambah|kurang|perbaik|kembali|nyala|matikan|terap|jalan)\w*/i;
+
+// A clean bill of health mentions the same vocabulary a broken one does — the healthy reply
+// that motivated this gate says "no alerts firing" and "0 restarts in the last hour". Negated
+// forms come out before anything is matched, or the gate would never skip anything.
+//
+// The keyword group repeats (`+`) because one negation covers a whole list: "No alerts are
+// firing and nothing is pending" has to lose `firing` too, not just `alerts`. The window
+// between them stops at a contrastive conjunction so "no logs, but it is in CrashLoopBackOff"
+// keeps its evidence — that clause is not a negation of the thing after "but".
+const NEGATED =
+  /\b(no|zero|0|none|nothing|neither|not|never|without)\b(?:(?:(?!\b(?:but|however|though|although|except|while)\b)[^.;\n]){0,30}?\b(?:alerts?|firing|restarts?|errors?|failures?|issues?|problems?|crash\w*|oom\w*|unhealthy|pending|failed|failing|unavailable|degraded|down)\b)+/gi;
+
+// What's left has to be an actual negative state. Most of these are Kubernetes reason strings
+// the agent quotes verbatim out of tool output, which is exactly why they're matched literally.
+const FAULT_EVIDENCE =
+  /\b(crashloop\w*|oomkill\w*|out of memory|imagepull\w*|errimagepull|createcontainer\w*|runcontainer\w*|invalidimagename|failedscheduling|unschedulable|evicted|backoff|node ?notready|not ready|unhealthy|degraded|unavailable|failing|failed|erroring|crashing|restarting|flapping|stuck|wedged|throttl\w*|saturat\w*|exhaust\w*|starv\w*|firing|disk pressure|memory pressure|timed out)\b/i;
+
+// `isRca` is the strongest signal there is: the agent only reaches for the incident template
+// when it found something to diagnose.
+export function worthProposing(userText: string, reply: string, isRca: boolean): { propose: boolean; reason: string } {
+  if (isRca) return { propose: true, reason: "RCA response — a fault was diagnosed" };
+  if (ACTION_INTENT.test(userText)) return { propose: true, reason: "the user asked for a change" };
+  const hit = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE);
+  if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")` };
+  return { propose: false, reason: "read-only question, no fault evidence in the answer" };
+}
+
 export const PROPOSAL_SYSTEM =
   "You propose Kubernetes remediation actions after an incident investigation. Output ONLY a JSON object, no prose.";
 

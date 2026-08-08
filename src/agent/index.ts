@@ -12,6 +12,18 @@ import { namespacesOf, outOfScope } from "./scope/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import {
+  RemediationCheckStore,
+  summarizePods,
+  alertState,
+  decideVerdict,
+  verdictMessage,
+  maxAttemptsReached,
+  type AlertState,
+  type PodHealth,
+  type RemediationCheck,
+  type Verdict,
+} from "./remediation/verify.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
 import type { GitOpsDrift } from "./gitops/types.js";
@@ -49,6 +61,7 @@ export class DevOpsAgent {
   private incidents: IncidentMemory;
   private usage: UsageStore;
   private remediations: RemediationStore;
+  private checks: RemediationCheckStore;
   private gitops: SqsGitOpsClient | null;
 
   constructor() {
@@ -58,6 +71,7 @@ export class DevOpsAgent {
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
     this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
+    this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
   }
 
@@ -78,6 +92,7 @@ export class DevOpsAgent {
       this.usage = new UsageStore(pool);
       this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
+      this.checks = new RemediationCheckStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
@@ -103,8 +118,10 @@ export class DevOpsAgent {
   }
 
   // Durable cross-incident memory — recall returns "" when disabled or no prior match.
-  recallIncidents(labels: Record<string, string>): Promise<string> {
-    return this.incidents.recall(labels);
+  // `queryText` (the alert body) unlocks the weakest tier, which matches on wording rather
+  // than on the alert's identity; without it recall stays exact-match only.
+  recallIncidents(labels: Record<string, string>, queryText?: string): Promise<string> {
+    return this.incidents.recall(labels, { queryText });
   }
 
   // Recall what was actually DONE about this alert before (past remediations + their PRs/
@@ -117,12 +134,21 @@ export class DevOpsAgent {
     const lines = rows.map((r) => {
       const date = new Date(r.createdAt).toISOString().slice(0, 10);
       const pr = r.result.startsWith("http") ? ` (PR: ${r.result})` : "";
-      return `- ${date}: ${r.summary} — ${r.status}${pr}`;
+      // The verdict is the part that says whether it WORKED — "succeeded" only means the
+      // call didn't error. Unverified rows say so rather than reading as a silent success.
+      const verdict = r.verdict ? ` → verified ${r.verdict}${r.detail ? ` (${r.detail})` : ""}` : " → never verified";
+      return `- ${date}: ${r.summary} — ${r.status}${pr}${verdict}`;
     });
+    const failed = rows.some((r) => r.verdict === "unchanged" || r.verdict === "worse");
     return [
       `## Previously remediated — same alert${labels.namespace ? ` in namespace ${labels.namespace}` : ""}`,
       ...lines,
       `These are prior actions taken for this recurring issue. Prefer confirming whether the same fix still applies over proposing a brand-new one.`,
+      ...(failed
+        ? [
+            `A "verified unchanged" or "verified worse" entry is evidence the action did NOT fix this alert — the agent already ran it and re-checked afterwards. Do not propose that same action again unless you can state what is different this time; if the same fix keeps not holding, the root cause is upstream of it, and that is what to investigate.`,
+          ]
+        : []),
     ].join("\n");
   }
 
@@ -602,8 +628,8 @@ export class DevOpsAgent {
       const ok = !result.startsWith("Error:");
       await this.remediations.finish(id, ok, result);
       if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
-      // delete_pod targets a pod, not a workload — drop the random suffix so the 90s
-      // status check matches the REPLACEMENT pod (same ReplicaSet hash / StatefulSet base)
+      // delete_pod targets a pod, not a workload — drop the random suffix so verification
+      // matches the REPLACEMENT pod (same ReplicaSet hash / StatefulSet base)
       const targetName = String(toolParams.name ?? String(toolParams.pod ?? "").replace(/-[a-z0-9]+$/, ""));
       return {
         text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
@@ -617,7 +643,8 @@ export class DevOpsAgent {
   }
 
   // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
-  // target — nothing is live until the PR merges + Flux syncs, so there's no 90s pod check.
+  // target — nothing is live until the PR merges + Flux syncs, so there is nothing for the
+  // post-remediation verification to look at (app/index.ts only schedules when target exists).
   private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string }> {
     const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; component?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
     const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
@@ -644,12 +671,84 @@ export class DevOpsAgent {
     }
   }
 
-  // Post-remediation status check — deterministic, no LLM call: list the namespace's
-  // pods and keep the target workload's lines (pod names carry the workload prefix).
-  async remediationStatus(namespace: string, name: string): Promise<string> {
-    const out = await this.mcp.callTool("k8s_list_pods", { namespace });
-    const lines = out.split("\n").filter((l) => l.includes(name));
-    return lines.length > 0 ? lines.join("\n") : truncate(out, 500);
+  // ---- Post-remediation verification (migrations/006, remediation/verify.ts) ----
+
+  // Schedule the "did that fix it" check. The baseline snapshot is taken NOW, at approval
+  // time, because "worse" has to mean the workload regressed while we waited — without a
+  // before, the damage we were sent to fix reads as damage the remediation caused.
+  // Best-effort by design: a workload we can't snapshot still gets a check (before = null,
+  // which only costs the regression comparison), and a store failure never fails the click.
+  async scheduleRemediationCheck(
+    remediationId: number,
+    channel: string,
+    threadTs: string,
+    target: { namespace: string; name: string }
+  ): Promise<void> {
+    if (!this.checks.enabled) return; // no Postgres → no durable schedule to keep
+    const before = await this.podHealth(target).catch((err) => {
+      logger.warn(`[remediation] baseline snapshot for ${target.namespace}/${target.name} failed: ${errDetail(err)}`);
+      return null;
+    });
+    const delaySeconds = Math.round(config.remediation.verifyDelayMs / 1000);
+    const stored = await this.checks.schedule(remediationId, channel, threadTs, target, before, delaySeconds);
+    if (stored) logger.info(`[remediation] verification for ${remediationId} due in ${delaySeconds}s (${target.namespace}/${target.name})`);
+  }
+
+  // One poller pass: claim whatever is due, verify it, record the verdict, and hand back the
+  // thread messages for the caller to post. Returns messages instead of posting them so the
+  // Slack client stays in the app layer — this class owns Postgres and MCP, not chat.
+  //
+  // The verdict is recorded BEFORE its message goes out: at-most-once beats a crash between
+  // two posts telling on-call twice that their fix failed.
+  async runDueRemediationChecks(): Promise<Array<{ channel: string; threadTs: string; text: string }>> {
+    const due = await this.checks.claimDue();
+    const out: Array<{ channel: string; threadTs: string; text: string }> = [];
+
+    for (const check of due) {
+      if (maxAttemptsReached(check)) {
+        const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Prometheus could not be read`;
+        await this.checks.abandon(check.id, detail);
+        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, "inconclusive", detail) });
+        continue;
+      }
+      try {
+        const { verdict, detail } = await this.verifyRemediation(check);
+        await this.checks.complete(check.id, verdict, detail);
+        logger.info(`[remediation] check ${check.id} (remediation ${check.remediationId}): ${verdict} — ${detail}`);
+        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, verdict, detail) });
+      } catch (err) {
+        // Left claimed on purpose: the lease expires and the next pass retries it, which is
+        // what makes a transient MCP outage a delay rather than a lost verdict.
+        logger.warn(`[remediation] check ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
+      }
+    }
+    return out;
+  }
+
+  // Deterministic, no LLM call. Both signals are fetched together and each degrades on its
+  // own — a Prometheus outage must not cost us the pod evidence, and vice versa.
+  private async verifyRemediation(check: RemediationCheck): Promise<{ verdict: Verdict; detail: string }> {
+    const [alert, after] = await Promise.all([
+      check.alertname
+        ? this.mcp
+            .callTool("prometheus_get_alerts", {})
+            .then((raw) => alertState(raw, check.alertname, check.namespace))
+            .catch((err) => {
+              logger.warn(`[remediation] alert re-check for ${check.alertname} failed: ${errDetail(err)}`);
+              return "unknown" as AlertState;
+            })
+        : Promise.resolve("none" as AlertState),
+      this.podHealth(check.target).catch((err) => {
+        logger.warn(`[remediation] pod re-check for ${check.target.namespace}/${check.target.name} failed: ${errDetail(err)}`);
+        return null;
+      }),
+    ]);
+    return decideVerdict(alert, check.before, after, { alertname: check.alertname });
+  }
+
+  private async podHealth(target: { namespace: string; name: string }): Promise<PodHealth | null> {
+    const raw = await this.mcp.callTool("k8s_list_pods", { namespace: target.namespace });
+    return summarizePods(raw, target.name);
   }
 
   async rejectRemediation(id: number, by: string): Promise<string> {

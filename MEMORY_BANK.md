@@ -65,7 +65,7 @@ logs" question). Enforced in code instead:
 - **Format backstop (deterministic):** even with the budget note, the model sometimes composed its FINAL answer in RCA format when tool results looked alarming (nginx logs full of errors → `response type=rca` for a "show me logs" mention). `handleMention` now detects `!wantsInvestigation && isRcaResponse(reply)` and calls `agent.reformatToConversation(reply)` — one tool-less LLM call with a **minimal** system prompt (the full one is what primes the RCA structure). Falls back to the original text on failure. This is the last line: prompt rules → budget note → programmatic reformat.
 - **Slack splitter (`utils/slack/split.ts`):** Slack hard-splits messages >~4000 chars and breaks ``` fences (continuation renders raw). Non-RCA mention replies are posted via `splitForSlack()` — newline-boundary chunks with fence re-balancing (close at chunk end, reopen at next chunk start). Unit-tested.
 - **Log fan-out guard (deterministic):** in conversation mode, `k8s_get_pod_logs` for > `MAX_LOG_FANOUT` (2) distinct pods in one round is refused with a synthesized "list the pods and ask the user" error (other calls in the round still execute). Stops "show me log metallb" (matches 8 pods) from dumping every pod's logs; the model asks which one instead.
-- **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested.
+- **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested. **The empty-first-round-scope escape is what makes `k8s_cluster_health` usable**: a cluster-wide scan passes no `namespace`, so round 1 sets an empty scope, the lock disables itself, and round 2 may drill into whichever namespace the scan surfaced. Don't "fix" the empty case into a block — that would turn the health scan into a dead end.
 - `MENTION_TOOL_ROUNDS` default is **2** (was 3): discover → fetch covers the common flows exactly; a 3rd round only ever fed wandering. Tunable via env without rebuild.
 
 ### Reasoning-model token exhaustion (private-llm)
@@ -188,7 +188,11 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 - **Store = Postgres (`pg`), NOT Redis.** Redis here is a cache (conversation memory, 24h TTL, evictable); incident memory is a system-of-record that must persist for months. Enabled only when `DB_HOST` is set (discrete `DB_*` vars → `pg.Pool` via `db/pool.ts`; `DB_SSL_MODE` maps to pg's `ssl`); `IncidentMemory(null)` is a safe no-op otherwise (single-pod dev works without Postgres).
 - **Schema = versioned migrations, NOT inline DDL.** `migrations/*.sql` applied by a framework-free runner (`db/migrate.ts`, uses installed `pg`): tracks applied files in `schema_migrations`, each in a txn, guarded by a **`pg_advisory_lock`** so concurrent pod startups (autoscaling) serialize instead of racing on `CREATE TABLE`. `runMigrations()` runs on agent startup AND via `npm run migrate` / `migrate:prod` (for a K8s Job/initContainer). `migrations/` is copied into the Docker image. Add changes as `002_*.sql`. `pendingMigrations()` (pure: filter/sort/skip-applied) is unit-tested. `IncidentMemory` no longer does DDL.
 - **Wiring:** owned by `DevOpsAgent` (alongside Redis/memory init), exposed as `recallIncidents(labels)` / `storeIncident(labels, rca)`. App calls them only on the **alert path** (`investigateAlertInBackground`) where `alert.labels` give `alertname`/`namespace`; recall + store are best-effort (`.catch`) so a DB failure never breaks an investigation. Mentions have no labels → not stored.
-- **Recall = exact label match, no vector DB** (`// ponytail:` add embeddings only if too coarse). Past incidents framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
+- **Recall is tiered, and the tiers are never flattened**: CONFIRMED (human, `incident_feedback`) → agent hypotheses for the exact `(alertname, namespace)` → **possibly related** (similarity, `migrations/005`). Past incidents are framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
+- **Similarity tier = Postgres built-in full-text search, no new dependency.** No pgvector, no `pg_trgm`, no embeddings API — `incidents.root_cause_tsv` is a `GENERATED ALWAYS AS (to_tsvector('english', coalesce(root_cause,''))) STORED` column with a GIN index; the alert text is the query side. The **two-arg** `to_tsvector(regconfig, text)` is IMMUTABLE and can back a generated column; the one-arg form cannot (it depends on `default_text_search_config`). No `CREATE EXTENSION` on purpose: `runMigrations(pool)` runs inside `DevOpsAgent.initialize()`, so a migration that needs a privilege the app role lacks means **the pod refuses to start**. pgvector would also put an embedding call on the read path.
+- **Ranking is distinct-lexeme overlap, not `ts_rank`.** Measured: on an OR tsquery `ts_rank` returns the same score for a one-term and a two-term hit (`0.0608` both) — it does not reward matching more of the query. Counting distinct matched lexemes (`unnest(root_cause_tsv)` vs the query's lexeme array) does, and a human can check it. `@@` on the GIN index filters, the count ranks and thresholds at `MIN_OVERLAP`; rows the exact-match tiers already cover are excluded so nothing appears twice.
+- `queryTerms()` splits CamelCase alert names (`KubePodCrashLooping OOMKilled` → `kube/crash/looping/killed`), drops envelope words, digits, and terms under 4 chars, dedups, and caps at 24 terms. Unit-tested in `incidents/index.test.ts`.
+- The similarity tier is **skipped entirely without query text** (recall then issues exactly 2 queries, never touching `root_cause_tsv`), rendered **last**, labelled as the weakest evidence, and wrapped so a failure there can never break recall.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
 
 ### Incident Dashboard (`src/dashboard/`, phase 1)
@@ -397,7 +401,7 @@ it is not in `parseProposal`'s whitelist. `k8s_delete_pod`
 (v1.3) deletes ONE wedged pod so its controller recreates it — refused for pods without a
 recreating controller (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement =
 outage); GitOps-safe like restart, so NOT behind the GitOps guard. Needs RBAC
-`get`+`delete` on pods. Its 90s status check strips the pod's random suffix so the filter
+`get`+`delete` on pods. Its verification target strips the pod's random suffix so the check
 matches the replacement pod.
 Enforcement layering (never trust a single layer): **RBAC** (floor) → **MCP server**
 (namespace allowlist + always-blocked kube-system/kube-public/kube-node-lease/flux-system;
@@ -410,6 +414,12 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - Rollout restart = patch `kubectl.kubernetes.io/restartedAt` annotation (honors rolling-update strategy + readiness probes; same as `kubectl rollout restart`).
 - **SECURITY — write tools never enter the agentic loop.** Auto-discovery would otherwise hand `k8s_rollout_restart` to the model during ANY investigation, bypassing the approval gate. Two layers in `agent/index.ts`: (1) tools whose description starts with **`[WRITE]`** are filtered out of the `llm.chat` tools list; (2) `executeToolCalls` refuses them with a synthesized error if the model hallucinates the name anyway. **Convention: every write tool's description MUST start with `[WRITE]`** (enforce when adding scale/rollback). Write tools are reachable only via `proposeRemediation` (dry-run) and `executeRemediation` (post-approval), both direct `callTool`.
 - **Mention-driven investigations get the same remediation flow**: `handleMention` calls `maybeProposeRemediation` with `incidentId=null` (no alert labels → no incident row; `remediations.incident_id` is nullable). Note: NULLs are distinct in the partial unique index, so the one-active-card guard only applies to alert-driven remediations.
+- **`worthProposing` gates the mention path** (`remediation/proposal.ts`, pure + unit-tested). Every mention used to spend a proposal LLM call, so a read-only "status check" on a healthy cluster burned a **heavy** call to be told `{"action": null}` — and on the day the heavy chain was down to one working backend it produced a page of stack traces instead. Propose when **any** of: the reply is an RCA (the template means a fault was diagnosed), the user asked for a change, or the answer carries fault evidence. Skip otherwise, logging the reason.
+  - **Deliberately asymmetric**: a false positive costs exactly what today costs (one call answering null), a false negative silently drops a legitimate fix. So every rule is a reason to SPEND the call and skipping is only what's left over. When in doubt, extend the vocabulary rather than tighten it.
+  - **The alert path is not gated** — an alert firing IS the evidence.
+  - **A clean bill of health uses the same words a broken one does** ("no alerts firing", "0 restarts in the last hour"), so negated forms are stripped before matching or the gate would never skip anything. The keyword group repeats (`+`) because one negation covers a list ("No alerts are firing and nothing is pending" must lose `firing` too), and the window stops at a contrastive conjunction so "no logs, **but** it is in CrashLoopBackOff" keeps its evidence.
+  - **Indonesian action verbs are matched as stems with up to 4 leading chars** — the affix carries the request: `perbaiki` arrives as `diperbaiki`, `ganti` as `mengganti`. A `\b`-anchored stem missed all of them.
+  - Text-only on purpose: no extra MCP call (`prometheus_get_alerts`) to check for active alerts — the agent has just looked, so the answer is already in the reply, and a second call adds latency plus a failure mode to a path whose whole point is spending less.
 - **Proposal observability:** every null path in `proposeRemediation` logs why (raw model output on parse failure, unregistered action, dry-run refusal, duplicate/store failure) — silent no-card failures cost a full debugging round during live testing.
 - **Remediations are recalled as agent memory** (`recallRemediations` → `RemediationStore.recallForAlert`): on the alert path, past executed remediations for the same `(alertname, namespace)` — joined via `remediations.incident_id = incidents.id` — are injected alongside `recallIncidents` into BOTH the investigation and the proposal context ("Previously remediated — same alert: 2026-07-23 set image → repo:v2 — succeeded (PR: ...)"). So a recurrence recalls what was actually DONE (+ the PR/outcome), not just the diagnosis, and the proposal model avoids re-proposing an already-applied fix. Everything's already stored in `remediations` (`params.changes` from→to, `path`, `valuesKey`, `result`=PR URL, `status`) — no schema change; rollback data lives there too (revert the PR = natural GitOps rollback). Keyed by alert → mention-driven flows (no labels) don't recall.
 - **Dry-run refusals are posted to the thread** (`{ refused }` return → "🚫 Remediation not proposed — <server reason>"): the model wanted to act but the MCP server refused (GitOps guard / blocked namespace / bad target) — the human deserves the reason, especially "managed by Flux/Helm, change it in the GitOps repo".
@@ -419,15 +429,70 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - **`container` is optional** in `k8s_set_image`/`k8s_set_resources`, both in the proposal schema and the MCP tool: the proposal model CANNOT know container names (not in its context) and guessed one from the workload name (`dev-auth-svc-be` vs actual `auth`). The MCP server auto-resolves single-container workloads and refuses multi-container ones with the name list. Proposal prompt rules: NEVER guess a container name; workload = Deployment/StatefulSet/DaemonSet name, NOT a pod name; an explicit user request ("ganti tag ke latest") is sufficient evidence for any whitelisted action — user-given tag + current repo from context.
 - **Approval card mentions the approvers** (`<@Uxx>` in the section block → real Slack notification): `SLACK_APPROVER_USERS` fallback `SLACK_ONCALL_USERS`; both empty = no mention line.
 - **GitOps overlay path is auto-detected from Flux** (`resolveOverlayPath`, `gitops/overlay.ts`): a Flux HelmRelease workload's HR CR carries `kustomize.toolkit.fluxcd.io/{name,namespace}` labels (the HR CR is applied by kustomize-controller, so it — unlike the Helm-rendered workload — has them). The agent reads the HR CR → the Kustomization CR → `spec.path` (e.g. `apps/dev/applications`) via the read-only `k8s_get_custom_resources` tool, and sends it as `pathPrefix` in the gitops request so the worker scopes the file search to the right per-env overlay (dev/stg/prd, applications vs systems — all automatic, zero config). Best-effort → falls back to the worker's `GITOPS_PATH_PREFIX`. This also resolves the base+overlay ambiguity (both define the HR; the prefix picks the overlay). **Detection itself needs no manifest change** — Flux auto-adds `helm.toolkit.fluxcd.io/name` to Flux-managed workloads (plain `helm install` like a standalone ingress-nginx lacks it → correctly refused).
-- **GitOps PR flow (v2, `DESIGN_gitops_pr_remediation.md`, opt-in `GITOPS_REMEDIATION_ENABLED`):** for a Flux HelmRelease-managed workload the MCP dry-run returns a structured PR preview (not a plain refusal). `parseGitOpsPreview` detects it → `proposeGitOpsPr` asks the **llm-worker** over a second SQS queue (`SqsGitOpsClient`) to prepare the PR (`dry_run` → diff), stores a PR-flavored remediation (`params.gitops=true` + helmRelease/action/changes/path/valuesKey), and posts a GitOps card variant (diff block + file/key). Approve → `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (`open_pr` → PR URL in `result`; **no 90s status check** — nothing is live until merge+Flux sync). `SqsGitOpsClient` is a **standalone mirror** of `SQSLLMClient` (NOT a shared base — the LLM client is the battle-tested critical path; two dispatchers cooperate via the shared response queue's release-non-owned mechanism). The agent holds **no GitHub credentials** — those live in the worker. GitOps action names in the preview/request are the SHORT forms (`set_image`/`scale`/`set_resources`), distinct from the DB `action` column's tool name (`k8s_set_image`).
+- **GitOps PR flow (v2, `DESIGN_gitops_pr_remediation.md`, opt-in `GITOPS_REMEDIATION_ENABLED`):** for a Flux HelmRelease-managed workload the MCP dry-run returns a structured PR preview (not a plain refusal). `parseGitOpsPreview` detects it → `proposeGitOpsPr` asks the **llm-worker** over a second SQS queue (`SqsGitOpsClient`) to prepare the PR (`dry_run` → diff), stores a PR-flavored remediation (`params.gitops=true` + helmRelease/action/changes/path/valuesKey), and posts a GitOps card variant (diff block + file/key). Approve → `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (`open_pr` → PR URL in `result`; **no verification check** — it returns no `target`, because nothing is live until merge+Flux sync). `SqsGitOpsClient` is a **standalone mirror** of `SQSLLMClient` (NOT a shared base — the LLM client is the battle-tested critical path; two dispatchers cooperate via the shared response queue's release-non-owned mechanism). The agent holds **no GitHub credentials** — those live in the worker. GitOps action names in the preview/request are the SHORT forms (`set_image`/`scale`/`set_resources`), distinct from the DB `action` column's tool name (`k8s_set_image`).
 - **Cluster/GitOps drift → `flux_reconcile`, not a PR.** Someone changes the cluster directly (`kubectl set image` on a Flux-managed workload); an alert fires; the RCA is fine; then the remediation died with *"the value is not set in the overlay and can't be auto-added for this action — set it in the overlay values first"*. That message was wrong: the incident context's `from` is the **drifted cluster value**, which naturally isn't in Git, and the worker's line search (key AND value) couldn't tell that apart from "the key isn't there". The worker now returns `drift:{path, valuesKey, gitValue, clusterValue}` (see llm-worker `detectDrift`), and `proposeGitOpsPr` branches to `proposeFluxReconcile` **before** treating it as a refusal:
   - proposes the MCP `flux_reconcile` write tool on the workload (parsed out of the preview's `kind/ns/name` by `workloadOf`), after the same mandatory dry-run;
   - card reads *"Flux reconcile `ns/name` — restore `image.tag` to `v1.4.0` (cluster drifted to `v9.9.9`)"*;
   - **still approval-gated** — the drifted value is occasionally the intended one, in which case the human wants a PR declaring it, not a reconcile discarding it;
   - if the MCP server is older and lacks the tool, the refusal text spells out the `flux reconcile helmrelease <ns>/<name> --force` command instead.
   Direction is fixed on purpose: the GitOps repo is the source of truth, so a reconcile RESTORES what Git declares rather than writing the drifted value into Git.
-- **Post-remediation status check** — 90s after a successful execution (`STATUS_CHECK_DELAY_MS`), the app posts the target workload's pod status into the thread (deterministic: `k8s_list_pods` filtered by workload-name prefix, no LLM call). `executeRemediation` returns `{ text, target? }` for this. `// ponytail:` in-process timer, lost on pod restart within the window.
+- **Post-remediation verification** (`agent/remediation/verify.ts`, `migrations/006`) — replaces the old in-process `setTimeout` status check, which was lost on a pod restart and answered the wrong question (it dumped the namespace's pod list into the thread instead of saying whether the problem went away). See "Post-remediation verification" below.
 - **Proposal context = head+tail of the RCA** (`buildProposalPrompt`), never head-only: long RCAs put the concrete fix in Recommended Actions at the END — a head-only `slice(0,4000)` cut it off and the model proposed nothing. The alert path also prepends the CONFIRMED prior (first 1200 chars) — a recurrence's proven fix is exactly what the proposal model needs. A user request without a concrete value (e.g. "ganti image tag" with no tag) correctly yields `{"action": null}` — never-invent beats a guessed card.
+
+### Post-remediation verification (`agent/remediation/verify.ts`, `migrations/006`)
+Answers "did that actually fix it?" and records the answer, so a later investigation can read
+a failed fix as a **negative prior**. Replaced a `setTimeout(…, 90_000)` in whichever pod
+handled the approval click.
+
+- **Durable schedule, not a timer.** One row in `remediation_checks` per remediation
+  (`one_check_per_remediation` unique index), claimed by whichever replica polls next — a
+  restart between the click and the check costs nothing. The poller (`startVerificationPoller`
+  in `app/index.ts`) re-arms **after** the work, not on a fixed interval, so a slow tick can't
+  overlap the next, and `unref()`s its timer so auxiliary work never keeps the process alive.
+- **`due_at` doubles as the lease** (the SQS visibility-timeout idea, in Postgres): claiming
+  sets `status='running'` AND pushes `due_at = now() + LEASE_SECONDS`, so a pod that dies
+  mid-check releases the row by itself instead of stranding it in `running`. Claim predicate is
+  `status IN ('pending','running') AND due_at <= now()` with `FOR UPDATE SKIP LOCKED`.
+  A failed check is deliberately **left claimed** — the lease expires and the next pass retries
+  it, which makes a transient MCP outage a delay rather than a lost verdict. `MAX_ATTEMPTS`
+  then abandons it as `inconclusive`.
+- **The alert is the primary signal, pods corroborate.** `prometheus_get_alerts` → `alertState`
+  (`pending` counts as firing: the condition is true again), `k8s_list_pods` → `summarizePods`.
+  Both degrade independently (`Promise.all` with per-call `.catch`).
+- **`k8s_list_pods` returns the pod *phase*, not container reasons.** A CrashLoopBackOff pod
+  reports `status: "Running"` with `ready: false` — counting phases alone scores a crash loop
+  as healthy. Readiness must come from the `ready` boolean.
+- **`summarizePods` returns `null` for unreadable output, and `null` is never a healthy zero.**
+  Same rule for `alertState`: `"unknown"` (Prometheus unreadable) and `"none"` (mention-driven,
+  no alert behind the remediation) are separate states — collapsing them would let a broken tool
+  call read as "there is no alert", i.e. as success.
+- **`worse` is a readiness regression and only that.** A rollout replaces the pod set, so a
+  restart delta compares *different* pods: the old crashing pod's counter sits in the baseline
+  while the new pods start at zero, which scored a half-finished rollout as a regression during
+  live testing. Restart counts stay in the detail as evidence, never as a trigger.
+- **Alert cleared + pods still down = `inconclusive`, not `recovered`** — the rule usually
+  stopped matching because the series went away (pods deleted), not because anything healed.
+- **The verdict is recorded before its message is posted.** At-most-once beats a crash between
+  two posts telling on-call twice that their fix failed.
+- **Slack I/O stays in the app layer**: `runDueRemediationChecks()` *returns* messages;
+  `DevOpsAgent` owns Postgres + MCP, `SlackApp` owns chat. The verdict is also appended to
+  thread memory (`noteInThread`) so the model knows its own fix didn't hold before the next
+  follow-up question.
+- **The message quotes the REAL wait**, computed from the row's `created_at`, not from
+  `verifyDelayMs` — a retried check waited longer than the setting says, and a verdict with no
+  elapsed time invites "maybe it just needed longer", which is the whole argument this check
+  exists to settle.
+- **`verdict` ≠ `status` in recall.** `status='succeeded'` only means the MCP call returned
+  cleanly. `recallForAlert` LEFT JOINs `remediation_checks` (1:1, so it can't fan the row set
+  out) and `recallRemediations` renders `→ verified <verdict>` or `→ never verified`; a
+  `succeeded` + `unchanged` pair triggers an extra paragraph telling the model not to re-propose
+  that action, because if the same fix keeps not holding the root cause is upstream of it.
+- **Verdicts are NOT written to `incident_feedback`** — that table is the human-confirmed tier
+  and agent-produced verdicts must not be laundered into it. Trust tiering stays intact.
+- No check is scheduled for GitOps PR remediations: `executeGitOpsPr` returns no `target`, and
+  nothing is live until the PR merges and Flux syncs (the `if (target)` guard covers this).
+- Tunables: `REMEDIATION_VERIFY_DELAY_SECONDS` (default 300 — 90s answered while the rolling
+  update was still converging) and `REMEDIATION_VERIFY_POLL_SECONDS` (default 30).
 
 ## LLM Providers
 
@@ -538,6 +603,25 @@ different output ceilings, `MAX_TOKENS` is the thing that has to grow a per-inde
 
 Spec: `docs/superpowers/specs/2026-07-30-llm-router-design.md`.
 
+### Token-limit parameter is auto-detected (`openai-compatible.ts`)
+OpenAI's newer models (o-series, gpt-5) answer `max_tokens` with a hard
+`400 Unsupported parameter … Use 'max_completion_tokens' instead`, while vLLM, DeepSeek and
+OpenRouter only understand `max_tokens`. Both register as ordinary `openai-compatible`
+backends in the same router, so any single static choice breaks half the fleet — and this is
+not hypothetical: it took out the whole heavy chain in production (the `chatgpt` backend 400'd,
+failover went to `haiku`, which was over its usage limit, and the remediation proposal died).
+- The client sends `max_tokens`, and **only** on a 400 whose message names
+  `max_completion_tokens` flips the instance and retries once. `wantsMaxCompletionTokens`
+  matches the parameter name rather than the sentence (the wording has already changed once)
+  and requires status 400, so a 429 or a bad-tool-schema 400 propagates instead of being sent
+  twice.
+- The choice is cached on the instance, and `buildBackends` runs once at boot → one wasted
+  request per backend per pod, not per call.
+- **Not** switched on the model name: that breaks the day a provider renames a model.
+- Deliberately different from llm-worker's `LLM_USE_MAX_COMPLETION_TOKENS` env flag — the
+  worker points at exactly one model, so a flag is fine there; the router holds several and
+  the operator shouldn't have to know each one's dialect.
+
 ### Anthropic content blocks → OpenAI chat (`toOpenAIMessages`)
 Both OpenAI-shaped paths (`openai-compatible.ts` here, `llm.ts` in llm-worker) must translate
 our Anthropic-style `Message[]` into native OpenAI: `tool_use` → `assistant.tool_calls[]`,
@@ -604,6 +688,8 @@ MCP_AUTH_TOKEN          # bearer token for MCP http transport; must match the se
 MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS   # conversation cache + multi-pod dedup
 DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD, DB_SSL_MODE   # durable incident memory; disabled if DB_HOST unset
 MAX_CONCURRENT_INVESTIGATIONS
+REMEDIATION_VERIFY_DELAY_SECONDS   # wait before "did that fix it?" (default 300)
+REMEDIATION_VERIFY_POLL_SECONDS    # how often a replica looks for due checks (default 30)
 LOG_LEVEL   # error | warn | info | http | debug
 ```
 
@@ -625,6 +711,10 @@ src/
 │   ├── incidents/index.ts        # IncidentMemory: durable recall/store (Postgres) + ping()
 │   ├── mcp/client.ts             # MCPClient: reconnect + mutex + isConnected() + bearer auth
 │   ├── memory/index.ts           # Redis/in-memory, hasRca/markRcaSent
+│   ├── remediation/
+│   │   ├── index.ts              # RemediationStore: propose/claim/finish + recallForAlert (joins the verdict)
+│   │   ├── proposal.ts           # parseProposal() whitelist gate, buildProposalPrompt()
+│   │   └── verify.ts             # post-remediation verdict: summarizePods/alertState/decideVerdict + RemediationCheckStore
 │   └── prompts/system.ts         # buildStaticSystemPrompt(), buildTimeContext()
 ├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + /health readiness + error handler
 ├── config/index.ts
@@ -715,8 +805,11 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - [x] **Reasoning-model resilience** (llm-worker) — `finish_reason=length` surfaced as `max_tokens`, empty-exhaustion auto-retry with 2× budget, `LLM_REASONING_EFFORT` passthrough, `SQS_LLM_TIMEOUT_SECONDS` default 240
 - [x] **MCP server ops polish** — startup upstream probe (non-fatal warn), `conciseCause` error trimming, no stack for expected errors; agent `/health` does a real MCP ping
 - [x] **Remediation live-test hardening** (from on-cluster testing) — proposal null-path logging, optional auto-resolved `container`, workload≠pod + never-guess prompt rules, approver mentions on the card, format-agnostic alert flow with recurrence shortcut (reformat-to-RCA removed)
-- [x] **Remediation UX & coherence round** — containers/images in workload listings, head+tail proposal context + CONFIRMED prior included, kind case normalization, dry-run refusals posted to the thread, lifecycle `[system note]`s in thread memory, post-execution 90s status check, `leaksRcaStructure` + command-dump reformat backstop, `toMrkdwn`, backticked/clean server refusal messages
+- [x] **Remediation UX & coherence round** — containers/images in workload listings, head+tail proposal context + CONFIRMED prior included, kind case normalization, dry-run refusals posted to the thread, lifecycle `[system note]`s in thread memory, post-execution 90s status check (**superseded** by the durable verification below), `leaksRcaStructure` + command-dump reformat backstop, `toMrkdwn`, backticked/clean server refusal messages
 - [x] **GitOps guard** (`assertNotGitOpsManaged`) + **D. resolved-alert loop** + **E step 5 reaction-learn** — see their sections
+- [x] **Agent capability round** (three improvements, zero new deps): (1) **similarity recall** — a third "possibly related" tier over Postgres full-text search (`migrations/005`), so a NodeMemoryPressure can learn from the OOMKilled it caused; (2) **post-remediation verification** (`migrations/006`) — a durable, DB-scheduled check that asks whether the *alert* went away and records the verdict as a negative prior, replacing the in-process 90s pod dump; (3) **evidence-based impact** — `prompts/system.md` now requires blast radius to be derived from `k8s_list_services` / `k8s_get_endpoints` / `k8s_list_ingresses` rather than asserted (RCA section labels unchanged, so `dashboard/rca.ts` still parses)
+- [x] **Mention-path proposal gate** (`worthProposing`) — a read-only question against a healthy cluster no longer spends a **heavy** LLM call to be told `{"action": null}`. Verified on-cluster 2026-08-08: the same `status check` cost a 9.1s proposal round-trip before the gate (which proposed a rolling restart of a Deployment that **does not exist** — caught only by the mandatory dry-run) and 0.4s after, with the skip reason logged. The alert path is deliberately not gated.
+- [x] **Token-limit parameter auto-detection** (`openai-compatible.ts`) — a live `chatgpt` backend 400'd on `max_tokens` and took the whole heavy chain down with it (failover landed on a `haiku` that was over its usage limit). The client now sends `max_tokens`, flips to `max_completion_tokens` on that one specific 400, retries once, and caches the answer per backend instance.
 
 ### Next — ordered
 - [x] **D. Resolved-alert loop** ✅ shipped — `status: resolved` now: releases the dedup claim (`AlertDeduplicator.clear` — a re-fire re-investigates instead of being suppressed 12h), marks the newest unresolved incident (`markResolved`, migration `003_resolved_at.sql`), posts "✅ Alert resolved" into the thread with a learn-reaction hint.

@@ -82,6 +82,18 @@ export const config = {
     timeoutMs: parseInt(process.env.SQS_GITOPS_TIMEOUT_SECONDS ?? "120") * 1000,
   },
 
+  // Post-remediation verification (migrations/006). The check is scheduled in Postgres and
+  // claimed by whichever replica polls next, so it survives the pod that approved the action.
+  remediation: {
+    // how long to wait before asking "did that fix it". 300s beats the old 90s because 90s
+    // answered while the rolling update was still converging — a half-restarted workload
+    // reads as "not fixed" no matter what the remediation did.
+    verifyDelayMs: parseInt(process.env.REMEDIATION_VERIFY_DELAY_SECONDS ?? "300") * 1000,
+    // how often to look for due checks. Cheap (one indexed UPDATE) and only bounds how late
+    // a verdict lands, so there's no reason to poll faster.
+    verifyPollMs: parseInt(process.env.REMEDIATION_VERIFY_POLL_SECONDS ?? "30") * 1000,
+  },
+
   mcp: {
     transport: (process.env.MCP_TRANSPORT ?? "stdio") as "stdio" | "http",
     stdio: {

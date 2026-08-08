@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { IncidentMemory, parseSeverity, extractRootCause } from "./index.js";
+import { IncidentMemory, parseSeverity, extractRootCause, queryTerms } from "./index.js";
 
 const SAMPLE_RCA = [
   "🔴 *Critical Severity Incident*",
@@ -91,6 +91,78 @@ test("recall renders the CONFIRMED tier above the hypothesis tier", async () => 
   assert.match(out, /pool exhausted; action: scaled to 4; outcome: resolved/);
   assert.match(out, /Prior similar incidents/);
   assert.ok(out.indexOf("CONFIRMED") < out.indexOf("Prior similar"), "confirmed tier must come first");
+});
+
+// ---- similarity tier (migrations/005) ----
+
+test("queryTerms splits CamelCase — an alert name is one token to a tokenizer", () => {
+  const terms = queryTerms("KubePodCrashLooping OOMKilled");
+  assert.deepEqual(terms, ["kube", "crash", "looping", "killed"]);
+  // "pod" and "oom" are dropped by the 4-char floor, not by the envelope list
+});
+
+test("queryTerms drops the envelope vocabulary every alert carries", () => {
+  // these would manufacture overlap between two incidents that have nothing in common
+  assert.deepEqual(queryTerms("alertname severity critical namespace payments firing"), ["payments"]);
+});
+
+test("queryTerms drops bare numbers, short tokens, and duplicates", () => {
+  assert.deepEqual(queryTerms("memory 8080 3 limit memory MEMORY exceeded"), ["memory", "limit", "exceeded"]);
+});
+
+test("queryTerms caps the term count — a whole RCA must not become one huge tsquery", () => {
+  const long = Array.from({ length: 60 }, (_, i) => `term${String.fromCharCode(97 + (i % 26))}${i}`).join(" ");
+  assert.equal(queryTerms(long).length, 24);
+});
+
+test("recall skips the similarity tier entirely without queryText", async () => {
+  const seen: string[] = [];
+  const fakePool = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      return { rows: [] };
+    },
+  } as any;
+  await new IncidentMemory(fakePool).recall({ alertname: "X", namespace: "payments" });
+  assert.equal(seen.length, 2, "only the two exact-match tiers should be queried");
+  assert.ok(!seen.some((s) => s.includes("root_cause_tsv")), "no similarity query without queryText");
+});
+
+test("recall renders the similarity tier last and labels it as the weakest", async () => {
+  const fakePool = {
+    query: async (sql: string) => {
+      if (sql.includes("incident_feedback")) return { rows: [] };
+      if (sql.includes("root_cause_tsv")) {
+        return {
+          rows: [
+            { created_at: "2026-06-01T00:00:00Z", alertname: "NodeMemoryPressure", namespace: "payments", root_cause: "node ran out of memory", overlap: 3 },
+          ],
+        };
+      }
+      return { rows: [{ created_at: "2026-06-19", severity: "critical", confidence: "High", root_cause: "OOM leak" }] };
+    },
+  } as any;
+  const out = await new IncidentMemory(fakePool).recall(
+    { alertname: "KubePodCrashLooping", namespace: "payments" },
+    { queryText: "KubePodCrashLooping container OOMKilled memory limit exceeded" }
+  );
+  assert.match(out, /Possibly related/);
+  assert.match(out, /NodeMemoryPressure in payments \(3 shared terms\)/);
+  assert.match(out, /NOT a causal link/);
+  assert.ok(out.indexOf("Prior similar") < out.indexOf("Possibly related"), "weakest tier must come last");
+});
+
+test("a similarity-tier failure never breaks recall — the other two tiers stand alone", async () => {
+  const fakePool = {
+    query: async (sql: string) => {
+      if (sql.includes("root_cause_tsv")) throw new Error("relation root_cause_tsv does not exist");
+      if (sql.includes("incident_feedback")) return { rows: [] };
+      return { rows: [{ created_at: "2026-06-19", severity: "critical", confidence: "High", root_cause: "OOM leak" }] };
+    },
+  } as any;
+  const out = await new IncidentMemory(fakePool).recall({ alertname: "X" }, { queryText: "memory limit exceeded" });
+  assert.match(out, /Prior similar incidents/);
+  assert.doesNotMatch(out, /Possibly related/);
 });
 
 test("storeFeedback maps a unique violation to 'duplicate' and null pool to 'failed'", async () => {

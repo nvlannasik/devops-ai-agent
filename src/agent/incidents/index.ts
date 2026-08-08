@@ -2,6 +2,51 @@ import { Pool } from "pg";
 import { parseConfidence } from "../confidence/index.js";
 import logger from "../../utils/logger/index.js";
 
+// How many distinct stemmed terms an old root cause must share with the current alert
+// before it is worth showing. 1 is noise — every Kubernetes alert shares *some* word with
+// every other. 2 is the smallest number that means "these two texts are about the same
+// thing" rather than "these two texts are both about Kubernetes".
+const MIN_OVERLAP = 2;
+const MAX_TERMS = 24; // ORing more than this into one tsquery buys nothing but planner work
+const MIN_TERM_LEN = 4;
+
+// Vocabulary every alert carries: it appears in the query text no matter what broke, so it
+// can only manufacture overlap. Postgres already strips English stopwords when building the
+// tsvector — this list is the DevOps envelope it doesn't know about. Words that name a
+// *failure* (oom, evicted, throttled, timeout…) are deliberately absent: those are signal.
+const ENVELOPE_WORDS = new Set([
+  "alert", "alerts", "alertname", "alertmanager", "firing", "resolved", "severity", "warning",
+  "critical", "info", "namespace", "cluster", "kubernetes", "kubelet", "container", "containers",
+  "instance", "endpoint", "service", "deployment", "prometheus", "grafana", "label", "labels",
+  "annotation", "annotations", "summary", "description", "runbook", "dashboard", "source",
+  "value", "https", "http", "true", "false", "null", "none", "automated", "investigation",
+  "incident", "webhook",
+]);
+
+// Split the alert text into the terms fed to the similarity tier. CamelCase is broken up
+// first: `KubePodCrashLooping` is one token to a tokenizer and matches nothing, but
+// `crash`/`looping` match plenty. Only `recallSimilar` calls this — exported for the test,
+// because what this drops is the whole difference between a lead and noise.
+export function queryTerms(text: string): string[] {
+  const words = text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")   // KubePod   → Kube Pod
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") // OOMKilled → OOM Killed
+    .toLowerCase()
+    .split(/[^a-z0-9]+/);
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const w of words) {
+    if (w.length < MIN_TERM_LEN || w.length > 32) continue;
+    if (/^\d+$/.test(w)) continue; // bare numbers (ports, replica counts) aren't topics
+    if (ENVELOPE_WORDS.has(w) || seen.has(w)) continue;
+    seen.add(w);
+    out.push(w);
+    if (out.length === MAX_TERMS) break;
+  }
+  return out;
+}
+
 // Durable cross-incident memory (Postgres). Unlike conversation memory (Redis, 24h TTL,
 // cache semantics), this is a system-of-record: resolved RCAs persist so the agent can
 // recognize recurring incidents instead of re-diagnosing from scratch every time.
@@ -12,15 +57,20 @@ export class IncidentMemory {
     private readonly onStored?: (incidentId: number, threadTs: string) => void
   ) {}
 
-  // Recall prior knowledge for the same alert (+ namespace when present), in two trust
-  // tiers that must never be flattened: human-CONFIRMED feedback (strong prior) and
-  // agent hypotheses (verify before reuse). ponytail: exact (alertname, namespace)
-  // match — no embeddings. Add similarity search only if label match proves too coarse.
-  async recall(labels: Record<string, string>, limit = 3): Promise<string> {
+  // Recall prior knowledge for the same alert (+ namespace when present), in trust tiers
+  // that must never be flattened: human-CONFIRMED feedback (strong prior), agent
+  // hypotheses for the same alert (verify before reuse), and — only when `queryText` is
+  // supplied — incidents whose recorded root cause merely shares vocabulary with the
+  // alert text (weakest; a lead, not an answer). See migrations/005.
+  async recall(
+    labels: Record<string, string>,
+    opts: { queryText?: string; limit?: number } = {}
+  ): Promise<string> {
     if (!this.pool) return "";
     const alertname = labels.alertname;
     if (!alertname) return ""; // nothing to key on (e.g. ad-hoc mention)
     const namespace = labels.namespace ?? null;
+    const limit = opts.limit ?? 3;
 
     const [hypo, confirmed] = await Promise.all([
       this.pool.query(
@@ -79,7 +129,62 @@ export class IncidentMemory {
       );
     }
 
+    const similar = opts.queryText ? await this.recallSimilar(opts.queryText, alertname, namespace, limit) : [];
+    if (similar.length > 0) {
+      const lines = similar.map((r) => {
+        const date = new Date(r.created_at).toISOString().slice(0, 10);
+        const where = `${r.alertname}${r.namespace ? ` in ${r.namespace}` : ""}`;
+        return `- ${date} — ${where} (${r.overlap} shared terms): ${(r.root_cause || "").slice(0, 300)}`;
+      });
+      sections.push(
+        [
+          `## Possibly related — matched on wording, not on alert identity`,
+          ...lines,
+          `These surfaced because their recorded root cause shares vocabulary with this alert — a lexical overlap, NOT a causal link, and a different alert entirely. Weakest tier: treat each as one lead worth checking, never as an explanation. Cite one only if your own evidence independently supports it.`,
+        ].join("\n")
+      );
+    }
+
     return sections.join("\n\n");
+  }
+
+  // Weakest recall tier: incidents whose root_cause shares at least MIN_OVERLAP distinct
+  // stemmed terms with the alert text. The GIN index on root_cause_tsv does the cheap
+  // filtering (`@@`); the overlap count then ranks and thresholds the survivors, because
+  // ts_rank on an OR query scores a two-term hit the same as a one-term hit — "how many
+  // distinct terms do these share" is both a better signal and one a human can check.
+  // Rows the exact-match tiers already cover are excluded here so nothing appears twice.
+  private async recallSimilar(
+    queryText: string,
+    alertname: string,
+    namespace: string | null,
+    limit: number
+  ): Promise<Array<{ created_at: string; alertname: string; namespace: string | null; root_cause: string | null; overlap: number }>> {
+    const terms = queryTerms(queryText);
+    if (terms.length < MIN_OVERLAP) return []; // can't clear the bar — don't bother the DB
+    try {
+      const { rows } = await this.pool!.query(
+        `WITH q AS (
+           SELECT to_tsquery('english', array_to_string($1::text[], ' | ')) AS tsq,
+                  (SELECT array_agg(DISTINCT lexeme)
+                     FROM unnest(to_tsvector('english', array_to_string($1::text[], ' ')))) AS lex
+         ),
+         cand AS (
+           SELECT i.created_at, i.alertname, i.namespace, i.root_cause,
+                  (SELECT count(*) FROM unnest(i.root_cause_tsv) u WHERE u.lexeme = ANY(q.lex))::int AS overlap
+             FROM incidents i, q
+            WHERE i.root_cause_tsv @@ q.tsq
+              AND NOT (i.alertname = $2 AND ($3::text IS NULL OR i.namespace = $3))
+         )
+         SELECT * FROM cand WHERE overlap >= $4 ORDER BY overlap DESC, created_at DESC LIMIT $5`,
+        [terms, alertname, namespace, MIN_OVERLAP, limit]
+      );
+      return rows;
+    } catch (err) {
+      // never let the weakest tier break a recall — the other two still stand on their own
+      logger.error(`[incidents] recallSimilar failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
   }
 
   // D. resolved-alert loop: mark the newest unresolved incident for this alert as

@@ -50,9 +50,25 @@ export interface OpenAICompatibleOptions {
   model?: string;
 }
 
+// The 400 a newer OpenAI model answers with when it is sent `max_tokens`. Matched on the
+// parameter NAME, not the sentence around it: the wording has already changed once, the name
+// is the part that carries the instruction. Exported for the test.
+export function wantsMaxCompletionTokens(err: unknown): boolean {
+  const e = err as { status?: number; message?: unknown };
+  return e?.status === 400 && typeof e.message === "string" && e.message.includes("max_completion_tokens");
+}
+
 export class OpenAICompatibleClient implements LLMClient {
   private client: OpenAI;
   readonly model: string;
+  // OpenAI's o-series / gpt-5 models REJECT `max_tokens` outright, while every self-hosted or
+  // aggregated backend we talk to (vLLM, DeepSeek, OpenRouter) only knows `max_tokens` — and
+  // both are ordinary "openai-compatible" entries in the same router. Nothing in the response
+  // says which family we're on, and switching on the model name breaks the day a provider
+  // renames one, so we send the widely-understood parameter and let the 400 teach us. Clients
+  // are built once at boot (registry.ts), so the lesson costs one wasted request per backend
+  // per pod, not one per call.
+  private tokenParam: "max_tokens" | "max_completion_tokens" = "max_tokens";
 
   constructor(opts: OpenAICompatibleOptions = {}) {
     this.client = new OpenAI({
@@ -62,10 +78,10 @@ export class OpenAICompatibleClient implements LLMClient {
     this.model = opts.model ?? config.llm.openaiCompatible.model;
   }
 
-  async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
-    const response = await this.client.chat.completions.create({
+  private body(messages: Message[], tools: ToolDefinition[], systemPrompt: string): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
+    return {
       model: this.model,
-      max_tokens: config.llm.maxTokens,
+      [this.tokenParam]: config.llm.maxTokens,
       messages: [{ role: "system", content: systemPrompt }, ...toOpenAIMessages(messages)],
       // omit when the agent disables tools (tool budget reached) — some providers reject []
       ...(tools.length > 0 && {
@@ -74,7 +90,22 @@ export class OpenAICompatibleClient implements LLMClient {
           function: { name: t.name, description: t.description, parameters: t.inputSchema },
         })),
       }),
-    });
+    };
+  }
+
+  async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
+    let response;
+    try {
+      response = await this.client.chat.completions.create(this.body(messages, tools, systemPrompt));
+    } catch (err) {
+      // Retry only on the one error that tells us exactly what to change, and only while we
+      // still have something to change — otherwise this would swallow a real 400 (bad tool
+      // schema, oversized context) behind a duplicate request.
+      if (this.tokenParam === "max_completion_tokens" || !wantsMaxCompletionTokens(err)) throw err;
+      this.tokenParam = "max_completion_tokens";
+      logger.info(`[llm] ${this.model} rejects max_tokens — switching this backend to max_completion_tokens`);
+      response = await this.client.chat.completions.create(this.body(messages, tools, systemPrompt));
+    }
 
     const choice = response.choices[0];
     const content: ContentBlock[] = [];
