@@ -618,7 +618,9 @@ when: oomkill|out of memory|exit code 137|memory limit
 
 - [ ] **Step 2: Create the RCA format skill**
 
-Create `prompts/skills/rca-format.md`: the frontmatter below, then `prompts/system.md` lines 304–347 verbatim as the body (everything under `## RCA Output Format`, excluding that heading).
+Create `prompts/skills/rca-format.md`: the frontmatter below, then `prompts/system.md` lines 304–348 verbatim as the body (everything under `## RCA Output Format`, excluding that heading).
+
+`prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is the last line of the RCA template — `*📈 Confidence:* ...` — and it is part of the body. Count with `awk 'END{print NR}'`, not `wc -l`, and verify with `grep -c Confidence prompts/skills/rca-format.md` (must be ≥ 1) before committing: `rca-format` is the only `always` skill, so a section missing here is missing from every RCA the agent writes.
 
 ```markdown
 ---
@@ -770,11 +772,35 @@ test("under pressure the skills go before the history", () => {
   assert.equal(r.history.length, 3, "no message dropped while a skill was still droppable");
 });
 
+// The test above passes under either fill order — its skill is too large to fit in any case.
+// This one separates them: the skill WOULD fit if it were offered the window first, and taking
+// it would cost the middle message. 105 leaves exactly one of the two affordable after the
+// 4 pinned tokens, so whichever is filled first is the one that survives.
+test("a skill never takes budget a history message could have used", () => {
+  const history = [user("first"), asst("m".repeat(300)), user("last")];
+  const r = fitToBudget({ history, skills: [skill("advice", 300)], available: 105 });
+  assert.equal(r.history.length, 3, "the middle message was traded away for a skill");
+  assert.equal(r.messagesDropped, 0);
+  assert.deepEqual(r.skillsDropped, ["advice"]);
+});
+
+// 160 is the window where the tie-break decides the outcome rather than merely the order:
+// after `core` (50) there is room for `matched-small` (50) OR `matched-big` (100), not both.
+// Sorted largest-first the big one is taken and the small one is dropped — a different result,
+// which is what makes this assertion mean something.
 test("an always-skill outranks a matched one, and among matched the largest drops first", () => {
-  const skills = [skill("matched-big", 600), skill("matched-small", 150), skill("core", 150, "always")];
-  const r = fitToBudget({ history: [user("a")], skills, available: 150 });
+  const skills = [skill("matched-big", 300), skill("matched-small", 150), skill("core", 150, "always")];
+  const r = fitToBudget({ history: [user("a")], skills, available: 160 });
   assert.deepEqual(r.skills.map((s) => s.name), ["core", "matched-small"]);
   assert.deepEqual(r.skillsDropped, ["matched-big"]);
+});
+
+// The early return for an empty history used to hand back every skill unmeasured.
+test("with no history at all the skills are still measured against the budget", () => {
+  const r = fitToBudget({ history: [], skills: [skill("big", 3000)], available: 10 });
+  assert.deepEqual(r.skills, []);
+  assert.deepEqual(r.skillsDropped, ["big"]);
+  assert.equal(r.messagesDropped, 0);
 });
 
 test("the first and the most recent message are never dropped", () => {
@@ -812,7 +838,11 @@ test("a final tool_result keeps the tool_use that produced it", () => {
     { role: "assistant", content: [{ type: "tool_use", id: "t9", name: "k8s", input: {} }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "t9", content: "r" }] },
   ];
-  const r = fitToBudget({ history, skills: [], available: 20 });
+  // 4 is below the 5 tokens the pinned trio costs. Pinning is unconditional; the middle-fill is
+  // not. So with the pairing removed the tool_use has only the budgeted path to arrive by, and
+  // cannot afford it — the window comes back as first + orphaned tool_result. A budget large
+  // enough for the middle-fill would pick the cheap tool_use up either way and assert nothing.
+  const r = fitToBudget({ history, skills: [], available: 4 });
   const kinds = r.history.map((m) => (Array.isArray(m.content) ? m.content[0]!.type : "text"));
   assert.deepEqual(kinds, ["text", "tool_use", "tool_result"]);
 });
@@ -882,13 +912,39 @@ export interface FitResult {
 // last", and if a second is ever added the tie-break is size rather than identity.
 const keepRank = (s: Skill): number => (s.when === "always" ? 0 : 1);
 
+// Greedy fill in keep-order over whatever `used` leaves. Both callers go through here: an empty
+// history is still a budget, and handing back an unmeasured skill list would overflow the window
+// on the one path that looks too trivial to check.
+const fitSkills = (
+  skills: readonly Skill[],
+  used: number,
+  available: number,
+): { kept: Skill[]; dropped: string[] } => {
+  const kept: Skill[] = [];
+  const dropped: string[] = [];
+  for (const s of [...skills].sort((a, b) => keepRank(a) - keepRank(b) || a.body.length - b.body.length)) {
+    const t = estimateTokens(s.body);
+    if (used + t <= available) {
+      used += t;
+      kept.push(s);
+    } else {
+      dropped.push(s.name);
+    }
+  }
+  return { kept, dropped };
+};
+
 /**
  * Fits skills and history into `available` tokens.
  *
  * Pinned, in this order: the thread's opening message, the most recent message, and — when that
  * most recent message carries tool_result blocks — the assistant message holding the matching
- * tool_use. Then skills, then history newest-first. Whatever is left of the middle is dropped
- * from the oldest end, and the window is advanced past any leading orphaned tool_result.
+ * tool_use. Pinned messages are kept whatever the budget says.
+ *
+ * What the pins leave goes to the history's middle first, newest-first, and only what survives
+ * that goes to the skills: history is evidence already gathered, a skill is only advice. The
+ * middle is dropped from the oldest end, and the window is advanced past any leading orphaned
+ * tool_result.
  */
 export function fitToBudget(input: {
   history: Message[];
@@ -897,7 +953,8 @@ export function fitToBudget(input: {
 }): FitResult {
   const { history, available } = input;
   if (history.length === 0) {
-    return { history: [], skills: [...input.skills], skillsDropped: [], messagesDropped: 0 };
+    const { kept, dropped } = fitSkills(input.skills, 0, available);
+    return { history: [], skills: kept, skillsDropped: dropped, messagesDropped: 0 };
   }
 
   const cost = history.map(estimateMessage);
@@ -912,18 +969,9 @@ export function fitToBudget(input: {
   for (let i = pinFrom; i <= last; i++) if (i > first) pinned.push(i);
   let used = pinned.reduce((n, i) => n + cost[i]!, 0);
 
-  const kept: Skill[] = [];
-  const skillsDropped: string[] = [];
-  for (const s of [...input.skills].sort((a, b) => keepRank(a) - keepRank(b) || a.body.length - b.body.length)) {
-    const t = estimateTokens(s.body);
-    if (used + t <= available) {
-      used += t;
-      kept.push(s);
-    } else {
-      skillsDropped.push(s.name);
-    }
-  }
-
+  // History before skills, against the same counter. Reversing these two blocks lets a skill
+  // that happens to fit consume budget a message needed, which is the trade this whole function
+  // exists to refuse.
   const middle: Message[] = [];
   for (let i = pinFrom - 1; i > first; i--) {
     const t = cost[i]!;
@@ -931,6 +979,8 @@ export function fitToBudget(input: {
     used += t;
     middle.unshift(history[i]!);
   }
+
+  const { kept, dropped: skillsDropped } = fitSkills(input.skills, used, available);
 
   const tail = history.slice(pinFrom).filter((_, k) => pinFrom + k > first);
   let out = [history[first]!, ...middle, ...tail];
@@ -1016,10 +1066,20 @@ test("a run shorter than three lines is left alone", () => {
   assert.match(out, /^a\na\nb/);
 });
 
+// The differentiator has to survive normalize(), so it is spelled in letters. A line numbered
+// `line 0`…`line 2999` does NOT work: DIGIT_RUN masks every run of two or more digits, so from
+// `line 10` on every line normalizes to the same key, 2990 of them collapse into one, and the
+// result lands far under the cap — this test would then pass through the collapse path and never
+// reach the truncation it is named after. The doesNotMatch below is what pins that shut.
+const ALPHA = "abcdefghijklmnopqrstuvwxyz";
+const word = (i: number): string =>
+  ALPHA[i % 26]! + ALPHA[Math.floor(i / 26) % 26]! + ALPHA[Math.floor(i / 676) % 26]!;
+
 test("head and tail survive when collapsing is not enough", () => {
-  const log = Array.from({ length: 3000 }, (_, i) => `line ${i} unique content ${"x".repeat(20)}`).join("\n");
+  const log = Array.from({ length: 3000 }, (_, i) => `line ${word(i)} unique content ${"x".repeat(20)}`).join("\n");
   const out = compactToolResult(log);
-  assert.ok(out.startsWith("line 0 "), "head lost");
+  assert.doesNotMatch(out, /more like this/, "nothing should have collapsed — every line is distinct");
+  assert.ok(out.startsWith("line aaa "), "head lost");
   assert.match(out, /\.\.\.\[truncated \d+ chars\]\.\.\./);
   assert.ok(out.trimEnd().endsWith("x".repeat(20)), "tail lost");
 });
@@ -1930,7 +1990,9 @@ Expected: FAIL — the prompt still contains `## Failure Mode Playbooks`.
 
 From `prompts/system.md`, delete:
 - Lines 106–185 inclusive — the `## Failure Mode Playbooks` heading, its one-line intro, and all twelve `### …` playbooks, up to but NOT including `## Tool Usage Reference`.
-- Lines 302–347 inclusive — the `## RCA Output Format` heading and everything under it to end of file.
+- Lines 302–348 inclusive — the `## RCA Output Format` heading and everything under it to end of file.
+
+  `prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is `*📈 Confidence:* ...`, the last line of the RCA template. Count with `awk 'END{print NR}'`, not `wc -l`; a delete that stops at 347 orphans that line in the middle of the prompt. It is the same range Task 3 copied into `prompts/skills/rca-format.md`, so verify `grep -c Confidence prompts/system.md` returns 0 after the delete.
 
 Then append this pointer where the RCA section used to be, so the core prompt still names the contract it no longer carries:
 
