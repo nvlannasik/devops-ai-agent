@@ -46,11 +46,35 @@ test("under pressure the skills go before the history", () => {
   assert.equal(r.history.length, 3, "no message dropped while a skill was still droppable");
 });
 
+// The test above passes under either fill order — its skill is too large to fit in any case.
+// This one separates them: the skill WOULD fit if it were offered the window first, and taking
+// it would cost the middle message. 105 leaves exactly one of the two affordable after the
+// 4 pinned tokens, so whichever is filled first is the one that survives.
+test("a skill never takes budget a history message could have used", () => {
+  const history = [user("first"), asst("m".repeat(300)), user("last")];
+  const r = fitToBudget({ history, skills: [skill("advice", 300)], available: 105 });
+  assert.equal(r.history.length, 3, "the middle message was traded away for a skill");
+  assert.equal(r.messagesDropped, 0);
+  assert.deepEqual(r.skillsDropped, ["advice"]);
+});
+
+// 160 is the window where the tie-break decides the outcome rather than merely the order:
+// after `core` (50) there is room for `matched-small` (50) OR `matched-big` (100), not both.
+// Sorted largest-first the big one is taken and the small one is dropped — a different result,
+// which is what makes this assertion mean something.
 test("an always-skill outranks a matched one, and among matched the largest drops first", () => {
-  const skills = [skill("matched-big", 600), skill("matched-small", 150), skill("core", 150, "always")];
-  const r = fitToBudget({ history: [user("a")], skills, available: 150 });
+  const skills = [skill("matched-big", 300), skill("matched-small", 150), skill("core", 150, "always")];
+  const r = fitToBudget({ history: [user("a")], skills, available: 160 });
   assert.deepEqual(r.skills.map((s) => s.name), ["core", "matched-small"]);
   assert.deepEqual(r.skillsDropped, ["matched-big"]);
+});
+
+// The early return for an empty history used to hand back every skill unmeasured.
+test("with no history at all the skills are still measured against the budget", () => {
+  const r = fitToBudget({ history: [], skills: [skill("big", 3000)], available: 10 });
+  assert.deepEqual(r.skills, []);
+  assert.deepEqual(r.skillsDropped, ["big"]);
+  assert.equal(r.messagesDropped, 0);
 });
 
 test("the first and the most recent message are never dropped", () => {
@@ -88,7 +112,11 @@ test("a final tool_result keeps the tool_use that produced it", () => {
     { role: "assistant", content: [{ type: "tool_use", id: "t9", name: "k8s", input: {} }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "t9", content: "r" }] },
   ];
-  const r = fitToBudget({ history, skills: [], available: 20 });
+  // 4 is below the 5 tokens the pinned trio costs. Pinning is unconditional; the middle-fill is
+  // not. So with the pairing removed the tool_use has only the budgeted path to arrive by, and
+  // cannot afford it — the window comes back as first + orphaned tool_result. A budget large
+  // enough for the middle-fill would pick the cheap tool_use up either way and assert nothing.
+  const r = fitToBudget({ history, skills: [], available: 4 });
   const kinds = r.history.map((m) => (Array.isArray(m.content) ? m.content[0]!.type : "text"));
   assert.deepEqual(kinds, ["text", "tool_use", "tool_result"]);
 });
