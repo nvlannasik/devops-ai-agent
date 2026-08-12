@@ -48,3 +48,4 @@ Output EXACTLY this structure (labels must match precisely for rendering):
 *⚠️ Impact if Unresolved*
 [Who is affected NOW and what breaks next — named from the blast-radius calls, not assumed. Lead with the dependants you found (`namespace/service`, `n/m ready`, the exposed host), then what fails next if nobody acts. If the checks showed nothing depends on this workload, say the impact is contained to it and why.]
 
+*📈 Confidence:* `High` — [one sentence: which evidence supports this and what would raise it]
