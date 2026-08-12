@@ -54,4 +54,8 @@ test("head and tail survive when collapsing is not enough", () => {
   assert.ok(out.startsWith("line aaa "), "head lost");
   assert.match(out, /\.\.\.\[truncated \d+ chars\]\.\.\./);
   assert.ok(out.trimEnd().endsWith("x".repeat(20)), "tail lost");
+  // The notice is part of the result, so it has to fit inside the cap. Two halves of MAX/2 plus
+  // a notice is MAX + notice.length — over budget on the one branch whose entire job is to get
+  // under it.
+  assert.ok(out.length <= MAX_TOOL_RESULT_CHARS, `truncated output is ${out.length} chars`);
 });

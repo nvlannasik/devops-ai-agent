@@ -44,7 +44,13 @@ export function compactToolResult(content: string): string {
 
   // Head AND tail: logs are chronological, so the most recent lines live at the END and
   // head-only truncation drops exactly what "show me the logs" was asking for.
-  const half = MAX_TOOL_RESULT_CHARS / 2;
-  const remaining = collapsed.length - MAX_TOOL_RESULT_CHARS;
-  return collapsed.slice(0, half) + TRUNCATION_NOTICE(remaining) + collapsed.slice(-half);
+  //
+  // The notice lives INSIDE the cap, not on top of it — its own length comes out of the two
+  // halves. Two slices of MAX/2 plus a notice returns MAX + notice.length, which breaks the one
+  // guarantee this function exists to make. The reservation is sized from `collapsed.length`
+  // because that is an upper bound on the dropped count and therefore on the notice's digits,
+  // so one pass is enough and the printed count is still exact.
+  const reserve = TRUNCATION_NOTICE(collapsed.length).length;
+  const half = Math.floor((MAX_TOOL_RESULT_CHARS - reserve) / 2);
+  return collapsed.slice(0, half) + TRUNCATION_NOTICE(collapsed.length - half * 2) + collapsed.slice(-half);
 }
