@@ -285,6 +285,147 @@ the left edge. Everything about it is constrained by **zero client JS outside `/
   sideways while `.table-wrap` scrolled nothing. `min-width` alone does not fix it. A test in
   `views.test.ts` pins both declarations.
 
+**Sizing is fluid, and it is measured against the container, not the viewport.** Every panel used
+to be laid out from `@media` breakpoints against a fixed `--maxw: 76rem`, and both halves of that
+were wrong: on a 1920 display the page sat in a 76rem ribbon with the rest of the screen empty,
+and on every width in between the components kept proportions that were chosen for one width.
+The rules now:
+- **`main` is a container** (`container: page / inline-size`), and the hero and the chart declare
+  their own (`hero`, `chart`). A media query cannot size these correctly: the rail is a 13.5rem
+  column above 60rem and a top bar below it, so the same viewport width means two different
+  content widths. Container queries ask the only question that matters — how wide is *this* box.
+  Note `cqi` inside a custom property resolves at the **use** site against the nearest *ancestor*
+  container; an element's own `container-type` never applies to itself.
+- **Padding, gaps and the stat type scale are `clamp()`, not fixed steps** (`--fs-stat`, `main`'s
+  padding, `h2` margins, `.hero` padding). A breakpoint is a cliff between two sizes that are each
+  right once; a clamp is right everywhere in between, which is what removes the dead space.
+- **The stat shelf steps 4 → 2 → 1** (`@container page` at 54rem and 26rem) and never `auto-fit`.
+  `auto-fit` on the token shelf produced a 3+1 band with an orphan tile, and a shelf that is not a
+  clean divisor of its row reads as a bug.
+- **A page of figures and a page of argument get different measures.** `--maxw` is 88rem, and
+  `.pane:has(.prose)` drops it to 62rem. The overview and the incident *list* improve with every
+  pixel a big display has; the incident *page* does not — `.prose-text` stops at 68ch however wide
+  its frame grows, so past a point the extra width is empty card and an Evidence table whose second
+  column drifts a hand's width from its first. `:has()` rather than a flag threaded through
+  `layout()`: the rule *is* the condition. `views.test.ts` pins the coupling, because renaming the
+  class on the RCA frame would silently stop the selector matching.
+- **A shelf's sub-lines are all-or-nothing.** `.stat dd` is bottom-anchored (`margin-top: auto`)
+  so values line up across a row without reserving a blank caption line — reserving one
+  (`min-height` on `dt`) was itself the whitespace being complained about. But the anchor pulls the
+  sub-line with it: give three tiles a sub-line and the fourth's value floats a line higher. Either
+  every tile on a shelf has one or none does. `views.test.ts` asserts it over both pages.
+- `[data-tone]` (not `tr[data-tone]`) feeds `--spine`, so a stat card wears the same severity bar a
+  table row does. Overview's *Open* tile takes `critical` only while something is actually open.
+- **The incident page's shelf is a variant, not a second component** — `statList(items, "facts")`
+  → `.stats.facts`. Namespace, confidence and two timestamps are an identity card, not figures, and
+  at the bottom of the ladder four stacked tiles cost a third of a phone screen *above* the analysis
+  the page exists for. In the one-column step only, `.stats.facts .stat` becomes `flex-direction:
+  row`: caption left, value right, the shape of a spec sheet. Two abreast there is no room for it,
+  and wider the tiles are already short. `views.test.ts`'s shelf assertions match the variants too —
+  a variant changes how a tile lays out, never what a shelf may hold.
+- **Two faces, not three.** `--font-ui` for the interface and everything written in sentences,
+  `--font-data` for what the system *measured* (ids, endpoints, timestamps, counts). There was a
+  third — a serif `--font-prose` on the RCA, on the argument that what the agent wrote is a
+  different kind of content from what it measured. It is, but `font-src` is blocked outright, so no
+  stack here is a font this project ships: the serif resolved to Iowan Old Style or Times, a print
+  face at 17px on a graphite console, and the RCA read as pasted in from somewhere else. The
+  distinction is still drawn — by the panel, the 68ch measure and `--fs-md` at 1.7 line-height,
+  which is what actually makes a paragraph read as prose.
+
+**A five-column table does not become readable by scrolling sideways.** `.table-wrap`'s horizontal
+scroll is a last resort: what falls off the right edge is whichever columns the author happened to
+put last — Result and Executed on the remediation table, i.e. the outcome of the change — and
+nothing on screen points at them. So `table(head, body, narrow)` (`html.ts`) lets a table declare
+what it *becomes* when the columns will not fit, and there are three answers:
+- **`"cards"` — the incident list, and only it.** Below 46rem each row is a three-row grid placed
+  **by cell name**: `when | sev | state` on the header line, the cause across the full width under
+  it, the namespace ellipsised right on a third. Placement by name is why this is not general —
+  another table's columns would come apart under the same rules. `td.when` gives up its `nowrap`
+  here: a nowrap cell does not shrink a `minmax(0, 1fr)` track, it overflows it, and at 320px the
+  timestamp printed underneath the CRITICAL badge.
+- **`"stack"` — a record whose values are sentences** (Evidence, Remediation, On-call feedback,
+  and the topology page's Inbound/Outbound — "Postgres (incident memory)", a queue pair with an
+  arrow between the two names, "bot token present, socket mode present").
+  Below 40rem each cell becomes a caption/value pair captioned from **its own `data-label`** via
+  `td::before`, so the caption travels with the cell and inserting a column cannot leave the
+  captions naming the wrong values. `headers()` and `cell()` take the same string, which is what
+  stops a header and its caption drifting apart. The cells are `display: block`, never grid or
+  flex: they hold inline markup (`inlineMrkdwn()` emits `<code>` and `<strong>` mid-sentence) and
+  either layout mode would make each of those its own item and take the sentence apart word by
+  word. Caption **above** the value here, because beside it the widest label sets a column
+  ("Confirmed root cause" is 20 characters) and the sentence is read through what is left.
+- **`"pairs"` — a record whose values are all short** (Token usage, Most recurring, LLM backends —
+  a spec sheet: a name, two identifiers, an enum, an endpoint). The same stack with the caption
+  *beside* the value. What chooses between the two is what the cells hold,
+  not how many there are: six counts and two ids each spending a caption line of their own turn a
+  six-field accounting row into twelve lines, five times over, and the caption line says nothing
+  the caption does not. Implemented as a **hanging indent** — `padding-left: 6rem` on the cell,
+  `text-indent: -6rem`, `width: 6rem` on the `::before` — precisely so the value stays one inline
+  flow; a grid or a flex row would split it, which is the same reason the stacked cell is a block.
+  The 6rem is the widest caption these tables actually carry (REACHED VIA), not the widest one
+  imaginable — a table whose labels are sentences takes the plain stack instead. Three traps: the
+  sheet's `*` reset does not match pseudo-elements, so padding on that `::before` lands *outside*
+  the 6rem and knocks the first line out of the column; `text-indent` **inherits**, and any
+  descendant that lays out its own lines re-applies it, so the Route badge (`display: inline-block`)
+  printed its own text 6rem to its left, on top of the caption, leaving an empty pill behind —
+  `td * { text-indent: 0 }` undoes it for every such child, present and future, and costs nothing
+  on the inline elements that never had a first line of their own; and `pairs` emits
+  **`data-stack data-pairs` both** (`NARROW_ATTR` in `html.ts`) — the pairs block only overrides
+  two declarations, so `data-pairs` alone is a table that never stacks at all. A test pins it.
+
+Some tables opt out, and that is a decision too: the topology page's MCP tools table is a family
+name and a count, two short columns that fit 320px with room to spare. There is nothing to rescue,
+and stacking it would put the expanded `<details>` tool list *between* the family and its count —
+the pair the row exists to show. A narrow layout is for columns that fall off the edge.
+
+Both layouts cost the table its semantics: a browser derives the table role from the **computed**
+display, so `display: grid` on a `<tr>` leaves a screen reader with anonymous groups. The
+`role="table"` / `rowgroup` / `row` / `cell` / `columnheader` chain is what survives the display
+change, and it only works if *every* level declares one — `table()` marks up the wrapper, and the
+caller must use `headers()`/`cell()` (or hand-write the roles, as `incidentTable()` does) to be
+allowed to ask for any of them. `views.test.ts` pins the roles, the named cells, and that a
+stacked table's captions equal its headers, over both pages and both stack variants.
+
+The three thresholds are staggered on purpose: cards at 46rem, stack/pairs at 40rem. The incident
+list carries five columns of which two are prose, so it runs out of room first; a table of counts
+survives a narrower box as a table, and a table is still the better reading of it while it fits.
+
+**`breakable()`** (`views.ts`) inserts `<wbr>` at the humps of a CamelCase alert name —
+`Kube<wbr>Pod<wbr>Crash<wbr>Looping`, at *every* hump — after escaping, never before. A browser takes an offered break
+before inventing one, so a long identifier wraps where it means something instead of mid-word. Its
+companion is `overflow-wrap: anywhere` rather than `break-word`: only `anywhere` lowers min-content
+width, which is what lets a `minmax(0, 1fr)` track actually shrink instead of being propped open by
+its longest word.
+
+**The filter bar declares its tracks** (`form.filters`). `auto-fit` gave a date field that can only
+say dd/mm/yyyy the same width as an alert name, and re-cut the row at every width — 6 across here,
+an orphaned 4+3 there, **Apply** landing wherever the wrap dropped it. The ladder is now fixed at
+7 declared tracks → 3 → 2 (`@container page` 62rem / 34rem); both steps divide six evenly, so
+from/to stays one range and severity/state one pair at every width. All three control types share
+`height: 2.5rem`, and that is load-bearing: a date input carries a picker, a select a chevron, a
+text input neither, so `align-items: end` lined up their *bottoms* and left the captions above them
+on three different baselines.
+
+**The chart is HTML, not SVG (`src/dashboard/chart.ts`).** `svg.ts` is gone. An SVG scales its
+*text* with its drawing, so the same caption that read fine in a 900px hero rendered near 4px in a
+320px one, and `viewBox="0 0 720 168"` pinned a 4.3:1 letterbox at every width — a flat strip on a
+desktop, an illegible sliver on a phone. A `viewBox` cannot be changed from CSS; a grid can.
+`barChart()` now computes bar heights **as percentages** and nothing else — every proportion the
+reader sees (plot height, bar gap, which period labels survive) is a CSS decision taken against the
+chart's own width. Load-bearing details:
+- Heights ride in `style="--h:63.6%"`. That works only because the dashboard CSP is
+  `style-src 'unsafe-inline'` with **no** `script-src` — inline style attributes are permitted, and
+  the value is re-derived with `Number()` (Postgres hands `int8` back as a string) so a hostile row
+  can put neither a script nor a `NaN` in the attribute.
+- Ticks are pre-marked `data-thin` **counting from the end**, and CSS hides them below 26rem. The
+  newest period is the one a reader looks at first; counting forwards would drop exactly that one.
+  The surviving ticks get `overflow: visible` so they may use the hidden neighbour's track — clipped
+  to their own they render as `05-1`.
+- The last bar is `data-current` (dashed, no fill) and the caption says why: unmarked, a partial
+  week reads as a collapse in incident volume.
+- Bar values are hidden below 34rem rather than shrunk. Below that width they are the first thing
+  to become unreadable, and the axis plus the hero figure still carry the numbers.
+
 **Section and stat glyphs (`ICON` + `section()` in `views.ts`).** The same inline-`<svg>`
 mechanism as the rail, extended to every `<h2>` and to the overview's stat cards, so a page of
 identically-styled uppercase mono captions has landmarks to scan by. Three rules hold it
@@ -367,6 +508,18 @@ Recommended Actions become two-column tables.
   requiring whitespace/bracket before the opener is what prevents that. But excluding `_` from the
   span only looks safer — it means `_k8s_list_pods_`, the exact form the template asks for, never
   matches and the markers render as literal underscores.
+- **A verdict is not a section.** The two sections the template ends on — Severity, Confidence —
+  are a word, or a word and the one line that justifies it. Rendered like every other section they
+  each spent a heading and a full-width panel on eight characters, a third of a phone screen below
+  the evidence saying "critical". `renderRca()` promotes them into a trailing `.rca-fields.verdicts`
+  strip: matched by name (`VERDICTS`, lowercased — the same convention `COLUMNS` uses) and **only if
+  `oneLine()` agrees**, i.e. a single prose block with no newline and no code fence. A model that
+  argues its confidence across three bullets has written an argument, and an argument does not fit
+  on a strip — it keeps its panel. The model's own inline fields lead the RCA because it wrote them
+  as a preamble; the promoted verdicts trail it because the evidence they rest on is above them.
+- Evidence's two-column table is `"stack"`-narrow like the rest. Two columns still do not fit a
+  phone when the left one is a whole finding: "OOMKilled, exit code 137" against a 5rem Source
+  column pushed the tool name off the edge — exactly the half a reader needs to check the claim.
 
 **`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
 `incident_id` is NULL at insert — the usage rows are written during the investigation, the

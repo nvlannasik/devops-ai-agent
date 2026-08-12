@@ -1,4 +1,4 @@
-import { esc, table } from "./html.js";
+import { cell, esc, headers, table } from "./html.js";
 
 // The RCA is the one field on this dashboard a model WROTE rather than measured, and it
 // arrives in **Slack mrkdwn**, not CommonMark. `prompts/system.md` pins the grammar: bold is
@@ -256,15 +256,44 @@ function renderBody(body: RcaBody): string {
       lead + `<ul class="rca-list">${body.items.map((i) => `<li>${inlineMrkdwn(i)}</li>`).join("")}</ul>`
     );
   }
-  const head = `<th>${esc(body.columns[0])}</th><th>${esc(body.columns[1])}</th>`;
+  const head = headers(body.columns[0], body.columns[1]);
   const rows = body.rows
     .map(
       (r) =>
-        `<tr><td class="primary">${r.left ? inlineMrkdwn(r.left) : "<span class=\"meta\">—</span>"}</td>` +
-        `<td>${inlineMrkdwn(r.right)}</td></tr>`
+        `<tr role="row">` +
+        cell(body.columns[0], r.left ? inlineMrkdwn(r.left) : `<span class="meta">—</span>`, "primary") +
+        cell(body.columns[1], inlineMrkdwn(r.right)) +
+        `</tr>`
     )
     .join("");
-  return (lead ? proseCard(lead) : "") + table(head, rows);
+  // Two columns still do not fit a phone when the left one is a whole finding: "OOMKilled, exit
+  // code 137" against a 5rem Source column pushed the tool name off the edge, which is exactly
+  // the half a reader needs to check the claim. Stacked, the finding keeps the width and its
+  // source sits underneath it.
+  return (lead ? proseCard(lead) : "") + table(head, rows, "stack");
+}
+
+const fieldStrip = (items: RcaField[], cls: string): string =>
+  items.length === 0
+    ? ""
+    : `<dl class="${cls}">` +
+      items.map((f) => `<div><dt>${esc(f.label)}</dt><dd>${inlineMrkdwn(f.value)}</dd></div>`).join("") +
+      `</dl>`;
+
+// The two sections the template ends on are verdicts, not argument: a word, or a word and the
+// one line that justifies it. Rendered like every other section they each spend a heading and a
+// full-width panel on eight characters — a third of a phone screen, below the evidence, saying
+// "critical". As a strip they read as what they are: the finding, stated once, where the
+// template already puts it. Matched by name and lowercased, the same convention COLUMNS uses;
+// a section this file does not recognise keeps its panel and asserts nothing.
+const VERDICTS = new Set(["severity", "confidence"]);
+
+// Only a body that is genuinely one line. A model that argues its confidence across three
+// bullets has written an argument, and an argument does not fit on a strip.
+function oneLine(body: RcaBody): string | null {
+  if (body.kind !== "prose" || body.blocks.length !== 1) return null;
+  const [b] = body.blocks;
+  return !b.code && !b.text.includes("\n") ? b.text : null;
 }
 
 /**
@@ -275,18 +304,21 @@ export function renderRca(raw: string): string {
   const parsed = parseRca(raw);
   if (!parsed) return proseCard(`<div class="prose-text">${esc(raw)}</div>`);
 
-  const fields =
-    parsed.fields.length === 0
-      ? ""
-      : `<dl class="rca-fields">` +
-        parsed.fields
-          .map((f) => `<div><dt>${esc(f.label)}</dt><dd>${inlineMrkdwn(f.value)}</dd></div>`)
-          .join("") +
-        `</dl>`;
-
-  const sections = parsed.sections
+  const verdicts: RcaField[] = [];
+  const body = parsed.sections
+    .filter((s) => {
+      const line = VERDICTS.has(s.title.toLowerCase()) ? oneLine(s.body) : null;
+      if (line === null) return true;
+      verdicts.push({ label: s.title, value: line });
+      return false;
+    })
     .map((s) => (s.title ? `<h3 class="rca-head">${esc(s.title)}</h3>` : "") + renderBody(s.body))
     .join("");
 
-  return `<div class="rca">${fields}${sections}</div>`;
+  // The model's own inline fields lead, because it wrote them as a preamble. The promoted
+  // verdicts trail, because the evidence they rest on is above them.
+  return (
+    `<div class="rca">${fieldStrip(parsed.fields, "rca-fields")}${body}` +
+    `${fieldStrip(verdicts, "rca-fields verdicts")}</div>`
+  );
 }

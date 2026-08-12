@@ -235,7 +235,8 @@ const wiredTopology: Topology = {
 // going anywhere. Asserted over the whole document, in both directions the reader can travel.
 test("every link in the diagram lands on a row that exists on the page", () => {
   const html = topologyPage(wiredTopology, NONCE);
-  const targets = new Set([...html.matchAll(/<tr id="([\w-]+)"/g)].map((m) => m[1]));
+  // not anchored to `<tr `: a row that opts into a narrow layout carries role="row" first.
+  const targets = new Set([...html.matchAll(/<tr[^>]* id="([\w-]+)"/g)].map((m) => m[1]));
   // the diagram's own links, not every anchor on the page — the skip link points at <main>
   const hrefs = [...html.matchAll(/<a href="#([\w-]+)" class="topo-link"/g)].map((m) => m[1]);
 
@@ -256,6 +257,31 @@ test("each family lists its own tools, and marks the ones that can change the cl
   // the write marker sits on the tool it belongs to, not merely somewhere in the row
   assert.match(html, /k8s_restart_deployment\s*<span class="badge" data-tone="warning">write<\/span>/);
   assert.doesNotMatch(html, /k8s_list_pods\s*<span class="badge"[^>]*>write<\/span>/);
+});
+
+// Three tables on this page opt into a narrow layout and a fourth deliberately does not, and
+// which is which is decided by what the cells hold: a dependency row is three phrases and takes
+// the stack, a backend row is five short identifiers and takes the pairs, a family and its count
+// are two words that fit any screen and take neither. Getting this wrong is invisible on a
+// desktop — the page only comes apart at 390px, where nothing here runs.
+test("each topology table takes the narrow layout its own cells call for", () => {
+  const html = topologyPage(wiredTopology, NONCE);
+
+  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 2, "inbound and outbound");
+  const pairs = [...html.matchAll(/<table role="table" data-stack data-pairs>([\s\S]*?)<\/table>/g)];
+  assert.equal(pairs.length, 1, "the backend table, and only it");
+  assert.doesNotMatch(html, /<table role="table" data-pairs/, "pairs without stack never stacks");
+
+  // The opt-out, asserted rather than assumed: stacking this one would put the expanded tool
+  // list between a family and the count it belongs to.
+  assert.match(html, /<table><thead><tr><th>Family<\/th>/, "the capability table stays a table at every width");
+
+  for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
+    const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
+    const labels = [...t[1].matchAll(/<td role="cell"[^>]*data-label="([^"]*)"/g)].map((m) => m[1]);
+    assert.equal(labels.length % heads.length, 0, "a row is missing a captioned cell");
+    for (const l of labels) assert.ok(heads.includes(l), `caption ${l} names no column of this table`);
+  }
 });
 
 // The floor the interactive layer stands on. topology-script.ts removes these radios at run
@@ -368,7 +394,7 @@ const tokens: Tokens = {
 
 // Where a section heading starts. These assertions are about the ORDER of the sections, so
 // they must not also pin the heading's internal markup — a glyph moving in or out of the
-// caption is not a change to the page's sequence, and matching on `<h2>Outcomes</h2>` made
+// caption is not a change to the page's sequence, and matching on `<h2>Token usage</h2>` made
 // every one of them fail for that reason.
 const sectionAt = (html: string, title: string): number => {
   const at = html.indexOf(`${title}</span></h2>`);
@@ -376,37 +402,93 @@ const sectionAt = (html: string, title: string): number => {
   return at;
 };
 
-// The hero holds one composed object: the 30-day count set against the series it summarises.
-// While the outcome figures shared that frame they read as a caption to the chart, which is
-// the thing this split exists to undo — so the assertion is positional, not merely "present".
-test("the outcome figures are their own section, outside the hero", () => {
+// The state panel is the first thing on the page and the hero follows it: the question that can
+// be urgent ("how many are still open") is answered in the first line, not under a chart. The
+// assertion is positional because "present somewhere" is exactly what it was before the move.
+test("the state panel opens the page, above the hero", () => {
   const html = overviewPage(emptyOverview, []);
-  const hero = html.slice(html.indexOf(`class="hero"`), html.indexOf("</section>"));
-  assert.match(hero, /class="hero-chart"/, "the chart stays in the hero");
-  assert.doesNotMatch(hero, /<dl class="stats">/, "the figures do not");
-  assert.ok(
-    html.indexOf("</section>") < sectionAt(html, "Outcomes"),
-    "Outcomes comes after the hero closes"
-  );
-  assert.ok(sectionAt(html, "Outcomes") < html.indexOf(`<dl class="stats">`));
+  const panel = html.indexOf(`<dl class="stats">`);
+  const hero = html.indexOf(`class="hero"`);
+  assert.ok(panel !== -1 && hero !== -1);
+  assert.ok(panel < hero, "the figures come first");
+  assert.ok(html.indexOf(`<h1 class="eyebrow"`) < panel, "and the page's title labels them");
+  // The hero keeps one composed object and nothing else. While the figures shared its frame
+  // they read as a caption to the chart, which is the thing this split exists to undo.
+  const heroHtml = html.slice(hero, html.indexOf("</section>", hero));
+  assert.match(heroHtml, /class="hero-chart"/, "the chart stays in the hero");
+  assert.doesNotMatch(heroHtml, /<dl class="stats">/, "the figures do not");
 });
 
-test("token usage is its own section, in the order volume → outcome → cost", () => {
+// Four figures, one shelf, four columns — the grid is a fixed 4 → 2 → 1 ladder, so a fifth
+// figure would wrap alone onto a second row and read as a category of its own.
+//
+// The sub-line rule is the other half of the same layout contract: a stat's value is anchored to
+// the FLOOR of its tile, which is what keeps a row of figures on one line when the captions wrap
+// differently — but it anchors the sub-line with it, so a shelf that gives three figures a
+// sub-line and the fourth none puts that fourth value a line above its neighbours.
+// Matches the variants too (`stats facts`): a variant changes how a stacked tile lays out, not
+// what a shelf is allowed to hold.
+const shelvesOf = (html: string): string[] =>
+  html
+    .split(/<dl class="stats[^"]*">/)
+    .slice(1)
+    .map((s) => s.slice(0, s.indexOf("</dl>")));
+
+test("every stat shelf holds four figures, and a shelf's sub-lines are all or none", () => {
+  const pages = [
+    overviewPage({ ...emptyOverview, tokens }, []),
+    detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }),
+  ];
+  const shelves = pages.flatMap(shelvesOf);
+  assert.equal(shelves.length, 3, "the state panel, the token totals, the incident fact bar");
+  for (const shelf of shelves) {
+    const stats = shelf.split(`<div class="stat"`).slice(1);
+    assert.equal(stats.length, 4);
+    const withSub = stats.filter((s) => s.includes("<span>")).length;
+    assert.ok(withSub === 0 || withSub === 4, `shelf mixes ${withSub} sub-lines into 4 figures`);
+  }
+});
+
+// Open incidents are the one figure on the page that can be bad news, and the only one that
+// carries a tone. A tone on every tile is a tone on none.
+test("open incidents wear the severity spine, and only while any are open", () => {
+  // Scoped to the shelf: the stylesheet is inlined into every page and names the tones too.
+  const shelf = (html: string): string =>
+    html.slice(html.indexOf(`<dl class="stats">`), html.indexOf("</dl>"));
+
+  const busy = shelf(overviewPage({ ...emptyOverview, totalIncidents: 10, resolvedIncidents: 7 }, []));
+  assert.match(busy, /<div class="stat" data-tone="critical"><dt>[\s\S]*?Open<\/dt><dd>3/);
+  assert.equal(busy.match(/data-tone=/g)?.length, 1, "nothing else on the shelf is toned");
+
+  const quiet = shelf(overviewPage({ ...emptyOverview, totalIncidents: 10, resolvedIncidents: 10 }, []));
+  assert.match(quiet, /<div class="stat"><dt>[\s\S]*?Open<\/dt><dd>0/, "no tone when nothing is open");
+  assert.doesNotMatch(quiet, /data-tone=/);
+});
+
+test("token usage is its own section, in the order state → volume → cost", () => {
   const html = overviewPage({ ...emptyOverview, tokens }, []);
-  assert.ok(sectionAt(html, "Outcomes") < sectionAt(html, "Token usage"));
+  assert.ok(html.indexOf(`class="hero"`) < sectionAt(html, "Token usage"));
   assert.ok(sectionAt(html, "Token usage") < sectionAt(html, "Most recurring"));
 });
 
 test("token usage totals the window and breaks it down by backend AND model", () => {
   const html = overviewPage({ ...emptyOverview, tokens }, []);
-  assert.match(html, /Total tokens<\/dt><dd>1,293,199/, "input + output, thousands-separated");
+  // The call count rides in the sub-line rather than taking a fifth tile — it is the
+  // denominator of the total above it, not a fourth kind of token.
+  assert.match(
+    html,
+    /Total tokens<\/dt><dd>1,293,199<span>input \+ output over 412 calls<\/span>/,
+    "input + output, thousands-separated, over the call count"
+  );
   assert.match(html, /Cache reads<\/dt><dd>950,004<span>12,003 written<\/span>/);
-  assert.match(html, /LLM calls<\/dt><dd>412/);
   // the model is what the router question is actually about — a heavy backend answering
   // what a light one could have is only visible if the model is on the row
   assert.match(html, /qwen3-32b/);
   assert.match(html, /claude-opus-5/);
-  assert.equal([...html.matchAll(/<td class="primary">(?:private-llm|claude)<\/td>/g)].length, 2);
+  assert.equal(
+    [...html.matchAll(/data-label="Backend">(?:private-llm|claude)<\/td>/g)].length,
+    2
+  );
 });
 
 // A fresh deployment has an empty llm_usage table, and a zero-row table with five headers
@@ -414,7 +496,7 @@ test("token usage totals the window and breaks it down by backend AND model", ()
 test("token usage names the absence instead of rendering an empty table", () => {
   const html = overviewPage(emptyOverview, []);
   assert.match(html, /No LLM calls recorded in this window/);
-  assert.doesNotMatch(html, /<th>Backend<\/th>/);
+  assert.doesNotMatch(html, /Backend<\/th>/);
 });
 
 // backend and model come from LLM_BACKEND_<N>_* env vars — the same trust level as every
@@ -451,11 +533,93 @@ test("detailPage renders the RCA as sections, not as a wall of asterisks", () =>
   ].join("\n");
   const html = detailPage({ incident: { ...row, rca, channel: null, thread_ts: null }, remediations: [], feedback: [] });
   assert.match(html, /<h3 class="rca-head">Root Cause<\/h3>/);
-  assert.match(html, /<th>Finding<\/th><th>Source<\/th>/);
-  assert.match(html, /<th>Horizon<\/th><th>Action<\/th>/);
+  assert.match(html, /<th role="columnheader">Finding<\/th><th role="columnheader">Source<\/th>/);
+  assert.match(html, /<th role="columnheader">Horizon<\/th><th role="columnheader">Action<\/th>/);
   assert.match(html, /<dt>Severity<\/dt>/);
   // and the source markers are gone from the visible text, not merely re-printed
   assert.doesNotMatch(html, /\*📍 Root Cause\*/);
+});
+
+// The stacked layout captions each cell from its own data-label, so the caption and the column
+// header are two copies of one string in two places. Nothing else notices when they drift: the
+// page keeps rendering, the desktop header stays right, and the phone quietly labels Result
+// with "Approved by". Every stacked cell must carry a label, and every label must be a header.
+test("a stacked table's captions are its headers", () => {
+  const html = detailPage({
+    incident: { ...row, rca: null, channel: null, thread_ts: null },
+    remediations: [{
+      id: 1, action: "k8s_scale", params: { replicas: 3 }, status: "succeeded",
+      approved_by: "U1", result: "applied", executed_at: new Date("2026-07-28T23:50:00Z"),
+    } as RemediationRow],
+    feedback: [{
+      slack_user: "anna", confirmed_root_cause: "limit too low", action_taken: "raised it",
+      outcome: "resolved", created_at: new Date("2026-07-28T23:55:00Z"),
+    } as FeedbackRow],
+  });
+
+  // Both variants, because the invariant is the same one: a caption comes from the cell's own
+  // data-label, so the only thing that can make it wrong is naming a column the table lacks.
+  for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
+    const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
+    const labels = [...t[1].matchAll(/<td role="cell"[^>]*data-label="([^"]*)"/g)].map((m) => m[1]);
+    assert.ok(heads.length > 0, "a stacked table with no headers has nothing to caption from");
+    assert.equal(labels.length % heads.length, 0, "a row is missing a captioned cell");
+    for (const l of labels) assert.ok(heads.includes(l), `caption ${l} names no column of this table`);
+  }
+  // both tables opted in — a five-column record is the case this exists for
+  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 2);
+});
+
+// `pairs` is the stack with the caption moved beside the value, so it must carry BOTH attributes:
+// the stylesheet's stack block does the work and the pairs block only overrides two declarations.
+// Emitting `data-pairs` alone would silently leave a table that never stacks at all.
+test("a table of short values is a stack with its captions beside them", () => {
+  const html = overviewPage(
+    {
+      ...emptyOverview,
+      tokens,
+      recurring: [
+        { alertname: "KubePodCrashLooping", namespace: "prod", n: 23, last_seen: new Date("2026-07-28T21:30:00Z") },
+      ],
+    },
+    []
+  );
+  const pairs = [...html.matchAll(/<table role="table" data-stack data-pairs>([\s\S]*?)<\/table>/g)];
+  assert.equal(pairs.length, 2, "token usage and most recurring");
+  assert.doesNotMatch(html, /<table role="table" data-pairs/, "pairs without stack never stacks");
+
+  // Same caption/header rule as the plain stack — the two tables differ in where the caption
+  // sits, never in where it comes from.
+  for (const t of pairs) {
+    const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
+    const labels = [...t[1].matchAll(/<td role="cell"[^>]*data-label="([^"]*)"/g)].map((m) => m[1]);
+    assert.equal(labels.length % heads.length, 0, "a row is missing a captioned cell");
+    for (const l of labels) assert.ok(heads.includes(l), `caption ${l} names no column of this table`);
+  }
+  // The alert name is the longest string on the page and takes the same wrap points the
+  // incident list gives it — the hanging indent leaves it a narrower column than the table did.
+  assert.match(html, /data-label="Alert">Kube<wbr>Pod<wbr>Crash<wbr>Looping</);
+});
+
+// Severity and Confidence arrive as sections; rendered as sections they spend a heading and a
+// full-width panel each on one word. rca.ts promotes the one-line ones onto the field strip,
+// and the stylesheet only styles a strip — so if the promotion stops happening the page still
+// renders, just three screens tall on a phone. Pinned from the page, not the parser, because
+// this is the join the reader sees.
+test("a one-line verdict is a field, an argued one keeps its section", () => {
+  const terse = detailPage({
+    incident: { ...row, rca: "*Root Cause*\nThe limit is too low.\n\n*Severity*\ncritical\n\n*Confidence*\nhigh — the exit code agrees.", channel: null, thread_ts: null },
+    remediations: [], feedback: [],
+  });
+  assert.match(terse, /class="rca-fields verdicts"/);
+  assert.match(terse, /<dt>Severity<\/dt><dd>critical<\/dd>/);
+  assert.doesNotMatch(terse, /<h3 class="rca-head">Severity<\/h3>/);
+
+  const argued = detailPage({
+    incident: { ...row, rca: "*Root Cause*\nThe limit is too low.\n\n*Severity*\ncritical\n\n*Confidence*\n• the exit code says OOMKilled\n• the memory series agrees", channel: null, thread_ts: null },
+    remediations: [], feedback: [],
+  });
+  assert.match(argued, /<h3 class="rca-head">Confidence<\/h3>/, "two bullets are an argument, and an argument keeps its panel");
 });
 
 test("an incident with no RCA says so rather than rendering an empty analysis", () => {
@@ -594,6 +758,82 @@ test("main and the footer are pinned to the pane rather than to their content", 
   }
 });
 
+// The narrower reading column is bought with `.pane:has(.prose)`, which means the selector and
+// the markup are a coupling nothing else checks: rename the class on the RCA frame and the rule
+// silently stops matching, leaving the incident page at the overview's 88rem with half of every
+// card empty. The condition must hold where the argument is and nowhere else.
+test("the reading measure follows the prose, and only the prose", () => {
+  const rule = STYLES.match(/^\.pane:has\(\.prose\) \{([^}]*)\}/m);
+  assert.ok(rule, "no reading-measure rule to check");
+  assert.match(rule[1], /--maxw:/, "the rule has to move the measure, not something else");
+
+  const incident: IncidentDetail = {
+    ...row, rca: "the container hit its limit", channel: "C1", thread_ts: "1785282508.001",
+  };
+  assert.match(
+    detailPage({ incident, remediations: [], feedback: [] }),
+    /class="prose/,
+    "the incident page is the argument page — it has to satisfy the selector"
+  );
+  assert.doesNotMatch(
+    listPage(page([row]), parseFilters(new URLSearchParams(""))),
+    /class="prose/,
+    "a table of incidents is figures, and keeps the full width"
+  );
+});
+
+// Below 46rem the stylesheet lays each incident row out as a card, and it does that by placing
+// cells BY NAME. Three couplings have to hold together or the layout silently comes apart: every
+// cell the rules place must exist, the rules must be scoped to this table (the remediation and
+// feedback tables have different columns), and the table has to carry explicit roles — changing
+// a <tr>'s display is what costs a table its semantics, and the roles are what survive it.
+test("the incident table can become cards: named cells, scoped rules, roles intact", () => {
+  const html = listPage(page([row]), parseFilters(new URLSearchParams("")));
+
+  for (const cell of ["when", "primary", "ns", "sev", "state"]) {
+    assert.match(html, new RegExp(`class="${cell}[ "]`), `no .${cell} cell for the card layout to place`);
+    assert.match(
+      STYLES,
+      new RegExp(`table\\[data-cards\\] td\\.${cell}`),
+      `.${cell} is rendered but the card layout never places it`
+    );
+  }
+  assert.match(html, /<table role="table" data-cards>/, "only this table opts into the card layout");
+  // Roles at every level or none: a role="table" whose rows have lost theirs is worse than
+  // leaving the semantics to the display, because it claims a structure that is not there.
+  for (const r of [/<thead role="rowgroup">/, /<tbody role="rowgroup">/, /<tr role="row"/, /<td role="cell"/, /<th role="columnheader">/]) {
+    assert.match(html, r, `the role chain is broken at ${r}`);
+  }
+  // and the tables that did NOT ask for it keep the plain markup
+  const detail = detailPage({
+    incident: { ...row, rca: null, channel: null, thread_ts: null },
+    remediations: [{
+      id: 1, action: "k8s_scale", params: {}, status: "succeeded",
+      approved_by: "U1", result: "applied", executed_at: new Date("2026-07-28T23:50:00Z"),
+    } as RemediationRow],
+    feedback: [],
+  });
+  assert.doesNotMatch(detail, /<table role="table" data-cards>[\s\S]*k8s_scale/, "remediation is not a card table");
+});
+
+test("a CamelCase alert name offers its humps as break points, and stays escaped", () => {
+  const html = listPage(
+    page([{ ...row, alertname: "PersistentVolumeFillingUp" }]),
+    parseFilters(new URLSearchParams(""))
+  );
+  assert.match(html, /Persistent<wbr>Volume<wbr>Filling<wbr>Up/);
+
+  // The <wbr> pass runs on already-escaped text, so it must not be a way back in.
+  const hostile = listPage(
+    page([{ ...row, alertname: `<img src=x onerror="alert(1)">Ab` }]),
+    parseFilters(new URLSearchParams(""))
+  );
+  assert.doesNotMatch(hostile, /<img src=x/);
+  assert.match(hostile, /&lt;img src=x/);
+  // and an entity is never split down the middle
+  assert.doesNotMatch(listPage(page([{ ...row, alertname: "a&B" }]), parseFilters(new URLSearchParams(""))), /&<wbr>|&amp<wbr>/);
+});
+
 // ---------- pagination ----------
 
 const filters = (q: string) => parseFilters(new URLSearchParams(q));
@@ -702,7 +942,7 @@ test("nothing about paging lives in the filter form", () => {
 test("a page holds ten rows", () => {
   assert.equal(PAGE_SIZE, 10);
   const html = listPage(page(Array.from({ length: PAGE_SIZE }, () => row), { hasMore: true, total: 25 }), filters(""));
-  assert.equal([...html.matchAll(/<td class="primary"><a href="\/incidents\//g)].length, PAGE_SIZE);
+  assert.equal([...html.matchAll(/class="primary"><a href="\/incidents\//g)].length, PAGE_SIZE);
   assert.match(html, /aria-label="Page 3"/, "25 incidents at ten a page is three pages");
 });
 

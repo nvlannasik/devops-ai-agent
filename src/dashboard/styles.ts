@@ -9,28 +9,45 @@
 // the thing that hides the alert. Interaction (focus, current page, primary button) gets the
 // single teal accent; nothing else does.
 //
-// Three faces, three jobs, each earned by the kind of content it carries:
-//   --font-ui    the interface itself
+// TWO faces, two jobs, each earned by the kind of content it carries:
+//   --font-ui    the interface, and everything written in sentences
 //   --font-data  what the system MEASURED — ids, endpoints, queue names, timestamps, counts
-//   --font-prose what the agent WROTE — the RCA, and nothing else
+//
+// There was a third — a serif reading face for the RCA, on the argument that what the agent
+// WROTE is a different kind of content from what it measured. It is, and the frame around it
+// already says so. What a serif said on the page was something else: none of these stacks is a
+// font this project ships (font-src is blocked outright), so it resolved to Iowan Old Style or
+// Times, a print face at 17px on a graphite console, with a colour and a rhythm that belong to
+// no other element on the screen. The RCA read as pasted in from somewhere else. The
+// distinction is still drawn — the panel, the 68ch measure and the larger size all draw it —
+// just not with a face borrowed from a book.
 export const STYLES = `
 :root {
   color-scheme: light dark;
 
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-data: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace;
-  --font-prose: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, "Times New Roman", serif;
 
   --fs-2xs: .6875rem; --fs-xs: .75rem; --fs-sm: .8125rem; --fs-base: .9375rem;
   --fs-md: 1.0625rem; --fs-lg: 1.3125rem;
   --fs-xl: clamp(1.5rem, 1.15rem + 1.5vw, 2rem);
   --fs-hero: clamp(2.5rem, 1.6rem + 3.6vw, 3.75rem);
+  /* A stat's value scales with the width of the COLUMN it sits in, not the viewport: the same
+     four tiles are 300px wide on a desktop and 170px on a phone, and a figure sized for one is
+     either lost or clipped in the other. cqi resolves against the nearest ancestor container
+     (page, declared on main); with no container anywhere it falls back to the viewport, which
+     is the old behaviour and still legible. */
+  --fs-stat: clamp(1.0625rem, .9rem + .55cqi, 1.5rem);
 
   --sp-1: .25rem; --sp-2: .5rem; --sp-3: .75rem; --sp-4: 1rem;
   --sp-5: 1.25rem; --sp-6: 1.5rem; --sp-8: 2rem; --sp-10: 2.5rem; --sp-12: 3rem;
 
   --r-sm: 5px; --r: 10px; --r-lg: 14px;
-  --maxw: 76rem;
+  /* The content column's ceiling. It is a measure for TABLES, not for prose — the RCA and every
+     other run of sentences carries its own 68ch cap, so the page can be wider than a comfortable
+     line length without any line getting longer. At 76rem a 1920 display spent a fifth of itself
+     on empty gutters while a six-column table scrolled inside its own frame. */
+  --maxw: 88rem;
   --rail-w: 13.5rem;
   --spine-w: 3px;
   /* The page gutter, and the notch allowance folded into it: below 60rem the rail becomes a
@@ -157,10 +174,25 @@ a, button, select, input, summary { touch-action: manipulation; }
    past the viewport and dragged the whole page into a horizontal scroll while .table-wrap sat
    there scrolling nothing. A definite width plus min-width 0 pins main to the pane and hands
    the overflow back to the wrap, where it belongs. */
+/* container is what lets everything below size itself against the CONTENT column instead of
+   the window. The two are not the same measurement and never were: the rail is a 13.5rem column
+   above 60rem and a bar across the top below it, so a 1000px window hands main either 784px or
+   1000px. A media query cannot tell those apart — it only ever sees 1000px — which is how a
+   panel ends up tuned for a width it never actually gets. Named, so a container added inside a
+   component later cannot silently capture a query written for this one. */
 main {
   width: 100%; min-width: 0; max-width: var(--maxw); margin: 0 auto;
-  padding: var(--sp-10) var(--gutter) var(--sp-12);
+  padding: clamp(var(--sp-6), 3cqi, var(--sp-8)) var(--gutter) var(--sp-12);
+  container: page / inline-size;
 }
+/* A page that holds an argument gets a narrower column than a page that holds figures. The
+   overview wants every pixel a big display has — four stat tiles and a twelve-week chart all
+   get better the wider they are. The incident page does not: its subject is the RCA, whose
+   text stops at 68ch no matter how wide the frame around it grows, so past a point the extra
+   width is empty card and an Evidence table whose second column drifts a hand's width away
+   from the first. :has, rather than a flag threaded through layout(), because the rule IS the
+   condition — the measure follows the prose, and a page that grows one later gets it free. */
+.pane:has(.prose) { --maxw: 62rem; }
 
 /* auto on top, 0 on the bottom: horizontally centred like main, and pushed to the foot of a
    short page rather than left floating under a two-row table. */
@@ -183,7 +215,7 @@ h2, .eyebrow {
   display: flex; align-items: center; gap: var(--sp-4);
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .14em; color: var(--text-dim);
-  margin: var(--sp-10) 0 var(--sp-4);
+  margin: clamp(var(--sp-6), 3.2cqi, var(--sp-8)) 0 var(--sp-4);
 }
 h2::after, .eyebrow::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
 /* The overview's <h1> wears .eyebrow — the class wins on everything it declares, and these two
@@ -227,14 +259,24 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    figures moved out to their own section rather than sitting on a shelf inside this one. */
 .hero {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-lg); padding: var(--sp-6);
+  border-radius: var(--r-lg); padding: clamp(var(--sp-5), 2.6cqi, var(--sp-6));
   overflow: hidden;
+  container: hero / inline-size;
 }
+/* A PROPORTION, not a fixed column plus whatever is left. auto sized the first column to the
+   width of the digits — so a 3-digit count took a third of the frame and a 1-digit count took a
+   tenth, and the chart's shape changed every time the number did. A percentage floor keeps the
+   split the same at every count and every width; the minmax floor stops it collapsing under the
+   count itself. Centred rather than bottom-aligned: the count is one short block against a tall
+   one, and aligning their baselines left the whole band above the number empty. */
 .hero-body {
-  display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr);
-  gap: var(--sp-8); align-items: end;
+  display: grid; grid-template-columns: minmax(6rem, 16%) minmax(0, 1fr);
+  gap: clamp(var(--sp-5), 3cqi, var(--sp-8)); align-items: center;
 }
-.hero-figure { margin: 0; display: flex; flex-direction: column; }
+.hero-figure {
+  margin: 0; display: flex; flex-direction: column; gap: var(--sp-3);
+  justify-content: center;
+}
 .hero-value {
   font-size: var(--fs-hero); font-weight: 620; letter-spacing: -.045em; line-height: .92;
   font-variant-numeric: tabular-nums;
@@ -242,30 +284,70 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 .hero-unit {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .14em; color: var(--text-dim);
-  margin-top: var(--sp-3);
 }
 .hero-chart { min-width: 0; }
+/* One column, and the count stops being a headline set beside a chart — it becomes a caption
+   over one. Under about 30rem of frame the two-column split gives the chart too little width to
+   read twelve periods in. */
+@container hero (max-width: 30rem) {
+  .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
+  .hero-figure { flex-direction: row; align-items: baseline; gap: var(--sp-3); }
+}
 
-/* One stat shelf, three homes: the overview's outcomes, its token totals, and the incident
+/* One stat shelf, three homes: the overview's summary panel, its token totals, and the incident
    fact bar. They are the same kind of thing — a labelled value — so they are one component.
-   auto-fit rather than a fixed count: four figures and five have to sit on the same grid.
    The dividers are a 1px grid gap with the border colour showing through from behind, not a
    border on each cell. A per-cell border cannot know it is at the start of a wrapped row —
    five stats in a four-wide grid left the fifth with a rule on the wrong side and none above
-   it. The gap draws every divider the grid actually has, in both directions, and no others. */
+   it. The gap draws every divider the grid actually has, in both directions, and no others.
+
+   FOUR, then two, then one — an explicit ladder, not auto-fit. auto-fit divides by whatever
+   fits and lands on three as often as not, which leaves a four-item row as 3 + 1: one tile
+   alone on a second row, reading as a category of its own rather than the fourth of four. The
+   ladder only ever halves, so every row stays full at every width. Every shelf on the page is
+   built to exactly four items to keep that promise. Queried against page — the content column,
+   not the window — because the rail's width is not the panel's to spend. */
 .stats {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px; margin: 0; background: var(--border);
   border: 1px solid var(--border); border-radius: var(--r); overflow: hidden;
 }
-.stat { padding: var(--sp-4) var(--sp-5); background: var(--surface); min-width: 0; }
+@container page (max-width: 54rem) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container page (max-width: 26rem) { .stats { grid-template-columns: minmax(0, 1fr); } }
+/* The incident page's shelf carries identity, not figures: a namespace, a confidence, two
+   timestamps. At the bottom of the ladder the four tiles stack, and four stacked tiles are a
+   third of a phone screen spent above the analysis a reader opened the page for. So on this
+   variant the stacked tile lays its caption and value on ONE line — label left, value right,
+   the shape of a spec sheet. Only in the one-column step: two abreast there is no room for it,
+   and above that the tiles are already short. */
+@container page (max-width: 26rem) {
+  .stats.facts .stat { flex-direction: row; align-items: baseline; justify-content: space-between; gap: var(--sp-4); }
+  .stats.facts .stat dd { margin-top: 0; font-size: var(--fs-base); text-align: right; }
+}
+/* A column with the value pushed to the FLOOR of the tile by margin-top:auto. Grid stretches
+   every tile in a band to the same height, so a value anchored to the bottom lands on the same
+   line as its neighbours whether or not its caption wrapped — a row of figures that do not line
+   up is a row that has to be read one tile at a time. Anchoring to the bottom rather than
+   reserving a second caption line everywhere is the difference between alignment and a blank
+   line in every tile on the page. It does mean the sub-line is part of what is anchored, so
+   within one shelf the figures either all carry a sub or none do; statList's callers keep to
+   that, and views.test.ts holds them to it. */
+.stat {
+  padding: clamp(var(--sp-4), 1.6cqi, var(--sp-5)) clamp(var(--sp-4), 1.6cqi, var(--sp-5));
+  background: var(--surface); min-width: 0;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+/* The same severity bar the tables use, on the one tile where a number means something is
+   wrong. Only tiles that declare a tone get it — see the [data-tone] block under tables. */
+.stat[data-tone] { box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent); }
 .stat dt {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+  line-height: 1.4;
 }
 .stat dd {
-  margin: var(--sp-2) 0 0; font-size: var(--fs-md); font-weight: 600;
-  letter-spacing: -.015em; font-variant-numeric: tabular-nums;
+  margin: 0; margin-top: auto; font-size: var(--fs-stat); font-weight: 600;
+  letter-spacing: -.015em; font-variant-numeric: tabular-nums; line-height: 1.2;
   overflow-wrap: anywhere;
 }
 .stat dd span {
@@ -295,15 +377,131 @@ tbody td:first-child {
   box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent);
   padding-left: calc(var(--sp-4) + var(--spine-w));
 }
-tr[data-tone="critical"] { --spine: var(--critical); }
-tr[data-tone="warning"]  { --spine: var(--warning); }
-tr[data-tone="info"]     { --spine: var(--info); }
-tr[data-tone="ok"]       { --spine: var(--ok); }
+/* Not scoped to tr any more: naming a tone is the page's one severity vocabulary, and a stat
+   tile carrying a count of open incidents means the same thing by it as a row does. The property
+   only draws where something consumes it (the first cell of a row, a toned tile), so declaring
+   it on a badge as well costs nothing. */
+[data-tone="critical"] { --spine: var(--critical); }
+[data-tone="warning"]  { --spine: var(--warning); }
+[data-tone="info"]     { --spine: var(--info); }
+[data-tone="ok"]       { --spine: var(--ok); }
 td .sub { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 2px; overflow-wrap: anywhere; }
 /* The alert name is the row's only target, and at 15px/1.55 its line box is 23px — a whisker
    under the 24px a finger needs. Padding on an inline element grows the hit area without
    touching the line box, so the row stays exactly as tall as it looks. */
 td.primary a { font-weight: 550; padding-block: 3px; }
+
+/* ---------- the incident table, below 46rem ---------- */
+/* Five columns do not fit a phone, and .table-wrap's answer — scroll sideways — was the wrong
+   one here: what fell off the right edge was severity and state, the two things a reader opens
+   this page to triage by, behind a scrollbar with no affordance pointing at it. Under 46rem the
+   row stops being a row and becomes a card: a quiet header of timestamp and badges, then the
+   alert name and its cause across the full width, then the namespace. Nothing is hidden,
+   nothing needs discovering, and the columns come back the moment there is room.
+   Scoped to [data-cards] because the placement is by cell name — the remediation and feedback
+   tables have different columns and would come apart under these rules. */
+@container page (max-width: 46rem) {
+  table[data-cards] thead { display: none; }
+  table[data-cards] tbody tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content;
+    gap: var(--sp-2) var(--sp-3); align-items: baseline;
+    padding: var(--sp-4); border-bottom: 1px solid var(--border);
+    /* the spine moves with the layout: it belonged to the first CELL, and the first cell is no
+       longer the leading edge of anything once the row is two-dimensional. */
+    box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent);
+  }
+  table[data-cards] tbody tr:last-child { border-bottom: 0; }
+  table[data-cards] tbody td { padding: 0; border-bottom: 0; box-shadow: none; }
+  /* Header line: when the incident fired, and the two badges hard against the right edge. The
+     timestamp holds the 1fr track, so the badges keep the same rag down the whole list — beside
+     a title they would step left and right with every alert name and stop being a column to
+     scan.
+     The timestamp gives up its nowrap here. In a column it is one atom, but on this line it is
+     the only thing that can yield: the badges are max-content and the track under it is
+     minmax(0,1fr), so a nowrap timestamp does not shrink the track, it overflows it and prints
+     under CRITICAL. Wrapping happens at its own space, so the worst case is the date over the
+     time — which only ever happens near 320px. */
+  table[data-cards] td.when  { grid-column: 1; grid-row: 1; white-space: normal; }
+  table[data-cards] td.sev   { grid-column: 2; grid-row: 1; }
+  table[data-cards] td.state { grid-column: 3; grid-row: 1; }
+  /* The name and its cause take the whole card. Beside the badges the cause had a third of the
+     width and ran to four lines with the space under the badges left empty — the same sentence
+     fits two lines here, so more of the list is on screen at once.
+     overflow-wrap: anywhere, not break-word — only anywhere also lowers the cell's min-content
+     width, and a spanning item still pushes on the tracks it spans. An alert name is one
+     unbreakable identifier; breaking it beats widening the card into a sideways scroll. */
+  table[data-cards] td.primary {
+    grid-column: 1 / -1; grid-row: 2; min-width: 0; overflow-wrap: anywhere;
+  }
+  /* The namespace closes the card on the same right edge the badges opened it on. It never
+     wraps: it is a label, and a label broken across two lines reads as two of them. */
+  table[data-cards] td.ns {
+    grid-column: 1 / -1; grid-row: 3; justify-self: end; max-width: 100%;
+    font-size: var(--fs-sm); color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+}
+
+/* ---------- every other table, below 40rem ---------- */
+/* The same problem, answered generically. Remediation, on-call feedback and the RCA's Evidence
+   are records of three to five fields; as columns on a phone their last fields — Result,
+   Executed, Outcome, Source — sit past the right edge, and on a remediation table that means
+   what you cannot see is whether the change worked. Each cell becomes its caption and its
+   value. The caption comes from the cell's own data-label, so this block names no column and
+   holds for all three tables and for any fourth.
+   Caption ABOVE the value, not beside it: beside it, the widest label in the table sets a
+   column ("Confirmed root cause" is 20 characters) and every value in the record is read
+   through what is left. Taller, and every field legible at 320px. */
+@container page (max-width: 40rem) {
+  table[data-stack], table[data-stack] tbody { display: block; }
+  table[data-stack] thead { display: none; }
+  table[data-stack] tbody tr {
+    display: block; padding: var(--sp-4); border-bottom: 1px solid var(--border);
+    box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent);
+  }
+  table[data-stack] tbody tr:last-child { border-bottom: 0; }
+  /* display: block, not grid. These cells hold inline markup — inlineMrkdwn() emits <code> and
+     <strong> inside a sentence — and a grid would make each of those its own item and take the
+     sentence apart word by word. */
+  table[data-stack] tbody td {
+    display: block; padding: 0; border-bottom: 0; box-shadow: none; overflow-wrap: anywhere;
+  }
+  table[data-stack] tbody td + td { margin-top: var(--sp-3); }
+  table[data-stack] tbody td::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim);
+  }
+  /* A timestamp is nowrap so it cannot be split across a column boundary; on its own line
+     there is no boundary to split at, and nowrap only lets it overflow the card. */
+  table[data-stack] td.when { white-space: normal; }
+
+  /* The same stack with the caption BESIDE the value, for a record whose values are all short —
+     a backend name, a model id, four counts; an alert name, a namespace, a count, a date. There
+     the caption line above says nothing the caption itself does not, and it doubles the height
+     of the table: six fields become twelve lines, five times over.
+     A hanging indent, not a grid or a flex row. Either of those makes every inline child its own
+     item and takes a sentence apart word by word — the reason the stacked cell is display: block
+     in the first place. text-indent pulls the caption left into the cell's own padding on the
+     first line only, so a value that wraps continues at the padding edge and the column holds.
+     The width is set for the longest caption these tables carry (REACHED VIA), not for the longest
+     one imaginable; a table whose labels are sentences takes the plain stack above. */
+  table[data-pairs] tbody td { padding-left: 6rem; text-indent: -6rem; }
+  /* text-indent inherits, and it re-applies in every descendant that lays out its own lines. A
+     badge is display: inline-block, so it took the -6rem too and printed its own text six rems
+     to the left of itself — on top of the caption, leaving an empty pill behind. An inline
+     element has no first line of its own and ignores this, so resetting it on every descendant
+     costs nothing and catches the next inline-block a cell is given. */
+  table[data-pairs] tbody td * { text-indent: 0; }
+  /* No padding on this box: the universal reset at the top of this sheet does not match
+     pseudo-elements, so a padding here would be added OUTSIDE the 6rem and push the first line
+     past the indent while wrapped lines kept it. The gap is what is left of 6rem after the
+     longest caption. */
+  table[data-pairs] tbody td::before {
+    display: inline-block; width: 6rem; margin-bottom: 0; text-indent: 0;
+  }
+  table[data-pairs] tbody td + td { margin-top: var(--sp-2); }
+}
 
 /* ---------- badges ---------- */
 .badge {
@@ -319,27 +517,48 @@ td.primary a { font-weight: 550; padding-block: 3px; }
 .badge[data-tone="ok"]       { background: var(--tint-ok);       color: var(--ok); }
 
 /* ---------- filters ---------- */
+/* Six fields sized to what they hold, not to each other. auto-fit used to divide the row into
+   equal tracks, which gave a date field that can only ever say dd/mm/yyyy the same width as an
+   alert name, and re-cut the row at every width — 6 across here, an orphaned 4+3 there, with
+   Apply landing wherever the wrap dropped it. The tracks are declared instead, and the ladder
+   is a fixed 3-step one like the stat shelf. Both steps divide six evenly, which is the point:
+   from/to is one range and severity/state is one pair of enums, and on 6, 3 or 2 columns each
+   lands beside its partner instead of across a row break. */
 form.filters {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: var(--sp-3); align-items: end; margin: var(--sp-6) 0 var(--sp-6);
+  display: grid;
+  grid-template-columns: 9.5rem 9.5rem minmax(0, 1fr) minmax(0, 1fr) 8.5rem 8.5rem auto;
+  gap: var(--sp-3) var(--sp-3); align-items: end; margin: var(--sp-6) 0;
+}
+@container page (max-width: 62rem) {
+  form.filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  form.filters .actions { grid-column: 1 / -1; }
+}
+@container page (max-width: 34rem) {
+  form.filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 form.filters label {
   display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0;
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim);
 }
+/* One height for all three control types, and it is load-bearing rather than cosmetic. A date
+   input carries a picker button, a select carries a chevron, and a text input carries neither,
+   so each has a different intrinsic height; align-items: end then lined up their BOTTOMS and
+   left the captions above them on three different baselines. Declaring the height once puts
+   every caption and every control on the same two lines. */
 form.filters input, form.filters select {
   font: inherit; font-family: var(--font-ui); font-size: var(--fs-sm);
   text-transform: none; letter-spacing: 0; color: var(--text);
   background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); min-width: 0; width: 100%;
+  border-radius: var(--r-sm); padding: 0 var(--sp-3); min-width: 0; width: 100%;
+  height: 2.5rem; line-height: normal;
 }
 form.filters input::placeholder { color: var(--text-dim); opacity: .8; }
-form.filters .actions { display: flex; gap: var(--sp-3); align-items: center; }
+form.filters .actions { display: flex; gap: var(--sp-4); align-items: center; height: 2.5rem; }
 form.filters button {
   font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
   background: var(--accent); color: var(--on-accent); border: 0;
-  border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-4); white-space: nowrap;
+  border-radius: var(--r-sm); padding: 0 var(--sp-5); height: 2.5rem; white-space: nowrap;
 }
 
 /* ---------- sign-in ---------- */
@@ -398,8 +617,11 @@ form.signout button {
   border-left: var(--spine-w) solid var(--border-strong);
   border-radius: var(--r); padding: var(--sp-6);
 }
+/* The UI face, one step up in size with an open line-height and a 68ch measure. That is the
+   whole of what makes this read as prose — a paragraph is prose because of its measure and its
+   leading, not because of its serifs. */
 .prose-text {
-  font-family: var(--font-prose); font-size: var(--fs-md); line-height: 1.7;
+  font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.7;
   max-width: 68ch; white-space: pre-wrap; overflow-wrap: break-word; text-wrap: pretty;
 }
 .prose-text + .prose-text, .prose-text + .rca-list, .prose-text + .rca-code { margin-top: var(--sp-4); }
@@ -428,11 +650,18 @@ form.signout button {
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
 }
 .rca-fields dd { margin: 0; font-size: var(--fs-sm); min-width: 0; }
-/* Bulleted sections the template does not name. They keep the reading face — an unrecognised
+/* The same strip, promoted out of the sections that were carrying those two words in a panel
+   each (see rca.ts). It trails the analysis rather than leading it, because it is the verdict
+   the evidence above it earns — so it gets a rule above it and none of the leading strip's
+   bottom margin. */
+.rca-fields.verdicts {
+  margin: var(--sp-6) 0 0; padding-top: var(--sp-5); border-top: 1px solid var(--border);
+}
+/* Bulleted sections the template does not name. They keep the prose setting — an unrecognised
    section is still the agent's argument — but not the marker: the source already carries a •
    and re-adding a disc would double it. */
 .rca-list {
-  font-family: var(--font-prose); font-size: var(--fs-md); line-height: 1.7;
+  font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.7;
   max-width: 68ch; margin: 0; padding-left: var(--sp-5);
 }
 .rca-list li { margin-top: var(--sp-2); overflow-wrap: break-word; }
@@ -505,18 +734,80 @@ form.signout button {
 .title-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-6); }
 
 /* ---------- charts ---------- */
-.chart { width: 100%; height: auto; display: block; overflow: visible; }
-.chart-bar { fill: var(--text-dim); }
+/* HTML and CSS, not SVG. The markup carries only the bar heights, as percentages; every
+   proportion a reader sees is decided here. That is the whole reason it stopped being an
+   <svg viewBox>: a viewBox fixes the drawing's aspect ratio at authoring time AND scales the
+   type inside it, so one file had to serve a 900px hero and a 340px phone with the same shape —
+   a letterbox strip at one end and 4px axis labels at the other. Here the plot's height is a
+   clamp, the labels are ordinary text at the page's own caption size, and both answer to the
+   width of the chart's own frame. */
+.chart { margin: 0; display: flex; flex-direction: column; gap: var(--sp-3); container: chart / inline-size; }
+/* The columns come from --n on the figure, so the plot and the axis below it are two grids with
+   identical tracks — every tick stays under its own bar without either knowing the count.
+   The dashed hairline at half scale is a background gradient rather than an element: it is a
+   reading aid for the bars, and an empty <div> in the DOM would be a reading aid for nobody. */
+.chart-plot {
+  display: grid; grid-template-columns: repeat(var(--n, 12), minmax(0, 1fr));
+  gap: clamp(2px, 1.4cqi, 10px);
+  height: clamp(7rem, 30cqi, 14rem);
+  padding-top: 1.15rem;
+  border-bottom: 1px solid var(--border);
+  background-image: repeating-linear-gradient(to right, var(--border) 0 2px, transparent 2px 6px);
+  background-size: 100% 1px; background-position: 0 50%; background-repeat: no-repeat;
+}
+.chart-col { min-width: 0; height: 100%; display: flex; align-items: flex-end; }
+/* min-height keeps a small-but-real week visible instead of rounding it away to nothing; a week
+   that genuinely had no incidents opts out of it, because a bar where there were none is a lie. */
+.chart-bar {
+  position: relative; width: 100%; height: var(--h, 0%); min-height: 2px;
+  background: var(--text-dim); border-radius: 2px 2px 0 0;
+}
+.chart-bar[data-zero] { min-height: 0; background: none; }
 /* The last bar is the week in progress. Marking it is information, not decoration: without it
    the final column always reads as a collapse in incident volume. Drawn as an OUTLINE rather
    than in the accent colour — a saturated bar draws the eye to the one number that is not yet
    true, and an unfilled box is the shape of a count still being filled in. */
-.chart-bar-current { fill: none; stroke: var(--text-dim); stroke-width: 1.5; stroke-dasharray: 3 3; }
-.chart-rule { stroke: var(--border); stroke-width: 1; }
-.chart-rule-soft { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; }
-.chart-label, .chart-empty { fill: var(--text-dim); font-family: var(--font-data); font-size: 10px; }
-.chart-value { fill: var(--text-dim); font-family: var(--font-data); font-size: 10px; font-weight: 600; }
-.chart-empty { font-size: 12px; }
+.chart-bar[data-current] {
+  background: none;
+  border: 1.5px dashed var(--text-dim); border-bottom: 0;
+}
+.chart-value {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  margin-bottom: 3px; line-height: 1;
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  color: var(--text-dim);
+}
+.chart-axis {
+  display: grid; grid-template-columns: repeat(var(--n, 12), minmax(0, 1fr));
+  gap: clamp(2px, 1.4cqi, 10px);
+}
+.chart-tick {
+  font-family: var(--font-data); font-size: var(--fs-2xs); color: var(--text-dim);
+  text-align: center; line-height: 1.2; white-space: nowrap;
+  overflow: hidden; text-overflow: clip;
+}
+.chart-caption { font-family: var(--font-data); font-size: var(--fs-2xs); color: var(--text-dim); }
+/* Same height as a populated plot, so a dashboard that has just come up does not reflow the
+   moment its first incident lands. */
+.chart-blank {
+  grid-template-columns: minmax(0, 1fr); place-items: center; padding-top: 0;
+  background-image: none; border-bottom-style: dashed;
+  margin: 0; color: var(--text-dim); font-size: var(--fs-sm);
+}
+/* Thinning, in the order the reader can afford to lose things. The per-bar counts go first —
+   every one of them is in the tables below and each bar keeps its title= — which is what buys
+   the period labels room to stay legible. Then every second period label is hidden, counted
+   from the newest backwards in the markup so the week in progress is never the one that goes.
+   visibility, not display: the tick keeps its grid track, so the labels that remain stay
+   directly under their own bars instead of redistributing across the axis. */
+@container chart (max-width: 34rem) { .chart-value { display: none; } }
+@container chart (max-width: 26rem) {
+  .chart-tick[data-thin] { visibility: hidden; }
+  /* Every surviving label now has a hidden neighbour on each side, so it may spill into that
+     room. Without this it clips to its own track — half the width of a date — and a phone shows
+     an axis reading 05-1 06-0 06-2, which is worse than showing no axis at all. */
+  .chart-tick { overflow: visible; }
+}
 
 /* ---------- topology ---------- */
 /* Every box is drawn on the SAME fill, so there is exactly one text-on-background pair in the
@@ -538,7 +829,14 @@ form.signout button {
    no rule of their own by design — they are structural hooks, and giving them a colour is the
    mistake above. A tool family especially: the agent knows the server ADVERTISED it, not that
    calling it works, so any colour there would be a health claim the page cannot make.) */
-.topo { display: block; }
+/* The diagram carries its own sizing. It used to borrow .chart for this, back when the incident
+   chart was an <svg> too; .chart is now the flex wrapper around an HTML bar chart, and inheriting
+   it here meant an SVG getting display:flex, a gap, and container-type:inline-size — the last of
+   which contains the element's own contents out of its intrinsic sizing, so the viewBox's aspect
+   ratio stopped driving the height and the whole map collapsed to the replaced-element default.
+   height:auto is what lets the viewBox set the proportion; overflow:visible keeps the arrowheads
+   and the outermost stroke from being clipped at the edges of the box. */
+.topo { display: block; width: 100%; height: auto; overflow: visible; }
 .topo-dot { fill: var(--border); }
 .topo-cluster { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 5 5; }
 .topo-box { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.5; }
@@ -677,8 +975,9 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   form.filters button:hover, .signin-form button:hover { filter: brightness(1.1); }
   form.signout button:hover { color: var(--text); background: var(--surface-2); }
   .pages a:hover { border-color: var(--accent); color: var(--accent); }
-  .chart-bar:hover { fill: var(--text); }
-  .chart-bar-current:hover { fill: none; stroke: var(--text); }
+  .chart-col:hover .chart-bar { background: var(--text); }
+  .chart-col:hover .chart-bar[data-current] { background: none; border-color: var(--text); }
+  .chart-col:hover .chart-value { color: var(--text); }
 }
 
 /* ---------- responsive & motion ---------- */
@@ -719,16 +1018,8 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   :root { --gutter: max(var(--sp-4), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px)); }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
-  .hero { padding: var(--sp-5); }
-  .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
-  .stat { padding: var(--sp-4); }
   .prose { padding: var(--sp-4); }
   .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
-  /* An SVG scales with its viewBox, so a 10px caption in a 720-unit chart renders near 4px on
-     a phone. The per-bar counts go — every number is in the tables below, and each bar keeps
-     its <title> — which frees the top gutter and lets the period labels grow back to legible. */
-  .chart-value { display: none; }
-  .chart-label { font-size: 19px; }
   /* Neither half of the hint is true here: there is no cursor to drag with and no ctrl key to
      hold. The gesture a phone does have — one finger across the map — needs no instructions. */
   .topo-hint { display: none; }
