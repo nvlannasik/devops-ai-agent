@@ -16,6 +16,9 @@ export interface BackendSpec {
   model?: string;
   baseUrl?: string;
   apiKey?: string;
+  // Context window in tokens. Optional — defaults by kind in resolve-budget.ts. Set it when a
+  // self-hosted model's window is not the kind's default (a 128k private LLM, say).
+  contextTokens?: number;
 }
 
 export interface Registry {
@@ -83,6 +86,14 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
       baseUrl: env[`LLM_BACKEND_${i}_BASE_URL`]?.trim(),
       apiKey: env[`LLM_BACKEND_${i}_KEY`]?.trim(),
     };
+    const rawWindow = env[`LLM_BACKEND_${i}_CONTEXT_TOKENS`]?.trim();
+    if (rawWindow) {
+      const n = Number(rawWindow);
+      if (!Number.isSafeInteger(n) || n <= 0) {
+        throw new Error(`LLM_BACKEND_${i}_CONTEXT_TOKENS must be a positive integer, got ${JSON.stringify(rawWindow)}`);
+      }
+      spec.contextTokens = n;
+    }
     assertFields(spec, i);
     backends.push(spec);
   }
