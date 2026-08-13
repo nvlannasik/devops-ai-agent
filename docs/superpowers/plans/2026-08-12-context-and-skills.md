@@ -2056,7 +2056,7 @@ git commit -m "refactor(prompts): playbooks and RCA format now live only in prom
 - Create: `src/dashboard/context.ts`, `src/dashboard/context.test.ts`
 
 **Interfaces:**
-- Consumes: the `SkillView` shape from Task 8 — **redeclared here, deliberately not imported**, the same seam `McpTool` uses in `topology.ts` so neither side owns the other's types; `estimateTokens`, `BUDGET_SAFETY_MARGIN`, `DEFAULT_CONTEXT_TOKENS` (Task 4); `parseRegistry` (Task 7); `buildStaticSystemPrompt()`; `config`.
+- Consumes: the `SkillView` shape from Task 8 — **redeclared here, deliberately not imported**, the same seam `McpTool` uses in `topology.ts` so neither side owns the other's types; `estimateTokens`, `BUDGET_SAFETY_MARGIN` (Task 4); `windowOf` (Task 7); `parseRegistry` and the `BackendSpec`/`BackendKind` types (`agent/llm/registry.ts`); `buildStaticSystemPrompt()`; `config`.
 - Produces:
   ```ts
   export interface SkillView { name: string; description: string; when: string; chars: number; body: string }
@@ -2067,8 +2067,17 @@ git commit -m "refactor(prompts): playbooks and RCA format now live only in prom
     backends: BackendBudget[];
     effective: { backend: string; available: number };
   }
-  export function buildContextView(skills: readonly SkillView[], toolCount: number, toolsJson: string): ContextView;
+  export function backendSpecs(provider: string, env: NodeJS.ProcessEnv): BackendSpec[];
+  export function buildContextView(
+    skills: readonly SkillView[],
+    toolCount: number,
+    toolsJson: string,
+    specs?: readonly BackendSpec[]   // defaults to backendSpecs(config.llm.provider, process.env)
+  ): ContextView;
   ```
+
+  Task 11 calls `buildContextView` with three arguments and must keep doing so — the fourth is a
+  test seam with a production default, not a parameter the route supplies.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2077,7 +2086,7 @@ Create `src/dashboard/context.test.ts`:
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildContextView } from "./context.js";
+import { buildContextView, backendSpecs } from "./context.js";
 
 const skills = [
   { name: "rca-format", description: "The RCA shape", when: "always", chars: 1800, body: "*Root Cause*" },
@@ -2116,6 +2125,46 @@ test("the effective budget names the smallest backend", () => {
   assert.equal(v.effective.backend, smallest.name);
   assert.equal(v.effective.available, smallest.available);
 });
+
+// The three above run on whatever single backend the test env configures, so none of them can see
+// a second row. These drive the specs in directly.
+test("every backend gets its own row, and the smallest window governs", () => {
+  const v = buildContextView(skills, 0, "[]", [
+    { name: "light", kind: "openai-compatible", model: "qwen3-32b", contextTokens: 32_000 },
+    { name: "heavy", kind: "claude", model: "claude-opus-5", contextTokens: 200_000 },
+  ]);
+  assert.deepEqual(v.backends.map((b) => b.name), ["light", "heavy"]);
+  assert.equal(v.backends[0]!.window, 32_000);
+  assert.equal(v.backends[1]!.window, 200_000);
+  // Hand-computed rather than re-derived with the implementation's own reduce: a test that
+  // recomputes the comparison the same way passes even when the comparison is backwards.
+  assert.equal(v.effective.backend, "light");
+  assert.equal(v.effective.available, 32_000 - v.backends[0]!.reserve - v.core.tokens);
+});
+
+test("a router registry contributes one spec per backend", () => {
+  const specs = backendSpecs("router", {
+    LLM_BACKEND_1_NAME: "light", LLM_BACKEND_1_KIND: "openai-compatible",
+    LLM_BACKEND_1_MODEL: "qwen3-32b", LLM_BACKEND_1_KEY: "x",
+    LLM_BACKEND_1_BASE_URL: "http://vllm", LLM_BACKEND_1_CONTEXT_TOKENS: "32000",
+    LLM_BACKEND_2_NAME: "heavy", LLM_BACKEND_2_KIND: "claude",
+    LLM_BACKEND_2_MODEL: "claude-opus-5", LLM_BACKEND_2_KEY: "y",
+    LLM_ROUTE_HEAVY: "heavy",
+  });
+  assert.deepEqual(specs.map((s) => s.name), ["light", "heavy"]);
+  assert.equal(specs[0]!.contextTokens, 32_000);
+});
+
+// A registry that will not parse is a degraded page, not a 500. parseRegistry throws on an empty
+// env ("router requires at least LLM_BACKEND_1_NAME"), which is the cheapest way to reach the catch.
+test("a registry that will not parse degrades to one row", () => {
+  assert.deepEqual(backendSpecs("router", {}).map((s) => s.name), ["router"]);
+});
+
+// Not "router", so the registry is never consulted at all — the env below would throw if it were.
+test("a single-provider deployment never parses a registry", () => {
+  assert.deepEqual(backendSpecs("claude", { LLM_BACKEND_1_NAME: "nope" }).map((s) => s.name), ["claude"]);
+});
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
@@ -2133,9 +2182,9 @@ Create `src/dashboard/context.ts`:
 
 ```ts
 import { buildStaticSystemPrompt } from "../agent/prompts/system.js";
-import { estimateTokens, BUDGET_SAFETY_MARGIN, DEFAULT_CONTEXT_TOKENS } from "../agent/context/budget.js";
+import { estimateTokens, BUDGET_SAFETY_MARGIN } from "../agent/context/budget.js";
 import { windowOf } from "../agent/context/resolve-budget.js";
-import { parseRegistry } from "../agent/llm/registry.js";
+import { parseRegistry, type BackendSpec, type BackendKind } from "../agent/llm/registry.js";
 import { config } from "../config/index.js";
 
 // The dashboard's own shape, like McpTool in topology.ts: strings and numbers only, so neither
@@ -2170,10 +2219,33 @@ export interface ContextView {
  * Everything on /context, computed from config and the in-memory registry. Reads no database and
  * makes no call, which is what lets the page render while Postgres is down.
  */
+/**
+ * The backends whose windows this page reports.
+ *
+ * Both inputs are parameters rather than reads off `config` and `process.env`, because
+ * `config.llm.provider` is frozen when `config/index.ts` is imported: nothing a test does later can
+ * make `buildContextView` take the router branch. Left inline, the branch and its catch are
+ * unreachable from any test, and deleting the whole ternary keeps the suite green.
+ */
+export function backendSpecs(provider: string, env: NodeJS.ProcessEnv): BackendSpec[] {
+  // The same single-spec shape resolve-budget.ts:33 builds for its no-registry branch, cast the
+  // same way. windowOf's second `??` is what catches an unrecognised provider: it lands on the
+  // conservative private-llm window instead of assuming 200k.
+  const single: BackendSpec[] = [{ name: provider, kind: provider as BackendKind }];
+  // Same fallback topology.ts makes for its registryError: a registry that will not parse is
+  // worth a degraded page, not a 500 — and this page is where an operator would go to see why.
+  try {
+    return provider === "router" ? parseRegistry(env).backends : single;
+  } catch {
+    return single;
+  }
+}
+
 export function buildContextView(
   skills: readonly SkillView[],
   toolCount: number,
-  toolsJson: string
+  toolsJson: string,
+  specs: readonly BackendSpec[] = backendSpecs(config.llm.provider, process.env)
 ): ContextView {
   const prompt = buildStaticSystemPrompt();
   const core = {
@@ -2183,21 +2255,6 @@ export function buildContextView(
   };
   const toolTokens = toolCount > 0 ? estimateTokens(toolsJson) : 0;
   const reserve = config.llm.maxTokens + BUDGET_SAFETY_MARGIN;
-
-  const single = [{
-    name: config.llm.provider,
-    kind: config.llm.provider as keyof typeof DEFAULT_CONTEXT_TOKENS,
-    model: undefined as string | undefined,
-    contextTokens: undefined as number | undefined,
-  }];
-  // Same fallback topology.ts makes for its registryError: a registry that will not parse is
-  // worth a degraded page, not a 500 — and this page is where an operator would go to see why.
-  let specs;
-  try {
-    specs = config.llm.provider === "router" ? parseRegistry(process.env).backends : single;
-  } catch {
-    specs = single;
-  }
 
   const backends: BackendBudget[] = specs.map((s) => {
     // windowOf from Task 7, not a second copy of its body. This page has to report the same
