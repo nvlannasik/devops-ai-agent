@@ -2468,20 +2468,41 @@ Add `import type { ContextView } from "./context.js";` to the imports at the top
 
 - [ ] **Step 5: Style the disclosure**
 
-In `src/dashboard/styles.ts`, add near the other table rules (outside any container query — this applies at every width):
+In `src/dashboard/styles.ts`, immediately after the existing
 
 ```css
-/* A playbook is preformatted text in a table cell. Without these two, one long PromQL line
-   pushes the whole page sideways at 390px — and `pre` does not wrap by default. */
+details > summary > span { margin-left: .35em; }
+```
+
+(the tool-list disclosure block, currently `styles.ts:952-955` — **not** "near the table rules";
+the disclosure rules live with the tool list). Outside any container query — this applies at every
+width:
+
+```css
+/* A playbook is preformatted text in a table cell. Without this, one long PromQL line pushes the
+   whole page sideways at 390px — `pre` does not wrap by default. */
 td details > pre {
   white-space: pre-wrap;
   overflow-x: auto;
-  margin: .5rem 0 0;
-  font-size: .82rem;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
-td details > summary { cursor: pointer; }
 ```
+
+That is the whole addition — **one rule, not two.**
+
+Do NOT add `td details > summary { cursor: pointer; }`. `styles.ts:954` already declares
+`details > summary { cursor: pointer; font-weight: 550; }`, which every `<summary>` on this page
+already matches; a `td`-scoped copy sets a property that is already set to the same value and
+silently drops the `font-weight` its neighbour carries, so the playbook summaries would be the one
+disclosure on the dashboard rendered at a different weight.
+
+Use the tokens, not raw lengths: `--fs-sm` is `.8125rem` and `--sp-2` is `.5rem` (both declared at
+`styles.ts:31` and `:42`), so this is the same rendered size the literals would have given. The
+file carries exactly five hardcoded `font-size` literals in ~1000 lines — the scale is the
+convention, and a `.82rem` that merely *looks* like `--fs-sm` is the kind of near-miss that stops
+tracking when the scale moves.
 
 Remember `STYLES` is a template literal — do not introduce a backtick.
 
