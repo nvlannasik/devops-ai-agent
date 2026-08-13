@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildContextView } from "./context.js";
+import { buildContextView, backendSpecs } from "./context.js";
 
 const skills = [
   { name: "rca-format", description: "The RCA shape", when: "always", chars: 1800, body: "*Root Cause*" },
@@ -38,4 +38,44 @@ test("the effective budget names the smallest backend", () => {
   const smallest = v.backends.reduce((a, b) => (b.available < a.available ? b : a));
   assert.equal(v.effective.backend, smallest.name);
   assert.equal(v.effective.available, smallest.available);
+});
+
+// The three above run on whatever single backend the test env configures, so none of them can see
+// a second row. These drive the specs in directly.
+test("every backend gets its own row, and the smallest window governs", () => {
+  const v = buildContextView(skills, 0, "[]", [
+    { name: "light", kind: "openai-compatible", model: "qwen3-32b", contextTokens: 32_000 },
+    { name: "heavy", kind: "claude", model: "claude-opus-5", contextTokens: 200_000 },
+  ]);
+  assert.deepEqual(v.backends.map((b) => b.name), ["light", "heavy"]);
+  assert.equal(v.backends[0]!.window, 32_000);
+  assert.equal(v.backends[1]!.window, 200_000);
+  // Hand-computed rather than re-derived with the implementation's own reduce: a test that
+  // recomputes the comparison the same way passes even when the comparison is backwards.
+  assert.equal(v.effective.backend, "light");
+  assert.equal(v.effective.available, 32_000 - v.backends[0]!.reserve - v.core.tokens);
+});
+
+test("a router registry contributes one spec per backend", () => {
+  const specs = backendSpecs("router", {
+    LLM_BACKEND_1_NAME: "light", LLM_BACKEND_1_KIND: "openai-compatible",
+    LLM_BACKEND_1_MODEL: "qwen3-32b", LLM_BACKEND_1_KEY: "x",
+    LLM_BACKEND_1_BASE_URL: "http://vllm", LLM_BACKEND_1_CONTEXT_TOKENS: "32000",
+    LLM_BACKEND_2_NAME: "heavy", LLM_BACKEND_2_KIND: "claude",
+    LLM_BACKEND_2_MODEL: "claude-opus-5", LLM_BACKEND_2_KEY: "y",
+    LLM_ROUTE_HEAVY: "heavy",
+  });
+  assert.deepEqual(specs.map((s) => s.name), ["light", "heavy"]);
+  assert.equal(specs[0]!.contextTokens, 32_000);
+});
+
+// A registry that will not parse is a degraded page, not a 500. parseRegistry throws on an empty
+// env ("router requires at least LLM_BACKEND_1_NAME"), which is the cheapest way to reach the catch.
+test("a registry that will not parse degrades to one row", () => {
+  assert.deepEqual(backendSpecs("router", {}).map((s) => s.name), ["router"]);
+});
+
+// Not "router", so the registry is never consulted at all — the env below would throw if it were.
+test("a single-provider deployment never parses a registry", () => {
+  assert.deepEqual(backendSpecs("claude", { LLM_BACKEND_1_NAME: "nope" }).map((s) => s.name), ["claude"]);
 });
