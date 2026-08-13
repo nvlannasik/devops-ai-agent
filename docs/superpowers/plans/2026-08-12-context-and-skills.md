@@ -2019,11 +2019,16 @@ Then append this pointer where the RCA section used to be, so the core prompt st
 ```markdown
 ## RCA Output Format
 
-The exact section labels, the Slack mrkdwn rules and the worked template arrive as a skill in the
-first user message. Follow them verbatim — they are what the Slack renderer and the dashboard
+The exact section labels, the Slack mrkdwn rules and the worked template arrive as a skill in the first user message. Follow them verbatim — they are what the Slack renderer and the dashboard
 parse. If no such skill is present, still answer with `*📍 Root Cause*`, `*📊 Evidence*` and
 `*🔧 Recommended Actions*` sections.
 ```
+
+That first line is deliberately long and must NOT be rewrapped. `prompts/system.md` is read raw and
+never reflowed, so a hard wrap between "in the" and "first" puts a newline inside the phrase Step 1
+asserts with a literal space — `/arrive as a skill in the first user message/` then cannot match its
+own pointer block, and this task fails a test it wrote itself. Wrapping anywhere else in the
+paragraph is fine; wrapping inside that phrase is not.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2292,9 +2297,16 @@ test("a skill body is readable without leaving the page", () => {
   assert.match(html, /<pre>1\. k8s_describe_pod<\/pre>/);
 });
 
+// Both "light" and "10,746" also appear in the budget table's own row for that backend, so
+// matching them anywhere on the page passes with the statement deleted — which is the whole
+// behaviour under test. Pin the sentence, on whitespace-flattened HTML so the template literal's
+// indentation cannot break the match.
 test("the effective budget is stated, not left to be inferred from the table", () => {
-  assert.match(contextPage(CTX), /light/);
-  assert.match(contextPage(CTX), /10,?746/);
+  const flat = contextPage(CTX).replace(/\s+/g, " ");
+  assert.match(
+    flat,
+    /built to fit <code translate="no">light<\/code>, the smallest window — about 10,746 tokens/
+  );
 });
 
 // Assert the escaped form is PRESENT — asserting the raw form is absent passes on a blank page.
@@ -2369,7 +2381,10 @@ const NAV = [
 Append to `src/dashboard/views.ts`:
 
 ```ts
-const num = (n: number): string => n.toLocaleString("en-US");
+// Numbers go through `fmtInt`, already imported at the top of views.ts (line 1) and used twenty
+// times below. Do NOT add a local `const num = (n) => n.toLocaleString("en-US")` — that is
+// html.ts:32-34 rewritten, in the one file that already imports the original, and it would put a
+// function named `num` beside the CSS class named "num" that these very cells pass.
 
 // A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
 // stack rather than pairs. The body hangs off the description in a <details>: native disclosure,
@@ -2387,7 +2402,7 @@ function skillRows(skills: ContextView["skills"]): string {
         cell("When", s.when === "always"
           ? `<span class="badge">ALWAYS</span>`
           : `<code translate="no">${esc(s.when)}</code>`) +
-        cell("Size", `${num(s.chars)} chars`) +
+        cell("Size", `${fmtInt(s.chars)} chars`) +
         cell("Description",
           `<details><summary>${esc(s.description)}</summary><pre>${esc(s.body)}</pre></details>`) +
         `</tr>`
@@ -2406,11 +2421,13 @@ function budgetRows(backends: ContextView["backends"]): string {
         `<tr role="row">` +
         cell("Backend", `<code translate="no">${esc(b.name)}</code>`) +
         cell("Model", `<code translate="no">${esc(b.model)}</code>`) +
-        cell("Window", num(b.window)) +
-        cell("Reserve", num(b.reserve)) +
-        cell("Core", num(b.core)) +
-        cell("Tools", num(b.tools)) +
-        cell("Available", num(b.available)) +
+        // "num" is the class every other numeric cell in this file carries (see the Token usage
+        // table, views.ts:273-276) — also a `pairs` table, so the combination is already proven.
+        cell("Window", fmtInt(b.window), "num") +
+        cell("Reserve", fmtInt(b.reserve), "num") +
+        cell("Core", fmtInt(b.core), "num") +
+        cell("Tools", fmtInt(b.tools), "num") +
+        cell("Available", fmtInt(b.available), "num") +
         `</tr>`
       )
       .join(""),
@@ -2426,8 +2443,8 @@ export function contextPage(v: ContextView): string {
        has to say it. Read from the running process — no database, no call leaves it.</p>
 
      ${section(ICON.layers, "Core prompt")}
-     <p class="meta"><code translate="no">prompts/system.md</code> — ${num(v.core.lines)} lines,
-       ${num(v.core.chars)} chars, about ${num(v.core.tokens)} tokens. Sent on every iteration of
+     <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
+       ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
        every investigation.</p>
 
      ${section(ICON.context, "Skills")}
@@ -2438,7 +2455,7 @@ export function contextPage(v: ContextView): string {
 
      ${section(ICON.chip, "Budget per backend")}
      <p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
-       the smallest window — about ${num(v.effective.available)} tokens for skills and conversation.
+       the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
        The router picks a backend after the request is assembled, so the request has to fit the
        smallest one it might land in.</p>
      ${budgetRows(v.backends)}`,
@@ -2561,7 +2578,17 @@ git commit -m "feat(dashboard): read-only /context page for the skill registry a
 
 - [ ] **Step 1: Update `CLAUDE.md`**
 
-Add to the architecture section, after the existing context/prompt notes:
+`CLAUDE.md` has four sections — `## Commands`, `## Conventions`, `## Gotchas (see
+MEMORY_BANK.md for the full list)`, `## Working style` — and no architecture section. These four
+bullets go in `## Gotchas`, immediately after the existing one-liner
+
+```markdown
+- **System prompt** lives in `prompts/system.md` — editable without rebuild.
+```
+
+which is the note they extend. Leave the `**History trimming:**` bullet above it alone: it is still
+true — `memory/index.ts` still calls `trimToWindow` on every append, and that is a different window
+from the budget (a message cap on what Redis stores, not a token cap on what is sent).
 
 ```markdown
 - **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
@@ -2585,7 +2612,50 @@ Add to the architecture section, after the existing context/prompt notes:
 
 - [ ] **Step 2: Update `MEMORY_BANK.md`**
 
-Add a section describing: the three-module split (`skills/`, `context/budget.ts`, `context/compact.ts`); the twelve playbooks + `rca-format` file list; why the Tool Usage Reference stayed in the core prompt; the `/context` page's two tables and which narrow layout each takes and why; and the empty-skills-directory boot error and the reasoning behind it. Match the file's existing voice — reasons, not restated code.
+Add one `###` subsection titled **`### Context Assembly & Skills`** at the END of the existing
+`## Key Design Decisions` section — i.e. immediately before the `## LLM Providers` heading, so it
+sits with the other design rationale rather than starting a fifteenth top-level section. Match the
+file's existing voice: **reasons, not restated code.** Every claim below is load-bearing and none of
+it is derivable from reading the diff — that is why it is written down.
+
+Cover exactly these five, one short paragraph or bullet each:
+
+1. **The three-module split.** `src/agent/skills/` owns *what content exists and when it applies*;
+   `context/budget.ts` owns *how much fits*; `context/compact.ts` owns *how much a single tool
+   result is allowed to cost*. They are separate because they fail separately: a malformed skill is
+   a boot error, an oversized request is a runtime trim, and a noisy tool result is neither.
+2. **The file list:** twelve failure-mode playbooks plus `rca-format`, in `prompts/skills/`. Note
+   that `rca-format` is `when: always` and the twelve are regex-gated on the alert text.
+3. **Why `## Tool Usage Reference` stayed in the core prompt** while the playbooks moved out: a
+   trigger built from alert text cannot know whether a PromQL query is coming, so gating the query
+   cookbook on the alert text removes it exactly when it is needed. Availability beats budget for
+   that one section.
+4. **The `/context` page's two tables** and the narrow layout each takes: skills → `"stack"`
+   (descriptions are sentences), backend budgets → `"pairs"` (every value is a short number). State
+   the rule that chose them — **what the cells hold, not how many there are** — because that is the
+   part a future editor gets wrong.
+5. **The empty-skills-directory boot error.** `loadSkills` throws when the directory holds no `.md`
+   files, and the reason is in the message: an agent with no skills has no RCA output format, so it
+   would investigate correctly and then answer in a shape the Slack renderer and
+   `src/dashboard/rca.ts` cannot parse. Failing at boot beats failing per-incident.
+
+- [ ] **Step 2b: Fix the one comment this branch made stale**
+
+`src/agent/memory/index.ts:38-40` still explains its trim by referring to `trimHistory`, the agent
+method Task 8 deleted. Change the third comment line
+
+```ts
+    // orphan a tool_result, which the trimHistory window then assumes never happens
+```
+
+to
+
+```ts
+    // orphan a tool_result, which every later stage then assumes never happens
+```
+
+Nothing else in that file changes. It is a comment naming a function that no longer exists, in the
+one file a reader lands in while asking why there are two different trims.
 
 - [ ] **Step 3: Verify the whole suite and the build one last time**
 
@@ -2597,15 +2667,15 @@ npm --prefix /Users/annasik/riset/devops-ai-agent run build 2>&1 | tail -10
 
 Expected: all tests pass, build clean.
 
-- [ ] **Step 4: Refresh the knowledge graph**
+- [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/annasik/riset && graphify update .
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add CLAUDE.md MEMORY_BANK.md
+git add CLAUDE.md MEMORY_BANK.md src/agent/memory/index.ts
 git commit -m "docs: context assembly, skills and the /context page"
 ```
+
+Refreshing the knowledge graph (`graphify update .`, run from `/Users/annasik/riset`) is
+deliberately NOT a step here. It scans the whole multi-repo workspace, and the final whole-branch
+review still comes after this task — a graph built now is stale before the branch lands. It is the
+branch-end action, run once after the review, and it is not this implementer's to judge if it
+fails.
