@@ -1972,7 +1972,11 @@ import { buildStaticSystemPrompt } from "../prompts/system.js";
 test("the moved sections are gone from the system prompt and live only in skills", () => {
   const prompt = buildStaticSystemPrompt();
   assert.doesNotMatch(prompt, /## Failure Mode Playbooks/);
-  assert.doesNotMatch(prompt, /## RCA Output Format/);
+  // NOT the heading: Step 3 deliberately leaves a `## RCA Output Format` pointer behind, so
+  // asserting the heading is absent would make this task fail its own test. What must be gone is
+  // the template — the worked example the skill now carries.
+  assert.doesNotMatch(prompt, /\*📈 Confidence:\*/);
+  assert.match(prompt, /arrive as a skill in the first user message/, "the pointer was deleted too");
   assert.doesNotMatch(prompt, /### CrashLoopBackOff/);
 
   const bodies = loadSkills(resolveSkillsDir()).all().map((s) => s.body).join("\n");
@@ -2002,7 +2006,13 @@ From `prompts/system.md`, delete:
 - Lines 106–185 inclusive — the `## Failure Mode Playbooks` heading, its one-line intro, and all twelve `### …` playbooks, up to but NOT including `## Tool Usage Reference`.
 - Lines 302–348 inclusive — the `## RCA Output Format` heading and everything under it to end of file.
 
-  `prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is `*📈 Confidence:* ...`, the last line of the RCA template. Count with `awk 'END{print NR}'`, not `wc -l`; a delete that stops at 347 orphans that line in the middle of the prompt. It is the same range Task 3 copied into `prompts/skills/rca-format.md`, so verify `grep -c Confidence prompts/system.md` returns 0 after the delete.
+  `prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is `*📈 Confidence:* ...`, the last line of the RCA template. Count with `awk 'END{print NR}'`, not `wc -l`; a delete that stops at 347 orphans that line in the middle of the prompt. It is the same range Task 3 copied into `prompts/skills/rca-format.md`, so verify `grep -c '📈 Confidence' prompts/system.md` returns 0 after the delete.
+
+  Use that emoji-qualified pattern, not a bare `grep -c Confidence`, which returns **2** after a
+  correct delete: `## Confidence Scoring` (line 272) and a prose mention inside `## Execution &
+  Remediation` (line 296) both sit ABOVE the deleted range and must survive it. They are not part
+  of the RCA template. An implementer that chases a bare count down to 0 deletes a section this
+  task was never meant to touch.
 
 Then append this pointer where the RCA section used to be, so the core prompt still names the contract it no longer carries:
 
@@ -2020,10 +2030,11 @@ parse. If no such skill is present, still answer with `*📍 Root Cause*`, `*�
 ```bash
 export PATH=~/.nvm/versions/node/v24.16.0/bin:$PATH
 npm --prefix /Users/annasik/riset/devops-ai-agent test 2>&1 | tail -20
-wc -l /Users/annasik/riset/devops-ai-agent/prompts/system.md
+awk 'END{print NR}' /Users/annasik/riset/devops-ai-agent/prompts/system.md
 ```
 
-Expected: PASS, and `system.md` is roughly 270 lines.
+Expected: PASS, and `system.md` is roughly 228 lines: 348 − 80 (lines 106–185) − 47 (lines
+302–348) = 221, plus the 7-line pointer block appended in Step 3.
 
 - [ ] **Step 5: Commit**
 
@@ -2084,6 +2095,11 @@ test("every backend gets a row, and available is what is left for conversation",
   assert.ok(v.backends.length >= 1);
   for (const b of v.backends) {
     assert.equal(b.available, b.window - b.reserve - b.core - b.tools);
+    // That identity is self-consistent and survives the behaviour being deleted: it still holds
+    // when the core prompt and the tool schemas are dropped from BOTH sides and reported as 0.
+    // Pin them to the real numbers, or the row can claim a window nothing is subtracted from.
+    assert.equal(b.core, v.core.tokens);
+    assert.ok(b.tools > 0, "the tool schemas are not counted against the window");
   }
 });
 
@@ -2113,6 +2129,7 @@ Create `src/dashboard/context.ts`:
 ```ts
 import { buildStaticSystemPrompt } from "../agent/prompts/system.js";
 import { estimateTokens, BUDGET_SAFETY_MARGIN, DEFAULT_CONTEXT_TOKENS } from "../agent/context/budget.js";
+import { windowOf } from "../agent/context/resolve-budget.js";
 import { parseRegistry } from "../agent/llm/registry.js";
 import { config } from "../config/index.js";
 
@@ -2178,7 +2195,10 @@ export function buildContextView(
   }
 
   const backends: BackendBudget[] = specs.map((s) => {
-    const window = s.contextTokens ?? DEFAULT_CONTEXT_TOKENS[s.kind] ?? DEFAULT_CONTEXT_TOKENS["private-llm"];
+    // windowOf from Task 7, not a second copy of its body. This page has to report the same
+    // window the agent actually budgets to; a duplicated default-by-kind chain diverges the day a
+    // kind's default moves, and the page whose whole job is showing the budget shows the wrong one.
+    const window = windowOf(s);
     return {
       name: s.name,
       model: s.model ?? "—",
@@ -2195,14 +2215,17 @@ export function buildContextView(
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 4: Run the tests and the build**
 
 ```bash
 export PATH=~/.nvm/versions/node/v24.16.0/bin:$PATH
 npm --prefix /Users/annasik/riset/devops-ai-agent test 2>&1 | tail -20
+npm --prefix /Users/annasik/riset/devops-ai-agent run build 2>&1 | tail -20
 ```
 
-Expected: PASS.
+Expected: both PASS. `npm test` runs under tsx, which strips types without checking them, and this
+file exports the three interfaces Task 11 renders from — a type error has to surface here, not in
+Task 11's diff.
 
 - [ ] **Step 5: Commit**
 
