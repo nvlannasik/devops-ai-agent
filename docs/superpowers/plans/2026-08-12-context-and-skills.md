@@ -2345,6 +2345,17 @@ test("only the session routes accept a non-GET method", () => {
 
 Add `METHODS` to that file's existing `./server.js` import. `matchRoute` is already exported (`server.ts:26`); `METHODS` is not — Step 6 exports it.
 
+Also add the new page to the `everyPage()` fixture in `views.test.ts` (currently `:679`), which is
+what applies the section-glyph and decorative-icon contracts to every page at once:
+
+```ts
+  ["context", contextPage(CTX)],
+```
+
+Its comment says a glyph forgotten on one page fails here; a page left out of the list is a page
+that contract never reaches. `CTX` is declared further down the file — that is fine, `everyPage`
+is a function and runs after the module has evaluated.
+
 - [ ] **Step 2: Run it and watch it fail**
 
 ```bash
@@ -2375,6 +2386,20 @@ const NAV = [
   { href: "/context", label: "Context", icon: ICON.context },
 ];
 ```
+
+A fourth destination breaks two assertions already in `views.test.ts` that count the rail — this
+is the nav's own contract widening, not a regression, so update them in the same step:
+
+- the loop in "the rail lists every destination" (`views.test.ts:657`) gains its pair:
+
+```ts
+  for (const [href, label] of [["/", "Overview"], ["/incidents", "Incidents"], ["/topology", "Topology"], ["/context", "Context"]]) {
+```
+
+- "every icon is decorative and every label stays in the markup" (`:665`) counts icons and labels
+  against a literal `4`; both become `5`, and the assertion message becomes `"four destinations
+  and the sign-out button"`. Leaving the message at "three" would describe a rail that no longer
+  exists, and the next person reading the failure would trust the message over the number.
 
 - [ ] **Step 4: Add `contextPage`**
 
@@ -2480,7 +2505,7 @@ width:
 
 ```css
 /* A playbook is preformatted text in a table cell. Without this, one long PromQL line pushes the
-   whole page sideways at 390px — `pre` does not wrap by default. */
+   whole page sideways at 390px — a pre element does not wrap by default. */
 td details > pre {
   white-space: pre-wrap;
   overflow-x: auto;
@@ -2504,7 +2529,10 @@ file carries exactly five hardcoded `font-size` literals in ~1000 lines — the 
 convention, and a `.82rem` that merely *looks* like `--fs-sm` is the kind of near-miss that stops
 tracking when the scale moves.
 
-Remember `STYLES` is a template literal — do not introduce a backtick.
+Remember `STYLES` is a template literal — do not introduce a backtick. That includes the comment:
+copy it as the plain words above. Markdown formatting around a word here is this document's, not
+the CSS's, and a backtick that survives the copy terminates `STYLES` mid-file — every module that
+imports it then fails to parse, so the topology tests fail too and the cause looks unrelated.
 
 - [ ] **Step 6: Add the route and the handler**
 
