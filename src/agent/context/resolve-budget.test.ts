@@ -29,6 +29,30 @@ test("without a registry the single provider's kind decides", () => {
   assert.equal(b.contextTokens, 200_000);
 });
 
+// Why every caller must pass the parsed registry when the provider is "router", never null:
+// "router" is not a BackendKind, so windowOf falls through its last `??` to the 32k private-llm
+// default and the same config that resolves to 128k with a registry blows up without one. The
+// error even names a backend that does not exist. See src/agent/index.ts:134-142.
+test("a router provider with no registry collapses to the 32k floor and can throw", () => {
+  const overheadTokens = 7_528; // prompts/system.md as it stands
+  assert.equal(
+    resolveBudget({ registry: null, provider: "router", maxTokens: 8096, overheadTokens }).contextTokens,
+    32_000
+  );
+  assert.throws(
+    () => resolveBudget({ registry: null, provider: "router", maxTokens: 23_448, overheadTokens }),
+    /backend "router"/
+  );
+  // The same MAX_TOKENS against the real registry is comfortable — the null was the whole problem.
+  assert.equal(
+    resolveBudget({
+      registry: reg({ name: "sonnet", kind: "claude" }, { name: "chatgpt", kind: "openai-compatible" }),
+      provider: "router", maxTokens: 23_448, overheadTokens,
+    }).contextTokens,
+    128_000
+  );
+});
+
 // A window that cannot hold the system prompt and the tool schemas is a misconfiguration, and it
 // should surface at deploy time rather than during an incident.
 test("throws when the smallest window cannot fit the prompt, the tools and the reserve", () => {

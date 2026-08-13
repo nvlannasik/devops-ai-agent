@@ -131,9 +131,15 @@ export class DevOpsAgent {
     for (const s of this.skills.all()) {
       logger.info(`[skills] ${s.name} (${s.chars} chars, when=${s.when === "always" ? "always" : s.when.source}) — ${s.description}`);
     }
-    // Provisional: tools are unknown until MCP connects, so initialize() recomputes it.
+    // Provisional: tools are unknown until MCP connects, so initialize() recomputes it. The
+    // registry is parsed here too, exactly as initialize() does — passing null instead made a
+    // `router` deployment resolve its own provider name as a BackendKind, fall through windowOf's
+    // last `??` to the 32k private-llm default, and throw at construction for any MAX_TOKENS at or
+    // above 23448, naming a backend "router" that does not exist. Nothing reads this value (both
+    // reads run after initialize()), so the only thing the null could still do was kill the pod.
     this.budget = resolveBudget({
-      registry: null, provider: config.llm.provider,
+      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      provider: config.llm.provider,
       maxTokens: config.llm.maxTokens, overheadTokens: estimateTokens(buildStaticSystemPrompt()),
     });
   }
