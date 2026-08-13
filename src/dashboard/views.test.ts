@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage, contextPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { STYLES } from "./styles.js";
 import type { IncidentDetail, IncidentPage, IncidentRow, Overview, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
+import type { ContextView } from "./context.js";
 
 // The shape queries.list() hands the page. The defaults are the ordinary case — one short
 // page, counted exactly — so a test that is not about pagination does not have to state a
@@ -653,7 +654,7 @@ test("the rail carries every destination as an icon beside a text label", () => 
   const html = layout("Test", "<p>hi</p>");
   assert.match(html, /<header class="rail">/);
   assert.match(html, /<nav aria-label="Primary">/);
-  for (const [href, label] of [["/", "Overview"], ["/incidents", "Incidents"], ["/topology", "Topology"]]) {
+  for (const [href, label] of [["/", "Overview"], ["/incidents", "Incidents"], ["/topology", "Topology"], ["/context", "Context"]]) {
     assert.match(html, new RegExp(`<a href="${href.replace("/", "\\/")}"[^>]*><svg class="ico"[\\s\\S]*?<span class="lbl">${label}<\\/span>`));
   }
 });
@@ -664,12 +665,12 @@ test("the rail carries every destination as an icon beside a text label", () => 
 test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
-  assert.equal(icons.length, 4, "three destinations and the sign-out button");
+  assert.equal(icons.length, 5, "four destinations and the sign-out button");
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
-  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 4);
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 5);
 });
 
 // ---------- section glyphs ----------
@@ -679,6 +680,7 @@ const everyPage = (): [string, string][] => [
   ["overview", overviewPage({ ...emptyOverview, tokens }, [row])],
   ["detail", detailPage({ incident: { ...row, rca: "x", channel: "C1", thread_ts: "1.0" }, remediations: [], feedback: [] })],
   ["topology", topologyPage(baseTopology, NONCE)],
+  ["context", contextPage(CTX)],
 ];
 
 // h2's own gap is the distance out to the hairline. Reusing it between a glyph and the word
@@ -954,4 +956,71 @@ test("an out-of-range page offers the way back instead of blaming the filters", 
   assert.match(html, /matches 12 incidents/);
   assert.match(html, /<a href="\/incidents\?namespace=prod">Go to the first page<\/a>/);
   assert.doesNotMatch(html, /Widen the date range/);
+});
+
+// ---------- /context ----------
+
+const CTX: ContextView = {
+  core: { lines: 267, chars: 24_100, tokens: 8_034 },
+  skills: [
+    { name: "rca-format", description: "The exact Slack mrkdwn shape every RCA must take", when: "always", chars: 1_820, body: "*📍 Root Cause*\none paragraph" },
+    { name: "oomkilled", description: "First tool calls for a container killed at its memory limit", when: "oomkill|exit code 137", chars: 940, body: "1. k8s_describe_pod" },
+  ],
+  backends: [
+    { name: "heavy", model: "claude-opus-5", window: 200_000, reserve: 9_120, core: 8_034, tools: 4_100, available: 178_746 },
+    { name: "light", model: "qwen2.5-32b-instruct", window: 32_000, reserve: 9_120, core: 8_034, tools: 4_100, available: 10_746 },
+  ],
+  effective: { backend: "light", available: 10_746 },
+};
+
+// The skills table holds sentences; the budget table holds seven short numbers. Which narrow
+// layout each takes is decided by what the cells hold, and it only shows at 390px.
+test("each context table takes the narrow layout its own cells call for", () => {
+  const html = contextPage(CTX);
+  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 1, "the skills table");
+  assert.equal([...html.matchAll(/<table role="table" data-stack data-pairs>/g)].length, 1, "the budget table");
+
+  for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
+    const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
+    const labels = [...t[1].matchAll(/<td role="cell"[^>]*data-label="([^"]*)"/g)].map((m) => m[1]);
+    assert.equal(labels.length % heads.length, 0, "a row is missing a captioned cell");
+    for (const l of labels) assert.ok(heads.includes(l), `caption ${l} names no column of this table`);
+  }
+});
+
+test("the page runs no JavaScript — the claim its CSP makes", () => {
+  assert.doesNotMatch(contextPage(CTX), /<script/i);
+});
+
+test("a skill body is readable without leaving the page", () => {
+  const html = contextPage(CTX);
+  assert.match(html, /<details><summary>First tool calls for a container killed at its memory limit<\/summary>/);
+  assert.match(html, /<pre>1\. k8s_describe_pod<\/pre>/);
+});
+
+// Both "light" and "10,746" also appear in the budget table's own row for that backend, so
+// matching them anywhere on the page passes with the statement deleted — which is the whole
+// behaviour under test. Pin the sentence, on whitespace-flattened HTML so the template literal's
+// indentation cannot break the match.
+test("the effective budget is stated, not left to be inferred from the table", () => {
+  const flat = contextPage(CTX).replace(/\s+/g, " ");
+  assert.match(
+    flat,
+    /built to fit <code translate="no">light<\/code>, the smallest window — about 10,746 tokens/
+  );
+});
+
+// Assert the escaped form is PRESENT — asserting the raw form is absent passes on a blank page.
+test("a skill body and a regex are escaped, not rendered", () => {
+  const html = contextPage({
+    ...CTX,
+    skills: [{ name: "x", description: 'a "quoted" one', when: '5xx|<b>|"q"', chars: 10, body: "<script>alert(1)</script>" }],
+  });
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /5xx\|&lt;b&gt;\|&quot;q&quot;/);
+  assert.doesNotMatch(html, /<script>alert/);
+});
+
+test("the nav offers Context and marks it current on its own page", () => {
+  assert.match(contextPage(CTX), /<a href="\/context" aria-current="page">/);
 });

@@ -953,6 +953,15 @@ tbody tr:target td { scroll-margin-top: 5rem; }
    bullet column would only push them off the mono grid they line up on. */
 details > summary { cursor: pointer; font-weight: 550; }
 details > summary > span { margin-left: .35em; }
+/* A playbook is preformatted text in a table cell. Without this, one long PromQL line pushes the
+   whole page sideways at 390px — a pre element does not wrap by default. */
+td details > pre {
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
 ul.toollist {
   /* indented to the family name, not to the triangle: the names hang under the thing they
      belong to, which is the only hierarchy this list has to show. */

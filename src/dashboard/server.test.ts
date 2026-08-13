@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { DashboardServer, matchRoute } from "./server.js";
+import { DashboardServer, matchRoute, METHODS } from "./server.js";
 import { DashboardQueries } from "./queries.js";
 import { config } from "../config/index.js";
 import { SESSION_COOKIE, mintSession } from "./auth.js";
@@ -391,4 +391,18 @@ test("an oversized login body is refused rather than read", async () => {
     assert.match(status(res), /^HTTP\/1\.1 400\b/);
     assert.equal(header(res, "set-cookie"), undefined);
   });
+});
+
+test("/context is a route, and a trailing slash is the same route", () => {
+  assert.deepEqual(matchRoute("/context"), { kind: "context" });
+  assert.deepEqual(matchRoute("/context/"), { kind: "context" });
+});
+
+// The read-only invariant, asserted rather than assumed. A route absent from METHODS answers 405
+// to every method but GET, so the assertion is the absence: only login and logout accept anything
+// else, and both act on the session rather than on data. Asserted against the table instead of
+// over a live socket — the table IS the rule, and this cannot flake on a port.
+test("only the session routes accept a non-GET method", () => {
+  assert.deepEqual(Object.keys(METHODS).sort(), ["login", "logout"]);
+  assert.equal("context" in METHODS, false);
 });

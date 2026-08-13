@@ -12,6 +12,7 @@ import type {
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
+import type { ContextView } from "./context.js";
 
 // Each glyph is drawn from the page it opens rather than picked off a generic set: a bar
 // series for the weekly chart the overview leads with, an alert triangle for a table whose
@@ -35,6 +36,10 @@ const ICON = {
   topology: ico(
     `<circle cx="12" cy="5" r="2.6"/><circle cx="5" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6"/>` +
       `<path d="M10.4 7.3 6.6 16.4"/><path d="M13.6 7.3l3.8 9.1"/>`
+  ),
+  context: ico(
+    `<path d="M4 5.4A1.8 1.8 0 0 1 5.8 3.6H19v13.6H5.8A1.8 1.8 0 0 0 4 19v-13.6Z"/>` +
+      `<path d="M4 19a1.8 1.8 0 0 0 1.8 1.8H19"/><path d="M8.4 8h6.4"/><path d="M8.4 11.6h4.2"/>`
   ),
   signout: ico(`<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 16 4-4-4-4"/><path d="M14 12H4"/>`),
 
@@ -76,6 +81,7 @@ const NAV = [
   { href: "/", label: "Overview", icon: ICON.overview },
   { href: "/incidents", label: "Incidents", icon: ICON.incidents },
   { href: "/topology", label: "Topology", icon: ICON.topology },
+  { href: "/context", label: "Context", icon: ICON.context },
 ];
 
 // The two theme-color values are the only colours written outside styles.ts, and they are
@@ -788,5 +794,87 @@ export function topologyPage(t: Topology, nonce: string): string {
      ${section(ICON.chip, "LLM backends")}
      ${router}`,
     "/topology"
+  );
+}
+
+// Numbers go through `fmtInt`, already imported at the top of views.ts (line 1) and used twenty
+// times below. Do NOT add a local `const num = (n) => n.toLocaleString("en-US")` — that is
+// html.ts:32-34 rewritten, in the one file that already imports the original, and it would put a
+// function named `num` beside the CSS class named "num" that these very cells pass.
+
+// A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
+// stack rather than pairs. The body hangs off the description in a <details>: native disclosure,
+// no JavaScript, and the summary is already the line the reader wanted.
+function skillRows(skills: ContextView["skills"]): string {
+  // No empty state on purpose: loadSkills throws at boot on a directory with no .md files, so a
+  // running agent always has skills. An "empty" table here would be a state the process cannot
+  // reach — do not add one later.
+  return table(
+    headers("Skill", "When", "Size", "Description"),
+    skills
+      .map((s) =>
+        `<tr role="row">` +
+        cell("Skill", `<code translate="no">${esc(s.name)}</code>`) +
+        cell("When", s.when === "always"
+          ? `<span class="badge">ALWAYS</span>`
+          : `<code translate="no">${esc(s.when)}</code>`) +
+        cell("Size", `${fmtInt(s.chars)} chars`) +
+        cell("Description",
+          `<details><summary>${esc(s.description)}</summary><pre>${esc(s.body)}</pre></details>`) +
+        `</tr>`
+      )
+      .join(""),
+    "stack"
+  );
+}
+
+// Seven short numbers and two identifiers: the spec-sheet shape pairs was built for.
+function budgetRows(backends: ContextView["backends"]): string {
+  return table(
+    headers("Backend", "Model", "Window", "Reserve", "Core", "Tools", "Available"),
+    backends
+      .map((b) =>
+        `<tr role="row">` +
+        cell("Backend", `<code translate="no">${esc(b.name)}</code>`) +
+        cell("Model", `<code translate="no">${esc(b.model)}</code>`) +
+        // "num" is the class every other numeric cell in this file carries (see the Token usage
+        // table, views.ts:273-276) — also a `pairs` table, so the combination is already proven.
+        cell("Window", fmtInt(b.window), "num") +
+        cell("Reserve", fmtInt(b.reserve), "num") +
+        cell("Core", fmtInt(b.core), "num") +
+        cell("Tools", fmtInt(b.tools), "num") +
+        cell("Available", fmtInt(b.available), "num") +
+        `</tr>`
+      )
+      .join(""),
+    "pairs"
+  );
+}
+
+export function contextPage(v: ContextView): string {
+  return layout(
+    "Context",
+    `<h1>Context and skills</h1>
+     <p class="meta">What this agent knows before it reads a single metric, and how much room it
+       has to say it. Read from the running process — no database, no call leaves it.</p>
+
+     ${section(ICON.layers, "Core prompt")}
+     <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
+       ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
+       every investigation.</p>
+
+     ${section(ICON.context, "Skills")}
+     <p class="meta">Selected from the alert text and carried in the first user message, never in
+       the system prompt — a system prompt that varied per investigation would miss the model's
+       prompt cache on every call. Expand a description to read the skill itself.</p>
+     ${skillRows(v.skills)}
+
+     ${section(ICON.chip, "Budget per backend")}
+     <p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
+       the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
+       The router picks a backend after the request is assembled, so the request has to fit the
+       smallest one it might land in.</p>
+     ${budgetRows(v.backends)}`,
+    "/context"
   );
 }
