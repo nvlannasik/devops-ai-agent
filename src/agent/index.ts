@@ -1,5 +1,6 @@
 import { createLLMClient } from "./llm/index.js";
 import { SERIALIZED_BLOCKS } from "./llm/router.js";
+import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -7,7 +8,10 @@ import { UsageStore } from "./usage/index.js";
 import { createPool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
-import { trimHistory, sanitizeContentBlocks } from "./context/index.js";
+import { assembleRequest, sanitizeContentBlocks } from "./context/index.js";
+import { resolveBudget } from "./context/resolve-budget.js";
+import { estimateTokens, type Budget } from "./context/budget.js";
+import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
@@ -40,6 +44,49 @@ const MAX_ITERATIONS = 10;
 // name matching many pods ("metallb" → 8) should produce a "which one?" question, not a dump
 const MAX_LOG_FANOUT = 2;
 
+// Per-thread skill sets live in memory, like ConversationMemory's rcaThreads. Bounded so a
+// long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
+// insertion-order, and a thread that outlives its entry simply re-selects from its next message.
+export const MAX_TRACKED_THREADS = 500;
+
+export type ThreadSkills = Map<string, Skill[]>;
+
+/** What the dashboard renders. Strings only — no RegExp crosses this boundary. */
+export interface SkillView {
+  name: string;
+  description: string;
+  when: string;
+  chars: number;
+  body: string;
+}
+
+/**
+ * Selects the skills for one incoming message and folds them into the thread's running set.
+ * Exported for the wiring test — the class method is a thin caller.
+ */
+export function selectForThread(
+  registry: SkillRegistry,
+  tracked: ThreadSkills,
+  threadId: string,
+  trigger: string
+): Skill[] {
+  const known = tracked.get(threadId) ?? [];
+  const { selected, overflow } = registry.select(trigger, new Set(known.map((s) => s.name)));
+  if (overflow.length > 0) {
+    logger.info(`[${threadId}] skills over the cap, not loaded: ${overflow.join(", ")}`);
+  }
+  const merged = selected.length > 0 ? [...known, ...selected] : known;
+
+  tracked.delete(threadId); // re-insert so this thread becomes the most recent
+  tracked.set(threadId, merged);
+  while (tracked.size > MAX_TRACKED_THREADS) {
+    const oldest = tracked.keys().next().value;
+    if (oldest === undefined) break;
+    tracked.delete(oldest);
+  }
+  return merged;
+}
+
 const zeroUsage = (): TokenUsage => ({
   inputTokens: 0,
   outputTokens: 0,
@@ -63,6 +110,9 @@ export class DevOpsAgent {
   private remediations: RemediationStore;
   private checks: RemediationCheckStore;
   private gitops: SqsGitOpsClient | null;
+  private readonly skills: SkillRegistry;
+  private readonly threadSkills: ThreadSkills = new Map();
+  private budget: Budget;
 
   constructor() {
     this.llm = createLLMClient();
@@ -73,6 +123,25 @@ export class DevOpsAgent {
     this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
+
+    // Throws here rather than at first request: a malformed skill file must be a pod that
+    // refuses to start. src/agent/skills/real.test.ts loads this same directory, so a bad file
+    // fails npm test long before it reaches a cluster.
+    this.skills = loadSkills(resolveSkillsDir());
+    for (const s of this.skills.all()) {
+      logger.info(`[skills] ${s.name} (${s.chars} chars, when=${s.when === "always" ? "always" : s.when.source}) — ${s.description}`);
+    }
+    // Provisional: tools are unknown until MCP connects, so initialize() recomputes it. The
+    // registry is parsed here too, exactly as initialize() does — passing null instead made a
+    // `router` deployment resolve its own provider name as a BackendKind, fall through windowOf's
+    // last `??` to the 32k private-llm default, and throw at construction for any MAX_TOKENS at or
+    // above 23448, naming a backend "router" that does not exist. Nothing reads this value (both
+    // reads run after initialize()), so the only thing the null could still do was kill the pod.
+    this.budget = resolveBudget({
+      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      provider: config.llm.provider,
+      maxTokens: config.llm.maxTokens, overheadTokens: estimateTokens(buildStaticSystemPrompt()),
+    });
   }
 
   async initialize(): Promise<void> {
@@ -97,6 +166,15 @@ export class DevOpsAgent {
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
     }
+
+    const tools = this.mcp.getTools();
+    this.budget = resolveBudget({
+      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      provider: config.llm.provider,
+      maxTokens: config.llm.maxTokens,
+      overheadTokens: estimateTokens(buildStaticSystemPrompt()) + estimateTokens(JSON.stringify(tools)),
+    });
+    logger.info(`[context] budget: ${this.budget.contextTokens} token window, ${this.budget.reserveTokens} reserved for output`);
   }
 
   // The tool list devops-mcp-server returned at connect, for the dashboard's dependency map.
@@ -104,6 +182,18 @@ export class DevOpsAgent {
   // a failed connect, which is a state the dashboard renders rather than an error.
   mcpTools(): ToolDefinition[] {
     return this.mcp.getTools();
+  }
+
+  // The registered skills, for the dashboard's /context page. Read-only and already in memory —
+  // this makes no call. Strings only: the dashboard never sees a RegExp.
+  skillsView(): readonly SkillView[] {
+    return this.skills.all().map((s) => ({
+      name: s.name,
+      description: s.description,
+      when: s.when === "always" ? "always" : s.when.source,
+      chars: s.chars,
+      body: s.body,
+    }));
   }
 
   // Readiness check for /health — reports each enabled dependency. ok=false (→ 503) if any
@@ -159,11 +249,11 @@ export class DevOpsAgent {
   // Everything below runs inside the trace context so outbound SQS requests carry the
   // threadId — that is what lets you grep one id across the agent log, the llm-worker
   // log, and the Slack thread when an answer comes out wrong.
-  investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
+  investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
     return withTrace(threadId, () => this.runInvestigation(threadId, userMessage, opts));
   }
 
-  private async runInvestigation(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
+  private async runInvestigation(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
@@ -186,6 +276,10 @@ export class DevOpsAgent {
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
 
+    // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
+    // prior incidents, and a previous incident's RCA must not select this one's playbook.
+    const skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
     // to execute state-changing actions on its own. Write tools are reachable only via
     // the proposal dry-run and the human-approved execution path (direct callTool).
@@ -203,13 +297,38 @@ export class DevOpsAgent {
       }
       iterations++;
 
-      const messages = trimHistory(await this.memory.get(threadId));
-      logger.debug(`[${threadId}] LLM call #${iterations} (history: ${messages.length} messages)`);
+      const assembled = assembleRequest({
+        history: await this.memory.get(threadId),
+        systemPrompt,
+        tools: toolsDisabled ? [] : tools,
+        skills,
+        budget: this.budget,
+      });
+      logger.debug(
+        `[${threadId}] LLM call #${iterations} (history: ${assembled.messages.length} messages, ` +
+        `-${assembled.messagesDropped} over budget, ~${assembled.estimatedTokens} tokens, ` +
+        `skills: [${assembled.skillsUsed.join(", ") || "none"}]` +
+        (assembled.skillsDropped.length > 0 ? `, dropped: [${assembled.skillsDropped.join(", ")}]` : "") + ")"
+      );
+      if (assembled.skillsDropped.length > 0) {
+        logger.warn(`[${threadId}] context budget dropped skills: ${assembled.skillsDropped.join(", ")}`);
+      }
+      // The floor: the first and the most recent message are pinned unconditionally, so a single
+      // enormous tool result can put the request over the window with nothing left to drop. Say so
+      // and send it anyway — a visible 400 from the backend beats inventing a truncation that
+      // hides which evidence went missing.
+      const available = this.budget.contextTokens - this.budget.reserveTokens;
+      if (assembled.estimatedTokens > available) {
+        logger.warn(
+          `[${threadId}] context over budget: ~${assembled.estimatedTokens} tokens vs ${available} ` +
+          `available — pinned messages alone exceed the window, sending anyway`
+        );
+      }
 
       const llmStart = Date.now();
       let response;
       try {
-        response = await this.llm.chat(messages, toolsDisabled ? [] : tools, systemPrompt);
+        response = await this.llm.chat(assembled.messages, toolsDisabled ? [] : tools, assembled.systemPrompt);
       } catch (err) {
         // the LLM call is the one hop that leaves this process; without this line a
         // worker/queue failure surfaced only as a generic Slack error with no context

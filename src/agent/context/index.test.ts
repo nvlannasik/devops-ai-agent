@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { trimToWindow, trimHistory, truncateToolResult, sanitizeContentBlocks } from "./index.js";
+import { assembleRequest, injectSkills, sanitizeContentBlocks, trimToWindow } from "./index.js";
 import type { Message } from "../llm/types.js";
+import type { Skill } from "../skills/index.js";
 
 const userText = (text: string): Message => ({ role: "user", content: text });
 const assistantToolUse = (id: string): Message => ({
@@ -60,7 +61,7 @@ test("trimToWindow never orphans a tool_result at the window boundary", () => {
   const trimmed = trimToWindow(messages, 5);
   assertPairingValid(trimmed);
   // the boundary was advanced past the orphan, so it lands on the assistant turn
-  assert.equal((trimmed[1].content as any)[0].type, "tool_use");
+  assert.equal((trimmed[1]!.content as any)[0].type, "tool_use");
 });
 
 test("trimToWindow keeps pairing valid across many cap sizes", () => {
@@ -73,32 +74,112 @@ test("trimToWindow keeps pairing valid across many cap sizes", () => {
   }
 });
 
-test("trimHistory enforces the 40-message window with valid pairing", () => {
-  const messages = buildInvestigation(40); // 82 messages
-  const trimmed = trimHistory(messages);
-  assert.ok(trimmed.length <= 40);
-  assertPairingValid(trimmed);
+const BUDGET = { contextTokens: 200_000, reserveTokens: 9_120 };
+const SYSTEM = "You are a DevOps agent.\nRules follow.";
+const skill = (name: string, body: string, when: Skill["when"] = /x/gi): Skill =>
+  ({ name, description: "d", when, body, chars: body.length + 60 });
+
+// THE regression test. src/agent/llm/claude.ts:26-32 wraps the entire system prompt in one
+// cache_control: ephemeral block. A system prompt that varies per investigation is a full cache
+// miss plus a cache WRITE at 1.25x — slower and more expensive while looking like a saving.
+test("the system prompt is byte-identical no matter which skills are selected", () => {
+  const history: Message[] = [{ role: "user", content: "pod is crashlooping" }];
+  const a = assembleRequest({ history, systemPrompt: SYSTEM, tools: [], skills: [], budget: BUDGET });
+  const b = assembleRequest({
+    history, systemPrompt: SYSTEM, tools: [],
+    skills: [skill("rca-format", "use this shape"), skill("oomkilled", "check the limit")],
+    budget: BUDGET,
+  });
+  assert.equal(a.systemPrompt, SYSTEM);
+  assert.equal(b.systemPrompt, SYSTEM);
+  assert.equal(a.systemPrompt, b.systemPrompt);
 });
 
-test("truncateToolResult keeps head AND tail with an honest notice", () => {
-  const long = "H".repeat(5000) + "T".repeat(4000); // 9000 chars
-  const out = truncateToolResult(long);
-  assert.ok(out.startsWith("H".repeat(4000))); // head half kept
-  assert.ok(out.endsWith("T".repeat(4000)));   // tail half kept — recent log lines live here
-  assert.match(out, /\.\.\.\[truncated 1000 chars\]\.\.\./);
+test("skills ride in the first user message, and the message count is unchanged", () => {
+  const history: Message[] = [
+    { role: "user", content: "the alert text" },
+    { role: "assistant", content: "working on it" },
+  ];
+  const out = assembleRequest({
+    history, systemPrompt: SYSTEM, tools: [], skills: [skill("oomkilled", "check the limit")], budget: BUDGET,
+  });
+  assert.equal(out.messages.length, 2);
+  assert.equal(out.messages[0]!.role, "user");
+  assert.match(String(out.messages[0]!.content), /--- skill: oomkilled ---\ncheck the limit\n--- end skill: oomkilled ---/);
+  assert.match(String(out.messages[0]!.content), /the alert text/);
+  assert.deepEqual(out.messages[1], history[1]);
+  assert.deepEqual(out.skillsUsed, ["oomkilled"]);
 });
 
-test("truncateToolResult leaves short content alone", () => {
-  assert.equal(truncateToolResult("short"), "short");
+test("a block-content first message gets a text block prepended, not a stringified one", () => {
+  const history: Message[] = [{ role: "user", content: [{ type: "text", text: "the alert text" }] }];
+  const [m] = injectSkills(history, [skill("s", "advice")]);
+  assert.ok(Array.isArray(m!.content));
+  const blocks = m!.content as { type: string; text?: string }[];
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0]!.type, "text");
+  assert.match(blocks[0]!.text!, /--- skill: s ---/);
+  assert.equal(blocks[1]!.text, "the alert text");
 });
 
-test("sanitizeContentBlocks truncates only oversized tool_result blocks", () => {
-  const blocks = sanitizeContentBlocks([
-    { type: "tool_result", tool_use_id: "a", content: "y".repeat(9000) },
-    { type: "tool_result", tool_use_id: "b", content: "small" },
-    { type: "text", text: "z".repeat(9000) },
+// Should not happen — a thread opens with the alert — but a skill block silently dropped is
+// worse than an extra message.
+test("a non-user first message gets its own skill message rather than losing the skills", () => {
+  const history: Message[] = [{ role: "assistant", content: "orphan" }];
+  const out = injectSkills(history, [skill("s", "advice")]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0]!.role, "user");
+  assert.match(String(out[0]!.content), /--- skill: s ---/);
+});
+
+test("no skills means the history is returned untouched", () => {
+  const history: Message[] = [{ role: "user", content: "a" }];
+  assert.deepEqual(injectSkills(history, []), history);
+});
+
+// The realistic squeeze is a huge PINNED tool result, not a huge skill: skills are capped at
+// 8000 chars, so three of them never fill a 32k window on their own. The pins are unconditional,
+// and one 66k-char log dump in the most recent message is what leaves no room for the advice.
+test("a small window drops skills that a large window keeps", () => {
+  const history: Message[] = [
+    { role: "user", content: "alert" },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "z".repeat(66_000) }] },
+  ];
+  const skills = [skill("rca-format", "f".repeat(6_000), "always")];
+  const big = assembleRequest({ history, systemPrompt: SYSTEM, tools: [], skills, budget: BUDGET });
+  const small = assembleRequest({
+    history, systemPrompt: SYSTEM, tools: [], skills, budget: { contextTokens: 32_000, reserveTokens: 9_120 },
+  });
+  assert.deepEqual(big.skillsUsed, ["rca-format"]);
+  assert.deepEqual(small.skillsUsed, []);
+  assert.deepEqual(small.skillsDropped, ["rca-format"]);
+});
+
+test("the tool schemas are charged to the budget", () => {
+  const history: Message[] = [{ role: "user", content: "alert" }];
+  const bare = assembleRequest({ history, systemPrompt: SYSTEM, tools: [], skills: [], budget: BUDGET });
+  const withTools = assembleRequest({
+    history, systemPrompt: SYSTEM, skills: [], budget: BUDGET,
+    tools: [{ name: "k8s_list_pods", description: "list pods", inputSchema: { type: "object" } }],
+  });
+  assert.ok(withTools.estimatedTokens > bare.estimatedTokens);
+});
+
+test("sanitizeContentBlocks compacts a tool_result and leaves other blocks alone", () => {
+  const long = Array.from({ length: 400 }, () => "ERROR connection refused").join("\n");
+  const out = sanitizeContentBlocks([
+    { type: "text", text: "hello" },
+    { type: "tool_result", tool_use_id: "1", content: long },
   ]);
-  assert.match(blocks[0].content as string, /truncated 1000 chars/);
-  assert.equal(blocks[1].content, "small");
-  assert.equal((blocks[2].text as string).length, 9000); // text blocks untouched
+  assert.deepEqual(out[0], { type: "text", text: "hello" });
+  assert.ok((out[1]!.content as string).length < long.length);
+  assert.match(out[1]!.content as string, /more like this/);
+});
+
+test("trimToWindow still pins the first message", () => {
+  const msgs: Message[] = Array.from({ length: 10 }, (_, i) => ({ role: "user", content: `m${i}` }));
+  const out = trimToWindow(msgs, 4);
+  assert.equal(out.length, 4);
+  assert.equal(out[0]!.content, "m0");
+  assert.equal(out[3]!.content, "m9");
 });

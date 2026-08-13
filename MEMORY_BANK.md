@@ -647,6 +647,40 @@ handled the approval click.
 - Tunables: `REMEDIATION_VERIFY_DELAY_SECONDS` (default 300 — 90s answered while the rolling
   update was still converging) and `REMEDIATION_VERIFY_POLL_SECONDS` (default 30).
 
+### Context Assembly & Skills
+Bounds what actually reaches the LLM call, on both axes that used to be unbounded: which prompt
+content ships (all of it, always) and how large a single tool result can grow (as large as the
+tool made it).
+
+- **Three modules, three failure modes.** `src/agent/skills/` owns *what content exists and when
+  it applies*, `context/budget.ts` owns *how much fits*, `context/compact.ts` owns *how much a
+  single tool result is allowed to cost*. Kept apart because each fails a different way: a
+  malformed skill is a **boot error** (fail before an incident ever runs), an oversized request is
+  a **runtime trim** (fail gracefully mid-investigation, drop something, keep going), and a noisy
+  tool result is **neither** — nothing is wrong with it, it's just a log line repeating, so it gets
+  collapsed rather than rejected or trimmed.
+- **`prompts/skills/` holds thirteen files: twelve failure-mode playbooks plus `rca-format.md`.**
+  `rca-format` is `when: always` — every investigation carries the output template regardless of
+  what fired. The twelve playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
+  also paying tokens for the ImagePullBackOff runbook.
+- **`## Tool Usage Reference` stayed in `prompts/system.md` instead of becoming a skill.** A
+  skill's `when` matches against the alert text, and the alert text has no way to say whether the
+  investigation is about to reach for a PromQL query — that decision happens mid-loop, after the
+  model is already several tool calls in. Gating the query cookbook on the alert text would remove
+  it at exactly the moment it's needed. Availability beats budget for that one section; everywhere
+  else in this design the budget wins.
+- **The `/context` page's two tables follow the same rule the rest of the dashboard's tables use:
+  what the cells hold, not how many there are.** Skills render `"stack"` — `description` is a
+  sentence, so the caption sits above the value. Backend budgets (`window`/`reserve`/`core`/
+  `tools`/`available`) render `"pairs"` — every value there is a short number, so the caption sits
+  beside it. A future column doesn't get to pick the layout by counting how many rows or columns
+  there are; it picks by asking what kind of value fills the cell.
+- **`loadSkills` throws when `prompts/skills/` holds no `.md` files**
+  (`src/agent/skills/index.ts:129`), and the message says why: an agent with no skills has no RCA
+  output format, so it would investigate correctly and then answer in a shape neither the Slack
+  renderer nor `src/dashboard/rca.ts` can parse. Failing at boot, loudly, beats failing per-incident,
+  silently.
+
 ## LLM Providers
 
 | `LLM_PROVIDER` | Class | Notes |

@@ -24,6 +24,23 @@ Deeper design in `docs/` (e.g. `DESIGN_guarded_remediation.md`).
 - **SQS:** the response queue is **shared** across replicas (one dispatcher per process, routed by `requestId`). Don't add per-pod queues.
 - **`/alert` is async:** acks 200 immediately, investigates in the background. Don't re-block it.
 - **System prompt** lives in `prompts/system.md` — editable without rebuild.
+- **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
+  per investigation: flat `name`/`description`/`when` frontmatter, hand-parsed (no YAML dep), body
+  injected verbatim. `when` is `always` or a case-insensitive regex over the alert text. Boot
+  throws on any malformation — `src/agent/skills/real.test.ts` loads the shipped directory, so a
+  bad file fails `npm test` rather than a deploy.
+- **Skills ride in the first user message, never in `systemPrompt`.** `llm/claude.ts:26-32` caches
+  the whole system prompt as one ephemeral block; a system prompt that varied per investigation
+  would be a full cache miss plus a rewrite at 1.25×. This also leaves the SQS contract untouched.
+  `context/index.test.ts` asserts the prompt is byte-identical across different skill sets — that
+  test is the guard, do not weaken it.
+- **The context budget is the SMALLEST backend window**, resolved once at boot
+  (`context/resolve-budget.ts`). The router picks a backend after the request is built, so the
+  request has to fit the smallest one it might land in. Under pressure skills drop before history:
+  history is evidence already gathered, a skill is advice.
+- **Tool results are compacted at ingest** (`context/compact.ts`), so Redis holds the compacted
+  form and the raw output is not recoverable. Only *consecutive* runs collapse — a global dedupe
+  would merge two phases of an incident.
 - **Incident memory = Postgres** (durable, `DB_*`), schema via `migrations/*.sql`. **Conversation memory = Redis** (24h cache). Don't conflate them.
 - **Migrations run at pod startup** (`runMigrations` inside `DevOpsAgent.initialize()`), so a migration that fails is a pod that won't start. No `CREATE EXTENSION` — the similarity tier uses core `to_tsvector` for exactly this reason. Next file is `007_*.sql`.
 - **Recall tiers are never flattened:** human-CONFIRMED (`incident_feedback`) > agent hypothesis (`incidents`) > "possibly related" (lexical similarity, `migrations/005`). Agent-produced verdicts must never be written to `incident_feedback` — that's the human tier.

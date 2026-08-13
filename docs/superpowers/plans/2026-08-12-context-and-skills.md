@@ -618,7 +618,9 @@ when: oomkill|out of memory|exit code 137|memory limit
 
 - [ ] **Step 2: Create the RCA format skill**
 
-Create `prompts/skills/rca-format.md`: the frontmatter below, then `prompts/system.md` lines 304–347 verbatim as the body (everything under `## RCA Output Format`, excluding that heading).
+Create `prompts/skills/rca-format.md`: the frontmatter below, then `prompts/system.md` lines 304–348 verbatim as the body (everything under `## RCA Output Format`, excluding that heading).
+
+`prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is the last line of the RCA template — `*📈 Confidence:* ...` — and it is part of the body. Count with `awk 'END{print NR}'`, not `wc -l`, and verify with `grep -c Confidence prompts/skills/rca-format.md` (must be ≥ 1) before committing: `rca-format` is the only `always` skill, so a section missing here is missing from every RCA the agent writes.
 
 ```markdown
 ---
@@ -770,11 +772,35 @@ test("under pressure the skills go before the history", () => {
   assert.equal(r.history.length, 3, "no message dropped while a skill was still droppable");
 });
 
+// The test above passes under either fill order — its skill is too large to fit in any case.
+// This one separates them: the skill WOULD fit if it were offered the window first, and taking
+// it would cost the middle message. 105 leaves exactly one of the two affordable after the
+// 4 pinned tokens, so whichever is filled first is the one that survives.
+test("a skill never takes budget a history message could have used", () => {
+  const history = [user("first"), asst("m".repeat(300)), user("last")];
+  const r = fitToBudget({ history, skills: [skill("advice", 300)], available: 105 });
+  assert.equal(r.history.length, 3, "the middle message was traded away for a skill");
+  assert.equal(r.messagesDropped, 0);
+  assert.deepEqual(r.skillsDropped, ["advice"]);
+});
+
+// 160 is the window where the tie-break decides the outcome rather than merely the order:
+// after `core` (50) there is room for `matched-small` (50) OR `matched-big` (100), not both.
+// Sorted largest-first the big one is taken and the small one is dropped — a different result,
+// which is what makes this assertion mean something.
 test("an always-skill outranks a matched one, and among matched the largest drops first", () => {
-  const skills = [skill("matched-big", 600), skill("matched-small", 150), skill("core", 150, "always")];
-  const r = fitToBudget({ history: [user("a")], skills, available: 150 });
+  const skills = [skill("matched-big", 300), skill("matched-small", 150), skill("core", 150, "always")];
+  const r = fitToBudget({ history: [user("a")], skills, available: 160 });
   assert.deepEqual(r.skills.map((s) => s.name), ["core", "matched-small"]);
   assert.deepEqual(r.skillsDropped, ["matched-big"]);
+});
+
+// The early return for an empty history used to hand back every skill unmeasured.
+test("with no history at all the skills are still measured against the budget", () => {
+  const r = fitToBudget({ history: [], skills: [skill("big", 3000)], available: 10 });
+  assert.deepEqual(r.skills, []);
+  assert.deepEqual(r.skillsDropped, ["big"]);
+  assert.equal(r.messagesDropped, 0);
 });
 
 test("the first and the most recent message are never dropped", () => {
@@ -812,7 +838,11 @@ test("a final tool_result keeps the tool_use that produced it", () => {
     { role: "assistant", content: [{ type: "tool_use", id: "t9", name: "k8s", input: {} }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "t9", content: "r" }] },
   ];
-  const r = fitToBudget({ history, skills: [], available: 20 });
+  // 4 is below the 5 tokens the pinned trio costs. Pinning is unconditional; the middle-fill is
+  // not. So with the pairing removed the tool_use has only the budgeted path to arrive by, and
+  // cannot afford it — the window comes back as first + orphaned tool_result. A budget large
+  // enough for the middle-fill would pick the cheap tool_use up either way and assert nothing.
+  const r = fitToBudget({ history, skills: [], available: 4 });
   const kinds = r.history.map((m) => (Array.isArray(m.content) ? m.content[0]!.type : "text"));
   assert.deepEqual(kinds, ["text", "tool_use", "tool_result"]);
 });
@@ -882,13 +912,39 @@ export interface FitResult {
 // last", and if a second is ever added the tie-break is size rather than identity.
 const keepRank = (s: Skill): number => (s.when === "always" ? 0 : 1);
 
+// Greedy fill in keep-order over whatever `used` leaves. Both callers go through here: an empty
+// history is still a budget, and handing back an unmeasured skill list would overflow the window
+// on the one path that looks too trivial to check.
+const fitSkills = (
+  skills: readonly Skill[],
+  used: number,
+  available: number,
+): { kept: Skill[]; dropped: string[] } => {
+  const kept: Skill[] = [];
+  const dropped: string[] = [];
+  for (const s of [...skills].sort((a, b) => keepRank(a) - keepRank(b) || a.body.length - b.body.length)) {
+    const t = estimateTokens(s.body);
+    if (used + t <= available) {
+      used += t;
+      kept.push(s);
+    } else {
+      dropped.push(s.name);
+    }
+  }
+  return { kept, dropped };
+};
+
 /**
  * Fits skills and history into `available` tokens.
  *
  * Pinned, in this order: the thread's opening message, the most recent message, and — when that
  * most recent message carries tool_result blocks — the assistant message holding the matching
- * tool_use. Then skills, then history newest-first. Whatever is left of the middle is dropped
- * from the oldest end, and the window is advanced past any leading orphaned tool_result.
+ * tool_use. Pinned messages are kept whatever the budget says.
+ *
+ * What the pins leave goes to the history's middle first, newest-first, and only what survives
+ * that goes to the skills: history is evidence already gathered, a skill is only advice. The
+ * middle is dropped from the oldest end, and the window is advanced past any leading orphaned
+ * tool_result.
  */
 export function fitToBudget(input: {
   history: Message[];
@@ -897,7 +953,8 @@ export function fitToBudget(input: {
 }): FitResult {
   const { history, available } = input;
   if (history.length === 0) {
-    return { history: [], skills: [...input.skills], skillsDropped: [], messagesDropped: 0 };
+    const { kept, dropped } = fitSkills(input.skills, 0, available);
+    return { history: [], skills: kept, skillsDropped: dropped, messagesDropped: 0 };
   }
 
   const cost = history.map(estimateMessage);
@@ -912,18 +969,9 @@ export function fitToBudget(input: {
   for (let i = pinFrom; i <= last; i++) if (i > first) pinned.push(i);
   let used = pinned.reduce((n, i) => n + cost[i]!, 0);
 
-  const kept: Skill[] = [];
-  const skillsDropped: string[] = [];
-  for (const s of [...input.skills].sort((a, b) => keepRank(a) - keepRank(b) || a.body.length - b.body.length)) {
-    const t = estimateTokens(s.body);
-    if (used + t <= available) {
-      used += t;
-      kept.push(s);
-    } else {
-      skillsDropped.push(s.name);
-    }
-  }
-
+  // History before skills, against the same counter. Reversing these two blocks lets a skill
+  // that happens to fit consume budget a message needed, which is the trade this whole function
+  // exists to refuse.
   const middle: Message[] = [];
   for (let i = pinFrom - 1; i > first; i--) {
     const t = cost[i]!;
@@ -931,6 +979,8 @@ export function fitToBudget(input: {
     used += t;
     middle.unshift(history[i]!);
   }
+
+  const { kept, dropped: skillsDropped } = fitSkills(input.skills, used, available);
 
   const tail = history.slice(pinFrom).filter((_, k) => pinFrom + k > first);
   let out = [history[first]!, ...middle, ...tail];
@@ -1016,12 +1066,26 @@ test("a run shorter than three lines is left alone", () => {
   assert.match(out, /^a\na\nb/);
 });
 
+// The differentiator has to survive normalize(), so it is spelled in letters. A line numbered
+// `line 0`…`line 2999` does NOT work: DIGIT_RUN masks every run of two or more digits, so from
+// `line 10` on every line normalizes to the same key, 2990 of them collapse into one, and the
+// result lands far under the cap — this test would then pass through the collapse path and never
+// reach the truncation it is named after. The doesNotMatch below is what pins that shut.
+const ALPHA = "abcdefghijklmnopqrstuvwxyz";
+const word = (i: number): string =>
+  ALPHA[i % 26]! + ALPHA[Math.floor(i / 26) % 26]! + ALPHA[Math.floor(i / 676) % 26]!;
+
 test("head and tail survive when collapsing is not enough", () => {
-  const log = Array.from({ length: 3000 }, (_, i) => `line ${i} unique content ${"x".repeat(20)}`).join("\n");
+  const log = Array.from({ length: 3000 }, (_, i) => `line ${word(i)} unique content ${"x".repeat(20)}`).join("\n");
   const out = compactToolResult(log);
-  assert.ok(out.startsWith("line 0 "), "head lost");
+  assert.doesNotMatch(out, /more like this/, "nothing should have collapsed — every line is distinct");
+  assert.ok(out.startsWith("line aaa "), "head lost");
   assert.match(out, /\.\.\.\[truncated \d+ chars\]\.\.\./);
   assert.ok(out.trimEnd().endsWith("x".repeat(20)), "tail lost");
+  // The notice is part of the result, so it has to fit inside the cap. Two halves of MAX/2 plus
+  // a notice is MAX + notice.length — over budget on the one branch whose entire job is to get
+  // under it.
+  assert.ok(out.length <= MAX_TOOL_RESULT_CHARS, `truncated output is ${out.length} chars`);
 });
 ```
 
@@ -1085,9 +1149,15 @@ export function compactToolResult(content: string): string {
 
   // Head AND tail: logs are chronological, so the most recent lines live at the END and
   // head-only truncation drops exactly what "show me the logs" was asking for.
-  const half = MAX_TOOL_RESULT_CHARS / 2;
-  const remaining = collapsed.length - MAX_TOOL_RESULT_CHARS;
-  return collapsed.slice(0, half) + TRUNCATION_NOTICE(remaining) + collapsed.slice(-half);
+  //
+  // The notice lives INSIDE the cap, not on top of it — its own length comes out of the two
+  // halves. Two slices of MAX/2 plus a notice returns MAX + notice.length, which breaks the one
+  // guarantee this function exists to make. The reservation is sized from `collapsed.length`
+  // because that is an upper bound on the dropped count and therefore on the notice's digits,
+  // so one pass is enough and the printed count is still exact.
+  const reserve = TRUNCATION_NOTICE(collapsed.length).length;
+  const half = Math.floor((MAX_TOOL_RESULT_CHARS - reserve) / 2);
+  return collapsed.slice(0, half) + TRUNCATION_NOTICE(collapsed.length - half * 2) + collapsed.slice(-half);
 }
 ```
 
@@ -1902,7 +1972,11 @@ import { buildStaticSystemPrompt } from "../prompts/system.js";
 test("the moved sections are gone from the system prompt and live only in skills", () => {
   const prompt = buildStaticSystemPrompt();
   assert.doesNotMatch(prompt, /## Failure Mode Playbooks/);
-  assert.doesNotMatch(prompt, /## RCA Output Format/);
+  // NOT the heading: Step 3 deliberately leaves a `## RCA Output Format` pointer behind, so
+  // asserting the heading is absent would make this task fail its own test. What must be gone is
+  // the template — the worked example the skill now carries.
+  assert.doesNotMatch(prompt, /\*📈 Confidence:\*/);
+  assert.match(prompt, /arrive as a skill in the first user message/, "the pointer was deleted too");
   assert.doesNotMatch(prompt, /### CrashLoopBackOff/);
 
   const bodies = loadSkills(resolveSkillsDir()).all().map((s) => s.body).join("\n");
@@ -1930,28 +2004,42 @@ Expected: FAIL — the prompt still contains `## Failure Mode Playbooks`.
 
 From `prompts/system.md`, delete:
 - Lines 106–185 inclusive — the `## Failure Mode Playbooks` heading, its one-line intro, and all twelve `### …` playbooks, up to but NOT including `## Tool Usage Reference`.
-- Lines 302–347 inclusive — the `## RCA Output Format` heading and everything under it to end of file.
+- Lines 302–348 inclusive — the `## RCA Output Format` heading and everything under it to end of file.
+
+  `prompts/system.md` has **no trailing newline**, so `wc -l` reports 347 while the file actually holds 348 lines. Line 348 is `*📈 Confidence:* ...`, the last line of the RCA template. Count with `awk 'END{print NR}'`, not `wc -l`; a delete that stops at 347 orphans that line in the middle of the prompt. It is the same range Task 3 copied into `prompts/skills/rca-format.md`, so verify `grep -c '📈 Confidence' prompts/system.md` returns 0 after the delete.
+
+  Use that emoji-qualified pattern, not a bare `grep -c Confidence`, which returns **2** after a
+  correct delete: `## Confidence Scoring` (line 272) and a prose mention inside `## Execution &
+  Remediation` (line 296) both sit ABOVE the deleted range and must survive it. They are not part
+  of the RCA template. An implementer that chases a bare count down to 0 deletes a section this
+  task was never meant to touch.
 
 Then append this pointer where the RCA section used to be, so the core prompt still names the contract it no longer carries:
 
 ```markdown
 ## RCA Output Format
 
-The exact section labels, the Slack mrkdwn rules and the worked template arrive as a skill in the
-first user message. Follow them verbatim — they are what the Slack renderer and the dashboard
+The exact section labels, the Slack mrkdwn rules and the worked template arrive as a skill in the first user message. Follow them verbatim — they are what the Slack renderer and the dashboard
 parse. If no such skill is present, still answer with `*📍 Root Cause*`, `*📊 Evidence*` and
 `*🔧 Recommended Actions*` sections.
 ```
+
+That first line is deliberately long and must NOT be rewrapped. `prompts/system.md` is read raw and
+never reflowed, so a hard wrap between "in the" and "first" puts a newline inside the phrase Step 1
+asserts with a literal space — `/arrive as a skill in the first user message/` then cannot match its
+own pointer block, and this task fails a test it wrote itself. Wrapping anywhere else in the
+paragraph is fine; wrapping inside that phrase is not.
 
 - [ ] **Step 4: Run the tests**
 
 ```bash
 export PATH=~/.nvm/versions/node/v24.16.0/bin:$PATH
 npm --prefix /Users/annasik/riset/devops-ai-agent test 2>&1 | tail -20
-wc -l /Users/annasik/riset/devops-ai-agent/prompts/system.md
+awk 'END{print NR}' /Users/annasik/riset/devops-ai-agent/prompts/system.md
 ```
 
-Expected: PASS, and `system.md` is roughly 270 lines.
+Expected: PASS, and `system.md` is roughly 228 lines: 348 − 80 (lines 106–185) − 47 (lines
+302–348) = 221, plus the 7-line pointer block appended in Step 3.
 
 - [ ] **Step 5: Commit**
 
@@ -1968,7 +2056,7 @@ git commit -m "refactor(prompts): playbooks and RCA format now live only in prom
 - Create: `src/dashboard/context.ts`, `src/dashboard/context.test.ts`
 
 **Interfaces:**
-- Consumes: the `SkillView` shape from Task 8 — **redeclared here, deliberately not imported**, the same seam `McpTool` uses in `topology.ts` so neither side owns the other's types; `estimateTokens`, `BUDGET_SAFETY_MARGIN`, `DEFAULT_CONTEXT_TOKENS` (Task 4); `parseRegistry` (Task 7); `buildStaticSystemPrompt()`; `config`.
+- Consumes: the `SkillView` shape from Task 8 — **redeclared here, deliberately not imported**, the same seam `McpTool` uses in `topology.ts` so neither side owns the other's types; `estimateTokens`, `BUDGET_SAFETY_MARGIN` (Task 4); `windowOf` (Task 7); `parseRegistry` and the `BackendSpec`/`BackendKind` types (`agent/llm/registry.ts`); `buildStaticSystemPrompt()`; `config`.
 - Produces:
   ```ts
   export interface SkillView { name: string; description: string; when: string; chars: number; body: string }
@@ -1979,8 +2067,17 @@ git commit -m "refactor(prompts): playbooks and RCA format now live only in prom
     backends: BackendBudget[];
     effective: { backend: string; available: number };
   }
-  export function buildContextView(skills: readonly SkillView[], toolCount: number, toolsJson: string): ContextView;
+  export function backendSpecs(provider: string, env: NodeJS.ProcessEnv): BackendSpec[];
+  export function buildContextView(
+    skills: readonly SkillView[],
+    toolCount: number,
+    toolsJson: string,
+    specs?: readonly BackendSpec[]   // defaults to backendSpecs(config.llm.provider, process.env)
+  ): ContextView;
   ```
+
+  Task 11 calls `buildContextView` with three arguments and must keep doing so — the fourth is a
+  test seam with a production default, not a parameter the route supplies.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1989,7 +2086,7 @@ Create `src/dashboard/context.test.ts`:
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildContextView } from "./context.js";
+import { buildContextView, backendSpecs } from "./context.js";
 
 const skills = [
   { name: "rca-format", description: "The RCA shape", when: "always", chars: 1800, body: "*Root Cause*" },
@@ -2012,6 +2109,11 @@ test("every backend gets a row, and available is what is left for conversation",
   assert.ok(v.backends.length >= 1);
   for (const b of v.backends) {
     assert.equal(b.available, b.window - b.reserve - b.core - b.tools);
+    // That identity is self-consistent and survives the behaviour being deleted: it still holds
+    // when the core prompt and the tool schemas are dropped from BOTH sides and reported as 0.
+    // Pin them to the real numbers, or the row can claim a window nothing is subtracted from.
+    assert.equal(b.core, v.core.tokens);
+    assert.ok(b.tools > 0, "the tool schemas are not counted against the window");
   }
 });
 
@@ -2022,6 +2124,46 @@ test("the effective budget names the smallest backend", () => {
   const smallest = v.backends.reduce((a, b) => (b.available < a.available ? b : a));
   assert.equal(v.effective.backend, smallest.name);
   assert.equal(v.effective.available, smallest.available);
+});
+
+// The three above run on whatever single backend the test env configures, so none of them can see
+// a second row. These drive the specs in directly.
+test("every backend gets its own row, and the smallest window governs", () => {
+  const v = buildContextView(skills, 0, "[]", [
+    { name: "light", kind: "openai-compatible", model: "qwen3-32b", contextTokens: 32_000 },
+    { name: "heavy", kind: "claude", model: "claude-opus-5", contextTokens: 200_000 },
+  ]);
+  assert.deepEqual(v.backends.map((b) => b.name), ["light", "heavy"]);
+  assert.equal(v.backends[0]!.window, 32_000);
+  assert.equal(v.backends[1]!.window, 200_000);
+  // Hand-computed rather than re-derived with the implementation's own reduce: a test that
+  // recomputes the comparison the same way passes even when the comparison is backwards.
+  assert.equal(v.effective.backend, "light");
+  assert.equal(v.effective.available, 32_000 - v.backends[0]!.reserve - v.core.tokens);
+});
+
+test("a router registry contributes one spec per backend", () => {
+  const specs = backendSpecs("router", {
+    LLM_BACKEND_1_NAME: "light", LLM_BACKEND_1_KIND: "openai-compatible",
+    LLM_BACKEND_1_MODEL: "qwen3-32b", LLM_BACKEND_1_KEY: "x",
+    LLM_BACKEND_1_BASE_URL: "http://vllm", LLM_BACKEND_1_CONTEXT_TOKENS: "32000",
+    LLM_BACKEND_2_NAME: "heavy", LLM_BACKEND_2_KIND: "claude",
+    LLM_BACKEND_2_MODEL: "claude-opus-5", LLM_BACKEND_2_KEY: "y",
+    LLM_ROUTE_HEAVY: "heavy",
+  });
+  assert.deepEqual(specs.map((s) => s.name), ["light", "heavy"]);
+  assert.equal(specs[0]!.contextTokens, 32_000);
+});
+
+// A registry that will not parse is a degraded page, not a 500. parseRegistry throws on an empty
+// env ("router requires at least LLM_BACKEND_1_NAME"), which is the cheapest way to reach the catch.
+test("a registry that will not parse degrades to one row", () => {
+  assert.deepEqual(backendSpecs("router", {}).map((s) => s.name), ["router"]);
+});
+
+// Not "router", so the registry is never consulted at all — the env below would throw if it were.
+test("a single-provider deployment never parses a registry", () => {
+  assert.deepEqual(backendSpecs("claude", { LLM_BACKEND_1_NAME: "nope" }).map((s) => s.name), ["claude"]);
 });
 ```
 
@@ -2040,8 +2182,9 @@ Create `src/dashboard/context.ts`:
 
 ```ts
 import { buildStaticSystemPrompt } from "../agent/prompts/system.js";
-import { estimateTokens, BUDGET_SAFETY_MARGIN, DEFAULT_CONTEXT_TOKENS } from "../agent/context/budget.js";
-import { parseRegistry } from "../agent/llm/registry.js";
+import { estimateTokens, BUDGET_SAFETY_MARGIN } from "../agent/context/budget.js";
+import { windowOf } from "../agent/context/resolve-budget.js";
+import { parseRegistry, type BackendSpec, type BackendKind } from "../agent/llm/registry.js";
 import { config } from "../config/index.js";
 
 // The dashboard's own shape, like McpTool in topology.ts: strings and numbers only, so neither
@@ -2076,10 +2219,33 @@ export interface ContextView {
  * Everything on /context, computed from config and the in-memory registry. Reads no database and
  * makes no call, which is what lets the page render while Postgres is down.
  */
+/**
+ * The backends whose windows this page reports.
+ *
+ * Both inputs are parameters rather than reads off `config` and `process.env`, because
+ * `config.llm.provider` is frozen when `config/index.ts` is imported: nothing a test does later can
+ * make `buildContextView` take the router branch. Left inline, the branch and its catch are
+ * unreachable from any test, and deleting the whole ternary keeps the suite green.
+ */
+export function backendSpecs(provider: string, env: NodeJS.ProcessEnv): BackendSpec[] {
+  // The same single-spec shape resolve-budget.ts:33 builds for its no-registry branch, cast the
+  // same way. windowOf's second `??` is what catches an unrecognised provider: it lands on the
+  // conservative private-llm window instead of assuming 200k.
+  const single: BackendSpec[] = [{ name: provider, kind: provider as BackendKind }];
+  // Same fallback topology.ts makes for its registryError: a registry that will not parse is
+  // worth a degraded page, not a 500 — and this page is where an operator would go to see why.
+  try {
+    return provider === "router" ? parseRegistry(env).backends : single;
+  } catch {
+    return single;
+  }
+}
+
 export function buildContextView(
   skills: readonly SkillView[],
   toolCount: number,
-  toolsJson: string
+  toolsJson: string,
+  specs: readonly BackendSpec[] = backendSpecs(config.llm.provider, process.env)
 ): ContextView {
   const prompt = buildStaticSystemPrompt();
   const core = {
@@ -2090,23 +2256,11 @@ export function buildContextView(
   const toolTokens = toolCount > 0 ? estimateTokens(toolsJson) : 0;
   const reserve = config.llm.maxTokens + BUDGET_SAFETY_MARGIN;
 
-  const single = [{
-    name: config.llm.provider,
-    kind: config.llm.provider as keyof typeof DEFAULT_CONTEXT_TOKENS,
-    model: undefined as string | undefined,
-    contextTokens: undefined as number | undefined,
-  }];
-  // Same fallback topology.ts makes for its registryError: a registry that will not parse is
-  // worth a degraded page, not a 500 — and this page is where an operator would go to see why.
-  let specs;
-  try {
-    specs = config.llm.provider === "router" ? parseRegistry(process.env).backends : single;
-  } catch {
-    specs = single;
-  }
-
   const backends: BackendBudget[] = specs.map((s) => {
-    const window = s.contextTokens ?? DEFAULT_CONTEXT_TOKENS[s.kind] ?? DEFAULT_CONTEXT_TOKENS["private-llm"];
+    // windowOf from Task 7, not a second copy of its body. This page has to report the same
+    // window the agent actually budgets to; a duplicated default-by-kind chain diverges the day a
+    // kind's default moves, and the page whose whole job is showing the budget shows the wrong one.
+    const window = windowOf(s);
     return {
       name: s.name,
       model: s.model ?? "—",
@@ -2123,14 +2277,17 @@ export function buildContextView(
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 4: Run the tests and the build**
 
 ```bash
 export PATH=~/.nvm/versions/node/v24.16.0/bin:$PATH
 npm --prefix /Users/annasik/riset/devops-ai-agent test 2>&1 | tail -20
+npm --prefix /Users/annasik/riset/devops-ai-agent run build 2>&1 | tail -20
 ```
 
-Expected: PASS.
+Expected: both PASS. `npm test` runs under tsx, which strips types without checking them, and this
+file exports the three interfaces Task 11 renders from — a type error has to surface here, not in
+Task 11's diff.
 
 - [ ] **Step 5: Commit**
 
@@ -2197,9 +2354,16 @@ test("a skill body is readable without leaving the page", () => {
   assert.match(html, /<pre>1\. k8s_describe_pod<\/pre>/);
 });
 
+// Both "light" and "10,746" also appear in the budget table's own row for that backend, so
+// matching them anywhere on the page passes with the statement deleted — which is the whole
+// behaviour under test. Pin the sentence, on whitespace-flattened HTML so the template literal's
+// indentation cannot break the match.
 test("the effective budget is stated, not left to be inferred from the table", () => {
-  assert.match(contextPage(CTX), /light/);
-  assert.match(contextPage(CTX), /10,?746/);
+  const flat = contextPage(CTX).replace(/\s+/g, " ");
+  assert.match(
+    flat,
+    /built to fit <code translate="no">light<\/code>, the smallest window — about 10,746 tokens/
+  );
 });
 
 // Assert the escaped form is PRESENT — asserting the raw form is absent passes on a blank page.
@@ -2238,6 +2402,17 @@ test("only the session routes accept a non-GET method", () => {
 
 Add `METHODS` to that file's existing `./server.js` import. `matchRoute` is already exported (`server.ts:26`); `METHODS` is not — Step 6 exports it.
 
+Also add the new page to the `everyPage()` fixture in `views.test.ts` (currently `:679`), which is
+what applies the section-glyph and decorative-icon contracts to every page at once:
+
+```ts
+  ["context", contextPage(CTX)],
+```
+
+Its comment says a glyph forgotten on one page fails here; a page left out of the list is a page
+that contract never reaches. `CTX` is declared further down the file — that is fine, `everyPage`
+is a function and runs after the module has evaluated.
+
 - [ ] **Step 2: Run it and watch it fail**
 
 ```bash
@@ -2269,12 +2444,29 @@ const NAV = [
 ];
 ```
 
+A fourth destination breaks two assertions already in `views.test.ts` that count the rail — this
+is the nav's own contract widening, not a regression, so update them in the same step:
+
+- the loop in "the rail lists every destination" (`views.test.ts:657`) gains its pair:
+
+```ts
+  for (const [href, label] of [["/", "Overview"], ["/incidents", "Incidents"], ["/topology", "Topology"], ["/context", "Context"]]) {
+```
+
+- "every icon is decorative and every label stays in the markup" (`:665`) counts icons and labels
+  against a literal `4`; both become `5`, and the assertion message becomes `"four destinations
+  and the sign-out button"`. Leaving the message at "three" would describe a rail that no longer
+  exists, and the next person reading the failure would trust the message over the number.
+
 - [ ] **Step 4: Add `contextPage`**
 
 Append to `src/dashboard/views.ts`:
 
 ```ts
-const num = (n: number): string => n.toLocaleString("en-US");
+// Numbers go through `fmtInt`, already imported at the top of views.ts (line 1) and used twenty
+// times below. Do NOT add a local `const num = (n) => n.toLocaleString("en-US")` — that is
+// html.ts:32-34 rewritten, in the one file that already imports the original, and it would put a
+// function named `num` beside the CSS class named "num" that these very cells pass.
 
 // A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
 // stack rather than pairs. The body hangs off the description in a <details>: native disclosure,
@@ -2292,7 +2484,7 @@ function skillRows(skills: ContextView["skills"]): string {
         cell("When", s.when === "always"
           ? `<span class="badge">ALWAYS</span>`
           : `<code translate="no">${esc(s.when)}</code>`) +
-        cell("Size", `${num(s.chars)} chars`) +
+        cell("Size", `${fmtInt(s.chars)} chars`) +
         cell("Description",
           `<details><summary>${esc(s.description)}</summary><pre>${esc(s.body)}</pre></details>`) +
         `</tr>`
@@ -2311,11 +2503,13 @@ function budgetRows(backends: ContextView["backends"]): string {
         `<tr role="row">` +
         cell("Backend", `<code translate="no">${esc(b.name)}</code>`) +
         cell("Model", `<code translate="no">${esc(b.model)}</code>`) +
-        cell("Window", num(b.window)) +
-        cell("Reserve", num(b.reserve)) +
-        cell("Core", num(b.core)) +
-        cell("Tools", num(b.tools)) +
-        cell("Available", num(b.available)) +
+        // "num" is the class every other numeric cell in this file carries (see the Token usage
+        // table, views.ts:273-276) — also a `pairs` table, so the combination is already proven.
+        cell("Window", fmtInt(b.window), "num") +
+        cell("Reserve", fmtInt(b.reserve), "num") +
+        cell("Core", fmtInt(b.core), "num") +
+        cell("Tools", fmtInt(b.tools), "num") +
+        cell("Available", fmtInt(b.available), "num") +
         `</tr>`
       )
       .join(""),
@@ -2331,8 +2525,8 @@ export function contextPage(v: ContextView): string {
        has to say it. Read from the running process — no database, no call leaves it.</p>
 
      ${section(ICON.layers, "Core prompt")}
-     <p class="meta"><code translate="no">prompts/system.md</code> — ${num(v.core.lines)} lines,
-       ${num(v.core.chars)} chars, about ${num(v.core.tokens)} tokens. Sent on every iteration of
+     <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
+       ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
        every investigation.</p>
 
      ${section(ICON.context, "Skills")}
@@ -2343,7 +2537,7 @@ export function contextPage(v: ContextView): string {
 
      ${section(ICON.chip, "Budget per backend")}
      <p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
-       the smallest window — about ${num(v.effective.available)} tokens for skills and conversation.
+       the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
        The router picks a backend after the request is assembled, so the request has to fit the
        smallest one it might land in.</p>
      ${budgetRows(v.backends)}`,
@@ -2356,22 +2550,46 @@ Add `import type { ContextView } from "./context.js";` to the imports at the top
 
 - [ ] **Step 5: Style the disclosure**
 
-In `src/dashboard/styles.ts`, add near the other table rules (outside any container query — this applies at every width):
+In `src/dashboard/styles.ts`, immediately after the existing
 
 ```css
-/* A playbook is preformatted text in a table cell. Without these two, one long PromQL line
-   pushes the whole page sideways at 390px — and `pre` does not wrap by default. */
+details > summary > span { margin-left: .35em; }
+```
+
+(the tool-list disclosure block, currently `styles.ts:952-955` — **not** "near the table rules";
+the disclosure rules live with the tool list). Outside any container query — this applies at every
+width:
+
+```css
+/* A playbook is preformatted text in a table cell. Without this, one long PromQL line pushes the
+   whole page sideways at 390px — a pre element does not wrap by default. */
 td details > pre {
   white-space: pre-wrap;
   overflow-x: auto;
-  margin: .5rem 0 0;
-  font-size: .82rem;
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
-td details > summary { cursor: pointer; }
 ```
 
-Remember `STYLES` is a template literal — do not introduce a backtick.
+That is the whole addition — **one rule, not two.**
+
+Do NOT add `td details > summary { cursor: pointer; }`. `styles.ts:954` already declares
+`details > summary { cursor: pointer; font-weight: 550; }`, which every `<summary>` on this page
+already matches; a `td`-scoped copy sets a property that is already set to the same value and
+silently drops the `font-weight` its neighbour carries, so the playbook summaries would be the one
+disclosure on the dashboard rendered at a different weight.
+
+Use the tokens, not raw lengths: `--fs-sm` is `.8125rem` and `--sp-2` is `.5rem` (both declared at
+`styles.ts:31` and `:42`), so this is the same rendered size the literals would have given. The
+file carries exactly five hardcoded `font-size` literals in ~1000 lines — the scale is the
+convention, and a `.82rem` that merely *looks* like `--fs-sm` is the kind of near-miss that stops
+tracking when the scale moves.
+
+Remember `STYLES` is a template literal — do not introduce a backtick. That includes the comment:
+copy it as the plain words above. Markdown formatting around a word here is this document's, not
+the CSS's, and a backtick that survives the copy terminates `STYLES` mid-file — every module that
+imports it then fails to parse, so the topology tests fail too and the cause looks unrelated.
 
 - [ ] **Step 6: Add the route and the handler**
 
@@ -2466,7 +2684,17 @@ git commit -m "feat(dashboard): read-only /context page for the skill registry a
 
 - [ ] **Step 1: Update `CLAUDE.md`**
 
-Add to the architecture section, after the existing context/prompt notes:
+`CLAUDE.md` has four sections — `## Commands`, `## Conventions`, `## Gotchas (see
+MEMORY_BANK.md for the full list)`, `## Working style` — and no architecture section. These four
+bullets go in `## Gotchas`, immediately after the existing one-liner
+
+```markdown
+- **System prompt** lives in `prompts/system.md` — editable without rebuild.
+```
+
+which is the note they extend. Leave the `**History trimming:**` bullet above it alone: it is still
+true — `memory/index.ts` still calls `trimToWindow` on every append, and that is a different window
+from the budget (a message cap on what Redis stores, not a token cap on what is sent).
 
 ```markdown
 - **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
@@ -2490,7 +2718,50 @@ Add to the architecture section, after the existing context/prompt notes:
 
 - [ ] **Step 2: Update `MEMORY_BANK.md`**
 
-Add a section describing: the three-module split (`skills/`, `context/budget.ts`, `context/compact.ts`); the twelve playbooks + `rca-format` file list; why the Tool Usage Reference stayed in the core prompt; the `/context` page's two tables and which narrow layout each takes and why; and the empty-skills-directory boot error and the reasoning behind it. Match the file's existing voice — reasons, not restated code.
+Add one `###` subsection titled **`### Context Assembly & Skills`** at the END of the existing
+`## Key Design Decisions` section — i.e. immediately before the `## LLM Providers` heading, so it
+sits with the other design rationale rather than starting a fifteenth top-level section. Match the
+file's existing voice: **reasons, not restated code.** Every claim below is load-bearing and none of
+it is derivable from reading the diff — that is why it is written down.
+
+Cover exactly these five, one short paragraph or bullet each:
+
+1. **The three-module split.** `src/agent/skills/` owns *what content exists and when it applies*;
+   `context/budget.ts` owns *how much fits*; `context/compact.ts` owns *how much a single tool
+   result is allowed to cost*. They are separate because they fail separately: a malformed skill is
+   a boot error, an oversized request is a runtime trim, and a noisy tool result is neither.
+2. **The file list:** twelve failure-mode playbooks plus `rca-format`, in `prompts/skills/`. Note
+   that `rca-format` is `when: always` and the twelve are regex-gated on the alert text.
+3. **Why `## Tool Usage Reference` stayed in the core prompt** while the playbooks moved out: a
+   trigger built from alert text cannot know whether a PromQL query is coming, so gating the query
+   cookbook on the alert text removes it exactly when it is needed. Availability beats budget for
+   that one section.
+4. **The `/context` page's two tables** and the narrow layout each takes: skills → `"stack"`
+   (descriptions are sentences), backend budgets → `"pairs"` (every value is a short number). State
+   the rule that chose them — **what the cells hold, not how many there are** — because that is the
+   part a future editor gets wrong.
+5. **The empty-skills-directory boot error.** `loadSkills` throws when the directory holds no `.md`
+   files, and the reason is in the message: an agent with no skills has no RCA output format, so it
+   would investigate correctly and then answer in a shape the Slack renderer and
+   `src/dashboard/rca.ts` cannot parse. Failing at boot beats failing per-incident.
+
+- [ ] **Step 2b: Fix the one comment this branch made stale**
+
+`src/agent/memory/index.ts:38-40` still explains its trim by referring to `trimHistory`, the agent
+method Task 8 deleted. Change the third comment line
+
+```ts
+    // orphan a tool_result, which the trimHistory window then assumes never happens
+```
+
+to
+
+```ts
+    // orphan a tool_result, which every later stage then assumes never happens
+```
+
+Nothing else in that file changes. It is a comment naming a function that no longer exists, in the
+one file a reader lands in while asking why there are two different trims.
 
 - [ ] **Step 3: Verify the whole suite and the build one last time**
 
@@ -2502,15 +2773,15 @@ npm --prefix /Users/annasik/riset/devops-ai-agent run build 2>&1 | tail -10
 
 Expected: all tests pass, build clean.
 
-- [ ] **Step 4: Refresh the knowledge graph**
+- [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/annasik/riset && graphify update .
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add CLAUDE.md MEMORY_BANK.md
+git add CLAUDE.md MEMORY_BANK.md src/agent/memory/index.ts
 git commit -m "docs: context assembly, skills and the /context page"
 ```
+
+Refreshing the knowledge graph (`graphify update .`, run from `/Users/annasik/riset`) is
+deliberately NOT a step here. It scans the whole multi-repo workspace, and the final whole-branch
+review still comes after this task — a graph built now is stale before the branch lands. It is the
+branch-end action, run once after the review, and it is not this implementer's to judge if it
+fails.

@@ -4,8 +4,9 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters } from "./filters.js";
-import { detailPage, errorPage, listPage, loginPage, overviewPage, topologyPage } from "./views.js";
+import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
+import { buildContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
 import {
   LoginThrottle,
@@ -20,7 +21,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "login" | "logout" }
   | { kind: "detail"; id: number };
 
 export function matchRoute(pathname: string): Route {
@@ -31,6 +32,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/logout") return { kind: "logout" };
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
+  if (p === "/context") return { kind: "context" };
   // digit count capped at 15: any 15-digit string is < 10^15, safely under
   // Number.MAX_SAFE_INTEGER (~9.007e15, 16 digits) — so isSafeInteger below is never the
   // thing doing the rejecting for an in-bound match, it is defense in depth. Without the
@@ -48,7 +50,7 @@ export function matchRoute(pathname: string): Route {
 
 // Which methods each route answers. Everything not named here is read-only and GET-only,
 // which is still true of every page: the two exceptions both act on the session, not on data.
-const METHODS: Partial<Record<Route["kind"], readonly string[]>> = {
+export const METHODS: Partial<Record<Route["kind"], readonly string[]>> = {
   login: ["GET", "POST"],
   logout: ["POST"],
 };
@@ -80,6 +82,7 @@ export class DashboardServer {
   private server: http.Server | null = null;
   private readonly queries: DashboardQueries;
   private readonly mcpTools: () => readonly McpTool[];
+  private readonly skills: () => readonly SkillView[];
   private readonly throttle = new LoginThrottle();
 
   // A getter, not a snapshot: the dashboard starts before — and outlives — any given MCP
@@ -87,9 +90,14 @@ export class DashboardServer {
   // the dashboard's own two-field shape, not the agent's ToolDefinition — this is the whole
   // dependency the dashboard has on the agent, and keeping it structural means neither side
   // imports the other's types.
-  constructor(queries?: DashboardQueries, mcpTools?: () => readonly McpTool[]) {
+  constructor(
+    queries?: DashboardQueries,
+    mcpTools?: () => readonly McpTool[],
+    skills?: () => readonly SkillView[]
+  ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
+    this.skills = skills ?? (() => []);
   }
 
   async start(): Promise<void> {
@@ -319,6 +327,15 @@ export class DashboardServer {
       return send(200, topologyPage(buildTopology(this.mcpTools()), nonce), "text/html; charset=utf-8", {
         "content-security-policy": csp(nonce),
       });
+    }
+
+    if (route.kind === "context") {
+      const tools = this.mcpTools();
+      return send(
+        200,
+        contextPage(buildContextView(this.skills(), tools.length, JSON.stringify(tools))),
+        "text/html; charset=utf-8"
+      );
     }
 
     if (!this.queries.enabled) {

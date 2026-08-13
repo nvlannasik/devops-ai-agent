@@ -155,3 +155,26 @@ test("rejects a duplicate within LLM_ROUTE_LIGHT", () => {
     /b.*repeated in LLM_ROUTE_LIGHT/
   );
 });
+
+test("CONTEXT_TOKENS is parsed per backend and left undefined when unset", () => {
+  const r = parseRegistry({
+    LLM_BACKEND_1_NAME: "light", LLM_BACKEND_1_KIND: "private-llm",
+    LLM_BACKEND_1_CONTEXT_TOKENS: "65536",
+    LLM_BACKEND_2_NAME: "heavy", LLM_BACKEND_2_KIND: "claude",
+    LLM_BACKEND_2_MODEL: "claude-opus-5", LLM_BACKEND_2_KEY: "k",
+    LLM_ROUTE_LIGHT: "light", LLM_ROUTE_HEAVY: "heavy",
+  } as NodeJS.ProcessEnv);
+  assert.equal(r.backends[0]!.contextTokens, 65_536);
+  assert.equal(r.backends[1]!.contextTokens, undefined);
+});
+
+test("a non-numeric CONTEXT_TOKENS is rejected at boot", () => {
+  assert.throws(
+    () => parseRegistry({
+      LLM_BACKEND_1_NAME: "light", LLM_BACKEND_1_KIND: "private-llm",
+      LLM_BACKEND_1_CONTEXT_TOKENS: "lots",
+      LLM_ROUTE_LIGHT: "light", LLM_ROUTE_HEAVY: "light",
+    } as NodeJS.ProcessEnv),
+    /LLM_BACKEND_1_CONTEXT_TOKENS/
+  );
+});
