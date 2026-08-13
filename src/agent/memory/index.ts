@@ -37,7 +37,7 @@ export class ConversationMemory {
     history.push(message);
     // preserve the original issue (index 0) and keep tool_use/tool_result pairs
     // intact — a blind splice on the oldest messages dropped the issue and could
-    // orphan a tool_result, which the trimHistory window then assumes never happens
+    // orphan a tool_result, which every later stage then assumes never happens
     const trimmed = trimToWindow(history, MAX_MESSAGES);
     if (this.redis) {
       await this.redis.set(`conv:${threadId}`, JSON.stringify(trimmed), "EX", REDIS_TTL_SEC);
