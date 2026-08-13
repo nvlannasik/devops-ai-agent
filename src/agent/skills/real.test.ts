@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadSkills, resolveSkillsDir, SKILL_MAX_CHARS } from "./index.js";
+import { buildStaticSystemPrompt } from "../prompts/system.js";
 
 // The shipped directory, not a fixture. loadSkills throws at boot on any malformation, so this
 // test is what turns "the pod refuses to start" into "npm test fails" — the whole reason
@@ -42,4 +43,27 @@ test("each playbook is reachable from a realistic alert line", () => {
     const { selected } = r.select(alert, new Set());
     assert.ok(selected.some((s) => s.name === name), `"${alert}" did not select ${name}`);
   }
+});
+
+// The content moved; it must not also stay. A section present in both places is sent twice and
+// drifts the moment one copy is edited.
+test("the moved sections are gone from the system prompt and live only in skills", () => {
+  const prompt = buildStaticSystemPrompt();
+  assert.doesNotMatch(prompt, /## Failure Mode Playbooks/);
+  // NOT the heading: Step 3 deliberately leaves a `## RCA Output Format` pointer behind, so
+  // asserting the heading is absent would make this task fail its own test. What must be gone is
+  // the template — the worked example the skill now carries.
+  assert.doesNotMatch(prompt, /\*📈 Confidence:\*/);
+  assert.match(prompt, /arrive as a skill in the first user message/, "the pointer was deleted too");
+  assert.doesNotMatch(prompt, /### CrashLoopBackOff/);
+
+  const bodies = loadSkills(resolveSkillsDir()).all().map((s) => s.body).join("\n");
+  assert.match(bodies, /Terminated: OOMKilled \(exit 137\)/);
+  assert.match(bodies, /\*🔧 Recommended Actions\*/);
+});
+
+// The cookbook stays: a trigger built from alert text cannot know whether a PromQL query is
+// coming, and a wrong guess removes the query patterns exactly when they are needed.
+test("the tool usage reference stays in the core prompt", () => {
+  assert.match(buildStaticSystemPrompt(), /## Tool Usage Reference/);
 });
