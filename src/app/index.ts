@@ -7,6 +7,7 @@ import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
+import { worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, type AlertItem } from "../agent/correlation/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from "../utils/slack/blocks.js";
@@ -15,10 +16,6 @@ import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/re
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { withRoute } from "../utils/trace/index.js";
-
-// how long after a successful remediation to post the pod-status check into the thread
-// ponytail: fixed 90s covers a typical rolling update; env var if workloads need more
-const STATUS_CHECK_DELAY_MS = 90_000;
 
 class Semaphore {
   private running = 0;
@@ -50,6 +47,8 @@ export class SlackApp {
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private httpServer: Server | null = null;
+  private verifyTimer: NodeJS.Timeout | null = null;
+  private stopping = false;
 
   constructor(agent: DevOpsAgent) {
     this.agent = agent;
@@ -182,7 +181,7 @@ export class SlackApp {
       `If this is not about this cluster's workloads, observability data, incidents or deploys, decline in one line ` +
       `per Scope of Work and answer nothing else — do not debug or explain code.]\n${text}`;
 
-    // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 3);
+    // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 2);
     // explicit investigation requests (and the alert webhook path) keep the full budget.
     const investigation = wantsInvestigation(text);
     const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
@@ -228,9 +227,15 @@ export class SlackApp {
       // Approval-gated remediation runs for BOTH mention response types: an RCA that
       // implies a fix, or a direct request ("restart X") answered in conversation mode.
       // The user text is part of the proposal context so an explicit command is enough
-      // evidence. Costs one extra LLM call per mention; {"action": null} is the escape.
-      // No incident row to link (no alert labels), so incidentId is null.
-      void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
+      // evidence. No incident row to link (no alert labels), so incidentId is null.
+      // The gate is what keeps a read-only "status check" on a healthy cluster from
+      // spending a heavy LLM call to be told {"action": null} — see worthProposing.
+      const gate = worthProposing(text, reply, isRca);
+      if (gate.propose) {
+        void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
+      } else {
+        logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
+      }
       await this.notifyIfLowConfidence(event.channel, threadId, reply);
     } catch (err) {
       logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
@@ -396,7 +401,7 @@ export class SlackApp {
       // agent recognizes a recurrence and its prior fix. Best-effort — recall failures must
       // not block the investigation.
       const [priorIncidents, priorRemediations] = await Promise.all([
-        this.agent.recallIncidents(labels).catch(() => ""),
+        this.agent.recallIncidents(labels, issueText).catch(() => ""),
         this.agent.recallRemediations(labels).catch(() => ""),
       ]);
       const memory = [priorIncidents, priorRemediations].filter(Boolean).join("\n\n");
@@ -407,7 +412,7 @@ export class SlackApp {
         `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
         (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
-      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue));
+      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText }));
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
       // recognized recurrence may be a concise conversational reply (known issue +
       // confirmed fix) — forcing it back into the template via a reformat LLM call
@@ -542,13 +547,15 @@ export class SlackApp {
       const noteThread: string | undefined = body.message?.thread_ts;
       if (noteThread) await this.agent.noteInThread(noteThread, text);
 
-      // Post-remediation status check: give the rolling update time to converge, then
-      // post the workload's pod status into the thread so the outcome is visible.
-      // ponytail: in-process timer — lost if this pod restarts within the delay; a
-      // durable scheduler is the upgrade path if that ever matters
+      // Post-remediation verification: scheduled in Postgres, not on a timer in this pod, so
+      // a restart between the click and the check costs nothing — whichever replica polls
+      // next answers it. `target` is absent for GitOps PR remediations (nothing is live
+      // until the PR merges and Flux syncs), which is exactly when there's nothing to verify.
       if (target) {
         const threadTs: string = body.message?.thread_ts ?? messageTs;
-        setTimeout(() => void this.postRemediationStatusCheck(channel, threadTs, target), STATUS_CHECK_DELAY_MS);
+        await this.agent
+          .scheduleRemediationCheck(remediationId, channel, threadTs, target)
+          .catch((e) => logger.error(`[remediation] could not schedule verification for ${remediationId}: ${errDetail(e)}`));
       }
     } catch (err) {
       const msg = `⚠️ Remediation handling failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -561,24 +568,32 @@ export class SlackApp {
     }
   }
 
-  private async postRemediationStatusCheck(
-    channel: string,
-    threadTs: string,
-    target: { namespace: string; name: string }
-  ): Promise<void> {
-    try {
-      const status = await this.agent.remediationStatus(target.namespace, target.name);
-      await this.app.client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text:
-          `🔎 *Status check* — \`${target.namespace}/${target.name}\`, ${Math.round(STATUS_CHECK_DELAY_MS / 1000)}s after remediation:\n` +
-          `\`\`\`\n${status}\n\`\`\``,
-        mrkdwn: true,
-      });
-    } catch (err) {
-      logger.error(`[remediation] status check failed for ${target.namespace}/${target.name}: ${errDetail(err)}`);
-    }
+  // Drain whatever verification checks are due and post each verdict into its own thread.
+  // The loop is in-process but the schedule is not: it only asks Postgres "is anything due",
+  // so a check outlives the pod that scheduled it. One slow tick can't overlap the next —
+  // the timer is re-armed after the work, not on a fixed interval.
+  private startVerificationPoller(): void {
+    if (!config.incidents.enabled) return; // checks live in Postgres; no DB, no schedule
+    const tick = async (): Promise<void> => {
+      try {
+        for (const msg of await this.agent.runDueRemediationChecks()) {
+          await this.app.client.chat.postMessage({ channel: msg.channel, thread_ts: msg.threadTs, text: msg.text, mrkdwn: true });
+          // the agent should know its own fix didn't hold before the next follow-up question
+          await this.agent.noteInThread(msg.threadTs, `Post-remediation verification: ${msg.text}`);
+        }
+      } catch (err) {
+        logger.error(`[remediation] verification poll failed: ${errDetail(err)}`);
+      } finally {
+        if (!this.stopping) this.armVerificationPoller(tick);
+      }
+    };
+    this.armVerificationPoller(tick);
+    logger.info(`[remediation] verification poller every ${Math.round(config.remediation.verifyPollMs / 1000)}s`);
+  }
+
+  private armVerificationPoller(tick: () => Promise<void>): void {
+    this.verifyTimer = setTimeout(() => void tick(), config.remediation.verifyPollMs);
+    this.verifyTimer.unref(); // auxiliary work must never be what keeps the process alive
   }
 
   private async notifyIfLowConfidence(channel: string, threadId: string, rca: string): Promise<void> {
@@ -621,9 +636,15 @@ export class SlackApp {
       await this.app.start(config.port);
       logger.info(`Slack app started in HTTP Mode on port ${config.port}`);
     }
+    this.startVerificationPoller();
   }
 
   async stop(): Promise<void> {
+    // stop the poller first: a tick that starts now would post into a thread with a Slack
+    // client that's about to close. Anything already due stays due — another pod, or this
+    // one after the restart, claims it.
+    this.stopping = true;
+    if (this.verifyTimer) clearTimeout(this.verifyTimer);
     await this.app.stop();
     if (this.httpServer) {
       await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));

@@ -65,7 +65,7 @@ logs" question). Enforced in code instead:
 - **Format backstop (deterministic):** even with the budget note, the model sometimes composed its FINAL answer in RCA format when tool results looked alarming (nginx logs full of errors → `response type=rca` for a "show me logs" mention). `handleMention` now detects `!wantsInvestigation && isRcaResponse(reply)` and calls `agent.reformatToConversation(reply)` — one tool-less LLM call with a **minimal** system prompt (the full one is what primes the RCA structure). Falls back to the original text on failure. This is the last line: prompt rules → budget note → programmatic reformat.
 - **Slack splitter (`utils/slack/split.ts`):** Slack hard-splits messages >~4000 chars and breaks ``` fences (continuation renders raw). Non-RCA mention replies are posted via `splitForSlack()` — newline-boundary chunks with fence re-balancing (close at chunk end, reopen at next chunk start). Unit-tested.
 - **Log fan-out guard (deterministic):** in conversation mode, `k8s_get_pod_logs` for > `MAX_LOG_FANOUT` (2) distinct pods in one round is refused with a synthesized "list the pods and ask the user" error (other calls in the round still execute). Stops "show me log metallb" (matches 8 pods) from dumping every pod's logs; the model asks which one instead.
-- **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested.
+- **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested. **The empty-first-round-scope escape is what makes `k8s_cluster_health` usable**: a cluster-wide scan passes no `namespace`, so round 1 sets an empty scope, the lock disables itself, and round 2 may drill into whichever namespace the scan surfaced. Don't "fix" the empty case into a block — that would turn the health scan into a dead end.
 - `MENTION_TOOL_ROUNDS` default is **2** (was 3): discover → fetch covers the common flows exactly; a 3rd round only ever fed wandering. Tunable via env without rebuild.
 
 ### Reasoning-model token exhaustion (private-llm)
@@ -188,8 +188,347 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 - **Store = Postgres (`pg`), NOT Redis.** Redis here is a cache (conversation memory, 24h TTL, evictable); incident memory is a system-of-record that must persist for months. Enabled only when `DB_HOST` is set (discrete `DB_*` vars → `pg.Pool` via `db/pool.ts`; `DB_SSL_MODE` maps to pg's `ssl`); `IncidentMemory(null)` is a safe no-op otherwise (single-pod dev works without Postgres).
 - **Schema = versioned migrations, NOT inline DDL.** `migrations/*.sql` applied by a framework-free runner (`db/migrate.ts`, uses installed `pg`): tracks applied files in `schema_migrations`, each in a txn, guarded by a **`pg_advisory_lock`** so concurrent pod startups (autoscaling) serialize instead of racing on `CREATE TABLE`. `runMigrations()` runs on agent startup AND via `npm run migrate` / `migrate:prod` (for a K8s Job/initContainer). `migrations/` is copied into the Docker image. Add changes as `002_*.sql`. `pendingMigrations()` (pure: filter/sort/skip-applied) is unit-tested. `IncidentMemory` no longer does DDL.
 - **Wiring:** owned by `DevOpsAgent` (alongside Redis/memory init), exposed as `recallIncidents(labels)` / `storeIncident(labels, rca)`. App calls them only on the **alert path** (`investigateAlertInBackground`) where `alert.labels` give `alertname`/`namespace`; recall + store are best-effort (`.catch`) so a DB failure never breaks an investigation. Mentions have no labels → not stored.
-- **Recall = exact label match, no vector DB** (`// ponytail:` add embeddings only if too coarse). Past incidents framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
+- **Recall is tiered, and the tiers are never flattened**: CONFIRMED (human, `incident_feedback`) → agent hypotheses for the exact `(alertname, namespace)` → **possibly related** (similarity, `migrations/005`). Past incidents are framed as **Hypothesis to verify** (system prompt + injected block) to avoid anchoring on a stale root cause.
+- **Similarity tier = Postgres built-in full-text search, no new dependency.** No pgvector, no `pg_trgm`, no embeddings API — `incidents.root_cause_tsv` is a `GENERATED ALWAYS AS (to_tsvector('english', coalesce(root_cause,''))) STORED` column with a GIN index; the alert text is the query side. The **two-arg** `to_tsvector(regconfig, text)` is IMMUTABLE and can back a generated column; the one-arg form cannot (it depends on `default_text_search_config`). No `CREATE EXTENSION` on purpose: `runMigrations(pool)` runs inside `DevOpsAgent.initialize()`, so a migration that needs a privilege the app role lacks means **the pod refuses to start**. pgvector would also put an embedding call on the read path.
+- **Ranking is distinct-lexeme overlap, not `ts_rank`.** Measured: on an OR tsquery `ts_rank` returns the same score for a one-term and a two-term hit (`0.0608` both) — it does not reward matching more of the query. Counting distinct matched lexemes (`unnest(root_cause_tsv)` vs the query's lexeme array) does, and a human can check it. `@@` on the GIN index filters, the count ranks and thresholds at `MIN_OVERLAP`; rows the exact-match tiers already cover are excluded so nothing appears twice.
+- `queryTerms()` splits CamelCase alert names (`KubePodCrashLooping OOMKilled` → `kube/crash/looping/killed`), drops envelope words, digits, and terms under 4 chars, dedups, and caps at 24 terms. Unit-tested in `incidents/index.test.ts`.
+- The similarity tier is **skipped entirely without query text** (recall then issues exactly 2 queries, never touching `root_cause_tsv`), rendered **last**, labelled as the weakest evidence, and wrapped so a failure there can never break recall.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
+
+### Incident Dashboard (`src/dashboard/`, phase 1)
+Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
+default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
+`docs/superpowers/specs/2026-08-03-dashboard-design.md`; §3.1 of that spec ("no auth") is
+superseded by `docs/DESIGN_dashboard_auth.md`.
+
+**Auth: one shared password, session in a signed cookie** (`src/dashboard/auth.ts`). The token is
+`v1.<exp>.<base64url hmac>` and the HMAC key is `scryptSync(DASHBOARD_PASSWORD, fixed salt)` — a
+*derived* key rather than a random one, so sessions survive a restart and are valid on every
+replica (a Map of session ids would sign everyone out on each rolling update, which lands during
+an incident, which is when the page is open). scrypt rather than a bare HMAC over the password
+because the token is two thirds public, so its signature is an offline oracle for the key.
+Rotating the password invalidates every session; that is the revocation mechanism.
+- **Unset password = 503 on every route but `/healthz`** — never anonymous content. The probe
+  stays open so a missing Secret cannot take the pod out of service.
+- Route order in `handle()`: parse → **method gate** (405, before auth: a stranger's POST and an
+  operator's get the same answer) → `/healthz` → 503 gate → `/login` → session gate → 404 →
+  `/topology` → DB gate. The 404 is deliberately *behind* the session now: an unauthenticated
+  caller learns nothing about which paths exist.
+- Cookie: `HttpOnly; SameSite=Strict; Secure` (`DASHBOARD_COOKIE_SECURE=false` only for plain
+  HTTP on a hostname — browsers exempt localhost, so a port-forward is unaffected).
+- `safeNext()` guards the post-login redirect (rejects `//host`, `/\host`, absolute URLs, control
+  characters) — it lands in a `Location` header and arrives from a URL anyone can send an operator.
+- `LoginThrottle` keyed on `remoteAddress`: 10 failures / 5 min → 429 + `Retry-After`. Behind a
+  proxy every client shares one bucket, deliberately — trusting `X-Forwarded-For` would make the
+  throttle decorative.
+- CSP gained `form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. `form-action` does
+  **not** inherit from `default-src`, so the login form worked without it; it is there to pin
+  where the password may be posted now that there is a session to steal. The policy is built by
+  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce and so gets a `script-src`
+  at all. Everywhere else there is no exemption, which is what keeps a missed `esc()` inert on
+  the pages that render an RCA.
+
+**Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
+one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
+the result is silently lost. Every query carries a `LIMIT` (page size 50, hard cap 200) and the
+overview aggregates are cached for 60s: a held-down refresh key is otherwise unthrottled load on
+the same event loop that handles alerts, and a signed-in operator can hold one down as easily as
+a stranger could. `queries.test.ts` asserts that mechanically over every emitted statement —
+a new query without a `LIMIT` fails the suite rather than the cluster.
+
+**Pagination (`/incidents`).** Ten rows a page, `PAGE_SIZE` in `filters.ts`, and **not
+adjustable** — there is no `pageSize` parameter and nothing about paging in the filter form.
+Page size is not a filter: a filter narrows *which* incidents you are looking at, paging only
+moves through them. The per-page `<select>` that used to sit in the filter bar conflated the
+two — it needed **Apply filters** to take effect and sat nowhere near the pager it governed —
+and at 50 rows the pager was a summary line under a screen and a half of scrolling, which is
+why nobody could find it. A constant also means no URL can widen the `LIMIT`.
+`list()` runs two queries concurrently: the page (over-fetched by
+one row, which is where `hasMore` comes from) and a **bounded** count —
+`SELECT count(*) FROM (SELECT 1 FROM incidents <same WHERE> LIMIT $n) c`, `COUNT_CAP = 5000`.
+An unbounded `COUNT(*)` is a full scan of a table that only grows, on a 3-connection pool with a
+3s timeout; the cap trades an exact number nobody reads past 5,000 for a bounded cost, and the
+page says `5,000+` when it hits the ceiling. Two consequences worth keeping straight:
+- The two queries share no snapshot, so a row inserted between them can make the count smaller
+  than what was just rendered. `total` is therefore `max(count, offset + rows.length)` — the
+  summary can never claim fewer incidents than the reader can see.
+- **Next is driven by the over-fetch, not by the count.** Past the ceiling the count is a floor
+  and would strand the reader; `hasMore` still knows there is another row.
+`Promise.all` order is load-bearing — rows first, count second; the tests read `calls[0]`.
+`pageWindow(current, last)` (`views.ts`) prints first, last, and ±2 around the current page,
+eliding the rest with `null` → `…`, but a *lone* hidden page is printed rather than elided (an
+ellipsis standing in for one number is longer than the number). The pager renders **below the
+table**, links carry the active filters forward, and `page=1` is omitted so a shared URL shows
+only what is actually on. Submitting the filter form drops `page` and so returns to page 1,
+which is what you want — page 6 of the old result set means nothing in the new one.
+
+**Nothing rendered is trusted input.** `rca`/`root_cause` are LLM output and the labels come from
+Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
+security-relevant one in this module.
+
+**The rail (`layout()` + `.rail` in `styles.ts`).** Navigation is a left sidebar, not a top bar:
+`<body>` is a two-column grid (`var(--rail-w) minmax(0, 1fr)`) and `body.bare` collapses it to
+one for sign-in and not-configured — without that class those pages would open 13.5rem short of
+the left edge. Everything about it is constrained by **zero client JS outside `/topology`**:
+- No hamburger, no toggle, no stored collapse state. The rail is CSS only, so it responds to the
+  viewport and nothing else: a full sidebar wide, a horizontal bar under 60rem, icons-only under
+  30rem.
+- Icons are hand-written inline `<svg>` (`ICON` in `views.ts`). `default-src 'none'` blocks an
+  icon font and a sprite `<use href>` alike, and a dependency for twelve paths is not worth it.
+  Each is `aria-hidden="true" focusable="false"` beside a real `<span class="lbl">`.
+- The icons-only breakpoint **clips the label, it does not delete it**: `clip-path: inset(50%)`,
+  so the text stays in the accessible name and a screen reader still reads "Incidents".
+- `main` and `footer.bottom` carry `width: 100%; min-width: 0`, and that is not restating a
+  default. They are flex items of the rail's `.pane` column with `margin: 0 auto`, and a flex
+  item with an auto cross-axis margin does not stretch — it takes fit-content, floored at
+  min-content, which on a phone is the width of the widest table. The whole page scrolled
+  sideways while `.table-wrap` scrolled nothing. `min-width` alone does not fix it. A test in
+  `views.test.ts` pins both declarations.
+
+**Sizing is fluid, and it is measured against the container, not the viewport.** Every panel used
+to be laid out from `@media` breakpoints against a fixed `--maxw: 76rem`, and both halves of that
+were wrong: on a 1920 display the page sat in a 76rem ribbon with the rest of the screen empty,
+and on every width in between the components kept proportions that were chosen for one width.
+The rules now:
+- **`main` is a container** (`container: page / inline-size`), and the hero and the chart declare
+  their own (`hero`, `chart`). A media query cannot size these correctly: the rail is a 13.5rem
+  column above 60rem and a top bar below it, so the same viewport width means two different
+  content widths. Container queries ask the only question that matters — how wide is *this* box.
+  Note `cqi` inside a custom property resolves at the **use** site against the nearest *ancestor*
+  container; an element's own `container-type` never applies to itself.
+- **Padding, gaps and the stat type scale are `clamp()`, not fixed steps** (`--fs-stat`, `main`'s
+  padding, `h2` margins, `.hero` padding). A breakpoint is a cliff between two sizes that are each
+  right once; a clamp is right everywhere in between, which is what removes the dead space.
+- **The stat shelf steps 4 → 2 → 1** (`@container page` at 54rem and 26rem) and never `auto-fit`.
+  `auto-fit` on the token shelf produced a 3+1 band with an orphan tile, and a shelf that is not a
+  clean divisor of its row reads as a bug.
+- **A page of figures and a page of argument get different measures.** `--maxw` is 88rem, and
+  `.pane:has(.prose)` drops it to 62rem. The overview and the incident *list* improve with every
+  pixel a big display has; the incident *page* does not — `.prose-text` stops at 68ch however wide
+  its frame grows, so past a point the extra width is empty card and an Evidence table whose second
+  column drifts a hand's width from its first. `:has()` rather than a flag threaded through
+  `layout()`: the rule *is* the condition. `views.test.ts` pins the coupling, because renaming the
+  class on the RCA frame would silently stop the selector matching.
+- **A shelf's sub-lines are all-or-nothing.** `.stat dd` is bottom-anchored (`margin-top: auto`)
+  so values line up across a row without reserving a blank caption line — reserving one
+  (`min-height` on `dt`) was itself the whitespace being complained about. But the anchor pulls the
+  sub-line with it: give three tiles a sub-line and the fourth's value floats a line higher. Either
+  every tile on a shelf has one or none does. `views.test.ts` asserts it over both pages.
+- `[data-tone]` (not `tr[data-tone]`) feeds `--spine`, so a stat card wears the same severity bar a
+  table row does. Overview's *Open* tile takes `critical` only while something is actually open.
+- **The incident page's shelf is a variant, not a second component** — `statList(items, "facts")`
+  → `.stats.facts`. Namespace, confidence and two timestamps are an identity card, not figures, and
+  at the bottom of the ladder four stacked tiles cost a third of a phone screen *above* the analysis
+  the page exists for. In the one-column step only, `.stats.facts .stat` becomes `flex-direction:
+  row`: caption left, value right, the shape of a spec sheet. Two abreast there is no room for it,
+  and wider the tiles are already short. `views.test.ts`'s shelf assertions match the variants too —
+  a variant changes how a tile lays out, never what a shelf may hold.
+- **Two faces, not three.** `--font-ui` for the interface and everything written in sentences,
+  `--font-data` for what the system *measured* (ids, endpoints, timestamps, counts). There was a
+  third — a serif `--font-prose` on the RCA, on the argument that what the agent wrote is a
+  different kind of content from what it measured. It is, but `font-src` is blocked outright, so no
+  stack here is a font this project ships: the serif resolved to Iowan Old Style or Times, a print
+  face at 17px on a graphite console, and the RCA read as pasted in from somewhere else. The
+  distinction is still drawn — by the panel, the 68ch measure and `--fs-md` at 1.7 line-height,
+  which is what actually makes a paragraph read as prose.
+
+**A five-column table does not become readable by scrolling sideways.** `.table-wrap`'s horizontal
+scroll is a last resort: what falls off the right edge is whichever columns the author happened to
+put last — Result and Executed on the remediation table, i.e. the outcome of the change — and
+nothing on screen points at them. So `table(head, body, narrow)` (`html.ts`) lets a table declare
+what it *becomes* when the columns will not fit, and there are three answers:
+- **`"cards"` — the incident list, and only it.** Below 46rem each row is a three-row grid placed
+  **by cell name**: `when | sev | state` on the header line, the cause across the full width under
+  it, the namespace ellipsised right on a third. Placement by name is why this is not general —
+  another table's columns would come apart under the same rules. `td.when` gives up its `nowrap`
+  here: a nowrap cell does not shrink a `minmax(0, 1fr)` track, it overflows it, and at 320px the
+  timestamp printed underneath the CRITICAL badge.
+- **`"stack"` — a record whose values are sentences** (Evidence, Remediation, On-call feedback,
+  and the topology page's Inbound/Outbound — "Postgres (incident memory)", a queue pair with an
+  arrow between the two names, "bot token present, socket mode present").
+  Below 40rem each cell becomes a caption/value pair captioned from **its own `data-label`** via
+  `td::before`, so the caption travels with the cell and inserting a column cannot leave the
+  captions naming the wrong values. `headers()` and `cell()` take the same string, which is what
+  stops a header and its caption drifting apart. The cells are `display: block`, never grid or
+  flex: they hold inline markup (`inlineMrkdwn()` emits `<code>` and `<strong>` mid-sentence) and
+  either layout mode would make each of those its own item and take the sentence apart word by
+  word. Caption **above** the value here, because beside it the widest label sets a column
+  ("Confirmed root cause" is 20 characters) and the sentence is read through what is left.
+- **`"pairs"` — a record whose values are all short** (Token usage, Most recurring, LLM backends —
+  a spec sheet: a name, two identifiers, an enum, an endpoint). The same stack with the caption
+  *beside* the value. What chooses between the two is what the cells hold,
+  not how many there are: six counts and two ids each spending a caption line of their own turn a
+  six-field accounting row into twelve lines, five times over, and the caption line says nothing
+  the caption does not. Implemented as a **hanging indent** — `padding-left: 6rem` on the cell,
+  `text-indent: -6rem`, `width: 6rem` on the `::before` — precisely so the value stays one inline
+  flow; a grid or a flex row would split it, which is the same reason the stacked cell is a block.
+  The 6rem is the widest caption these tables actually carry (REACHED VIA), not the widest one
+  imaginable — a table whose labels are sentences takes the plain stack instead. Three traps: the
+  sheet's `*` reset does not match pseudo-elements, so padding on that `::before` lands *outside*
+  the 6rem and knocks the first line out of the column; `text-indent` **inherits**, and any
+  descendant that lays out its own lines re-applies it, so the Route badge (`display: inline-block`)
+  printed its own text 6rem to its left, on top of the caption, leaving an empty pill behind —
+  `td * { text-indent: 0 }` undoes it for every such child, present and future, and costs nothing
+  on the inline elements that never had a first line of their own; and `pairs` emits
+  **`data-stack data-pairs` both** (`NARROW_ATTR` in `html.ts`) — the pairs block only overrides
+  two declarations, so `data-pairs` alone is a table that never stacks at all. A test pins it.
+
+Some tables opt out, and that is a decision too: the topology page's MCP tools table is a family
+name and a count, two short columns that fit 320px with room to spare. There is nothing to rescue,
+and stacking it would put the expanded `<details>` tool list *between* the family and its count —
+the pair the row exists to show. A narrow layout is for columns that fall off the edge.
+
+Both layouts cost the table its semantics: a browser derives the table role from the **computed**
+display, so `display: grid` on a `<tr>` leaves a screen reader with anonymous groups. The
+`role="table"` / `rowgroup` / `row` / `cell` / `columnheader` chain is what survives the display
+change, and it only works if *every* level declares one — `table()` marks up the wrapper, and the
+caller must use `headers()`/`cell()` (or hand-write the roles, as `incidentTable()` does) to be
+allowed to ask for any of them. `views.test.ts` pins the roles, the named cells, and that a
+stacked table's captions equal its headers, over both pages and both stack variants.
+
+The three thresholds are staggered on purpose: cards at 46rem, stack/pairs at 40rem. The incident
+list carries five columns of which two are prose, so it runs out of room first; a table of counts
+survives a narrower box as a table, and a table is still the better reading of it while it fits.
+
+**`breakable()`** (`views.ts`) inserts `<wbr>` at the humps of a CamelCase alert name —
+`Kube<wbr>Pod<wbr>Crash<wbr>Looping`, at *every* hump — after escaping, never before. A browser takes an offered break
+before inventing one, so a long identifier wraps where it means something instead of mid-word. Its
+companion is `overflow-wrap: anywhere` rather than `break-word`: only `anywhere` lowers min-content
+width, which is what lets a `minmax(0, 1fr)` track actually shrink instead of being propped open by
+its longest word.
+
+**The filter bar declares its tracks** (`form.filters`). `auto-fit` gave a date field that can only
+say dd/mm/yyyy the same width as an alert name, and re-cut the row at every width — 6 across here,
+an orphaned 4+3 there, **Apply** landing wherever the wrap dropped it. The ladder is now fixed at
+7 declared tracks → 3 → 2 (`@container page` 62rem / 34rem); both steps divide six evenly, so
+from/to stays one range and severity/state one pair at every width. All three control types share
+`height: 2.5rem`, and that is load-bearing: a date input carries a picker, a select a chevron, a
+text input neither, so `align-items: end` lined up their *bottoms* and left the captions above them
+on three different baselines.
+
+**The chart is HTML, not SVG (`src/dashboard/chart.ts`).** `svg.ts` is gone. An SVG scales its
+*text* with its drawing, so the same caption that read fine in a 900px hero rendered near 4px in a
+320px one, and `viewBox="0 0 720 168"` pinned a 4.3:1 letterbox at every width — a flat strip on a
+desktop, an illegible sliver on a phone. A `viewBox` cannot be changed from CSS; a grid can.
+`barChart()` now computes bar heights **as percentages** and nothing else — every proportion the
+reader sees (plot height, bar gap, which period labels survive) is a CSS decision taken against the
+chart's own width. Load-bearing details:
+- Heights ride in `style="--h:63.6%"`. That works only because the dashboard CSP is
+  `style-src 'unsafe-inline'` with **no** `script-src` — inline style attributes are permitted, and
+  the value is re-derived with `Number()` (Postgres hands `int8` back as a string) so a hostile row
+  can put neither a script nor a `NaN` in the attribute.
+- Ticks are pre-marked `data-thin` **counting from the end**, and CSS hides them below 26rem. The
+  newest period is the one a reader looks at first; counting forwards would drop exactly that one.
+  The surviving ticks get `overflow: visible` so they may use the hidden neighbour's track — clipped
+  to their own they render as `05-1`.
+- The last bar is `data-current` (dashed, no fill) and the caption says why: unmarked, a partial
+  week reads as a collapse in incident volume.
+- Bar values are hidden below 34rem rather than shrunk. Below that width they are the first thing
+  to become unreadable, and the axis plus the hero figure still carry the numbers.
+
+**Section and stat glyphs (`ICON` + `section()` in `views.ts`).** The same inline-`<svg>`
+mechanism as the rail, extended to every `<h2>` and to the overview's stat cards, so a page of
+identically-styled uppercase mono captions has landmarks to scan by. Three rules hold it
+together:
+- **A heading's glyph and its label are one flex item** — `section()` wraps them in
+  `<span class="sec">`, which is what `h2`'s own `gap` spaces. That gap is the distance out to
+  the `::after` hairline (16px); between a picture and the word it labels it reads as two
+  separate things. Putting the `<svg>` back as a direct child of `h2` renders wrong and passes
+  every test except the one that pins the wrapper.
+- **A glyph repeats only where the meaning repeats.** The wrench is remediation on the overview
+  stat and on the incident page's section; the speech bubble is on-call in both; the chip is the
+  model in Token usage and in LLM backends. Anything else gets its own drawing rather than a
+  reused near-match — a reader who learns one should not have to relearn it a page later.
+- **No glyph carries colour or an accessible name.** `stroke="currentColor"`, `fill="none"`,
+  `aria-hidden`, `focusable="false"` — colour here is reserved for severity, focus, and where you
+  are, and an announcing icon would give a heading two names. `Stat.icon` is optional and is
+  passed as markup, never through `esc()`; `Stat.label` still is. `views.test.ts` pins all of it
+  across all three pages at once, so a glyph added to one page and forgotten on another fails.
+
+**`/topology`** renders the agent's declared dependencies from `config` — no probe, no outbound
+call, no database read, so it is the one page that still works while Postgres is down. Design:
+`docs/superpowers/specs/2026-08-04-topology-design.md`.
+
+`buildTopology()` (`src/dashboard/topology.ts`) **is the allowlist**: it names every field it
+emits, one at a time. It must never iterate the config object and never filter a known-bad set
+out of it — the config holds every secret this service has, one shared password stands between a
+leak and all of them, and a denylist stops being correct the moment someone adds the next secret,
+silently (`DASHBOARD_PASSWORD` is itself in the sentinel list). Secrets
+render as "set"/"not set"; endpoints go through `redactUrl()` (userinfo and query stripped).
+`topology.test.ts` seeds every secret-bearing env var with a sentinel and fails if one reaches
+either the data structure or the rendered HTML — that test is what keeps the allowlist honest
+as the config grows.
+
+**Interactive map (`src/dashboard/topology-script.ts`).** Drag to pan, ctrl/cmd + wheel or the
+toolbar to zoom; one inline `<script>` carrying a **per-response nonce** (`randomBytes(16)`,
+base64url), never `'unsafe-inline'` — see `docs/DESIGN_dashboard_auth.md`. It is progressive
+enhancement: the page still ships the script-free three-radio scale control, and the script
+removes it, flips `data-live="on"`, and drives the **`viewBox`** instead (not a CSS transform —
+the SVG keeps its own box, so a pointer position converts to user units by one ratio and pan
+needs no scroll container). With scripting off the map still renders, scales, and links.
+Non-obvious, and each one is load-bearing:
+- Pointer capture is taken **after 4px of movement**, not on `pointerdown` — capturing early
+  retargets the following `click`, and every box in the map is a link to its own table row. A
+  `dragged` flag (cleared by the click it swallows) stops a drag that ends on a box from also
+  opening it.
+- `aria-disabled`, not `disabled`, on the zoom buttons: a disabled button drops focus the moment
+  the keyboard reaches the limit, and the next Tab restarts from the top of the document.
+- **Ctrl/cmd + wheel only.** A bare wheel keeps scrolling the page — the map sits mid-document,
+  and a figure that swallowed the wheel would trap the reader every time the pointer crossed it.
+  `touch-action: pan-y` does the same job for one-finger drags on a phone.
+- A `focusin` handler pans a focused box back inside the viewBox. Nothing else can: the viewBox
+  clips it, so there is no scroll for the browser to do.
+- The script-free controls are removed **last**, after every listener is wired, so a throw on any
+  line leaves the page with a zoom control that still works.
+- `topology-script.test.ts` guards the cross-file couplings nothing else would catch: the script
+  can't close its own `<script>`; it builds no markup and evaluates no strings (the nonce buys
+  one trusted block, not a licence for that block to reopen the injection surface); every
+  selector it queries is derived from its own source and asserted against the rendered page; and
+  the `data-live`/`data-drag` attributes it sets are the ones `styles.ts` reacts to.
+
+**RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
+`prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are
+the `•` character, and there are **no `#` headings at all**; a section is announced by a line that
+is entirely one bold run (`*📍 Root Cause*`). That is why the parser is hand-written rather than a
+dependency: a Markdown parser reads almost none of it correctly. `parseRca()` keys off whole-line
+bold runs (heading), `*Label:*` + content (field — the colon must sit immediately before the
+closing asterisk, or `*Impact: what breaks*` becomes a field), `•`/`-`/`N.` markers, and ` — ` as
+the claim/source split. Arguments (Root Cause, Impact) stay prose; Evidence, Ruled Out and
+Recommended Actions become two-column tables.
+- **Escape-then-markup is the invariant.** `esc()` runs on every fragment *before* a single tag is
+  added, so an escaped string provably holds no `<` or `>` and the tags that follow are this
+  module's own. There is no ordering in which model output can close a tag we opened. No attribute
+  value is ever built from parsed text. `rca.test.ts` mutation-checks each esc() call site.
+- **It degrades, never guesses.** Fewer than two titled sections → `parseRca` returns `null` and
+  the page renders the plain escaped block it used before. A model that ignores the format loses
+  its formatting, never its content. Same for a code fence: a section holding one is left as prose
+  rather than tabulated around a stack trace, and the fence is not scanned for bullets or headings.
+- **The italic rule is bounded on both sides, and its span must allow inner underscores.** Half the
+  identifiers on this page are snake_case, so an unbounded `/_(.+?)_/` mangles `k8s_list_pods`;
+  requiring whitespace/bracket before the opener is what prevents that. But excluding `_` from the
+  span only looks safer — it means `_k8s_list_pods_`, the exact form the template asks for, never
+  matches and the markers render as literal underscores.
+- **A verdict is not a section.** The two sections the template ends on — Severity, Confidence —
+  are a word, or a word and the one line that justifies it. Rendered like every other section they
+  each spent a heading and a full-width panel on eight characters, a third of a phone screen below
+  the evidence saying "critical". `renderRca()` promotes them into a trailing `.rca-fields.verdicts`
+  strip: matched by name (`VERDICTS`, lowercased — the same convention `COLUMNS` uses) and **only if
+  `oneLine()` agrees**, i.e. a single prose block with no newline and no code fence. A model that
+  argues its confidence across three bullets has written an argument, and an argument does not fit
+  on a strip — it keeps its panel. The model's own inline fields lead the RCA because it wrote them
+  as a preamble; the promoted verdicts trail it because the evidence they rest on is above them.
+- Evidence's two-column table is `"stack"`-narrow like the rest. Two columns still do not fit a
+  phone when the left one is a whole finding: "OOMKilled, exit code 137" against a 5rem Source
+  column pushed the tool name off the edge — exactly the half a reader needs to check the claim.
+
+**`llm_usage`** (migration 004) records one row per LLM call, with the router's backend and route.
+`incident_id` is NULL at insert — the usage rows are written during the investigation, the
+incident row only exists after — and is backfilled by `IncidentMemory.store()` via the
+`onStored` callback. Rows for conversation-mode replies stay NULL forever, which is correct.
+The overview's **Token usage** section reads it: totals over the 30-day window, then a breakdown
+by **backend AND model** (collapsing to backend hides a re-point mid-window, which is the change
+someone reading the page is looking for). `sum()` over INTEGER widens to BIGINT and node-postgres
+returns BIGINT as a *string*, so every sum goes through `num()` — without it 12 + 7 renders 127.
 
 ### On-call Feedback Learning (`@agent learn` — trust-tiered memory)
 Design: `docs/DESIGN_oncall_feedback_learning.md`. Two tiers, never flattened:
@@ -215,7 +554,7 @@ it is not in `parseProposal`'s whitelist. `k8s_delete_pod`
 (v1.3) deletes ONE wedged pod so its controller recreates it — refused for pods without a
 recreating controller (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement =
 outage); GitOps-safe like restart, so NOT behind the GitOps guard. Needs RBAC
-`get`+`delete` on pods. Its 90s status check strips the pod's random suffix so the filter
+`get`+`delete` on pods. Its verification target strips the pod's random suffix so the check
 matches the replacement pod.
 Enforcement layering (never trust a single layer): **RBAC** (floor) → **MCP server**
 (namespace allowlist + always-blocked kube-system/kube-public/kube-node-lease/flux-system;
@@ -228,6 +567,12 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - Rollout restart = patch `kubectl.kubernetes.io/restartedAt` annotation (honors rolling-update strategy + readiness probes; same as `kubectl rollout restart`).
 - **SECURITY — write tools never enter the agentic loop.** Auto-discovery would otherwise hand `k8s_rollout_restart` to the model during ANY investigation, bypassing the approval gate. Two layers in `agent/index.ts`: (1) tools whose description starts with **`[WRITE]`** are filtered out of the `llm.chat` tools list; (2) `executeToolCalls` refuses them with a synthesized error if the model hallucinates the name anyway. **Convention: every write tool's description MUST start with `[WRITE]`** (enforce when adding scale/rollback). Write tools are reachable only via `proposeRemediation` (dry-run) and `executeRemediation` (post-approval), both direct `callTool`.
 - **Mention-driven investigations get the same remediation flow**: `handleMention` calls `maybeProposeRemediation` with `incidentId=null` (no alert labels → no incident row; `remediations.incident_id` is nullable). Note: NULLs are distinct in the partial unique index, so the one-active-card guard only applies to alert-driven remediations.
+- **`worthProposing` gates the mention path** (`remediation/proposal.ts`, pure + unit-tested). Every mention used to spend a proposal LLM call, so a read-only "status check" on a healthy cluster burned a **heavy** call to be told `{"action": null}` — and on the day the heavy chain was down to one working backend it produced a page of stack traces instead. Propose when **any** of: the reply is an RCA (the template means a fault was diagnosed), the user asked for a change, or the answer carries fault evidence. Skip otherwise, logging the reason.
+  - **Deliberately asymmetric**: a false positive costs exactly what today costs (one call answering null), a false negative silently drops a legitimate fix. So every rule is a reason to SPEND the call and skipping is only what's left over. When in doubt, extend the vocabulary rather than tighten it.
+  - **The alert path is not gated** — an alert firing IS the evidence.
+  - **A clean bill of health uses the same words a broken one does** ("no alerts firing", "0 restarts in the last hour"), so negated forms are stripped before matching or the gate would never skip anything. The keyword group repeats (`+`) because one negation covers a list ("No alerts are firing and nothing is pending" must lose `firing` too), and the window stops at a contrastive conjunction so "no logs, **but** it is in CrashLoopBackOff" keeps its evidence.
+  - **Indonesian action verbs are matched as stems with up to 4 leading chars** — the affix carries the request: `perbaiki` arrives as `diperbaiki`, `ganti` as `mengganti`. A `\b`-anchored stem missed all of them.
+  - Text-only on purpose: no extra MCP call (`prometheus_get_alerts`) to check for active alerts — the agent has just looked, so the answer is already in the reply, and a second call adds latency plus a failure mode to a path whose whole point is spending less.
 - **Proposal observability:** every null path in `proposeRemediation` logs why (raw model output on parse failure, unregistered action, dry-run refusal, duplicate/store failure) — silent no-card failures cost a full debugging round during live testing.
 - **Remediations are recalled as agent memory** (`recallRemediations` → `RemediationStore.recallForAlert`): on the alert path, past executed remediations for the same `(alertname, namespace)` — joined via `remediations.incident_id = incidents.id` — are injected alongside `recallIncidents` into BOTH the investigation and the proposal context ("Previously remediated — same alert: 2026-07-23 set image → repo:v2 — succeeded (PR: ...)"). So a recurrence recalls what was actually DONE (+ the PR/outcome), not just the diagnosis, and the proposal model avoids re-proposing an already-applied fix. Everything's already stored in `remediations` (`params.changes` from→to, `path`, `valuesKey`, `result`=PR URL, `status`) — no schema change; rollback data lives there too (revert the PR = natural GitOps rollback). Keyed by alert → mention-driven flows (no labels) don't recall.
 - **Dry-run refusals are posted to the thread** (`{ refused }` return → "🚫 Remediation not proposed — <server reason>"): the model wanted to act but the MCP server refused (GitOps guard / blocked namespace / bad target) — the human deserves the reason, especially "managed by Flux/Helm, change it in the GitOps repo".
@@ -237,15 +582,104 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - **`container` is optional** in `k8s_set_image`/`k8s_set_resources`, both in the proposal schema and the MCP tool: the proposal model CANNOT know container names (not in its context) and guessed one from the workload name (`dev-auth-svc-be` vs actual `auth`). The MCP server auto-resolves single-container workloads and refuses multi-container ones with the name list. Proposal prompt rules: NEVER guess a container name; workload = Deployment/StatefulSet/DaemonSet name, NOT a pod name; an explicit user request ("ganti tag ke latest") is sufficient evidence for any whitelisted action — user-given tag + current repo from context.
 - **Approval card mentions the approvers** (`<@Uxx>` in the section block → real Slack notification): `SLACK_APPROVER_USERS` fallback `SLACK_ONCALL_USERS`; both empty = no mention line.
 - **GitOps overlay path is auto-detected from Flux** (`resolveOverlayPath`, `gitops/overlay.ts`): a Flux HelmRelease workload's HR CR carries `kustomize.toolkit.fluxcd.io/{name,namespace}` labels (the HR CR is applied by kustomize-controller, so it — unlike the Helm-rendered workload — has them). The agent reads the HR CR → the Kustomization CR → `spec.path` (e.g. `apps/dev/applications`) via the read-only `k8s_get_custom_resources` tool, and sends it as `pathPrefix` in the gitops request so the worker scopes the file search to the right per-env overlay (dev/stg/prd, applications vs systems — all automatic, zero config). Best-effort → falls back to the worker's `GITOPS_PATH_PREFIX`. This also resolves the base+overlay ambiguity (both define the HR; the prefix picks the overlay). **Detection itself needs no manifest change** — Flux auto-adds `helm.toolkit.fluxcd.io/name` to Flux-managed workloads (plain `helm install` like a standalone ingress-nginx lacks it → correctly refused).
-- **GitOps PR flow (v2, `DESIGN_gitops_pr_remediation.md`, opt-in `GITOPS_REMEDIATION_ENABLED`):** for a Flux HelmRelease-managed workload the MCP dry-run returns a structured PR preview (not a plain refusal). `parseGitOpsPreview` detects it → `proposeGitOpsPr` asks the **llm-worker** over a second SQS queue (`SqsGitOpsClient`) to prepare the PR (`dry_run` → diff), stores a PR-flavored remediation (`params.gitops=true` + helmRelease/action/changes/path/valuesKey), and posts a GitOps card variant (diff block + file/key). Approve → `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (`open_pr` → PR URL in `result`; **no 90s status check** — nothing is live until merge+Flux sync). `SqsGitOpsClient` is a **standalone mirror** of `SQSLLMClient` (NOT a shared base — the LLM client is the battle-tested critical path; two dispatchers cooperate via the shared response queue's release-non-owned mechanism). The agent holds **no GitHub credentials** — those live in the worker. GitOps action names in the preview/request are the SHORT forms (`set_image`/`scale`/`set_resources`), distinct from the DB `action` column's tool name (`k8s_set_image`).
+- **GitOps PR flow (v2, `DESIGN_gitops_pr_remediation.md`, opt-in `GITOPS_REMEDIATION_ENABLED`):** for a Flux HelmRelease-managed workload the MCP dry-run returns a structured PR preview (not a plain refusal). `parseGitOpsPreview` detects it → `proposeGitOpsPr` asks the **llm-worker** over a second SQS queue (`SqsGitOpsClient`) to prepare the PR (`dry_run` → diff), stores a PR-flavored remediation (`params.gitops=true` + helmRelease/action/changes/path/valuesKey), and posts a GitOps card variant (diff block + file/key). Approve → `executeRemediation` branches on `params.gitops` → `executeGitOpsPr` (`open_pr` → PR URL in `result`; **no verification check** — it returns no `target`, because nothing is live until merge+Flux sync). `SqsGitOpsClient` is a **standalone mirror** of `SQSLLMClient` (NOT a shared base — the LLM client is the battle-tested critical path; two dispatchers cooperate via the shared response queue's release-non-owned mechanism). The agent holds **no GitHub credentials** — those live in the worker. GitOps action names in the preview/request are the SHORT forms (`set_image`/`scale`/`set_resources`), distinct from the DB `action` column's tool name (`k8s_set_image`).
 - **Cluster/GitOps drift → `flux_reconcile`, not a PR.** Someone changes the cluster directly (`kubectl set image` on a Flux-managed workload); an alert fires; the RCA is fine; then the remediation died with *"the value is not set in the overlay and can't be auto-added for this action — set it in the overlay values first"*. That message was wrong: the incident context's `from` is the **drifted cluster value**, which naturally isn't in Git, and the worker's line search (key AND value) couldn't tell that apart from "the key isn't there". The worker now returns `drift:{path, valuesKey, gitValue, clusterValue}` (see llm-worker `detectDrift`), and `proposeGitOpsPr` branches to `proposeFluxReconcile` **before** treating it as a refusal:
   - proposes the MCP `flux_reconcile` write tool on the workload (parsed out of the preview's `kind/ns/name` by `workloadOf`), after the same mandatory dry-run;
   - card reads *"Flux reconcile `ns/name` — restore `image.tag` to `v1.4.0` (cluster drifted to `v9.9.9`)"*;
   - **still approval-gated** — the drifted value is occasionally the intended one, in which case the human wants a PR declaring it, not a reconcile discarding it;
   - if the MCP server is older and lacks the tool, the refusal text spells out the `flux reconcile helmrelease <ns>/<name> --force` command instead.
   Direction is fixed on purpose: the GitOps repo is the source of truth, so a reconcile RESTORES what Git declares rather than writing the drifted value into Git.
-- **Post-remediation status check** — 90s after a successful execution (`STATUS_CHECK_DELAY_MS`), the app posts the target workload's pod status into the thread (deterministic: `k8s_list_pods` filtered by workload-name prefix, no LLM call). `executeRemediation` returns `{ text, target? }` for this. `// ponytail:` in-process timer, lost on pod restart within the window.
+- **Post-remediation verification** (`agent/remediation/verify.ts`, `migrations/006`) — replaces the old in-process `setTimeout` status check, which was lost on a pod restart and answered the wrong question (it dumped the namespace's pod list into the thread instead of saying whether the problem went away). See "Post-remediation verification" below.
 - **Proposal context = head+tail of the RCA** (`buildProposalPrompt`), never head-only: long RCAs put the concrete fix in Recommended Actions at the END — a head-only `slice(0,4000)` cut it off and the model proposed nothing. The alert path also prepends the CONFIRMED prior (first 1200 chars) — a recurrence's proven fix is exactly what the proposal model needs. A user request without a concrete value (e.g. "ganti image tag" with no tag) correctly yields `{"action": null}` — never-invent beats a guessed card.
+
+### Post-remediation verification (`agent/remediation/verify.ts`, `migrations/006`)
+Answers "did that actually fix it?" and records the answer, so a later investigation can read
+a failed fix as a **negative prior**. Replaced a `setTimeout(…, 90_000)` in whichever pod
+handled the approval click.
+
+- **Durable schedule, not a timer.** One row in `remediation_checks` per remediation
+  (`one_check_per_remediation` unique index), claimed by whichever replica polls next — a
+  restart between the click and the check costs nothing. The poller (`startVerificationPoller`
+  in `app/index.ts`) re-arms **after** the work, not on a fixed interval, so a slow tick can't
+  overlap the next, and `unref()`s its timer so auxiliary work never keeps the process alive.
+- **`due_at` doubles as the lease** (the SQS visibility-timeout idea, in Postgres): claiming
+  sets `status='running'` AND pushes `due_at = now() + LEASE_SECONDS`, so a pod that dies
+  mid-check releases the row by itself instead of stranding it in `running`. Claim predicate is
+  `status IN ('pending','running') AND due_at <= now()` with `FOR UPDATE SKIP LOCKED`.
+  A failed check is deliberately **left claimed** — the lease expires and the next pass retries
+  it, which makes a transient MCP outage a delay rather than a lost verdict. `MAX_ATTEMPTS`
+  then abandons it as `inconclusive`.
+- **The alert is the primary signal, pods corroborate.** `prometheus_get_alerts` → `alertState`
+  (`pending` counts as firing: the condition is true again), `k8s_list_pods` → `summarizePods`.
+  Both degrade independently (`Promise.all` with per-call `.catch`).
+- **`k8s_list_pods` returns the pod *phase*, not container reasons.** A CrashLoopBackOff pod
+  reports `status: "Running"` with `ready: false` — counting phases alone scores a crash loop
+  as healthy. Readiness must come from the `ready` boolean.
+- **`summarizePods` returns `null` for unreadable output, and `null` is never a healthy zero.**
+  Same rule for `alertState`: `"unknown"` (Prometheus unreadable) and `"none"` (mention-driven,
+  no alert behind the remediation) are separate states — collapsing them would let a broken tool
+  call read as "there is no alert", i.e. as success.
+- **`worse` is a readiness regression and only that.** A rollout replaces the pod set, so a
+  restart delta compares *different* pods: the old crashing pod's counter sits in the baseline
+  while the new pods start at zero, which scored a half-finished rollout as a regression during
+  live testing. Restart counts stay in the detail as evidence, never as a trigger.
+- **Alert cleared + pods still down = `inconclusive`, not `recovered`** — the rule usually
+  stopped matching because the series went away (pods deleted), not because anything healed.
+- **The verdict is recorded before its message is posted.** At-most-once beats a crash between
+  two posts telling on-call twice that their fix failed.
+- **Slack I/O stays in the app layer**: `runDueRemediationChecks()` *returns* messages;
+  `DevOpsAgent` owns Postgres + MCP, `SlackApp` owns chat. The verdict is also appended to
+  thread memory (`noteInThread`) so the model knows its own fix didn't hold before the next
+  follow-up question.
+- **The message quotes the REAL wait**, computed from the row's `created_at`, not from
+  `verifyDelayMs` — a retried check waited longer than the setting says, and a verdict with no
+  elapsed time invites "maybe it just needed longer", which is the whole argument this check
+  exists to settle.
+- **`verdict` ≠ `status` in recall.** `status='succeeded'` only means the MCP call returned
+  cleanly. `recallForAlert` LEFT JOINs `remediation_checks` (1:1, so it can't fan the row set
+  out) and `recallRemediations` renders `→ verified <verdict>` or `→ never verified`; a
+  `succeeded` + `unchanged` pair triggers an extra paragraph telling the model not to re-propose
+  that action, because if the same fix keeps not holding the root cause is upstream of it.
+- **Verdicts are NOT written to `incident_feedback`** — that table is the human-confirmed tier
+  and agent-produced verdicts must not be laundered into it. Trust tiering stays intact.
+- No check is scheduled for GitOps PR remediations: `executeGitOpsPr` returns no `target`, and
+  nothing is live until the PR merges and Flux syncs (the `if (target)` guard covers this).
+- Tunables: `REMEDIATION_VERIFY_DELAY_SECONDS` (default 300 — 90s answered while the rolling
+  update was still converging) and `REMEDIATION_VERIFY_POLL_SECONDS` (default 30).
+
+### Context Assembly & Skills
+Bounds what actually reaches the LLM call, on both axes that used to be unbounded: which prompt
+content ships (all of it, always) and how large a single tool result can grow (as large as the
+tool made it).
+
+- **Three modules, three failure modes.** `src/agent/skills/` owns *what content exists and when
+  it applies*, `context/budget.ts` owns *how much fits*, `context/compact.ts` owns *how much a
+  single tool result is allowed to cost*. Kept apart because each fails a different way: a
+  malformed skill is a **boot error** (fail before an incident ever runs), an oversized request is
+  a **runtime trim** (fail gracefully mid-investigation, drop something, keep going), and a noisy
+  tool result is **neither** — nothing is wrong with it, it's just a log line repeating, so it gets
+  collapsed rather than rejected or trimmed.
+- **`prompts/skills/` holds thirteen files: twelve failure-mode playbooks plus `rca-format.md`.**
+  `rca-format` is `when: always` — every investigation carries the output template regardless of
+  what fired. The twelve playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
+  also paying tokens for the ImagePullBackOff runbook.
+- **`## Tool Usage Reference` stayed in `prompts/system.md` instead of becoming a skill.** A
+  skill's `when` matches against the alert text, and the alert text has no way to say whether the
+  investigation is about to reach for a PromQL query — that decision happens mid-loop, after the
+  model is already several tool calls in. Gating the query cookbook on the alert text would remove
+  it at exactly the moment it's needed. Availability beats budget for that one section; everywhere
+  else in this design the budget wins.
+- **The `/context` page's two tables follow the same rule the rest of the dashboard's tables use:
+  what the cells hold, not how many there are.** Skills render `"stack"` — `description` is a
+  sentence, so the caption sits above the value. Backend budgets (`window`/`reserve`/`core`/
+  `tools`/`available`) render `"pairs"` — every value there is a short number, so the caption sits
+  beside it. A future column doesn't get to pick the layout by counting how many rows or columns
+  there are; it picks by asking what kind of value fills the cell.
+- **`loadSkills` throws when `prompts/skills/` holds no `.md` files**
+  (`src/agent/skills/index.ts:129`), and the message says why: an agent with no skills has no RCA
+  output format, so it would investigate correctly and then answer in a shape neither the Slack
+  renderer nor `src/dashboard/rca.ts` can parse. Failing at boot, loudly, beats failing per-incident,
+  silently.
 
 ## LLM Providers
 
@@ -356,6 +790,25 @@ different output ceilings, `MAX_TOKENS` is the thing that has to grow a per-inde
 
 Spec: `docs/superpowers/specs/2026-07-30-llm-router-design.md`.
 
+### Token-limit parameter is auto-detected (`openai-compatible.ts`)
+OpenAI's newer models (o-series, gpt-5) answer `max_tokens` with a hard
+`400 Unsupported parameter … Use 'max_completion_tokens' instead`, while vLLM, DeepSeek and
+OpenRouter only understand `max_tokens`. Both register as ordinary `openai-compatible`
+backends in the same router, so any single static choice breaks half the fleet — and this is
+not hypothetical: it took out the whole heavy chain in production (the `chatgpt` backend 400'd,
+failover went to `haiku`, which was over its usage limit, and the remediation proposal died).
+- The client sends `max_tokens`, and **only** on a 400 whose message names
+  `max_completion_tokens` flips the instance and retries once. `wantsMaxCompletionTokens`
+  matches the parameter name rather than the sentence (the wording has already changed once)
+  and requires status 400, so a 429 or a bad-tool-schema 400 propagates instead of being sent
+  twice.
+- The choice is cached on the instance, and `buildBackends` runs once at boot → one wasted
+  request per backend per pod, not per call.
+- **Not** switched on the model name: that breaks the day a provider renames a model.
+- Deliberately different from llm-worker's `LLM_USE_MAX_COMPLETION_TOKENS` env flag — the
+  worker points at exactly one model, so a flag is fine there; the router holds several and
+  the operator shouldn't have to know each one's dialect.
+
 ### Anthropic content blocks → OpenAI chat (`toOpenAIMessages`)
 Both OpenAI-shaped paths (`openai-compatible.ts` here, `llm.ts` in llm-worker) must translate
 our Anthropic-style `Message[]` into native OpenAI: `tool_use` → `assistant.tool_calls[]`,
@@ -422,6 +875,8 @@ MCP_AUTH_TOKEN          # bearer token for MCP http transport; must match the se
 MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS   # conversation cache + multi-pod dedup
 DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD, DB_SSL_MODE   # durable incident memory; disabled if DB_HOST unset
 MAX_CONCURRENT_INVESTIGATIONS
+REMEDIATION_VERIFY_DELAY_SECONDS   # wait before "did that fix it?" (default 300)
+REMEDIATION_VERIFY_POLL_SECONDS    # how often a replica looks for due checks (default 30)
 LOG_LEVEL   # error | warn | info | http | debug
 ```
 
@@ -443,6 +898,10 @@ src/
 │   ├── incidents/index.ts        # IncidentMemory: durable recall/store (Postgres) + ping()
 │   ├── mcp/client.ts             # MCPClient: reconnect + mutex + isConnected() + bearer auth
 │   ├── memory/index.ts           # Redis/in-memory, hasRca/markRcaSent
+│   ├── remediation/
+│   │   ├── index.ts              # RemediationStore: propose/claim/finish + recallForAlert (joins the verdict)
+│   │   ├── proposal.ts           # parseProposal() whitelist gate, buildProposalPrompt()
+│   │   └── verify.ts             # post-remediation verdict: summarizePods/alertState/decideVerdict + RemediationCheckStore
 │   └── prompts/system.ts         # buildStaticSystemPrompt(), buildTimeContext()
 ├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + /health readiness + error handler
 ├── config/index.ts
@@ -533,8 +992,11 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - [x] **Reasoning-model resilience** (llm-worker) — `finish_reason=length` surfaced as `max_tokens`, empty-exhaustion auto-retry with 2× budget, `LLM_REASONING_EFFORT` passthrough, `SQS_LLM_TIMEOUT_SECONDS` default 240
 - [x] **MCP server ops polish** — startup upstream probe (non-fatal warn), `conciseCause` error trimming, no stack for expected errors; agent `/health` does a real MCP ping
 - [x] **Remediation live-test hardening** (from on-cluster testing) — proposal null-path logging, optional auto-resolved `container`, workload≠pod + never-guess prompt rules, approver mentions on the card, format-agnostic alert flow with recurrence shortcut (reformat-to-RCA removed)
-- [x] **Remediation UX & coherence round** — containers/images in workload listings, head+tail proposal context + CONFIRMED prior included, kind case normalization, dry-run refusals posted to the thread, lifecycle `[system note]`s in thread memory, post-execution 90s status check, `leaksRcaStructure` + command-dump reformat backstop, `toMrkdwn`, backticked/clean server refusal messages
+- [x] **Remediation UX & coherence round** — containers/images in workload listings, head+tail proposal context + CONFIRMED prior included, kind case normalization, dry-run refusals posted to the thread, lifecycle `[system note]`s in thread memory, post-execution 90s status check (**superseded** by the durable verification below), `leaksRcaStructure` + command-dump reformat backstop, `toMrkdwn`, backticked/clean server refusal messages
 - [x] **GitOps guard** (`assertNotGitOpsManaged`) + **D. resolved-alert loop** + **E step 5 reaction-learn** — see their sections
+- [x] **Agent capability round** (three improvements, zero new deps): (1) **similarity recall** — a third "possibly related" tier over Postgres full-text search (`migrations/005`), so a NodeMemoryPressure can learn from the OOMKilled it caused; (2) **post-remediation verification** (`migrations/006`) — a durable, DB-scheduled check that asks whether the *alert* went away and records the verdict as a negative prior, replacing the in-process 90s pod dump; (3) **evidence-based impact** — `prompts/system.md` now requires blast radius to be derived from `k8s_list_services` / `k8s_get_endpoints` / `k8s_list_ingresses` rather than asserted (RCA section labels unchanged, so `dashboard/rca.ts` still parses)
+- [x] **Mention-path proposal gate** (`worthProposing`) — a read-only question against a healthy cluster no longer spends a **heavy** LLM call to be told `{"action": null}`. Verified on-cluster 2026-08-08: the same `status check` cost a 9.1s proposal round-trip before the gate (which proposed a rolling restart of a Deployment that **does not exist** — caught only by the mandatory dry-run) and 0.4s after, with the skip reason logged. The alert path is deliberately not gated.
+- [x] **Token-limit parameter auto-detection** (`openai-compatible.ts`) — a live `chatgpt` backend 400'd on `max_tokens` and took the whole heavy chain down with it (failover landed on a `haiku` that was over its usage limit). The client now sends `max_tokens`, flips to `max_completion_tokens` on that one specific 400, retries once, and caches the answer per backend instance.
 
 ### Next — ordered
 - [x] **D. Resolved-alert loop** ✅ shipped — `status: resolved` now: releases the dedup claim (`AlertDeduplicator.clear` — a re-fire re-investigates instead of being suppressed 12h), marks the newest unresolved incident (`markResolved`, migration `003_resolved_at.sql`), posts "✅ Alert resolved" into the thread with a learn-reaction hint.
