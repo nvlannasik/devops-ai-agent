@@ -288,9 +288,12 @@ action, currentValue, newValue }` → `{ requestId, diff | prUrl | error }`, rou
 - **Audit**: reuse the `remediations` row — `action` = the original (`k8s_set_image`), a
   flag/marker that it went the PR route, and `result` = the PR URL. `// ponytail:` store the
   PR URL in the existing `result` field, no schema change unless we later want to query PRs.
-- **No 90s status check** for PR remediations — nothing is live until merge+sync. Instead a
-  `[system note]` states verification happens post-merge, and the **resolved-alert loop** is
-  the natural confirmation (alert stops firing → ✅). Optionally a longer delayed re-check.
+- **No post-remediation verification** for PR remediations — nothing is live until merge+sync,
+  so there is no workload to re-check. `executeGitOpsPr` returns no `target`, and `app/index.ts`
+  only schedules a check when a target is present (`agent/remediation/verify.ts`,
+  `migrations/006`). Instead a `[system note]` states verification happens post-merge, and the
+  **resolved-alert loop** is the natural confirmation (alert stops firing → ✅). Optionally a
+  longer delayed re-check.
 - **Idempotency**: the atomic row-flip already prevents double-execute; additionally the
   branch name is derived from the remediation id, so a retry collides on branch/PR instead
   of opening a duplicate.

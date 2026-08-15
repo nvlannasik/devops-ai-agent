@@ -51,6 +51,27 @@ test("withRoute('light') uses the light chain", async () => {
   assert.equal(res.content[0].text, "L");
 });
 
+// LLM_BACKEND_<N>_MODEL never reaches `config` — the router is the only place that knows
+// which model answered. A dropped `model: this.models.get(name)` would leave both
+// assertions below undefined, not merely one of them wrong.
+test("the response carries the answering backend's configured model, not a substitute", async () => {
+  const calls: string[] = [];
+  const m = new Map<string, LLMClient>([
+    ["light1", fake(answer("L"), calls, "light1")],
+    ["heavy1", fake(answer("H"), calls, "heavy1")],
+  ]);
+  const models = new Map([["light1", "light-model"], ["heavy1", "heavy-model"]]);
+  const r = new RouterLLMClient(m, ["heavy1"], ["light1"], models);
+
+  const heavyRes = await r.chat([], [], "sys"); // no route context -> heavy chain
+  assert.equal(heavyRes.backend, "heavy1");
+  assert.equal(heavyRes.model, "heavy-model");
+
+  const lightRes = await withRoute("light", () => r.chat([], [], "sys"));
+  assert.equal(lightRes.backend, "light1");
+  assert.equal(lightRes.model, "light-model");
+});
+
 test("a throwing light backend falls up to heavy", async () => {
   const calls: string[] = [];
   const r = build(calls, fake(boom, calls, "light1"), fake(answer("H"), calls, "heavy1"));

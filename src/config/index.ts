@@ -2,6 +2,24 @@ import "dotenv/config";
 
 const env = process.env.NODE_ENV || "dev";
 
+export const DASHBOARD_PORT_DEFAULT = 3001;
+
+// `parseInt(x ?? "3001")` guards only the UNSET case: an empty string, a typo, or an
+// out-of-range number all survive it, and http.Server.listen() then throws
+// ERR_SOCKET_BAD_PORT synchronously — which used to take the whole pod down over a
+// statistics page. Everything else in this file may fail loud at boot; the dashboard
+// specifically may not (design §8), so a bad value falls back and says so.
+export function dashboardPort(raw: string | undefined): number {
+  if (raw === undefined) return DASHBOARD_PORT_DEFAULT;
+  const n = Number(raw.trim());
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+  console.warn(
+    `[config] DASHBOARD_PORT="${raw}" is not a port number (1-65535) — ` +
+    `falling back to ${DASHBOARD_PORT_DEFAULT}`
+  );
+  return DASHBOARD_PORT_DEFAULT;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -64,6 +82,18 @@ export const config = {
     timeoutMs: parseInt(process.env.SQS_GITOPS_TIMEOUT_SECONDS ?? "120") * 1000,
   },
 
+  // Post-remediation verification (migrations/006). The check is scheduled in Postgres and
+  // claimed by whichever replica polls next, so it survives the pod that approved the action.
+  remediation: {
+    // how long to wait before asking "did that fix it". 300s beats the old 90s because 90s
+    // answered while the rolling update was still converging — a half-restarted workload
+    // reads as "not fixed" no matter what the remediation did.
+    verifyDelayMs: parseInt(process.env.REMEDIATION_VERIFY_DELAY_SECONDS ?? "300") * 1000,
+    // how often to look for due checks. Cheap (one indexed UPDATE) and only bounds how late
+    // a verdict lands, so there's no reason to poll faster.
+    verifyPollMs: parseInt(process.env.REMEDIATION_VERIFY_POLL_SECONDS ?? "30") * 1000,
+  },
+
   mcp: {
     transport: (process.env.MCP_TRANSPORT ?? "stdio") as "stdio" | "http",
     stdio: {
@@ -107,6 +137,20 @@ export const config = {
       database: process.env.DB_NAME ?? "devops_agent",
       sslMode: process.env.DB_SSL_MODE ?? "disable", // disable | require | verify-full
     },
+  },
+
+  // Read-only incident dashboard on its own port. Off unless asked for — the agent must
+  // be unchanged for anyone not using it. Behind a shared-password session (see
+  // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
+  // than serving incidents anonymously.
+  dashboard: {
+    enabled: process.env.DASHBOARD_ENABLED === "true",
+    port: dashboardPort(process.env.DASHBOARD_PORT),
+    password: process.env.DASHBOARD_PASSWORD,
+    // Opt-out, not opt-in: a Secure cookie is dropped in silence over plain HTTP, and the
+    // symptom (a login page that keeps reappearing) points nowhere near the cause. Browsers
+    // exempt localhost, so a port-forward needs no change — only a plain-HTTP hostname does.
+    cookieSecure: process.env.DASHBOARD_COOKIE_SECURE !== "false",
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),
