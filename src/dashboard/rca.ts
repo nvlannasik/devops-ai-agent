@@ -238,19 +238,55 @@ function emphasis(escaped: string): string {
 
 const proseCard = (inner: string): string => `<div class="prose">${inner}</div>`;
 
+// The paragraphs of one prose block. A model separates them with a blank line, and until now
+// that blank line WAS the spacing: .prose-text is white-space: pre-wrap, so an empty line
+// rendered as an empty line — a typewriter's paragraph break rather than a page's. It is
+// always exactly one line tall whatever the leading is, it cannot be tuned, and it leaves a
+// whole section as one undifferentiated block with no paragraphs in it for a reader, or a
+// screen reader, to move between. One <p> each gives the break a margin instead.
+// pre-wrap stays for what is INSIDE a paragraph, where a newline is one the model chose:
+// joining those lines would run a two-line key/value list into a single sentence.
+// The formatter is a parameter because the degrade path wants the same paragraphs and NOT the
+// same markup: it passes esc, so a model that ignored the template keeps its markers as
+// characters. Splitting on blank lines is safe either way — it happens before any markup is
+// added, and cannot itself introduce a tag.
+const proseText = (text: string, fmt: (s: string) => string): string =>
+  text
+    .split(/\n[ \t]*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p !== "")
+    .map((p) => `<p class="prose-text">${fmt(p)}</p>`)
+    .join("");
+
+// One span per line of a fenced excerpt. A log line is far wider than a phone, so on a narrow
+// screen the block has to wrap — and wrapped, a 200-character kubelet line and the next line
+// are one wall of text with nothing saying where either begins. A line that is its own block
+// can hang its own indent (styles.ts), so every continuation is inset and the left margin
+// still marks the start of a record. Above that width nothing about this changes: the spans
+// are blocks, and one block per line is what the newlines already produced.
+//
+// Safe by the same rule as the rest of this file: esc() runs on the whole excerpt FIRST, and
+// escaped text provably contains no newline of its own making, so splitting it cannot cut a
+// character reference in half or hand a `<` to the join.
+const codeLines = (text: string): string =>
+  esc(text)
+    .split("\n")
+    .map((line) => `<span>${line}</span>`)
+    .join("");
+
 function renderBody(body: RcaBody): string {
   if (body.kind === "prose") {
     return proseCard(
       body.blocks
         .map((b) =>
           b.code
-            ? `<pre class="rca-code" translate="no"><code>${esc(b.text)}</code></pre>`
-            : `<div class="prose-text">${inlineMrkdwn(b.text)}</div>`
+            ? `<pre class="rca-code" translate="no"><code>${codeLines(b.text)}</code></pre>`
+            : proseText(b.text, inlineMrkdwn)
         )
         .join("")
     );
   }
-  const lead = body.lead ? `<div class="prose-text">${inlineMrkdwn(body.lead)}</div>` : "";
+  const lead = body.lead ? proseText(body.lead, inlineMrkdwn) : "";
   if (body.kind === "list") {
     return proseCard(
       lead + `<ul class="rca-list">${body.items.map((i) => `<li>${inlineMrkdwn(i)}</li>`).join("")}</ul>`
@@ -302,7 +338,7 @@ function oneLine(body: RcaBody): string | null {
  */
 export function renderRca(raw: string): string {
   const parsed = parseRca(raw);
-  if (!parsed) return proseCard(`<div class="prose-text">${esc(raw)}</div>`);
+  if (!parsed) return proseCard(proseText(raw, esc));
 
   const verdicts: RcaField[] = [];
   const body = parsed.sections
@@ -312,7 +348,18 @@ export function renderRca(raw: string): string {
       verdicts.push({ label: s.title, value: line });
       return false;
     })
-    .map((s) => (s.title ? `<h3 class="rca-head">${esc(s.title)}</h3>` : "") + renderBody(s.body))
+    // One <section> per section of the template, which is the shape the RCA already has in
+    // Slack: a label, then what it labels, top to bottom. The wrapper is what carries the rule
+    // and the space between two of them — a body is sometimes one element and sometimes two (a
+    // lead paragraph AND a table), so a sibling selector on the blocks themselves cannot tell
+    // the boundary between sections from an adjacency inside one.
+    .map(
+      (s) =>
+        `<section class="rca-sec">` +
+        (s.title ? `<h3 class="rca-head">${esc(s.title)}</h3>` : "") +
+        renderBody(s.body) +
+        `</section>`
+    )
     .join("");
 
   // The model's own inline fields lead, because it wrote them as a preamble. The promoted

@@ -818,6 +818,51 @@ test("the incident table can become cards: named cells, scoped rules, roles inta
   assert.doesNotMatch(detail, /<table role="table" data-cards>[\s\S]*k8s_scale/, "remediation is not a card table");
 });
 
+// The width at which a table stops being a table is a number in a container query, and the
+// only thing that can check it is arithmetic against the other number like it. Both blocks
+// answer the same question — five columns no longer fit — so they answer it at the same width,
+// and the pair is asserted rather than the value: 46rem is measured from the labels and cells
+// these tables actually hold, and re-measuring it should move both or neither. It was 40rem on
+// the record tables, and the 6rem between them was a band where .table-wrap did the one thing
+// these blocks exist to prevent: scrolled Executed and When out of sight.
+const queryAbove = (marker: string): number => {
+  const at = STYLES.indexOf(marker);
+  assert.ok(at > 0, `${marker} is not in the stylesheet — the layout it belongs to is gone`);
+  const q = [...STYLES.slice(0, at).matchAll(/@container page \(max-width: ([\d.]+)rem\)/g)].pop();
+  assert.ok(q, `${marker} is not inside a container query any more`);
+  return Number(q[1]);
+};
+
+test("a record table stops being a table at the same width the incident list does", () => {
+  assert.equal(queryAbove("table[data-stack] tbody td::before"), queryAbove("table[data-cards] thead"));
+});
+
+// What sets a record table's floor is its HEADER row, not its values: five nowrap captions in
+// tracked-out uppercase ("Confirmed root cause" is twenty characters) demand more width than
+// the sentences underneath them do, and the wrapper answers with a sideways scroll. A scan
+// list keeps nowrap — there the captions are one line the eye runs along.
+test("only a record table lets its headers wrap", () => {
+  assert.match(STYLES, /table\[data-stack\] th \{[^}]*white-space: normal/);
+  const base = STYLES.match(/^th \{([^}]*)\}/m);
+  assert.ok(base, "no base th rule to check");
+  assert.match(base[1], /white-space: nowrap/, "a list's headers still hold their line");
+});
+
+// Flex shrinks every item by its share, and the nav is the one item that cannot absorb a cut:
+// its links are nowrap, so narrowing them only spills them past the right edge and takes the
+// document sideways with them. Between 481 and 555px that was the whole cause of a horizontal
+// scrollbar on every page of the dashboard. The brand is what gives way — it is the only item
+// in the bar built to be cut, and it already carries the ellipsis to show it.
+test("nothing in the top bar gives way except the brand", () => {
+  for (const sel of [String.raw`\.rail nav`, String.raw`form\.signout`]) {
+    assert.match(STYLES, new RegExp(`${sel} \\{[^}]*flex: 0 0 auto`), `${sel} can be squeezed into an overflow`);
+  }
+  const brand = STYLES.match(/^\.rail \.brand \{([^}]*)\}/m);
+  assert.ok(brand, "no .brand rule to check");
+  assert.match(brand[1], /min-width: 0/);
+  assert.match(brand[1], /text-overflow: ellipsis/);
+});
+
 test("a CamelCase alert name offers its humps as break points, and stays escaped", () => {
   const html = listPage(
     page([{ ...row, alertname: "PersistentVolumeFillingUp" }]),
@@ -834,6 +879,178 @@ test("a CamelCase alert name offers its humps as break points, and stays escaped
   assert.match(hostile, /&lt;img src=x/);
   // and an entity is never split down the middle
   assert.doesNotMatch(listPage(page([{ ...row, alertname: "a&B" }]), parseFilters(new URLSearchParams(""))), /&<wbr>|&amp<wbr>/);
+});
+
+// The list gets <wbr>s put through it; the incident page's <h1> does not — it prints the
+// alertname whole, because a heading peppered with break opportunities reads as one. So the
+// break has to come from the stylesheet, and without it the title alone was 40px wider than a
+// 320px screen and took the document with it. Both halves are asserted: the CSS that breaks
+// it, and the markup fact that nothing else will.
+test("the incident title breaks the identifier rather than the page", () => {
+  const h1 = STYLES.match(/^h1 \{([^}]*)\}/m);
+  assert.ok(h1, "no h1 rule to check");
+  assert.match(h1[1], /overflow-wrap: anywhere/);
+  assert.match(
+    detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }),
+    /<h1>KubernetesContainerOomKiller<\/h1>/,
+    "the title is one unbroken word — the stylesheet is the only thing that can break it"
+  );
+});
+
+// What a model puts in an evidence cell is a metric selector, an image digest or a pod name:
+// one token of sixty to ninety characters with nothing in it a line is allowed to break at.
+// A td's overflow is visible, so the excess was not clipped — it printed straight across the
+// Source column, on top of the tool name that backs the claim. The stacked step had this
+// declaration all along; the tabular one is where the ink escaped. Scoped to .rca on purpose:
+// the list breaks its alert names at CamelCase humps, and a hump is a better break than
+// wherever the line happened to run out.
+// It has to be "anywhere" and not "break-word": both break the token, but only "anywhere"
+// lowers the cell's min-content claim, and an auto-layout table hands out width in proportion
+// to what its columns claim — with break-word the Evidence table measured 300px past its own
+// frame at 1024. The floor below is what that costs: Recommended Actions puts one word in the
+// leading column, and a column claiming one character wide printed "Immediate" as "Immedia/te".
+test("a metric selector breaks inside its evidence cell instead of over the next column", () => {
+  const rule = STYLES.match(/^\.rca td \{([^}]*)\}/m);
+  assert.ok(rule, "no .rca td rule to check");
+  assert.match(rule[1], /overflow-wrap: anywhere/);
+  assert.match(
+    STYLES,
+    /\.rca td\.primary \{[^}]*min-width: 12ch/,
+    "nothing stops the label column collapsing under a word it cannot fit"
+  );
+  assert.doesNotMatch(
+    STYLES,
+    /^td \{[^}]*overflow-wrap/m,
+    "every table on the dashboard now breaks mid-word, including the one with <wbr>s in it"
+  );
+});
+
+// A log line is 200 characters and at 390px the excerpt box is 35 of them: six screens of
+// sideways swiping to read one line, with no way to see its start and its end at once. So at
+// the same width a table stops being a table, the excerpt stops being one line — and each line
+// keeps a block of its own with a hanging indent, which is the only thing left saying where
+// one entry ends and the next begins. Above that width the line still wins.
+test("a log excerpt wraps where a table stops being a table, and keeps its line boundaries", () => {
+  const base = STYLES.match(/^\.rca-code \{([^}]*)\}/m);
+  assert.ok(base, "no .rca-code rule to check");
+  assert.match(base[1], /overflow-x: auto/, "a log line no longer holds its shape on a desktop");
+  assert.equal(
+    queryAbove(".rca-code { white-space: pre-wrap"),
+    queryAbove("table[data-stack] tbody td::before")
+  );
+  assert.match(
+    STYLES,
+    /\.rca-code span \{[^}]*text-indent: -2ch/,
+    "a wrapped log line has nothing marking where the next one starts"
+  );
+});
+
+// The one thing a heading has to do is outrank what it heads, and for five sections in a
+// single card it is the only thing separating them. These were set at --fs-base over prose at
+// --fs-md — 15px over 17px, a heading SMALLER than its own paragraph — and no amount of space
+// above them fixed that: Root Cause, Evidence, Ruled Out and the rest read as one run. Asserted
+// as arithmetic against the prose size rather than as a token name, because renaming the step
+// is fine and inverting the pair is the bug.
+const rem = (token: string): number => {
+  const m = STYLES.match(new RegExp(`--${token}: ([\\d.]+)rem`));
+  assert.ok(m, `--${token} is gone from the scale`);
+  return Number(m[1]);
+};
+
+test("an RCA section heading is set larger than the prose underneath it", () => {
+  const head = STYLES.match(/^\.rca-head \{([^}]*)\}/m);
+  const prose = STYLES.match(/^\.prose-text \{([^}]*)\}/m);
+  assert.ok(head && prose, "no .rca-head / .prose-text rules to check");
+  const size = (rule: string) => {
+    const m = rule.match(/font-size: var\(--(fs-[\w-]+)\)/);
+    assert.ok(m, `no font-size in ${rule}`);
+    return rem(m[1]);
+  };
+  assert.ok(size(head[1]) > size(prose[1]), "a section heading is no bigger than its own paragraph");
+  // and it is the only thing at that size on the page — an h1 it can be mistaken for is worse
+  // than no rank at all.
+  assert.doesNotMatch(STYLES, /^h1 \{[^}]*font-size: var\(--fs-lg\)/m);
+});
+
+// renderBody emits a lead paragraph and then a table for the same section, and the two arrive
+// as two framed blocks with no margin of their own — the panel's bottom edge met the table's
+// top edge and the pair read as one box drawn twice. Every other adjacency in the card has a
+// heading between it.
+test("a section's lead paragraph is not flush against its own table", () => {
+  assert.match(STYLES, /\.rca-sec > \.prose \+ \.table-wrap \{[^}]*margin-top/);
+});
+
+// The page has ONE width, and it is --maxw. Everything in the RCA — paragraph, list, table,
+// divider — ends on the same right edge as the fact strip above it, which is what makes the
+// two read as one column instead of a panel with a ragged margin beside it. Any max-width
+// declared inside the RCA breaks that: the capped block stops short while its uncapped
+// neighbours run on, and the 240px strip down the right comes straight back.
+test("nothing inside the RCA sets a width of its own", () => {
+  for (const sel of [".rca", ".prose", ".prose-text", ".rca-list", ".rca-head"]) {
+    const rule = STYLES.match(new RegExp(`^\\${sel} \\{([^}]*)\\}`, "m"));
+    if (!rule) continue;
+    assert.doesNotMatch(
+      rule[1],
+      /max-width/,
+      `${sel} caps itself — the page's --maxw is the only measure the RCA may have`
+    );
+  }
+});
+
+// --maxw for this page is a floor, not a preference. main's content box sits ~3rem inside it,
+// and the stat strip breaks its four tiles into two rows once its container drops under 54rem.
+// Narrowing the reading measure past that point silently rearranges the header above the RCA,
+// which is the panel the RCA was just aligned to.
+test("the incident page stays wide enough to keep the stat strip in one row", () => {
+  const page = STYLES.match(/^\.pane:has\(\.prose\) \{[^}]*--maxw: ([\d.]+)rem/m);
+  assert.ok(page, "the incident page's column is gone");
+  const step = STYLES.match(/@container page \(max-width: ([\d.]+)rem\) \{ \.stats \{/);
+  assert.ok(step, "the stat strip's 4->2 step is gone");
+  assert.ok(
+    Number(page[1]) >= Number(step[1]) + 3,
+    `--maxw ${page[1]}rem leaves the container at or under the ${step[1]}rem step — the fact strip will wrap to two rows`
+  );
+});
+
+// Sections are separated by a rule rather than by a frame around each one. Slack separates them
+// with a blank line; a page cannot, because a blank line here is one leading of a paragraph and
+// reads as a paragraph break. What must not come back is the panel: a box has to be as wide as
+// its widest neighbour while the text in it stops at the measure, and the difference was 188px
+// of empty card beside every paragraph.
+test("an RCA section is separated by a rule, not framed as a card", () => {
+  assert.match(STYLES, /\.rca-sec \+ \.rca-sec \{[^}]*border-top: 1px solid/);
+  const prose = STYLES.match(/^\.prose \{([^}]*)\}/m);
+  assert.ok(prose, "no .prose rule to check");
+  assert.doesNotMatch(prose[1], /background|border|padding/, "the RCA sections are framed again");
+});
+
+// The template writes a tool name as _italic_ because Slack mrkdwn has nothing else to mark one
+// with. On a page with a second face, italic sans beside a mono argument in the same cell reads
+// as two kinds of thing when it is one. Table cells only: an underscored word in a paragraph is
+// a model emphasising a word, and that keeps its italic.
+test("a tool name in a table cell is set in the data face, not italicised", () => {
+  const rule = STYLES.match(/^\.rca td em \{([^}]*)\}/m);
+  assert.ok(rule, "no .rca td em rule to check");
+  assert.match(rule[1], /font-family: var\(--font-data\)/);
+  assert.match(rule[1], /font-style: normal/);
+  assert.doesNotMatch(STYLES, /^\.prose-text em \{/m, "prose emphasis has been made into data too");
+});
+
+// STYLES is one template literal, which is why this can only be caught here: a stray */ inside
+// it fails no build and throws no error — the CSS parser takes everything up to the next { as a
+// selector and silently drops the rule that followed. That is exactly how .rca td.primary went
+// missing for a while, and the only reason it was noticed is that a column was measured.
+test("the stylesheet's comments and blocks close where they open", () => {
+  const bare = STYLES.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(bare, /\*\//, "a */ outside a comment: everything up to the next { is now a selector");
+  assert.doesNotMatch(bare, /\/\*/, "an unterminated comment swallows the rest of the sheet");
+  let depth = 0;
+  for (const ch of bare) {
+    if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+    assert.ok(depth >= 0, "a } with no { — the rules after it are outside the block they belong to");
+  }
+  assert.equal(depth, 0, "an unclosed rule block");
 });
 
 // ---------- pagination ----------
