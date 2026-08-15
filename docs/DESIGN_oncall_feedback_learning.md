@@ -2,10 +2,19 @@
 
 > **Status: v1 IMPLEMENTED (2026-07-14)** — steps 1–4 of §8 shipped (migration 002,
 > feedback store/recall, `@agent learn` router + extraction, confirmed-tier recall +
-> prompt framing). Step 5 (`reaction_added` trigger) and §10 v2 ideas remain. Goal: the
+> prompt framing). **Step 5 shipped 2026-07-16**: `reaction_added` trigger
+> (`SLACK_LEARN_REACTION`, default ✅; silent outside stored-incident threads and on
+> repeats; needs `reactions:read` + the event subscription). §10 v2 ideas remain. Goal: the
 > agent learns from what on-call engineers say in Slack alert threads (confirmed root
 > causes, actions taken, outcomes), stores it as **high-trust** knowledge, and recalls it
 > on future similar incidents to reduce hallucination and make future remediation safer.
+>
+> **v1.1 (2026-07-16):** a recurrence confirmed by fresh evidence may now answer
+> **concisely** (known recurrence + confirmed root cause + verified evidence + concrete
+> fix) instead of the full RCA template — the alert pipeline is format-agnostic: incident
+> store and the remediation proposal run regardless of format. Forcing the reply back into
+> the template via a reformat LLM call was tried twice and removed (the private LLM echoed
+> the template skeleton / dropped the emoji labels the Slack renderer parses by).
 
 ## 1. Goal
 

@@ -2,6 +2,24 @@ import "dotenv/config";
 
 const env = process.env.NODE_ENV || "dev";
 
+export const DASHBOARD_PORT_DEFAULT = 3001;
+
+// `parseInt(x ?? "3001")` guards only the UNSET case: an empty string, a typo, or an
+// out-of-range number all survive it, and http.Server.listen() then throws
+// ERR_SOCKET_BAD_PORT synchronously — which used to take the whole pod down over a
+// statistics page. Everything else in this file may fail loud at boot; the dashboard
+// specifically may not (design §8), so a bad value falls back and says so.
+export function dashboardPort(raw: string | undefined): number {
+  if (raw === undefined) return DASHBOARD_PORT_DEFAULT;
+  const n = Number(raw.trim());
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+  console.warn(
+    `[config] DASHBOARD_PORT="${raw}" is not a port number (1-65535) — ` +
+    `falling back to ${DASHBOARD_PORT_DEFAULT}`
+  );
+  return DASHBOARD_PORT_DEFAULT;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -12,10 +30,25 @@ export const config = {
     appToken: process.env.SLACK_APP_TOKEN,
     alertChannel: process.env.SLACK_ALERT_CHANNEL,
     oncallUsers: (process.env.SLACK_ONCALL_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    // who may approve/reject remediations — falls back to oncallUsers; both empty =
+    // any user may decide (warned in logs; still a human gate + server-side guardrails)
+    approverUsers: (process.env.SLACK_APPROVER_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    // emoji name that triggers learn-from-thread when reacted inside an investigated
+    // thread (needs reactions:read + the reaction_added event subscription)
+    learnReaction: process.env.SLACK_LEARN_REACTION ?? "white_check_mark",
+  },
+
+  // Shared secret required on POST /alert (Authorization: Bearer <token>). The endpoint
+  // triggers investigations AND remediation proposals, so an open port is a real trust
+  // boundary. Unset = open + a startup warning (backward-compat, same policy as MCP_AUTH_TOKEN).
+  // Configure the sender via Alertmanager `http_config.authorization.credentials`.
+  alertWebhook: {
+    token: process.env.ALERT_WEBHOOK_TOKEN,
   },
 
   llm: {
-    provider: (process.env.LLM_PROVIDER ?? "claude") as "claude" | "openai-compatible" | "private-llm",
+    provider: (process.env.LLM_PROVIDER ?? "claude") as
+      "claude" | "openai-compatible" | "private-llm" | "router",
     // Output token ceiling for claude + openai-compatible. SQS path's limit lives in llm-worker.
     maxTokens: parseInt(process.env.MAX_TOKENS ?? "8096"),
     claude: {
@@ -37,6 +70,28 @@ export const config = {
       timeoutMs: parseInt(process.env.SQS_LLM_TIMEOUT_SECONDS ?? "240") * 1000,
       pollWaitSeconds: parseInt(process.env.SQS_POLL_WAIT_SECONDS ?? "10"),
     },
+  },
+
+  // GitOps PR-flow remediation (DESIGN_gitops_pr_remediation.md). When enabled, a Flux
+  // HelmRelease-managed workload's remediation opens a PR via the llm-worker's gitops
+  // handler over SQS (request queue below; responses share the LLM response queue, routed
+  // by requestId). The agent holds NO GitHub credentials — those live in the worker.
+  gitops: {
+    enabled: process.env.GITOPS_REMEDIATION_ENABLED === "true",
+    requestQueueName: process.env.SQS_GITOPS_REQUEST_QUEUE_NAME ?? "gitops-request.fifo",
+    timeoutMs: parseInt(process.env.SQS_GITOPS_TIMEOUT_SECONDS ?? "120") * 1000,
+  },
+
+  // Post-remediation verification (migrations/006). The check is scheduled in Postgres and
+  // claimed by whichever replica polls next, so it survives the pod that approved the action.
+  remediation: {
+    // how long to wait before asking "did that fix it". 300s beats the old 90s because 90s
+    // answered while the rolling update was still converging — a half-restarted workload
+    // reads as "not fixed" no matter what the remediation did.
+    verifyDelayMs: parseInt(process.env.REMEDIATION_VERIFY_DELAY_SECONDS ?? "300") * 1000,
+    // how often to look for due checks. Cheap (one indexed UPDATE) and only bounds how late
+    // a verdict lands, so there's no reason to poll faster.
+    verifyPollMs: parseInt(process.env.REMEDIATION_VERIFY_POLL_SECONDS ?? "30") * 1000,
   },
 
   mcp: {
@@ -82,6 +137,20 @@ export const config = {
       database: process.env.DB_NAME ?? "devops_agent",
       sslMode: process.env.DB_SSL_MODE ?? "disable", // disable | require | verify-full
     },
+  },
+
+  // Read-only incident dashboard on its own port. Off unless asked for — the agent must
+  // be unchanged for anyone not using it. Behind a shared-password session (see
+  // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
+  // than serving incidents anonymously.
+  dashboard: {
+    enabled: process.env.DASHBOARD_ENABLED === "true",
+    port: dashboardPort(process.env.DASHBOARD_PORT),
+    password: process.env.DASHBOARD_PASSWORD,
+    // Opt-out, not opt-in: a Secure cookie is dropped in silence over plain HTTP, and the
+    // symptom (a login page that keeps reappearing) points nowhere near the cause. Browsers
+    // exempt localhost, so a port-forward needs no change — only a plain-HTTP hostname does.
+    cookieSecure: process.env.DASHBOARD_COOKIE_SECURE !== "false",
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),

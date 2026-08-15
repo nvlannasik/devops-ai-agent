@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { IncidentMemory, parseSeverity, extractRootCause } from "./index.js";
+import { IncidentMemory, parseSeverity, extractRootCause, queryTerms } from "./index.js";
 
 const SAMPLE_RCA = [
   "🔴 *Critical Severity Incident*",
@@ -51,6 +51,28 @@ test("store returns the inserted id and persists the Slack thread link", async (
   assert.deepEqual(captured!.params.slice(-2), ["C123", "1720.99"]); // channel, thread_ts
 });
 
+test("store fires onStored with the inserted id and thread ts (the usage backfill link)", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "42" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store({ alertname: "X" }, SAMPLE_RCA, { channel: "C123", threadTs: "1720.99" });
+
+  assert.equal(id, 42);
+  assert.deepEqual(calls, [[42, "1720.99"]]);
+});
+
+test("store does NOT fire onStored without a Slack thread — nothing to link", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "42" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store({ alertname: "X" }, SAMPLE_RCA); // no slack argument
+
+  assert.equal(id, 42);
+  assert.deepEqual(calls, []);
+});
+
 test("recall returns '' without an alertname to key on", async () => {
   // a fake pool would never be hit because the alertname guard returns first
   const mem = new IncidentMemory({ query: async () => assert.fail("should not query") } as any);
@@ -71,6 +93,78 @@ test("recall renders the CONFIRMED tier above the hypothesis tier", async () => 
   assert.ok(out.indexOf("CONFIRMED") < out.indexOf("Prior similar"), "confirmed tier must come first");
 });
 
+// ---- similarity tier (migrations/005) ----
+
+test("queryTerms splits CamelCase — an alert name is one token to a tokenizer", () => {
+  const terms = queryTerms("KubePodCrashLooping OOMKilled");
+  assert.deepEqual(terms, ["kube", "crash", "looping", "killed"]);
+  // "pod" and "oom" are dropped by the 4-char floor, not by the envelope list
+});
+
+test("queryTerms drops the envelope vocabulary every alert carries", () => {
+  // these would manufacture overlap between two incidents that have nothing in common
+  assert.deepEqual(queryTerms("alertname severity critical namespace payments firing"), ["payments"]);
+});
+
+test("queryTerms drops bare numbers, short tokens, and duplicates", () => {
+  assert.deepEqual(queryTerms("memory 8080 3 limit memory MEMORY exceeded"), ["memory", "limit", "exceeded"]);
+});
+
+test("queryTerms caps the term count — a whole RCA must not become one huge tsquery", () => {
+  const long = Array.from({ length: 60 }, (_, i) => `term${String.fromCharCode(97 + (i % 26))}${i}`).join(" ");
+  assert.equal(queryTerms(long).length, 24);
+});
+
+test("recall skips the similarity tier entirely without queryText", async () => {
+  const seen: string[] = [];
+  const fakePool = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      return { rows: [] };
+    },
+  } as any;
+  await new IncidentMemory(fakePool).recall({ alertname: "X", namespace: "payments" });
+  assert.equal(seen.length, 2, "only the two exact-match tiers should be queried");
+  assert.ok(!seen.some((s) => s.includes("root_cause_tsv")), "no similarity query without queryText");
+});
+
+test("recall renders the similarity tier last and labels it as the weakest", async () => {
+  const fakePool = {
+    query: async (sql: string) => {
+      if (sql.includes("incident_feedback")) return { rows: [] };
+      if (sql.includes("root_cause_tsv")) {
+        return {
+          rows: [
+            { created_at: "2026-06-01T00:00:00Z", alertname: "NodeMemoryPressure", namespace: "payments", root_cause: "node ran out of memory", overlap: 3 },
+          ],
+        };
+      }
+      return { rows: [{ created_at: "2026-06-19", severity: "critical", confidence: "High", root_cause: "OOM leak" }] };
+    },
+  } as any;
+  const out = await new IncidentMemory(fakePool).recall(
+    { alertname: "KubePodCrashLooping", namespace: "payments" },
+    { queryText: "KubePodCrashLooping container OOMKilled memory limit exceeded" }
+  );
+  assert.match(out, /Possibly related/);
+  assert.match(out, /NodeMemoryPressure in payments \(3 shared terms\)/);
+  assert.match(out, /NOT a causal link/);
+  assert.ok(out.indexOf("Prior similar") < out.indexOf("Possibly related"), "weakest tier must come last");
+});
+
+test("a similarity-tier failure never breaks recall — the other two tiers stand alone", async () => {
+  const fakePool = {
+    query: async (sql: string) => {
+      if (sql.includes("root_cause_tsv")) throw new Error("relation root_cause_tsv does not exist");
+      if (sql.includes("incident_feedback")) return { rows: [] };
+      return { rows: [{ created_at: "2026-06-19", severity: "critical", confidence: "High", root_cause: "OOM leak" }] };
+    },
+  } as any;
+  const out = await new IncidentMemory(fakePool).recall({ alertname: "X" }, { queryText: "memory limit exceeded" });
+  assert.match(out, /Prior similar incidents/);
+  assert.doesNotMatch(out, /Possibly related/);
+});
+
 test("storeFeedback maps a unique violation to 'duplicate' and null pool to 'failed'", async () => {
   const fb = { slackUser: "U1", triggerKey: "123.45", rawExcerpt: "…", confirmed_root_cause: "x", action_taken: null, outcome: "resolved" };
   const dupPool = { query: async () => { const e: any = new Error("dup"); e.code = "23505"; throw e; } } as any;
@@ -83,4 +177,23 @@ test("findIncidentByThread maps the row id (pg returns BIGSERIAL as string)", as
   assert.equal(await mem.findIncidentByThread("C1", "111.22"), 7);
   const empty = new IncidentMemory({ query: async () => ({ rows: [] }) } as any);
   assert.equal(await empty.findIncidentByThread("C1", "111.22"), null);
+});
+
+test("markResolved flips the newest unresolved incident and returns its thread", async () => {
+  let captured: { sql: string; params: unknown[] } | null = null;
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      captured = { sql, params };
+      return { rows: [{ channel: "C123", thread_ts: "1720.99" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+  const thread = await mem.markResolved({ alertname: "X", namespace: "ns" });
+  assert.deepEqual(thread, { channel: "C123", threadTs: "1720.99" });
+  assert.match(captured!.sql, /resolved_at IS NULL/);
+  assert.match(captured!.sql, /ORDER BY created_at DESC LIMIT 1/);
+
+  // no matching unresolved incident → null (and rows without a thread → null too)
+  const empty = new IncidentMemory({ query: async () => ({ rows: [] }) } as any);
+  assert.equal(await empty.markResolved({ alertname: "X" }), null);
 });

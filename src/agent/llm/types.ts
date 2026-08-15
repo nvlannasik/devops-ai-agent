@@ -43,6 +43,15 @@ export interface LLMResponse {
   content: ContentBlock[];
   stopReason: "end_turn" | "tool_use" | "max_tokens";
   usage?: TokenUsage;
+  // Which registered backend answered, on which chain, and its configured model name.
+  // Set only by RouterLLMClient — the direct providers leave these undefined, and
+  // llm_usage stores NULL for them. model can be undefined even when backend is set
+  // (e.g. a private-llm backend has no configured model) — leave it undefined rather
+  // than substituting another backend's model; a NULL in llm_usage is honest, a wrong
+  // model name is not.
+  backend?: string;
+  route?: "light" | "heavy";
+  model?: string;
 }
 
 export interface LLMClient {

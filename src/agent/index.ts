@@ -1,23 +1,91 @@
 import { createLLMClient } from "./llm/index.js";
+import { SERIALIZED_BLOCKS } from "./llm/router.js";
+import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
+import { UsageStore } from "./usage/index.js";
 import { createPool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
 import { buildStaticSystemPrompt, buildTimeContext } from "./prompts/system.js";
-import { trimHistory, sanitizeContentBlocks } from "./context/index.js";
+import { assembleRequest, sanitizeContentBlocks } from "./context/index.js";
+import { resolveBudget } from "./context/resolve-budget.js";
+import { estimateTokens, type Budget } from "./context/budget.js";
+import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
+import { RemediationStore } from "./remediation/index.js";
+import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import {
+  RemediationCheckStore,
+  summarizePods,
+  alertState,
+  decideVerdict,
+  verdictMessage,
+  maxAttemptsReached,
+  type AlertState,
+  type PodHealth,
+  type RemediationCheck,
+  type Verdict,
+} from "./remediation/verify.js";
+import { SqsGitOpsClient } from "./gitops/sqs.js";
+import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
+import type { GitOpsDrift } from "./gitops/types.js";
+import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import type { LLMClient, Message, ContentBlock, TokenUsage } from "./llm/types.js";
+import type { LLMClient, LLMResponse, Message, ContentBlock, TokenUsage, ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
-import logger from "../utils/logger/index.js";
+import logger, { errDetail } from "../utils/logger/index.js";
+import { withRoute, withTrace } from "../utils/trace/index.js";
 
 const MAX_ITERATIONS = 10;
 // conversation mode: max distinct pods whose logs may be fetched in one round — a generic
 // name matching many pods ("metallb" → 8) should produce a "which one?" question, not a dump
 const MAX_LOG_FANOUT = 2;
+
+// Per-thread skill sets live in memory, like ConversationMemory's rcaThreads. Bounded so a
+// long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
+// insertion-order, and a thread that outlives its entry simply re-selects from its next message.
+export const MAX_TRACKED_THREADS = 500;
+
+export type ThreadSkills = Map<string, Skill[]>;
+
+/** What the dashboard renders. Strings only — no RegExp crosses this boundary. */
+export interface SkillView {
+  name: string;
+  description: string;
+  when: string;
+  chars: number;
+  body: string;
+}
+
+/**
+ * Selects the skills for one incoming message and folds them into the thread's running set.
+ * Exported for the wiring test — the class method is a thin caller.
+ */
+export function selectForThread(
+  registry: SkillRegistry,
+  tracked: ThreadSkills,
+  threadId: string,
+  trigger: string
+): Skill[] {
+  const known = tracked.get(threadId) ?? [];
+  const { selected, overflow } = registry.select(trigger, new Set(known.map((s) => s.name)));
+  if (overflow.length > 0) {
+    logger.info(`[${threadId}] skills over the cap, not loaded: ${overflow.join(", ")}`);
+  }
+  const merged = selected.length > 0 ? [...known, ...selected] : known;
+
+  tracked.delete(threadId); // re-insert so this thread becomes the most recent
+  tracked.set(threadId, merged);
+  while (tracked.size > MAX_TRACKED_THREADS) {
+    const oldest = tracked.keys().next().value;
+    if (oldest === undefined) break;
+    tracked.delete(oldest);
+  }
+  return merged;
+}
 
 const zeroUsage = (): TokenUsage => ({
   inputTokens: 0,
@@ -38,12 +106,42 @@ export class DevOpsAgent {
   private mcp: MCPClient;
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
+  private usage: UsageStore;
+  private remediations: RemediationStore;
+  private checks: RemediationCheckStore;
+  private gitops: SqsGitOpsClient | null;
+  private readonly skills: SkillRegistry;
+  private readonly threadSkills: ThreadSkills = new Map();
+  private budget: Budget;
 
   constructor() {
     this.llm = createLLMClient();
     this.mcp = new MCPClient();
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
+    this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
+    this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
+    this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
+    this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
+
+    // Throws here rather than at first request: a malformed skill file must be a pod that
+    // refuses to start. src/agent/skills/real.test.ts loads this same directory, so a bad file
+    // fails npm test long before it reaches a cluster.
+    this.skills = loadSkills(resolveSkillsDir());
+    for (const s of this.skills.all()) {
+      logger.info(`[skills] ${s.name} (${s.chars} chars, when=${s.when === "always" ? "always" : s.when.source}) — ${s.description}`);
+    }
+    // Provisional: tools are unknown until MCP connects, so initialize() recomputes it. The
+    // registry is parsed here too, exactly as initialize() does — passing null instead made a
+    // `router` deployment resolve its own provider name as a BackendKind, fall through windowOf's
+    // last `??` to the 32k private-llm default, and throw at construction for any MAX_TOKENS at or
+    // above 23448, naming a backend "router" that does not exist. Nothing reads this value (both
+    // reads run after initialize()), so the only thing the null could still do was kill the pod.
+    this.budget = resolveBudget({
+      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      provider: config.llm.provider,
+      maxTokens: config.llm.maxTokens, overheadTokens: estimateTokens(buildStaticSystemPrompt()),
+    });
   }
 
   async initialize(): Promise<void> {
@@ -60,11 +158,42 @@ export class DevOpsAgent {
       const pool = createPool();
       pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
       await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
-      this.incidents = new IncidentMemory(pool);
+      this.usage = new UsageStore(pool);
+      this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
+      this.remediations = new RemediationStore(pool);
+      this.checks = new RemediationCheckStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
     }
+
+    const tools = this.mcp.getTools();
+    this.budget = resolveBudget({
+      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      provider: config.llm.provider,
+      maxTokens: config.llm.maxTokens,
+      overheadTokens: estimateTokens(buildStaticSystemPrompt()) + estimateTokens(JSON.stringify(tools)),
+    });
+    logger.info(`[context] budget: ${this.budget.contextTokens} token window, ${this.budget.reserveTokens} reserved for output`);
+  }
+
+  // The tool list devops-mcp-server returned at connect, for the dashboard's dependency map.
+  // Read-only and already in memory — this makes no call. Empty before initialize() and after
+  // a failed connect, which is a state the dashboard renders rather than an error.
+  mcpTools(): ToolDefinition[] {
+    return this.mcp.getTools();
+  }
+
+  // The registered skills, for the dashboard's /context page. Read-only and already in memory —
+  // this makes no call. Strings only: the dashboard never sees a RegExp.
+  skillsView(): readonly SkillView[] {
+    return this.skills.all().map((s) => ({
+      name: s.name,
+      description: s.description,
+      when: s.when === "always" ? "always" : s.when.source,
+      chars: s.chars,
+      body: s.body,
+    }));
   }
 
   // Readiness check for /health — reports each enabled dependency. ok=false (→ 503) if any
@@ -79,15 +208,52 @@ export class DevOpsAgent {
   }
 
   // Durable cross-incident memory — recall returns "" when disabled or no prior match.
-  recallIncidents(labels: Record<string, string>): Promise<string> {
-    return this.incidents.recall(labels);
+  // `queryText` (the alert body) unlocks the weakest tier, which matches on wording rather
+  // than on the alert's identity; without it recall stays exact-match only.
+  recallIncidents(labels: Record<string, string>, queryText?: string): Promise<string> {
+    return this.incidents.recall(labels, { queryText });
+  }
+
+  // Recall what was actually DONE about this alert before (past remediations + their PRs/
+  // outcomes) so the agent doesn't re-propose a fix that already ran. "" when none.
+  async recallRemediations(labels: Record<string, string>): Promise<string> {
+    const alertname = labels.alertname;
+    if (!alertname) return ""; // keyed by alert; mention-driven flows have no labels
+    const rows = await this.remediations.recallForAlert(alertname, labels.namespace, 3).catch(() => []);
+    if (rows.length === 0) return "";
+    const lines = rows.map((r) => {
+      const date = new Date(r.createdAt).toISOString().slice(0, 10);
+      const pr = r.result.startsWith("http") ? ` (PR: ${r.result})` : "";
+      // The verdict is the part that says whether it WORKED — "succeeded" only means the
+      // call didn't error. Unverified rows say so rather than reading as a silent success.
+      const verdict = r.verdict ? ` → verified ${r.verdict}${r.detail ? ` (${r.detail})` : ""}` : " → never verified";
+      return `- ${date}: ${r.summary} — ${r.status}${pr}${verdict}`;
+    });
+    const failed = rows.some((r) => r.verdict === "unchanged" || r.verdict === "worse");
+    return [
+      `## Previously remediated — same alert${labels.namespace ? ` in namespace ${labels.namespace}` : ""}`,
+      ...lines,
+      `These are prior actions taken for this recurring issue. Prefer confirming whether the same fix still applies over proposing a brand-new one.`,
+      ...(failed
+        ? [
+            `A "verified unchanged" or "verified worse" entry is evidence the action did NOT fix this alert — the agent already ran it and re-checked afterwards. Do not propose that same action again unless you can state what is different this time; if the same fix keeps not holding, the root cause is upstream of it, and that is what to investigate.`,
+          ]
+        : []),
+    ].join("\n");
   }
 
   storeIncident(labels: Record<string, string>, rca: string, channel?: string, threadTs?: string): Promise<number | null> {
     return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined);
   }
 
-  async investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number } = {}): Promise<string> {
+  // Everything below runs inside the trace context so outbound SQS requests carry the
+  // threadId — that is what lets you grep one id across the agent log, the llm-worker
+  // log, and the Slack thread when an answer comes out wrong.
+  investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
+    return withTrace(threadId, () => this.runInvestigation(threadId, userMessage, opts));
+  }
+
+  private async runInvestigation(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
@@ -105,12 +271,19 @@ export class DevOpsAgent {
     // for first message: prepend time context
     // for follow-up: prepend explicit mode instruction so LLM doesn't default to RCA format
     const messageToAppend = isFollowUp
-      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format]\n${userMessage}`
+      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
       : `${buildTimeContext()}\n\n${userMessage}`;
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
 
-    const tools = this.mcp.getTools();
+    // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
+    // prior incidents, and a previous incident's RCA must not select this one's playbook.
+    const skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+
+    // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
+    // to execute state-changing actions on its own. Write tools are reachable only via
+    // the proposal dry-run and the human-approved execution path (direct callTool).
+    const tools = this.mcp.getTools().filter((t) => !t.description.startsWith("[WRITE]"));
     const systemPrompt = buildStaticSystemPrompt();
     let iterations = 0;
     let totalUsage = zeroUsage();
@@ -124,15 +297,56 @@ export class DevOpsAgent {
       }
       iterations++;
 
-      const messages = trimHistory(await this.memory.get(threadId));
-      logger.debug(`[${threadId}] LLM call #${iterations} (history: ${messages.length} messages)`);
+      const assembled = assembleRequest({
+        history: await this.memory.get(threadId),
+        systemPrompt,
+        tools: toolsDisabled ? [] : tools,
+        skills,
+        budget: this.budget,
+      });
+      logger.debug(
+        `[${threadId}] LLM call #${iterations} (history: ${assembled.messages.length} messages, ` +
+        `-${assembled.messagesDropped} over budget, ~${assembled.estimatedTokens} tokens, ` +
+        `skills: [${assembled.skillsUsed.join(", ") || "none"}]` +
+        (assembled.skillsDropped.length > 0 ? `, dropped: [${assembled.skillsDropped.join(", ")}]` : "") + ")"
+      );
+      if (assembled.skillsDropped.length > 0) {
+        logger.warn(`[${threadId}] context budget dropped skills: ${assembled.skillsDropped.join(", ")}`);
+      }
+      // The floor: the first and the most recent message are pinned unconditionally, so a single
+      // enormous tool result can put the request over the window with nothing left to drop. Say so
+      // and send it anyway — a visible 400 from the backend beats inventing a truncation that
+      // hides which evidence went missing.
+      const available = this.budget.contextTokens - this.budget.reserveTokens;
+      if (assembled.estimatedTokens > available) {
+        logger.warn(
+          `[${threadId}] context over budget: ~${assembled.estimatedTokens} tokens vs ${available} ` +
+          `available — pinned messages alone exceed the window, sending anyway`
+        );
+      }
 
       const llmStart = Date.now();
-      const response = await this.llm.chat(messages, toolsDisabled ? [] : tools, systemPrompt);
+      let response;
+      try {
+        response = await this.llm.chat(assembled.messages, toolsDisabled ? [] : tools, assembled.systemPrompt);
+      } catch (err) {
+        // the LLM call is the one hop that leaves this process; without this line a
+        // worker/queue failure surfaced only as a generic Slack error with no context
+        logger.error(`[${threadId}] LLM call #${iterations} failed after ${Date.now() - llmStart}ms: ${errDetail(err)}`);
+        throw err;
+      }
       const llmMs = Date.now() - llmStart;
+
+      // what the model actually produced — the missing piece when Slack shows garbage but
+      // the logs only say "stop=end_turn"
+      logger.debug(
+        `[${threadId}] LLM #${iterations} content: [${response.content.map((c) => c.type).join(", ") || "empty"}]` +
+        (this.extractText(response.content) ? ` text="${truncate(this.extractText(response.content), 200)}"` : "")
+      );
 
       if (response.usage) {
         totalUsage = addUsage(totalUsage, response.usage);
+        this.recordUsage(threadId, response);
         logger.debug(
           `[${threadId}] LLM #${iterations} ${llmMs}ms | ` +
           `in=${response.usage.inputTokens} out=${response.usage.outputTokens} ` +
@@ -161,6 +375,15 @@ export class DevOpsAgent {
             return "⚠️ The model hit its output-token limit before writing the answer (its reasoning consumed the whole budget). Try again — or raise `LLM_MAX_TOKENS` / set `LLM_REASONING_EFFORT=low` on the llm-worker.";
           }
           return "⚠️ The investigation finished but the model returned an empty response. Please re-run or rephrase the request.";
+        }
+        // A model that echoes our own content-block JSON as prose means its tool-call
+        // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
+        // Log it here — otherwise the only symptom is a wall of JSON in Slack.
+        if (SERIALIZED_BLOCKS.test(summary)) {
+          logger.warn(
+            `[${threadId}] final answer looks like a serialized content array — the backend is likely ` +
+            `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`
+          );
         }
         return summary;
       }
@@ -250,6 +473,16 @@ export class DevOpsAgent {
     return Promise.all(
       toolUses.map(async (toolUse) => {
         const { id, name, input } = toolUse;
+        // second layer of the write-tool exclusion (first: filtered from the tools list)
+        const def = this.mcp.getTools().find((t) => t.name === name);
+        if (def?.description.startsWith("[WRITE]")) {
+          logger.warn(`[${threadId}] blocked direct write-tool call: ${name}`);
+          return {
+            type: "tool_result" as const,
+            tool_use_id: id,
+            content: "Error: write tools require the human approval flow and cannot be called during an investigation.",
+          };
+        }
         const start = Date.now();
         logger.info(`[${threadId}] → tool: ${name} input: ${truncate(JSON.stringify(input))}`);
         try {
@@ -265,12 +498,391 @@ export class DevOpsAgent {
     );
   }
 
+  // One row per chat() call (per the llm_usage migration's own header comment) — every
+  // this.llm.chat() call site must go through this, not just the investigation loop.
+  // threadTs is null wherever the call site has no Slack thread to attribute to (proposal
+  // drafting, learn extraction, the conversation-mode reformat) — never invent one.
+  private recordUsage(threadTs: string | null, response: LLMResponse): void {
+    if (!response.usage) return;
+    void this.usage.record({
+      threadTs,
+      backend: response.backend ?? null,
+      route: response.route ?? null,
+      model: response.model ?? null,
+      usage: response.usage,
+    });
+  }
+
   private extractText(content: ContentBlock[]): string {
     return content
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
       .join("\n")
       .trim();
+  }
+
+  // ---- Guarded Remediation (docs/DESIGN_guarded_remediation.md) ----
+
+  // Propose at most one whitelisted action after an RCA. Returns null when: write tools
+  // aren't enabled on the MCP server (tool not discovered), the model proposes nothing,
+  // or a card is already active for this incident. A dry-run refusal returns the server's
+  // reason instead — the model DID want to act, and the human deserves to know why not
+  // (GitOps guard, blocked namespace, bad target). No card in any non-id case.
+  async proposeRemediation(
+    incidentId: number | null, // null = mention-driven investigation (no alert labels)
+    labels: Record<string, string>,
+    rca: string
+  ): Promise<
+    | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
+    | { refused: string }
+    | null
+  > {
+    // write tools present at all? (server-side flag off = never propose)
+    if (!this.mcp.getTools().some((t) => t.description.startsWith("[WRITE]"))) return null;
+
+    const response = await this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM);
+    this.recordUsage(null, response); // no Slack thread at this call site — never invent one
+    const text = this.extractText(response.content);
+    const proposal = parseProposal(text);
+    if (!proposal) {
+      logger.info(`[remediation] no actionable proposal from model: ${truncate(text, 200)}`);
+      return null;
+    }
+    // the specific proposed action must actually be registered on the server
+    if (!this.mcp.getTools().some((t) => t.name === proposal.action)) {
+      logger.info(`[remediation] proposed action ${proposal.action} is not registered on the MCP server`);
+      return null;
+    }
+
+    // Mandatory dry-run before any card — validates the target AND exercises the MCP
+    // server's namespace guardrails with zero side effects.
+    const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
+    if (dryRun.startsWith("Error:")) {
+      logger.info(`[remediation] dry-run refused for ${proposal.summary}: ${truncate(dryRun, 200)}`);
+      return { refused: dryRun.replace(/^Error:\s*/, "") };
+    }
+
+    // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
+    // validation) — route to the GitOps PR flow instead of storing a direct-patch card.
+    const preview = parseGitOpsPreview(dryRun);
+    if (preview) return this.proposeGitOpsPr(incidentId, proposal, preview);
+
+    // store the exact tool params + display fields — execution replays params verbatim
+    const id = await this.remediations.propose(incidentId, proposal.action, {
+      ...proposal.toolParams,
+      reason: proposal.reason,
+      summary: proposal.summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+
+    return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+  }
+
+  // Auto-detect the GitOps overlay path for a HelmRelease from Flux's own config: HR CR →
+  // the Kustomization that applied it (kustomize.toolkit.fluxcd.io labels) → its spec.path
+  // (e.g. "apps/dev/applications"). Reuses the read-only k8s_get_custom_resources MCP tool.
+  // Best-effort: undefined on any miss → the worker falls back to its GITOPS_PATH_PREFIX.
+  private async resolveOverlayPath(hr: { name: string; namespace: string }): Promise<string | undefined> {
+    try {
+      const hrRes = await this.mcp.callTool("k8s_get_custom_resources", { ...FLUX_HELMRELEASE, namespace: hr.namespace, name: hr.name });
+      if (hrRes.startsWith("Error:")) {
+        logger.info(`[remediation] overlay auto-detect: can't read HelmRelease ${hr.namespace}/${hr.name} — ${truncate(hrRes, 200)} (needs RBAC get on helm.toolkit.fluxcd.io/helmreleases)`);
+        return undefined;
+      }
+      const ksRef = kustomizeRefOf(JSON.parse(hrRes));
+      if (!ksRef) {
+        logger.info(`[remediation] overlay auto-detect: HelmRelease ${hr.namespace}/${hr.name} has no kustomize.toolkit.fluxcd.io labels`);
+        return undefined;
+      }
+      const ksRes = await this.mcp.callTool("k8s_get_custom_resources", { ...FLUX_KUSTOMIZATION, namespace: ksRef.namespace, name: ksRef.name });
+      if (ksRes.startsWith("Error:")) {
+        logger.info(`[remediation] overlay auto-detect: can't read Kustomization ${ksRef.namespace}/${ksRef.name} — ${truncate(ksRes, 200)} (needs RBAC get on kustomize.toolkit.fluxcd.io/kustomizations)`);
+        return undefined;
+      }
+      const prefix = fluxPathToPrefix(JSON.parse(ksRes));
+      if (!prefix) {
+        logger.info(`[remediation] overlay auto-detect: Kustomization ${ksRef.namespace}/${ksRef.name} has no usable spec.path`);
+        return undefined;
+      }
+      logger.info(`[remediation] overlay path auto-detected: ${prefix} (via Flux Kustomization ${ksRef.namespace}/${ksRef.name})`);
+      return prefix;
+    } catch (err) {
+      logger.info(`[remediation] overlay path auto-detect failed for ${hr.namespace}/${hr.name}: ${err instanceof Error ? err.message : err}`);
+      return undefined;
+    }
+  }
+
+  // GitOps PR branch of proposeRemediation: ask the worker (over SQS) to prepare the PR
+  // (dry_run → diff), then store a PR-flavored remediation so the approve path opens it.
+  private async proposeGitOpsPr(
+    incidentId: number | null,
+    proposal: Proposal,
+    preview: GitOpsPreview
+    // gitOps is absent on the drift branch: that proposes a Flux reconcile, not a PR
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
+    if (!this.gitops) {
+      return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
+    }
+    const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    let payload;
+    try {
+      payload = await this.gitops.request({ op: "dry_run", helmRelease: preview.helmRelease, action: preview.action, container: preview.container, component: preview.component, changes: preview.changes, pathPrefix });
+    } catch (err) {
+      logger.error(`[remediation] gitops dry-run failed: ${err instanceof Error ? err.message : err}`);
+      return { refused: `couldn't prepare the GitOps PR: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!payload.ok) {
+      // Drift is a finding, not a refusal: the repo DOES declare this key, the cluster just
+      // isn't running it. A PR would write a value nobody declared; the repo is the source
+      // of truth, so propose restoring it instead.
+      if (payload.drift) return this.proposeFluxReconcile(incidentId, proposal, preview, payload.drift);
+      logger.info(`[remediation] gitops dry-run refused: ${payload.reason}`);
+      return { refused: payload.reason };
+    }
+    if (payload.op !== "dry_run") return null; // defensive: worker returned the wrong op
+
+    const summary = `open a GitOps PR — ${proposal.summary} (\`${payload.valuesKey}\` in \`${payload.path}\`)`;
+    const id = await this.remediations.propose(incidentId, proposal.action, {
+      gitops: true,
+      helmRelease: preview.helmRelease,
+      action: preview.action,
+      container: preview.container,
+      component: preview.component,
+      changes: preview.changes,
+      pathPrefix, // replay the same overlay scope on open_pr
+      path: payload.path,
+      valuesKey: payload.valuesKey,
+      reason: proposal.reason,
+      summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] gitops not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+    return { id, proposal: { ...proposal, summary }, dryRunSummary: payload.diff, gitOps: { path: payload.path, valuesKey: payload.valuesKey, helmRelease: preview.helmRelease } };
+  }
+
+  // Cluster drifted from Git (someone patched the cluster directly). Propose a Flux
+  // reconcile: it restores what the repo declares instead of encoding the drifted value.
+  // Same approval card as everything else — a human still decides, because the drifted
+  // value is occasionally the intended one (in which case they want a PR, not a reconcile).
+  private async proposeFluxReconcile(
+    incidentId: number | null,
+    proposal: Proposal,
+    preview: GitOpsPreview,
+    drift: GitOpsDrift
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+    const target = this.workloadOf(preview.workload);
+    if (!target) return { refused: `cluster/GitOps drift detected but the workload reference \`${preview.workload}\` could not be parsed.` };
+    // an older MCP server won't have the tool — say so instead of proposing a dead action
+    if (!this.mcp.getTools().some((t) => t.name === "flux_reconcile")) {
+      return {
+        refused:
+          `cluster/GitOps drift: \`${drift.valuesKey}\` is \`${drift.gitValue}\` in \`${drift.path}\` but the cluster runs ` +
+          `\`${drift.clusterValue}\`. Run \`flux reconcile helmrelease ${preview.helmRelease.namespace}/${preview.helmRelease.name} --force\` ` +
+          `to restore the declared state (the agent's flux_reconcile tool is not available on this MCP server).`,
+      };
+    }
+
+    const toolParams = { namespace: target.namespace, name: target.name, kind: target.kind };
+    const dryRun = await this.mcp.callTool("flux_reconcile", { ...toolParams, dry_run: true });
+    if (dryRun.startsWith("Error:")) {
+      logger.info(`[remediation] flux_reconcile dry-run refused: ${truncate(dryRun, 200)}`);
+      return { refused: dryRun.replace(/^Error:\s*/, "") };
+    }
+
+    const summary =
+      `Flux reconcile \`${preview.helmRelease.namespace}/${preview.helmRelease.name}\` — restore \`${drift.valuesKey}\` ` +
+      `to \`${drift.gitValue}\` (cluster drifted to \`${drift.clusterValue}\`)`;
+    logger.warn(
+      `[remediation] cluster/GitOps drift on ${preview.workload}: ${drift.valuesKey} git=${drift.gitValue} ` +
+      `cluster=${drift.clusterValue} (${drift.path}) — proposing flux_reconcile`
+    );
+    const id = await this.remediations.propose(incidentId, "flux_reconcile", {
+      ...toolParams,
+      reason: `cluster drifted from the GitOps repo: ${drift.valuesKey} is ${drift.gitValue} in ${drift.path}, cluster is running ${drift.clusterValue}`,
+      summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] flux_reconcile not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+    return {
+      id,
+      proposal: { ...proposal, action: "flux_reconcile", namespace: target.namespace, name: target.name, toolParams, summary },
+      dryRunSummary: truncate(dryRun, 400),
+    };
+  }
+
+  // "deployment/ns/name" (the MCP preview's workload reference) → its parts.
+  private workloadOf(ref: string): { kind: string; namespace: string; name: string } | null {
+    const [kind, namespace, ...rest] = ref.split("/");
+    if (!kind || !namespace || rest.length === 0) return null;
+    return { kind, namespace, name: rest.join("/") };
+  }
+
+  // Approve path: atomically claim the row (double-click / multi-pod safe), execute the
+  // whitelisted MCP tool, record the outcome. Returns the user-facing card text, plus the
+  // target workload on success so the app can schedule a post-remediation status check.
+  async executeRemediation(
+    id: number,
+    approvedBy: string
+  ): Promise<{ text: string; target?: { namespace: string; name: string } }> {
+    const claim = await this.remediations.claimForExecution(id, approvedBy);
+    if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
+    if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
+    if (claim === "taken") return { text: "⚠️ This remediation was already handled by another approver or process." };
+
+    // GitOps PR remediations open a PR via the worker instead of patching the cluster
+    if ((claim.params as { gitops?: boolean }).gitops) return this.executeGitOpsPr(id, approvedBy, claim.params);
+
+    // stored params = tool input + display fields; strip the display fields before the call
+    const { reason: _reason, summary, ...toolParams } = claim.params as Record<string, unknown> & { summary?: string };
+    const label = typeof summary === "string" ? summary : claim.action;
+    try {
+      const result = await this.mcp.callTool(claim.action, toolParams);
+      const ok = !result.startsWith("Error:");
+      await this.remediations.finish(id, ok, result);
+      if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
+      // delete_pod targets a pod, not a workload — drop the random suffix so verification
+      // matches the REPLACEMENT pod (same ReplicaSet hash / StatefulSet base)
+      const targetName = String(toolParams.name ?? String(toolParams.pod ?? "").replace(/-[a-z0-9]+$/, ""));
+      return {
+        text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
+        target: { namespace: String(toolParams.namespace ?? ""), name: targetName },
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.remediations.finish(id, false, msg);
+      return { text: `❌ *Remediation failed* — ${label}: ${truncate(msg, 300)}` };
+    }
+  }
+
+  // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
+  // target — nothing is live until the PR merges + Flux syncs, so there is nothing for the
+  // post-remediation verification to look at (app/index.ts only schedules when target exists).
+  private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string }> {
+    const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; component?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
+    const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
+    if (!this.gitops) {
+      await this.remediations.finish(id, false, "gitops client not available");
+      return { text: `❌ *PR not opened* — ${label}: the GitOps PR client is not enabled on this agent.` };
+    }
+    try {
+      const payload = await this.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });
+      if (!payload.ok) {
+        await this.remediations.finish(id, false, payload.reason);
+        return { text: `❌ *PR not opened* — ${label}: ${truncate(payload.reason, 300)}` };
+      }
+      if (payload.op !== "open_pr") {
+        await this.remediations.finish(id, false, "unexpected worker response");
+        return { text: `❌ *PR not opened* — ${label}: unexpected worker response.` };
+      }
+      await this.remediations.finish(id, true, payload.prUrl);
+      return { text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.remediations.finish(id, false, msg);
+      return { text: `❌ *PR not opened* — ${label}: ${truncate(msg, 300)}` };
+    }
+  }
+
+  // ---- Post-remediation verification (migrations/006, remediation/verify.ts) ----
+
+  // Schedule the "did that fix it" check. The baseline snapshot is taken NOW, at approval
+  // time, because "worse" has to mean the workload regressed while we waited — without a
+  // before, the damage we were sent to fix reads as damage the remediation caused.
+  // Best-effort by design: a workload we can't snapshot still gets a check (before = null,
+  // which only costs the regression comparison), and a store failure never fails the click.
+  async scheduleRemediationCheck(
+    remediationId: number,
+    channel: string,
+    threadTs: string,
+    target: { namespace: string; name: string }
+  ): Promise<void> {
+    if (!this.checks.enabled) return; // no Postgres → no durable schedule to keep
+    const before = await this.podHealth(target).catch((err) => {
+      logger.warn(`[remediation] baseline snapshot for ${target.namespace}/${target.name} failed: ${errDetail(err)}`);
+      return null;
+    });
+    const delaySeconds = Math.round(config.remediation.verifyDelayMs / 1000);
+    const stored = await this.checks.schedule(remediationId, channel, threadTs, target, before, delaySeconds);
+    if (stored) logger.info(`[remediation] verification for ${remediationId} due in ${delaySeconds}s (${target.namespace}/${target.name})`);
+  }
+
+  // One poller pass: claim whatever is due, verify it, record the verdict, and hand back the
+  // thread messages for the caller to post. Returns messages instead of posting them so the
+  // Slack client stays in the app layer — this class owns Postgres and MCP, not chat.
+  //
+  // The verdict is recorded BEFORE its message goes out: at-most-once beats a crash between
+  // two posts telling on-call twice that their fix failed.
+  async runDueRemediationChecks(): Promise<Array<{ channel: string; threadTs: string; text: string }>> {
+    const due = await this.checks.claimDue();
+    const out: Array<{ channel: string; threadTs: string; text: string }> = [];
+
+    for (const check of due) {
+      if (maxAttemptsReached(check)) {
+        const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Prometheus could not be read`;
+        await this.checks.abandon(check.id, detail);
+        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, "inconclusive", detail) });
+        continue;
+      }
+      try {
+        const { verdict, detail } = await this.verifyRemediation(check);
+        await this.checks.complete(check.id, verdict, detail);
+        logger.info(`[remediation] check ${check.id} (remediation ${check.remediationId}): ${verdict} — ${detail}`);
+        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, verdict, detail) });
+      } catch (err) {
+        // Left claimed on purpose: the lease expires and the next pass retries it, which is
+        // what makes a transient MCP outage a delay rather than a lost verdict.
+        logger.warn(`[remediation] check ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
+      }
+    }
+    return out;
+  }
+
+  // Deterministic, no LLM call. Both signals are fetched together and each degrades on its
+  // own — a Prometheus outage must not cost us the pod evidence, and vice versa.
+  private async verifyRemediation(check: RemediationCheck): Promise<{ verdict: Verdict; detail: string }> {
+    const [alert, after] = await Promise.all([
+      check.alertname
+        ? this.mcp
+            .callTool("prometheus_get_alerts", {})
+            .then((raw) => alertState(raw, check.alertname, check.namespace))
+            .catch((err) => {
+              logger.warn(`[remediation] alert re-check for ${check.alertname} failed: ${errDetail(err)}`);
+              return "unknown" as AlertState;
+            })
+        : Promise.resolve("none" as AlertState),
+      this.podHealth(check.target).catch((err) => {
+        logger.warn(`[remediation] pod re-check for ${check.target.namespace}/${check.target.name} failed: ${errDetail(err)}`);
+        return null;
+      }),
+    ]);
+    return decideVerdict(alert, check.before, after, { alertname: check.alertname });
+  }
+
+  private async podHealth(target: { namespace: string; name: string }): Promise<PodHealth | null> {
+    const raw = await this.mcp.callTool("k8s_list_pods", { namespace: target.namespace });
+    return summarizePods(raw, target.name);
+  }
+
+  async rejectRemediation(id: number, by: string): Promise<string> {
+    const flipped = await this.remediations.reject(id, by);
+    return flipped ? `🚫 Remediation rejected by <@${by}>. Nothing was executed.` : "⚠️ Already handled (or expired).";
+  }
+
+  // D. resolved-alert loop: mark the incident resolved, return its Slack thread (or null).
+  async resolveIncident(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
+    return this.incidents.markResolved(labels);
+  }
+
+  // E. reaction-learn needs to know silently whether a thread maps to a stored incident.
+  async findIncidentForThread(channel: string, threadTs: string): Promise<number | null> {
+    return this.incidents.findIncidentByThread(channel, threadTs);
   }
 
   // On-call feedback learning (`@agent learn`): map the thread to its incident, run one
@@ -287,6 +899,7 @@ export class DevOpsAgent {
       [],
       EXTRACTION_SYSTEM
     );
+    this.recordUsage(threadTs, response);
     const extracted = parseFeedbackJson(this.extractText(response.content));
     if (!extracted) {
       return "🤷 I couldn't find a concrete conclusion in this thread yet. State the actual root cause / action taken in the thread, then mention me with `learn` again.";
@@ -315,22 +928,35 @@ export class DevOpsAgent {
   // an RCA-shaped reply into a plain conversational answer. Deliberately uses a minimal
   // system prompt — the full one is what primes the RCA structure we're removing.
   async reformatToConversation(text: string): Promise<string> {
-    const response = await this.llm.chat(
-      [
-        {
-          role: "user",
-          content:
-            "Rewrite this as a short conversational Slack answer (mrkdwn). Keep the facts and any log excerpts. " +
-            "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions, impact, confidence). " +
-            "End with at most one short offer to investigate if something looked genuinely wrong.\n\n---\n\n" +
-            text,
-        },
-      ],
-      [],
-      "You reformat DevOps chatbot replies for Slack. Output only the rewritten reply in Slack mrkdwn."
-    );
-    const out = this.extractText(response.content);
-    return out || text;
+    return withRoute("light", async () => {
+      const response = await this.llm.chat(
+        [
+          {
+            role: "user",
+            content:
+              "Rewrite this as a short conversational Slack answer (mrkdwn), at most ~10 short lines. Keep the facts and any log excerpts. " +
+              "Remove the incident/RCA structure entirely (severity, root cause, evidence, ruled out, recommended actions/plans, risks, impact, confidence). " +
+              "Remove kubectl/helm command instructions entirely — execution happens via the approval card, never via the user's terminal. " +
+              'Remove any "do you want me to proceed" style closing question — if a change was requested, an approval card or a refusal follows this message automatically. ' +
+              "End with at most one short offer to investigate if something looked genuinely wrong.\n\n---\n\n" +
+              text,
+          },
+        ],
+        [],
+        "You reformat DevOps chatbot replies for Slack. Output only the rewritten reply in Slack mrkdwn."
+      );
+      this.recordUsage(null, response); // no Slack thread parameter at this call site — never invent one
+      const out = this.extractText(response.content);
+      return out || text;
+    });
+  }
+
+  // Remediation lifecycle events (card posted / refused / executed) happen OUTSIDE the
+  // LLM conversation — append them to thread memory so follow-ups stay coherent (the
+  // model once promised "I'll open an approval card" right after the server refused one,
+  // because it never saw the refusal).
+  async noteInThread(threadId: string, note: string): Promise<void> {
+    await this.memory.append(threadId, { role: "assistant", content: `[system note] ${note}` }).catch(() => {});
   }
 
   async markRcaSent(threadId: string): Promise<void> {
@@ -344,6 +970,7 @@ export class DevOpsAgent {
   async shutdown(): Promise<void> {
     await this.mcp.disconnect();
     await this.llm.shutdown?.();
+    await this.gitops?.shutdown();
     await this.incidents.close();
   }
 }

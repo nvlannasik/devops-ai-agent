@@ -32,6 +32,18 @@ export class AlertDeduplicator {
     return true;
   }
 
+  // D. resolved-alert loop: a resolved alert releases its dedup claim so the NEXT firing
+  // of the same alert re-triggers a fresh investigation instead of being suppressed.
+  async clear(labels: Record<string, string>): Promise<void> {
+    const fingerprint = this.fingerprint(labels);
+    const redis = getRedis();
+    if (redis) {
+      await redis.del(`dedup:${fingerprint}`);
+      return;
+    }
+    this.seen.delete(fingerprint);
+  }
+
   private fingerprint(labels: Record<string, string>): string {
     // stable sort keys so order doesn't matter
     return Object.keys(labels)

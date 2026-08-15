@@ -30,3 +30,12 @@ test("expired entry is processed again", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(await d.shouldProcess(labels, 1), true); // TTL lapsed → processed again
 });
+
+test("clear releases the claim so the next firing is processed again", async () => {
+  const d = new AlertDeduplicator();
+  const labels = { alertname: "PodNotHealthy", namespace: "dev-auth" };
+  assert.equal(await d.shouldProcess(labels), true);
+  assert.equal(await d.shouldProcess(labels), false); // suppressed while claimed
+  await d.clear(labels); // alert resolved
+  assert.equal(await d.shouldProcess(labels), true); // re-fire → fresh investigation
+});

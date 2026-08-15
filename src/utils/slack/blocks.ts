@@ -6,7 +6,8 @@ const SEVERITY_COLOR: Record<string, string> = {
   critical: "🔴", high: "🟠", medium: "🟡", low: "🟢",
 };
 
-function extractSection(text: string, label: string): string {
+// exported: reformatToRca gates on it — isRcaResponse alone passed texts that rendered empty
+export function extractSection(text: string, label: string): string {
   // matches "*📍 Root Cause*\n..." up to the next "*emoji Label*" or end
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*\\n([\\s\\S]*?)(?=\\n\\*[🔴🟠🟡🟢📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
@@ -24,6 +25,23 @@ function section(text: string): Block {
 
 function header(text: string): Block {
   return { type: "header", text: { type: "plain_text", text, emoji: true } };
+}
+
+// Conversation replies sometimes leak RCA-template SECTIONS without the Severity label
+// isRcaResponse keys on ("Proposed plan: Immediate/Short-term/Long-term", "Impact if
+// Unresolved", "Confidence: High"). Two or more distinct markers = structural leak →
+// the reply should be reformatted to a plain conversational answer.
+export function leaksRcaStructure(text: string): boolean {
+  // mutating kubectl/helm command dumps are their own leak class — execution happens
+  // via the approval card, never via instructions for the user's terminal
+  const commandDump = /\bkubectl\s+(rollout|scale|set|patch|delete|apply|edit)\b|\bhelm\s+(upgrade|rollback|uninstall)\b/i;
+  const markers = [
+    /impact if unresolved/i,
+    /confidence:\s*[`*]?\s*(high|medium|low)/i,
+    /ruled out/i,
+    /immediate:[\s\S]{0,400}short-term:/i,
+  ];
+  return commandDump.test(text) || markers.filter((m) => m.test(text)).length >= 2;
 }
 
 export function isRcaResponse(text: string): boolean {
