@@ -295,7 +295,7 @@ export function topologyDiagram(t: Topology): string {
       : "");
 
   return (
-    `<svg viewBox="0 0 ${W} ${height}" class="chart topo" role="group" aria-label="${esc(summary)}">` +
+    `<svg viewBox="0 0 ${W} ${height}" class="topo" role="group" aria-label="${esc(summary)}">` +
     `<defs>` +
     `<pattern id="topo-grid" width="22" height="22" patternUnits="userSpaceOnUse">` +
     `<circle cx="1" cy="1" r="1" class="topo-dot"/></pattern>` +

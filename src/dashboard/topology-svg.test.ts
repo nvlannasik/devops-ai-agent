@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { topologyDiagram } from "./topology-svg.js";
+import { STYLES } from "./styles.js";
 import type { Topology } from "./topology.js";
 
 const base: Topology = {
@@ -304,4 +305,24 @@ test("the figure is a group, not an image, now that it contains links", () => {
   assert.match(svg, /<svg[^>]+role="group"/);
   assert.doesNotMatch(svg, /role="img"/);
   assert.match(svg, /<svg[^>]+aria-label="[^"]+"/);
+});
+
+// The diagram once wore `class="chart topo"`, from a time when the incident chart was an <svg>
+// too and `.chart` meant "size an SVG". `.chart` is now the flex wrapper around an HTML bar
+// chart, so the diagram inherited display:flex and container-type:inline-size — the latter
+// contains an element's own contents out of its intrinsic sizing, so the viewBox stopped
+// driving the height and the map collapsed to the 300x150 replaced-element default. Nothing
+// failed; it just got small. These two assertions are the pin: the diagram owns its sizing.
+test("the diagram sizes itself and does not borrow the bar chart's wrapper class", () => {
+  const svg = topologyDiagram(base);
+  assert.match(svg, /<svg [^>]*class="topo"/);
+  assert.doesNotMatch(svg, /class="[^"]*\bchart\b[^"]*"/);
+});
+
+test("the .topo rule carries the sizing the viewBox needs", () => {
+  const topo = /^\.topo \{([^}]*)\}/m.exec(STYLES);
+  assert.ok(topo, "styles should define a base .topo rule");
+  // height:auto is what lets the viewBox set the proportion; without it the SVG falls back to
+  // its default height and the whole diagram shrinks.
+  assert.match(topo![1], /height:\s*auto/);
 });

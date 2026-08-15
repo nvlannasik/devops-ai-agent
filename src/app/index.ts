@@ -412,7 +412,7 @@ export class SlackApp {
         `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
         (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
-      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue));
+      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText }));
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
       // recognized recurrence may be a concise conversational reply (known issue +
       // confirmed fix) — forcing it back into the template via a reformat LLM call

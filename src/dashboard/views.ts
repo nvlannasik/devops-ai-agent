@@ -1,6 +1,6 @@
-import { esc, fmtDate, fmtInt, fmtPct, table } from "./html.js";
+import { cell, esc, fmtDate, fmtInt, fmtPct, headers, table } from "./html.js";
 import { renderRca } from "./rca.js";
-import { barChart } from "./svg.js";
+import { barChart } from "./chart.js";
 import { topologyDiagram } from "./topology-svg.js";
 import { TOPO_SCRIPT } from "./topology-script.js";
 import { STYLES } from "./styles.js";
@@ -12,6 +12,7 @@ import type {
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
+import type { ContextView } from "./context.js";
 
 // Each glyph is drawn from the page it opens rather than picked off a generic set: a bar
 // series for the weekly chart the overview leads with, an alert triangle for a table whose
@@ -36,6 +37,10 @@ const ICON = {
     `<circle cx="12" cy="5" r="2.6"/><circle cx="5" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6"/>` +
       `<path d="M10.4 7.3 6.6 16.4"/><path d="M13.6 7.3l3.8 9.1"/>`
   ),
+  context: ico(
+    `<path d="M4 5.4A1.8 1.8 0 0 1 5.8 3.6H19v13.6H5.8A1.8 1.8 0 0 0 4 19v-13.6Z"/>` +
+      `<path d="M4 19a1.8 1.8 0 0 0 1.8 1.8H19"/><path d="M8.4 8h6.4"/><path d="M8.4 11.6h4.2"/>`
+  ),
   signout: ico(`<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 16 4-4-4-4"/><path d="M14 12H4"/>`),
 
   // Section and figure glyphs. Same rule as the rail's: each one is drawn from what it labels,
@@ -43,7 +48,6 @@ const ICON = {
   // pairs that DO repeat are deliberate — the wrench is remediation wherever remediation is
   // named, the speech bubble is on-call, the chip is the model — because a reader who learns
   // one on the overview should not have to relearn it on the incident page.
-  target: ico(`<circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.4"/>`),
   chip: ico(
     `<rect x="7" y="7" width="10" height="10" rx="1.7"/>` +
       `<path d="M10 3.2v3.4"/><path d="M14 3.2v3.4"/><path d="M10 17.4v3.4"/><path d="M14 17.4v3.4"/>` +
@@ -58,10 +62,6 @@ const ICON = {
     `<path d="M14.6 6.4a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.7-3.7a6 6 0 0 1-7.9 7.9l-6.8 6.8a2.1 2.1 0 0 1-3-3l6.8-6.8a6 6 0 0 1 7.9-7.9Z"/>`
   ),
   speech: ico(`<path d="M20.5 14.5a2 2 0 0 1-2 2H7.8L3.5 20.8V5.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z"/>`),
-  userCheck: ico(
-    `<path d="M15 20.5v-1.8a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1.8"/><circle cx="8.5" cy="7.2" r="3.7"/>` +
-      `<path d="m15.8 11.4 2.2 2.2 4-4.4"/>`
-  ),
   check: ico(`<circle cx="12" cy="12" r="8.8"/><path d="m8.2 12.3 2.6 2.6 5-5.6"/>`),
   layers: ico(`<path d="m12 2.6 9 4.9-9 4.9-9-4.9 9-4.9Z"/><path d="m3 13 9 4.9 9-4.9"/>`),
   // The two arrows are a pair and are read as one: what went to the model, what came back.
@@ -69,7 +69,6 @@ const ICON = {
   inTokens: ico(`<path d="M12 3.4v11"/><path d="m7.6 10 4.4 4.4 4.4-4.4"/><path d="M4 20.2h16"/>`),
   outTokens: ico(`<path d="M12 20.6v-11"/><path d="m7.6 14 4.4-4.4 4.4 4.4"/><path d="M4 3.8h16"/>`),
   bolt: ico(`<path d="M13.2 2.4 4.4 13.6h7.1l-1 8 8.8-11.2h-7.1l1-8Z"/>`),
-  pulse: ico(`<path d="M2.6 12h4.2l2.8-7.4 4.2 15.4 2.8-8h4.8"/>`),
   inbound: ico(`<path d="M20.6 12H8.2"/><path d="m12.6 7.2 5 4.8-5 4.8"/><path d="M3.6 4.2v15.6"/>`),
   outbound: ico(`<path d="M3.4 12h12.4"/><path d="m11.4 7.2 5 4.8-5 4.8"/><path d="M20.4 4.2v15.6"/>`),
   plug: ico(
@@ -82,6 +81,7 @@ const NAV = [
   { href: "/", label: "Overview", icon: ICON.overview },
   { href: "/incidents", label: "Incidents", icon: ICON.incidents },
   { href: "/topology", label: "Topology", icon: ICON.topology },
+  { href: "/context", label: "Context", icon: ICON.context },
 ];
 
 // The two theme-color values are the only colours written outside styles.ts, and they are
@@ -183,6 +183,17 @@ const badge = (label: string, t: string = tone(label)): string =>
 const dash = `<span class="meta">—</span>`;
 const severityBadge = (s: string | null): string => (s ? badge(s) : dash);
 
+// Alert names are one long CamelCase identifier with no space in them, so in a narrow column the
+// browser has nowhere to break and falls back to breaking anywhere — PersistentVolumeFillin/gUp.
+// <wbr> offers the humps as break opportunities, and a browser takes an offered break before it
+// invents one, so the name comes apart at PersistentVolume/FillingUp instead.
+//
+// Escape first, insert markup second — the same invariant rca.ts is built on. The regex is safe
+// against the escaped string on purpose: every entity esc() can emit (&amp; &lt; &gt; &quot;
+// &#39;) is lowercase or digits after the ampersand, so a lower-to-upper boundary can never fall
+// inside one and split it.
+const breakable = (name: string): string => esc(name).replace(/([a-z0-9])(?=[A-Z])/g, "$1<wbr>");
+
 // Every empty state names the fact and then the next move. An empty screen that only says
 // "no data" leaves the reader unsure whether the system is broken or simply quiet.
 const empty = (headline: string, next: string): string =>
@@ -201,33 +212,50 @@ interface Stat {
   value: string;
   sub?: string;
   icon?: string;
+  // The same severity vocabulary the tables use, for the one figure on a shelf that can be bad
+  // news. Only set it when the number IS the bad news — a tone on every tile is a tone on none.
+  // Passed through toneAttr like every other tone on the page, so it meets the same allowlist.
+  tone?: string;
 }
-const statList = (items: Stat[]): string =>
-  `<dl class="stats">` +
+// Four to a shelf, always. The grid is a fixed 4 → 2 → 1 ladder, so a fifth figure does not wrap
+// into a row of its own — it either earns a place among the four or it belongs in a sub-line.
+//
+// `facts` marks a shelf that carries an incident's identity rather than a measurement — a
+// namespace, a confidence, two timestamps. Same shelf, but on a phone each tile lays its label
+// and value on one line instead of stacking them: four figures deserve the height, four labels
+// do not, and this one sits above the analysis a reader came for.
+const statList = (items: Stat[], variant: "" | "facts" = ""): string =>
+  `<dl class="stats${variant ? ` ${variant}` : ""}">` +
   items
     .map(
-      (s) => `<div class="stat"><dt>${s.icon ?? ""}${esc(s.label)}</dt><dd>${esc(s.value)}` +
+      (s) => `<div class="stat"${toneAttr(s.tone)}>` +
+        `<dt>${s.icon ?? ""}${esc(s.label)}</dt><dd>${esc(s.value)}` +
         (s.sub ? `<span>${esc(s.sub)}</span>` : "") + `</dd></div>`
     )
     .join("") +
   `</dl>`;
 
+// Every cell carries a class, including the two that hold nothing but a badge. Below 46rem the
+// stylesheet stops laying this out as a table and lays each row out as a card instead, and it
+// addresses the cells by name to do it — a positional selector would silently re-target the day
+// someone inserts a column, which is the kind of break no test written against the columns as a
+// SET would catch.
 function incidentTable(rows: IncidentRow[], whenEmpty: string): string {
   if (rows.length === 0) return whenEmpty;
   const body = rows
     .map(
-      (r) => `<tr${toneAttr(r.severity)}>
-      <td class="when">${esc(fmtDate(r.created_at))}</td>
-      <td class="primary"><a href="/incidents/${esc(r.id)}">${esc(r.alertname)}</a>${
+      (r) => `<tr role="row"${toneAttr(r.severity)}>
+      <td role="cell" class="when">${esc(fmtDate(r.created_at))}</td>
+      <td role="cell" class="primary"><a href="/incidents/${esc(r.id)}">${breakable(r.alertname)}</a>${
         r.root_cause ? `<div class="sub">${esc(r.root_cause)}</div>` : ""
       }</td>
-      <td class="mono" translate="no">${esc(r.namespace ?? "—")}</td>
-      <td>${severityBadge(r.severity)}</td>
-      <td>${r.resolved_at ? badge("resolved", "ok") : badge("firing", "")}</td>
+      <td role="cell" class="ns mono" translate="no">${esc(r.namespace ?? "—")}</td>
+      <td role="cell" class="sev">${severityBadge(r.severity)}</td>
+      <td role="cell" class="state">${r.resolved_at ? badge("resolved", "ok") : badge("firing", "")}</td>
     </tr>`
     )
     .join("");
-  return table(`<th>When</th><th>Alert</th><th>Namespace</th><th>Severity</th><th>State</th>`, body);
+  return table(headers("When", "Alert", "Namespace", "Severity", "State"), body, "cards");
 }
 
 // What the investigations cost. The stats are totals over the window; the table is per
@@ -240,31 +268,42 @@ function tokenUsage(t: Tokens): string {
       "Accounting starts with the next investigation the agent runs."
     );
   }
+  // Six columns is the widest table on the site, and the two that fall off a phone first are
+  // Output and Cache read — the halves of the ratio this section exists to show. Stacked, a
+  // backend's whole accounting is one captioned block.
   const rows = t.byBackend
     .map(
-      (b) => `<tr><td class="primary">${esc(b.backend)}</td>` +
-        `<td class="mono" translate="no">${esc(b.model)}</td>` +
-        `<td class="num">${fmtInt(b.calls)}</td>` +
-        `<td class="num">${fmtInt(b.input)}</td>` +
-        `<td class="num">${fmtInt(b.output)}</td>` +
-        `<td class="num">${fmtInt(b.cacheRead)}</td></tr>`
+      (b) => `<tr role="row">` +
+        cell("Backend", esc(b.backend), "primary") +
+        cell("Model", `<span translate="no">${esc(b.model)}</span>`, "mono") +
+        cell("Calls", fmtInt(b.calls), "num") +
+        cell("Input", fmtInt(b.input), "num") +
+        cell("Output", fmtInt(b.output), "num") +
+        cell("Cache read", fmtInt(b.cacheRead), "num") +
+        `</tr>`
     )
     .join("");
   return (
     statList(
       [
-        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: "input + output" },
-        { icon: ICON.inTokens, label: "Input", value: fmtInt(t.input) },
-        { icon: ICON.outTokens, label: "Output", value: fmtInt(t.output) },
+        // The call count rides in the sub-line rather than taking a fifth tile: it is the
+        // denominator of the figure above it ("how much, over how many calls"), and as its own
+        // tile it was the odd one out on a four-wide shelf — a count of events among three
+        // counts of tokens.
+        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: `input + output over ${fmtInt(t.calls)} calls` },
+        // The split, not just the two counts. An investigation that is 95% input is a caching
+        // problem; one that is 40% output is a verbosity problem. The shares say which.
+        { icon: ICON.inTokens, label: "Input", value: fmtInt(t.input), sub: `${fmtPct(t.input, t.input + t.output)} of tokens` },
+        { icon: ICON.outTokens, label: "Output", value: fmtInt(t.output), sub: `${fmtPct(t.output, t.input + t.output)} of tokens` },
         // Cache reads are the tokens that were NOT re-sent, so the pair reads as a saving
         // and its price. Writes sit in the sub-line: you pay for them once, deliberately.
         { icon: ICON.bolt, label: "Cache reads", value: fmtInt(t.cacheRead), sub: `${fmtInt(t.cacheCreation)} written` },
-        { icon: ICON.pulse, label: "LLM calls", value: fmtInt(t.calls) },
       ]
     ) +
     table(
-      `<th>Backend</th><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache read</th>`,
-      rows
+      headers("Backend", "Model", "Calls", "Input", "Output", "Cache read"),
+      rows,
+      "pairs"
     )
   );
 }
@@ -277,24 +316,46 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
     o.recurring.length === 0
       ? empty("Nothing has recurred.", "Every alert in the last 30 days fired exactly once.")
       : table(
-          `<th>Alert</th><th>Namespace</th><th>Times</th><th>Last seen</th>`,
+          headers("Alert", "Namespace", "Times", "Last seen"),
           o.recurring
             .map(
-              (r) => `<tr><td class="primary">${esc(r.alertname)}</td><td class="mono" translate="no">${esc(r.namespace ?? "—")}</td>` +
-                `<td class="num">${fmtInt(r.n)}</td><td class="when">${esc(fmtDate(r.last_seen))}</td></tr>`
+              (r) => `<tr role="row">` +
+                // The same wrap points the incident list offers: this column holds the longest
+                // string on the page and is the one the other three are read against.
+                cell("Alert", breakable(r.alertname), "primary") +
+                cell("Namespace", `<span translate="no">${esc(r.namespace ?? "—")}</span>`, "mono") +
+                cell("Times", fmtInt(r.n), "num") +
+                cell("Last seen", esc(fmtDate(r.last_seen)), "when") +
+                `</tr>`
             )
-            .join("")
+            .join(""),
+          "pairs"
         );
 
-  // Volume, then outcome, then cost — each its own section, in the order the questions are
-  // asked. The hero holds one composed object and nothing else: the 30-day count set against
-  // the weekly series it summarises, because the count and the shape of it are one fact.
-  // The four supporting figures are a different fact — what happened to those incidents —
-  // and they were reading as a caption to the chart while they shared its frame.
+  // State first, then volume, then cost. The panel across the top is where the page answers the
+  // only question that can need an answer right now — how many are still open — and it answers
+  // it in the first line of the page rather than below a chart. It carries the page's single
+  // toned figure: open incidents wear the critical spine when there are any, and nothing else on
+  // the shelf is coloured, so the tone means "look here" and not "this tile is a stat".
+  //
+  // The hero below it is one composed object and nothing else: the 30-day count set against the
+  // weekly series it summarises, because the count and the shape of it are one fact. The outcome
+  // figures used to sit in a section of their own between the two; they are the state of those
+  // incidents, so they belong in the state panel, and repeating them in both places would make
+  // the page say the same thing twice.
+  const open = o.totalIncidents - o.resolvedIncidents;
   return layout(
     "Overview",
-    `<section class="hero">
-       <h1 class="eyebrow">Incidents · last 30 days</h1>
+    `<h1 class="eyebrow">Incidents · last 30 days</h1>
+     ${statList(
+       [
+         { icon: ICON.incidents, label: "Open", value: fmtInt(open), sub: `of ${fmtInt(o.totalIncidents)} investigated`, tone: open > 0 ? "critical" : undefined },
+         { icon: ICON.check, label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents), sub: `${o.resolvedIncidents} of ${o.totalIncidents}` },
+         { icon: ICON.wrench, label: "Remediation applied", value: fmtPct(o.remediationSucceeded, remediationTotal), sub: `${o.remediationSucceeded} of ${remediationTotal}` },
+         { icon: ICON.speech, label: "On-call replies", value: fmtInt(feedbackTotal), sub: `${fmtInt(o.feedback.resolved ?? 0)} confirmed fixed` },
+       ]
+     )}
+     <section class="hero">
        <div class="hero-body">
          <p class="hero-figure">
            <span class="hero-value">${esc(fmtInt(o.totalIncidents))}</span>
@@ -303,15 +364,6 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
          <div class="hero-chart">${barChart(o.weekly, { label: "incidents per week" })}</div>
        </div>
      </section>
-     ${section(ICON.target, "Outcomes")}
-     ${statList(
-       [
-         { icon: ICON.check, label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents), sub: `${o.resolvedIncidents} of ${o.totalIncidents}` },
-         { icon: ICON.wrench, label: "Remediation applied", value: fmtPct(o.remediationSucceeded, remediationTotal), sub: `${o.remediationSucceeded} of ${remediationTotal}` },
-         { icon: ICON.speech, label: "On-call replies", value: fmtInt(feedbackTotal) },
-         { icon: ICON.userCheck, label: "Confirmed fixed", value: fmtInt(o.feedback.resolved ?? 0), sub: "by on-call" },
-       ]
-     )}
      ${section(ICON.chip, "Token usage")}
      ${tokenUsage(o.tokens)}
      ${section(ICON.repeat, "Most recurring")}
@@ -476,32 +528,51 @@ export function detailPage(d: {
       ? `<a class="standalone" href="${esc(`https://slack.com/app_redirect?channel=${encodeURIComponent(i.channel)}&message_ts=${encodeURIComponent(i.thread_ts)}`)}">Open the Slack thread →</a>`
       : "";
 
+  // Both of these are records of five fields, not lists to scan, so below 46rem they stack into
+  // captioned pairs rather than scrolling sideways — five columns on a phone put Result and
+  // Executed past the right edge, which on a remediation table means the outcome of the change
+  // is the part you cannot see. Five is also why the threshold is the incident list's and not
+  // the lower one these tables used to take: they ask for ~740px of columns, so between 40 and
+  // 46rem they were still a table and still scrolling. headers() keeps the <th> text and the
+  // cell captions the same
+  // string: they are the same label, and a table whose captions have drifted from its headers
+  // is one nobody notices is wrong.
   const remediations =
     d.remediations.length === 0
       ? empty("No remediation proposed.", "The agent investigated this alert but suggested no change.")
       : table(
-          `<th>Action</th><th>Status</th><th>Approved by</th><th>Result</th><th>Executed</th>`,
+          headers("Action", "Status", "Approved by", "Result", "Executed"),
           d.remediations
             .map(
-              (r) => `<tr${toneAttr(r.status)}><td class="mono" translate="no">${esc(r.action)}<div class="sub">${esc(JSON.stringify(r.params))}</div></td>` +
-                `<td>${badge(r.status)}</td><td>${esc(r.approved_by ?? "—")}</td>` +
-                `<td>${esc(r.result ?? "—")}</td><td class="when">${esc(fmtDate(r.executed_at))}</td></tr>`
+              (r) => `<tr role="row"${toneAttr(r.status)}>` +
+                cell("Action", `<span translate="no">${esc(r.action)}</span><div class="sub" translate="no">${esc(JSON.stringify(r.params))}</div>`, "mono") +
+                cell("Status", badge(r.status)) +
+                cell("Approved by", esc(r.approved_by ?? "—")) +
+                cell("Result", esc(r.result ?? "—")) +
+                cell("Executed", esc(fmtDate(r.executed_at)), "when") +
+                `</tr>`
             )
-            .join("")
+            .join(""),
+          "stack"
         );
 
   const feedback =
     d.feedback.length === 0
       ? empty("No on-call feedback yet.", "Reply in the Slack thread to record what actually fixed it.")
       : table(
-          `<th>From</th><th>Confirmed root cause</th><th>Action taken</th><th>Outcome</th><th>When</th></tr>`,
+          headers("From", "Confirmed root cause", "Action taken", "Outcome", "When"),
           d.feedback
             .map(
-              (r) => `<tr${toneAttr(r.outcome)}><td>${esc(r.slack_user ?? "—")}</td><td>${esc(r.confirmed_root_cause ?? "—")}</td>` +
-                `<td>${esc(r.action_taken ?? "—")}</td><td>${r.outcome ? badge(r.outcome) : dash}</td>` +
-                `<td class="when">${esc(fmtDate(r.created_at))}</td></tr>`
+              (r) => `<tr role="row"${toneAttr(r.outcome)}>` +
+                cell("From", esc(r.slack_user ?? "—")) +
+                cell("Confirmed root cause", esc(r.confirmed_root_cause ?? "—")) +
+                cell("Action taken", esc(r.action_taken ?? "—")) +
+                cell("Outcome", r.outcome ? badge(r.outcome) : dash) +
+                cell("When", esc(fmtDate(r.created_at)), "when") +
+                `</tr>`
             )
-            .join("")
+            .join(""),
+          "stack"
         );
 
   return layout(
@@ -521,7 +592,8 @@ export function detailPage(d: {
          { label: "Confidence", value: i.confidence ?? "—" },
          { label: "Fired", value: fmtDate(i.created_at) },
          { label: "Resolved", value: fmtDate(i.resolved_at) },
-       ]
+       ],
+       "facts"
      )}
      ${section(ICON.search, "Root cause analysis")}
      ${
@@ -549,28 +621,45 @@ const nodeRows = (nodes: TopoNode[], group?: "in" | "out"): string =>
   nodes.length === 0
     ? empty("Nothing configured in this group.", "Set the matching environment variables to wire one up.")
     : table(
-        `<th>Dependency</th><th>Endpoint</th><th>Notes</th>`,
+        headers("Dependency", "Endpoint", "Notes"),
         nodes
           .map(
-            (n, i) => `<tr${group ? ` id="${rowId(group, i)}"` : ""}${n.configured ? "" : ` data-tone="warning"`}>` +
-              `<td class="primary">${esc(n.label)}</td>` +
-              `<td class="mono" translate="no">${esc(n.detail)}</td>` +
-              `<td class="meta">${esc(n.meta)}${n.configured ? "" : ` ${badge("not configured", "warning")}`}</td></tr>`
+            (n, i) => `<tr role="row"${group ? ` id="${rowId(group, i)}"` : ""}${n.configured ? "" : ` data-tone="warning"`}>` +
+              cell("Dependency", esc(n.label), "primary") +
+              cell("Endpoint", `<span translate="no">${esc(n.detail)}</span>`, "mono") +
+              cell(
+                "Notes",
+                `${esc(n.meta)}${n.configured ? "" : ` ${badge("not configured", "warning")}`}`,
+                "meta"
+              ) +
+              `</tr>`
           )
-          .join("")
+          .join(""),
+        // Stacked, not paired: every one of these three is a phrase rather than a value —
+        // "Postgres (incident memory)", a queue pair with an arrow between them, "bot token
+        // present, socket mode present". A caption beside them would leave each phrase a third
+        // of the screen to wrap in.
+        "stack"
       );
 
+// Paired rather than stacked: a backend row is a spec sheet — a name, two identifiers, an enum
+// and an endpoint. Only the endpoint is long, and it is the one field a reader scans down rather
+// than reads, so it keeps the column the other four set.
 const backendRows = (backends: BackendNode[]): string =>
   table(
-    `<th>Backend</th><th>Kind</th><th>Model</th><th>Route</th><th>Reached via</th>`,
+    headers("Backend", "Kind", "Model", "Route", "Reached via"),
     backends
       .map(
-        (b, i) => `<tr id="${rowId("backend", i)}"><td class="primary">${esc(b.name)}</td>` +
-          `<td class="mono" translate="no">${esc(b.kind)}</td>` +
-          `<td class="mono" translate="no">${esc(b.model)}</td><td>${badge(b.route, "")}</td>` +
-          `<td class="mono" translate="no">${esc(b.endpoint)}</td></tr>`
+        (b, i) => `<tr role="row" id="${rowId("backend", i)}">` +
+          cell("Backend", esc(b.name), "primary") +
+          cell("Kind", `<span translate="no">${esc(b.kind)}</span>`, "mono") +
+          cell("Model", `<span translate="no">${esc(b.model)}</span>`, "mono") +
+          cell("Route", badge(b.route, "")) +
+          cell("Reached via", `<span translate="no">${esc(b.endpoint)}</span>`, "mono") +
+          `</tr>`
       )
-      .join("")
+      .join(""),
+    "pairs"
   );
 
 // The one table on this page whose source is NOT config: these families are derived from the
@@ -587,6 +676,11 @@ const capabilityRows = (caps: Capability[]): string =>
         "No tools discovered yet.",
         "The agent lists them when it connects to devops-mcp-server. If this persists, the server is unreachable."
       )
+    // The one table on this page that stays a table at every width, and deliberately. Two
+    // columns — a family name and a count — fit 320px with room to spare, so there is nothing to
+    // rescue; and stacking it would put the expanded tool list BETWEEN the family and its count,
+    // which is the pair the row exists to show. A narrow layout is for columns that fall off the
+    // edge, not for every table.
     : table(
         `<th>Family</th><th>Tools</th>`,
         caps
@@ -703,5 +797,87 @@ export function topologyPage(t: Topology, nonce: string): string {
      ${section(ICON.chip, "LLM backends")}
      ${router}`,
     "/topology"
+  );
+}
+
+// Numbers go through `fmtInt`, already imported at the top of views.ts (line 1) and used twenty
+// times below. Do NOT add a local `const num = (n) => n.toLocaleString("en-US")` — that is
+// html.ts:32-34 rewritten, in the one file that already imports the original, and it would put a
+// function named `num` beside the CSS class named "num" that these very cells pass.
+
+// A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
+// stack rather than pairs. The body hangs off the description in a <details>: native disclosure,
+// no JavaScript, and the summary is already the line the reader wanted.
+function skillRows(skills: ContextView["skills"]): string {
+  // No empty state on purpose: loadSkills throws at boot on a directory with no .md files, so a
+  // running agent always has skills. An "empty" table here would be a state the process cannot
+  // reach — do not add one later.
+  return table(
+    headers("Skill", "When", "Size", "Description"),
+    skills
+      .map((s) =>
+        `<tr role="row">` +
+        cell("Skill", `<code translate="no">${esc(s.name)}</code>`) +
+        cell("When", s.when === "always"
+          ? `<span class="badge">ALWAYS</span>`
+          : `<code translate="no">${esc(s.when)}</code>`) +
+        cell("Size", `${fmtInt(s.chars)} chars`) +
+        cell("Description",
+          `<details><summary>${esc(s.description)}</summary><pre>${esc(s.body)}</pre></details>`) +
+        `</tr>`
+      )
+      .join(""),
+    "stack"
+  );
+}
+
+// Seven short numbers and two identifiers: the spec-sheet shape pairs was built for.
+function budgetRows(backends: ContextView["backends"]): string {
+  return table(
+    headers("Backend", "Model", "Window", "Reserve", "Core", "Tools", "Available"),
+    backends
+      .map((b) =>
+        `<tr role="row">` +
+        cell("Backend", `<code translate="no">${esc(b.name)}</code>`) +
+        cell("Model", `<code translate="no">${esc(b.model)}</code>`) +
+        // "num" is the class every other numeric cell in this file carries (see the Token usage
+        // table, views.ts:273-276) — also a `pairs` table, so the combination is already proven.
+        cell("Window", fmtInt(b.window), "num") +
+        cell("Reserve", fmtInt(b.reserve), "num") +
+        cell("Core", fmtInt(b.core), "num") +
+        cell("Tools", fmtInt(b.tools), "num") +
+        cell("Available", fmtInt(b.available), "num") +
+        `</tr>`
+      )
+      .join(""),
+    "pairs"
+  );
+}
+
+export function contextPage(v: ContextView): string {
+  return layout(
+    "Context",
+    `<h1>Context and skills</h1>
+     <p class="meta">What this agent knows before it reads a single metric, and how much room it
+       has to say it. Read from the running process — no database, no call leaves it.</p>
+
+     ${section(ICON.layers, "Core prompt")}
+     <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
+       ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
+       every investigation.</p>
+
+     ${section(ICON.context, "Skills")}
+     <p class="meta">Selected from the alert text and carried in the first user message, never in
+       the system prompt — a system prompt that varied per investigation would miss the model's
+       prompt cache on every call. Expand a description to read the skill itself.</p>
+     ${skillRows(v.skills)}
+
+     ${section(ICON.chip, "Budget per backend")}
+     <p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
+       the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
+       The router picks a backend after the request is assembled, so the request has to fit the
+       smallest one it might land in.</p>
+     ${budgetRows(v.backends)}`,
+    "/context"
   );
 }

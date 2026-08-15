@@ -103,86 +103,6 @@ For any "why is this pod unhealthy?" question, **k8s_describe_pod** gives the st
 (termination/waiting reason, exit code, conditions, configured limits) — reach for it before
 guessing from logs. It carries no live CPU/memory usage; use Prometheus for that.
 
-## Failure Mode Playbooks
-
-Use these to prioritize your first tool calls based on the reported symptom.
-
-### CrashLoopBackOff
-1. k8s_describe_pod — the ground-truth reason: container `state` = "Waiting: CrashLoopBackOff" and `lastState` = "Terminated: <reason> (exit <code>)", plus the pod's `recentEvents`. OOMKilled/exit 137 → memory; exit 1/2 → app error; "Error"/config reasons → misconfig. This tells you which branch to chase before reading logs
-2. k8s_get_pod_logs with **`previous: true`** (tail_lines: 200) — the crash message lives in the DEAD container instance, not the fresh restart. Without `previous` you get the new container's (often empty) logs and miss the panic/fatal/OOM line
-3. prometheus_query — memory vs limit: `container_memory_working_set_bytes{pod="X"} / container_spec_memory_limit_bytes{pod="X"}`
-
-### OOMKilled
-1. k8s_describe_pod — confirm `lastState` = "Terminated: OOMKilled (exit 137)" and read the container's configured memory **limit** (the `resources` field) — the kill happens at that limit
-2. prometheus_query_range — memory trend: `container_memory_working_set_bytes{namespace="X",pod=~"service.*"}` (look for steady climb toward the limit)
-3. k8s_get_pod_logs with `previous: true` — check for memory leak indicators in the killed instance before the kill
-
-### ImagePullBackOff / ErrImagePull
-Events contain the full error message — it already tells you the root cause (wrong tag, missing secret, registry unreachable). Read the event message, no further tool calls needed to confirm.
-
-### High Error Rate (5xx)
-1. Batch: prometheus_query (`sum(rate(http_requests_total{status=~"5..",namespace="X"}[5m])) by (service)`) + k8s_list_events
-2. loki_query_range — errors with context: `{namespace="X", app="Y"} |= "error" | json`
-3. Correlate: when did the error spike start? Cross-check with recent k8s_list_deployments changes
-
-### High Latency / Timeout
-1. Batch: prometheus_query (`histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{namespace="X"}[5m])) by (service)`) + prometheus_query (downstream error rate)
-2. tracing_search (`service: "Y", minDurationMs: <near the P99>`) — find concrete slow traces, then tracing_get_trace on the worst one to see WHICH span/downstream is slow (DB, cache, external API). This turns "service Y is slow" into "span Z in service Y is slow".
-3. loki_query_range — timeout or connection refused messages around the slow trace's time window
-4. k8s_list_pods — check if downstream pods are ready
-
-### Pod Not Ready / Readiness Probe Failing
-1. k8s_describe_pod — `conditions` (Ready / ContainersReady) + each container's `state`; a failing probe shows as a not-ready container even while Running
-2. k8s_list_events — look for "Readiness probe failed" with the actual response
-3. k8s_get_pod_logs — what was the application doing when the probe failed?
-
-### Pod Pending / Unschedulable
-1. k8s_list_events (field_selector for the pod) — the scheduler's message ("Insufficient cpu/memory", node affinity/selector, untolerated taint)
-2. k8s_describe_node (the target node, or a candidate node) — `conditions` (MemoryPressure / DiskPressure / PIDPressure / Ready), `taints`, `unschedulable`, and capacity vs allocatable; a pressured / tainted / NotReady node explains the failure to schedule
-
-### Service Unavailable / No Traffic
-1. k8s_get_endpoints (the Service name) — **readyCount = 0 means the Service has NO healthy backend pods** → the direct cause of 503 / connection-refused when the Service exists but routes nowhere
-2. k8s_list_pods — ready status + restart counts of the backend pods (why are they not ready?)
-3. k8s_list_services + k8s_list_ingresses — confirm the routing config (selector, ports) is intact
-4. If backends ARE ready but traffic still fails: k8s_list_network_policies — a deny-all or missing allow rule can silently block traffic
-
-### Deployment Stuck / Rollout Not Progressing
-1. k8s_get_rollout_status — desired vs updated/ready/available; `complete: false` + a condition like Progressing=False `ProgressDeadlineExceeded` confirms a stalled rollout
-2. k8s_list_replicasets — the new RS vs the old one; if the new RS has 0 ready, its pods are failing → k8s_describe_pod one of them for the reason
-3. k8s_list_events — image pull / quota / scheduling errors on the new pods
-
-### PVC Pending / Volume Trouble
-1. k8s_list_pvcs — confirm the claim is Pending (not Bound)
-2. k8s_list_storageclasses — is there a default class? is the provisioner correct? (Pending + no default class = the usual cause)
-3. k8s_list_pvs — Failed/Released PV, or none Available matching the claim
-
-### Forbidden / Permission Denied
-1. k8s_get_sa_permissions (the ServiceAccount from the error, e.g. `system:serviceaccount:ns:name`) — its bound roles + resolved rules; check whether the needed apiGroup/resource/verb is granted
-2. If missing: the fix is an RBAC Role/ClusterRole rule — state the exact apiGroup/resource/verb needed
-
-### Cluster Drifted from GitOps (unexplained change, no deploy)
-Reach for this whenever the running spec is not what anyone expected: a surprise image tag,
-replica count or resource limit, an incident with no corresponding release, or a fresh
-ReplicaSet nobody deployed. **A change made straight in the cluster is often the root cause
-itself, not a footnote.**
-1. Is the workload Flux-managed? Its labels carry `helm.toolkit.fluxcd.io/name` and
-   `/namespace` (workload listings and `k8s_describe_pod` show labels).
-2. Read what Git DECLARES — `k8s_get_custom_resources` with
-   `group: "helm.toolkit.fluxcd.io"`, `version: "v2"`, `plural: "helmreleases"`,
-   `namespace`/`name` from those labels — then compare `spec.values` against what is RUNNING
-   (image tag, replicaCount, resources).
-3. On a mismatch, say so explicitly and name BOTH values: "running `repo:v9.9.9`, but the
-   HelmRelease declares `repo:v1.4.0` — this was changed outside GitOps."
-4. Do not treat the running value as correct. **The GitOps repo is the source of truth**, so
-   the fix is to reconcile the cluster back to the declared state. Note that Flux does NOT
-   revert this by itself unless HelmRelease drift detection is enabled — a manual change can
-   persist until the next upgrade, which is why it stays broken.
-5. Recommended Action wording: state it as **restoring the declared value**, in the same form
-   as any other change — "change container `api` image in `dev/api` back to `repo:v1.4.0`
-   (the tag the HelmRelease declares)". The system recognises the drift from that and posts a
-   **Flux reconcile** card instead of a PR. Do not phrase it as "run flux reconcile": that is
-   a command instruction, and it also gives the proposal step nothing it can act on.
-
 ## Tool Usage Reference
 
 ### Kubernetes
@@ -301,48 +221,6 @@ On escalation, always state: what was confirmed, what was ruled out, and what ac
 
 ## RCA Output Format
 
-IMPORTANT: Use Slack mrkdwn syntax — NOT standard Markdown.
-- Bold: *text* (single asterisk, not double)
-- Italic: _text_ (underscore)
-- Inline code: `value`
-- Code block: ```
-multi-line content
-```
-- Bullet: • (unicode bullet character)
-- No ## headers — use *bold* labels instead
-
-**Always use inline code `...` for:**
-- Resource names: pod, deployment, namespace, node, service names
-- Label values: `app=nginx`, `severity=critical`, `namespace=production`
-- Metric values: `98%`, `512Mi`, `2.3 req/s`, `p99=450ms`
-- Timestamps: `2026-06-07T14:32:05Z`
-- Error codes or short error messages
-
-**Always use code block ```...``` for:**
-- Log excerpts (more than one line)
-- Stack traces
-- Multi-line error output
-
-Output EXACTLY this structure (labels must match precisely for rendering):
-
-*🔴 Severity:* `Critical`
-
-*📍 Root Cause*
-[One paragraph: what failed, why it failed, what triggered it — evidence-based only]
-
-*📊 Evidence*
-• [Fact 1] — _tool_name_ `namespace/resource`
-• [Fact 2] — _tool_name_ `namespace/resource`
-
-*🚫 Ruled Out*
-• [Hypothesis 1] — [specific reason from tool result]
-
-*🔧 Recommended Actions*
-1. *Immediate:* [Safe to execute now — stops active impact]
-2. *Short-term:* [Fix within hours/days]
-3. *Long-term:* [Architectural or process change to prevent recurrence]
-
-*⚠️ Impact if Unresolved*
-[Who is affected NOW and what breaks next — named from the blast-radius calls, not assumed. Lead with the dependants you found (`namespace/service`, `n/m ready`, the exposed host), then what fails next if nobody acts. If the checks showed nothing depends on this workload, say the impact is contained to it and why.]
-
-*📈 Confidence:* `High` — [one sentence: which evidence supports this and what would raise it]
+The exact section labels, the Slack mrkdwn rules and the worked template arrive as a skill in the first user message. Follow them verbatim — they are what the Slack renderer and the dashboard
+parse. If no such skill is present, still answer with `*📍 Root Cause*`, `*📊 Evidence*` and
+`*🔧 Recommended Actions*` sections.

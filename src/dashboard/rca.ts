@@ -1,4 +1,4 @@
-import { esc, table } from "./html.js";
+import { cell, esc, headers, table } from "./html.js";
 
 // The RCA is the one field on this dashboard a model WROTE rather than measured, and it
 // arrives in **Slack mrkdwn**, not CommonMark. `prompts/system.md` pins the grammar: bold is
@@ -238,33 +238,98 @@ function emphasis(escaped: string): string {
 
 const proseCard = (inner: string): string => `<div class="prose">${inner}</div>`;
 
+// The paragraphs of one prose block. A model separates them with a blank line, and until now
+// that blank line WAS the spacing: .prose-text is white-space: pre-wrap, so an empty line
+// rendered as an empty line — a typewriter's paragraph break rather than a page's. It is
+// always exactly one line tall whatever the leading is, it cannot be tuned, and it leaves a
+// whole section as one undifferentiated block with no paragraphs in it for a reader, or a
+// screen reader, to move between. One <p> each gives the break a margin instead.
+// pre-wrap stays for what is INSIDE a paragraph, where a newline is one the model chose:
+// joining those lines would run a two-line key/value list into a single sentence.
+// The formatter is a parameter because the degrade path wants the same paragraphs and NOT the
+// same markup: it passes esc, so a model that ignored the template keeps its markers as
+// characters. Splitting on blank lines is safe either way — it happens before any markup is
+// added, and cannot itself introduce a tag.
+const proseText = (text: string, fmt: (s: string) => string): string =>
+  text
+    .split(/\n[ \t]*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p !== "")
+    .map((p) => `<p class="prose-text">${fmt(p)}</p>`)
+    .join("");
+
+// One span per line of a fenced excerpt. A log line is far wider than a phone, so on a narrow
+// screen the block has to wrap — and wrapped, a 200-character kubelet line and the next line
+// are one wall of text with nothing saying where either begins. A line that is its own block
+// can hang its own indent (styles.ts), so every continuation is inset and the left margin
+// still marks the start of a record. Above that width nothing about this changes: the spans
+// are blocks, and one block per line is what the newlines already produced.
+//
+// Safe by the same rule as the rest of this file: esc() runs on the whole excerpt FIRST, and
+// escaped text provably contains no newline of its own making, so splitting it cannot cut a
+// character reference in half or hand a `<` to the join.
+const codeLines = (text: string): string =>
+  esc(text)
+    .split("\n")
+    .map((line) => `<span>${line}</span>`)
+    .join("");
+
 function renderBody(body: RcaBody): string {
   if (body.kind === "prose") {
     return proseCard(
       body.blocks
         .map((b) =>
           b.code
-            ? `<pre class="rca-code" translate="no"><code>${esc(b.text)}</code></pre>`
-            : `<div class="prose-text">${inlineMrkdwn(b.text)}</div>`
+            ? `<pre class="rca-code" translate="no"><code>${codeLines(b.text)}</code></pre>`
+            : proseText(b.text, inlineMrkdwn)
         )
         .join("")
     );
   }
-  const lead = body.lead ? `<div class="prose-text">${inlineMrkdwn(body.lead)}</div>` : "";
+  const lead = body.lead ? proseText(body.lead, inlineMrkdwn) : "";
   if (body.kind === "list") {
     return proseCard(
       lead + `<ul class="rca-list">${body.items.map((i) => `<li>${inlineMrkdwn(i)}</li>`).join("")}</ul>`
     );
   }
-  const head = `<th>${esc(body.columns[0])}</th><th>${esc(body.columns[1])}</th>`;
+  const head = headers(body.columns[0], body.columns[1]);
   const rows = body.rows
     .map(
       (r) =>
-        `<tr><td class="primary">${r.left ? inlineMrkdwn(r.left) : "<span class=\"meta\">—</span>"}</td>` +
-        `<td>${inlineMrkdwn(r.right)}</td></tr>`
+        `<tr role="row">` +
+        cell(body.columns[0], r.left ? inlineMrkdwn(r.left) : `<span class="meta">—</span>`, "primary") +
+        cell(body.columns[1], inlineMrkdwn(r.right)) +
+        `</tr>`
     )
     .join("");
-  return (lead ? proseCard(lead) : "") + table(head, rows);
+  // Two columns still do not fit a phone when the left one is a whole finding: "OOMKilled, exit
+  // code 137" against a 5rem Source column pushed the tool name off the edge, which is exactly
+  // the half a reader needs to check the claim. Stacked, the finding keeps the width and its
+  // source sits underneath it.
+  return (lead ? proseCard(lead) : "") + table(head, rows, "stack");
+}
+
+const fieldStrip = (items: RcaField[], cls: string): string =>
+  items.length === 0
+    ? ""
+    : `<dl class="${cls}">` +
+      items.map((f) => `<div><dt>${esc(f.label)}</dt><dd>${inlineMrkdwn(f.value)}</dd></div>`).join("") +
+      `</dl>`;
+
+// The two sections the template ends on are verdicts, not argument: a word, or a word and the
+// one line that justifies it. Rendered like every other section they each spend a heading and a
+// full-width panel on eight characters — a third of a phone screen, below the evidence, saying
+// "critical". As a strip they read as what they are: the finding, stated once, where the
+// template already puts it. Matched by name and lowercased, the same convention COLUMNS uses;
+// a section this file does not recognise keeps its panel and asserts nothing.
+const VERDICTS = new Set(["severity", "confidence"]);
+
+// Only a body that is genuinely one line. A model that argues its confidence across three
+// bullets has written an argument, and an argument does not fit on a strip.
+function oneLine(body: RcaBody): string | null {
+  if (body.kind !== "prose" || body.blocks.length !== 1) return null;
+  const [b] = body.blocks;
+  return !b.code && !b.text.includes("\n") ? b.text : null;
 }
 
 /**
@@ -273,20 +338,34 @@ function renderBody(body: RcaBody): string {
  */
 export function renderRca(raw: string): string {
   const parsed = parseRca(raw);
-  if (!parsed) return proseCard(`<div class="prose-text">${esc(raw)}</div>`);
+  if (!parsed) return proseCard(proseText(raw, esc));
 
-  const fields =
-    parsed.fields.length === 0
-      ? ""
-      : `<dl class="rca-fields">` +
-        parsed.fields
-          .map((f) => `<div><dt>${esc(f.label)}</dt><dd>${inlineMrkdwn(f.value)}</dd></div>`)
-          .join("") +
-        `</dl>`;
-
-  const sections = parsed.sections
-    .map((s) => (s.title ? `<h3 class="rca-head">${esc(s.title)}</h3>` : "") + renderBody(s.body))
+  const verdicts: RcaField[] = [];
+  const body = parsed.sections
+    .filter((s) => {
+      const line = VERDICTS.has(s.title.toLowerCase()) ? oneLine(s.body) : null;
+      if (line === null) return true;
+      verdicts.push({ label: s.title, value: line });
+      return false;
+    })
+    // One <section> per section of the template, which is the shape the RCA already has in
+    // Slack: a label, then what it labels, top to bottom. The wrapper is what carries the rule
+    // and the space between two of them — a body is sometimes one element and sometimes two (a
+    // lead paragraph AND a table), so a sibling selector on the blocks themselves cannot tell
+    // the boundary between sections from an adjacency inside one.
+    .map(
+      (s) =>
+        `<section class="rca-sec">` +
+        (s.title ? `<h3 class="rca-head">${esc(s.title)}</h3>` : "") +
+        renderBody(s.body) +
+        `</section>`
+    )
     .join("");
 
-  return `<div class="rca">${fields}${sections}</div>`;
+  // The model's own inline fields lead, because it wrote them as a preamble. The promoted
+  // verdicts trail, because the evidence they rest on is above them.
+  return (
+    `<div class="rca">${fieldStrip(parsed.fields, "rca-fields")}${body}` +
+    `${fieldStrip(verdicts, "rca-fields verdicts")}</div>`
+  );
 }
