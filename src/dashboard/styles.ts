@@ -187,12 +187,18 @@ main {
 }
 /* A page that holds an argument gets a narrower column than a page that holds figures. The
    overview wants every pixel a big display has — four stat tiles and a twelve-week chart all
-   get better the wider they are. The incident page does not: its subject is the RCA, whose
-   text stops at 68ch no matter how wide the frame around it grows, so past a point the extra
-   width is empty card and an Evidence table whose second column drifts a hand's width away
-   from the first. :has, rather than a flag threaded through layout(), because the rule IS the
-   condition — the measure follows the prose, and a page that grows one later gets it free. */
-.pane:has(.prose) { --maxw: 62rem; }
+   get better the wider they are. The incident page does not: its subject is the RCA, and a
+   line of argument that runs the width of a large monitor is a line the eye loses its place
+   returning from. So this is THE measure — the only width on the page. Nothing inside the RCA
+   caps itself; paragraph, list and table all end on this edge, the same edge the fact strip
+   above them ends on. A cap on the text alone would stop it short of a column it shares with
+   blocks that have no cap at all, which is exactly the ragged right this page had before.
+   58rem is the floor, not a taste: main's content box lands at 55rem here, and the stat strip
+   breaks 4 tiles into two rows once its container drops under 54rem (see .stats below). Narrow
+   this and the header above the RCA comes apart. :has, rather than a flag threaded through
+   layout(), because the rule IS the condition — the measure follows the prose, and a page that
+   grows one later gets it free. */
+.pane:has(.prose) { --maxw: 58rem; }
 
 /* auto on top, 0 on the bottom: horizontally centred like main, and pushed to the foot of a
    short page rather than left floating under a two-row table. */
@@ -203,9 +209,17 @@ footer.bottom {
 }
 
 /* ---------- type ---------- */
+/* overflow-wrap, because the incident page's <h1> is an alertname and an alertname is one
+   unbroken CamelCase identifier: KubernetesContainerOomKiller sets 328px at this size, which
+   is 40px more than a 320px screen has to give it and 24px more than the whole document had —
+   the title alone was what made that page scroll sideways, tables and rail notwithstanding.
+   text-wrap: balance has nothing to work with on a single word; only a break does. "anywhere"
+   rather than "break-word" for the same reason the card layout takes it: it also lowers the
+   heading's min-content width, so a heading inside a track that measures its content cannot
+   widen that track past the screen either. */
 h1 {
   font-size: var(--fs-xl); font-weight: 640; letter-spacing: -.025em; line-height: 1.15;
-  margin: 0 0 var(--sp-4); text-wrap: balance;
+  margin: 0 0 var(--sp-4); text-wrap: balance; overflow-wrap: anywhere;
 }
 /* Section headers are instrument-panel labels: a small mono caption with a hairline running
    out to the edge of the content. Deliberately NOT numbered — these sections are a set of
@@ -356,9 +370,14 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 }
 
 /* ---------- tables ---------- */
+/* Same treatment as the log excerpt, for the tables that stay tabular on purpose (the MCP tool
+   list): where the platform draws a bar, it is a hairline in this palette rather than the
+   light default one across the foot of a dark panel. Where nothing overflows there is no bar
+   and this costs nothing. */
 .table-wrap {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); overflow-x: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
 }
 table { width: 100%; border-collapse: collapse; }
 th {
@@ -367,6 +386,14 @@ th {
   text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim);
   padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border);
 }
+/* Except on a record table, where the header row is what makes it too wide. A nowrap <th> is
+   a floor under its column that the column's own values never asked for: "Confirmed root
+   cause" is 20 characters of tracked-out uppercase, and five of those floors added up put the
+   remediation and feedback tables 74px past their wrapper at a 700px window — a sideways
+   scroll that hides Executed and When, which is where the outcome of a change is written.
+   A scan-list keeps its nowrap: there the header IS the column, and one wrapped to two lines
+   would break the single line of captions a reader runs their eye along. */
+table[data-stack] th { white-space: normal; }
 td { padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }
 
@@ -442,7 +469,7 @@ td.primary a { font-weight: 550; padding-block: 3px; }
   }
 }
 
-/* ---------- every other table, below 40rem ---------- */
+/* ---------- every other table, below 46rem ---------- */
 /* The same problem, answered generically. Remediation, on-call feedback and the RCA's Evidence
    are records of three to five fields; as columns on a phone their last fields — Result,
    Executed, Outcome, Source — sit past the right edge, and on a remediation table that means
@@ -451,8 +478,17 @@ td.primary a { font-weight: 550; padding-block: 3px; }
    holds for all three tables and for any fourth.
    Caption ABOVE the value, not beside it: beside it, the widest label in the table sets a
    column ("Confirmed root cause" is 20 characters) and every value in the record is read
-   through what is left. Taller, and every field legible at 320px. */
-@container page (max-width: 40rem) {
+   through what is left. Taller, and every field legible at 320px.
+
+   46rem, the same number the incident list turns into cards at — one width for "a table stops
+   being a table", not two. It was 40rem, and 40rem was measured against nothing: a five-field
+   record does not fit five columns until about 39rem of content, so between 40 and 46rem the
+   wrapper answered with the sideways scroll this block exists to avoid. The remaining margin
+   is real rather than nominal — with the header row wrapping (see table[data-stack] th) the
+   widest of these tables asks for ~625px against the 736px this threshold hands it, and what
+   sets that floor is the handful of cells that cannot wrap at all: an action name, a Slack
+   user id, a timestamp, a badge. */
+@container page (max-width: 46rem) {
   table[data-stack], table[data-stack] tbody { display: block; }
   table[data-stack] thead { display: none; }
   table[data-stack] tbody tr {
@@ -608,34 +644,65 @@ form.signout button {
 /* The RCA is the only thing on this dashboard a machine WROTE rather than measured, and it
    is the reason anyone opens an incident. Setting it in a serif at a reading measure is the
    whole type system in one line: it is an argument to be read, not a field to be scanned. */
-/* Frame and measure are two different jobs, so they are two elements. The frame spans the
-   content width and lines up with the tables above and below it; the text inside stops at a
-   readable 68ch. Putting both on one element made the card end in mid-air two-thirds across
-   the page, aligned with nothing, which reads as a rendering bug rather than as typography. */
-.prose {
-  background: var(--surface); border: 1px solid var(--border);
-  border-left: var(--spine-w) solid var(--border-strong);
-  border-radius: var(--r); padding: var(--sp-6);
-}
-/* The UI face, one step up in size with an open line-height and a 68ch measure. That is the
-   whole of what makes this read as prose — a paragraph is prose because of its measure and its
-   leading, not because of its serifs. */
+/* Unframed on purpose. This page renders the same RCA the agent posts to Slack, and there it
+   is a message: a bold label, then the text under it, section after section. A panel around
+   each one turned that into six boxes, and a box has to be as wide as its widest neighbour
+   while the text inside it stops at 68ch — which is where the empty strip down the right of
+   every paragraph came from. Removing the frame removes the strip: what is left of the width
+   is page margin, which is what a document does with it.
+   The heading is what marks a section now, and it is enough — it outranks the prose by a step
+   of the scale, and nothing else on the page is set at that size. */
+.prose { margin: 0; }
+/* The UI face, one step up in size with an open line-height. That is what makes this read as
+   prose — a paragraph is prose because of its size and its leading, not because of its serifs.
+   The measure is NOT set here. It is the page's (.pane:has(.prose)), so a paragraph ends on
+   the same right edge as the fact strip and the tables; a max-width of its own would stop the
+   text short of a column it shares with blocks that have no measure at all. */
 .prose-text {
   font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.7;
-  max-width: 68ch; white-space: pre-wrap; overflow-wrap: break-word; text-wrap: pretty;
+  margin: 0; white-space: pre-wrap; overflow-wrap: break-word; text-wrap: pretty;
 }
-.prose-text + .prose-text, .prose-text + .rca-list, .prose-text + .rca-code { margin-top: var(--sp-4); }
+/* One rule for every adjacency inside the card, because rca.ts can emit them in any order: a
+   paragraph after a log excerpt is as ordinary as one before it, and the pair that used to be
+   listed by name (prose + prose, prose + list, prose + code) left the other direction with no
+   space at all. The margin is smaller than the empty line it replaces — an empty line is a
+   whole 1.7 leading, which at a 68ch measure reads as a gap between sections rather than
+   between paragraphs. */
+.prose > * + * { margin-top: var(--sp-4); }
 
 /* ---------- RCA ---------- */
 /* The RCA arrives as one string and comes apart into the sections its template declares, so
    these headings sit a level below the page's own. They deliberately do NOT repeat the h2
    treatment: a second rank of mono captions with hairlines would read as a second page rather
-   than as the inside of one section. Sentence case, UI face, no rule — quieter by design. */
+   than as the inside of one section. Sentence case, UI face, no rule.
+   The size is the correction: at --fs-base these were 15px over a 17px paragraph — a heading
+   SMALLER than the text it heads, which is why the five sections read as one undifferentiated
+   run no matter how much air went between them. --fs-lg is the next step in the scale and the
+   first one that outranks the prose; nothing else on the incident page is at that size, so it
+   also cannot be mistaken for the h1. Weight comes down as size goes up (620 -> 600): a heading
+   this size no longer needs to shout, and 620 at 21px reads as a system alert.
+   Space is asymmetric on purpose — 2rem above, .75rem below. A heading belongs to what follows
+   it, and the gap that says so is the difference between the two, not the size of either. */
+/* No width of its own. The RCA takes the column the page gives it, which is the same column the
+   fact strip and the section rules above it take — a block that stops short of the panel over it
+   reads as a rendering fault, however well-measured the number behind it is. The measure is the
+   PAGE's instead (see .pane:has(.prose)), so there is exactly one width on this page and nothing
+   for a second number to drift from. */
 .rca-head {
-  font-size: var(--fs-base); font-weight: 620; letter-spacing: -.01em;
-  margin: var(--sp-6) 0 var(--sp-3);
+  font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.02em; line-height: 1.25;
+  margin: 0 0 var(--sp-3); text-wrap: balance;
 }
-.rca > .rca-head:first-child { margin-top: 0; }
+/* What separates one section from the next, now that no panel does. The rule is the hairline
+   already used between records elsewhere on the page, and the space around it is asymmetric in
+   the same direction the heading's is: more above the rule than below it, so the divider reads
+   as belonging to the section it opens rather than floating between two. Slack separates these
+   with a blank line and nothing else; a blank line is not available to a page that has already
+   spent its vertical rhythm on paragraphs, so the rule stands in for it. */
+.rca-sec + .rca-sec { margin-top: var(--sp-7); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+/* A section that opens with a sentence and then tabulates (renderBody's lead) is the one
+   adjacency in the RCA that no heading separates: the last line of the lead and the table's
+   header row would otherwise sit a single line apart and read as a caption the table swallowed. */
+.rca-sec > .prose + .table-wrap { margin-top: var(--sp-5); }
 /* Severity and Confidence are stated inline in the RCA text, and the model writes a sentence
    after the confidence level that exists nowhere else — the incidents table has the level and
    not the reasoning. So they are rendered, and rendered small: the badges at the top of the
@@ -649,7 +716,12 @@ form.signout button {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
 }
-.rca-fields dd { margin: 0; font-size: var(--fs-sm); min-width: 0; }
+/* Not --fs-sm: the value beside Confidence is not a value, it is the sentence in which the
+   model says why — the one piece of reasoning the incidents table does not carry — and at 13px
+   it was set as fine print under a heading three sizes larger. The measure is the same 68ch
+   the prose takes, for the same reason: without it that sentence is one 110-character line
+   across the widest frame on the page. */
+.rca-fields dd { margin: 0; font-size: var(--fs-base); max-width: 68ch; min-width: 0; }
 /* The same strip, promoted out of the sections that were carrying those two words in a panel
    each (see rca.ts). It trails the analysis rather than leading it, because it is the verdict
    the evidence above it earns — so it gets a rule above it and none of the leading strip's
@@ -658,26 +730,93 @@ form.signout button {
   margin: var(--sp-6) 0 0; padding-top: var(--sp-5); border-top: 1px solid var(--border);
 }
 /* Bulleted sections the template does not name. They keep the prose setting — an unrecognised
-   section is still the agent's argument — but not the marker: the source already carries a •
-   and re-adding a disc would double it. */
+   section is still the agent's argument — and they keep the browser's disc, which is the whole
+   marker they have: classify() in rca.ts strips the source's own • when it splits the item off
+   the line, so a list-style of none here would leave a stack of paragraphs at an indent with
+   nothing to say where one item ends. The space between items is a third of a line rather than
+   a quarter: an item that wraps has to be told apart from the item after it, and at --sp-2 the
+   gap between two items was the same as the gap between two lines of one. */
 .rca-list {
   font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.7;
-  max-width: 68ch; margin: 0; padding-left: var(--sp-5);
+  margin: 0; padding-left: var(--sp-5);
 }
-.rca-list li { margin-top: var(--sp-2); overflow-wrap: break-word; }
+.rca-list li { margin-top: var(--sp-3); overflow-wrap: break-word; }
+/* The disc is punctuation, not content: dim keeps it a marker instead of a fourth bullet-sized
+   thing competing with the text beside it. */
+.rca-list li::marker { color: var(--text-dim); }
 .rca-list li:first-child { margin-top: 0; }
 /* Log excerpts and stack traces. The one place on this page where wrapping would destroy the
-   thing being read, so it scrolls instead. */
+   thing being read, so above the narrow step (see the container query below) it scrolls
+   instead. The scrollbar declarations do not decide WHETHER a bar is drawn — that is the
+   platform's call, and on macOS it is an overlay bar that appears only once something moves —
+   they decide what it looks like where one IS drawn: on Windows and Linux this box would
+   otherwise carry the light default bar across the bottom of a dark panel. Not verified on
+   macOS: headless renders overlay bars whatever this says, so the claim stops here. */
 .rca-code {
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.5;
   background: var(--surface-2); border-radius: var(--r-sm);
   padding: var(--sp-3) var(--sp-4); margin: 0; overflow-x: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
 }
 .rca-code code { font-size: inherit; }
-/* Evidence and Ruled Out put a whole claim in the leading column. Cells wrap by default, but
-   these ones need a ceiling too, or a long finding takes the table to the width of its
-   longest sentence and the source column is squeezed to one word per line. */
-.rca td.primary { max-width: 44ch; }
+/* One line of the excerpt, one block (rca.ts emits them). A blank line inside a stack trace
+   has no text to give it height, so it needs a floor or the trace closes up by a line. */
+.rca-code span { display: block; min-height: 1lh; }
+/* Below the width where a log line has any chance of fitting, the scroll stops being a way to
+   read: at 390px this box is 35 characters wide, and a kubelet line is 200 — six screens of
+   sideways swiping to read one line, with no way to see its beginning and its end at once, on
+   the device where a sideways swipe inside a vertical scroll is hardest to aim. So on the same
+   step where a table stops being a table, the excerpt stops being a single line. It is a real
+   loss — a wrapped line no longer shows where the next one starts — and it is the smaller one:
+   the alternative is a log nobody can read at all. Above this width the line wins, which is
+   why this is an override and not the default. */
+@container page (max-width: 46rem) {
+  .rca-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* The hanging indent is what keeps the wrap honest: a line begins at the left edge and every
+     continuation of it is inset, so three log lines still read as three. Two characters is
+     enough to see and small enough that it costs the line almost nothing at 320px. */
+  .rca-code span { padding-left: 2ch; text-indent: -2ch; }
+}
+/* A floor under the leading column, and nothing above it. The ceiling that used to sit here
+   (max-width: 44ch) was inert: CSS 2.1 leaves min-width and max-width on a table cell
+   undefined, and Blink honours the first and ignores the second — removing it moved no column
+   by a pixel at 768, 900, 1024 or 1440. What actually balances Evidence at roughly 65/35 is
+   the auto algorithm dividing the frame in proportion to what each column could use.
+   The floor is for the other shape this column takes: Recommended Actions puts a horizon in
+   it — one word, "Immediate" or "Short-term" — and the overflow-wrap below drops every cell's
+   claim on the table's width to a single character, so that column is handed whatever the
+   Action column leaves. It was handed 73px, which is narrower than the word "Immediate" and
+   printed it as "Immedia/te". A dozen characters is what those two words need; a leading
+   column holding sentences is far past that and never sees this declaration do anything. */
+.rca td.primary { min-width: 12ch; }
+/* "Cells wrap by default" is only true of prose. What the model actually puts in an evidence
+   cell is a metric selector, an image digest, a pod name — one token of 60-90 characters with
+   nothing in it a line may break at. A cell like that does not widen its column here, because
+   the ceiling above already fixed the width: it OVERFLOWS, and a td's overflow is visible, so
+   a container_memory_working_set_bytes{...} selector printed straight across the Source column
+   and the tool name that backs the claim was rendered underneath it, unreadable.
+   anywhere, not break-word, and the difference is the table's sizing pass rather than the line
+   box: both break a word that cannot fit, but only "anywhere" also lowers what the cell CLAIMS
+   as its minimum width. Leave that claim at the full ninety characters — which is what
+   break-word does — and the two columns together ask for more than the frame has, so
+   .table-wrap starts scrolling and the Source column is the half that goes off the edge: the
+   half a reader needs to check the claim. Measured, not assumed: break-word put the Evidence
+   table 300px past its own frame at 1024.
+   What "anywhere" costs is that a column of one-word labels claims one character too, and that
+   is what the floor on .primary above pays for. Scoped to .rca because the incident list
+   breaks its alert names at CamelCase humps instead (breakable() in html.ts) — a hump is a
+   better break than an arbitrary character. */
+.rca td { overflow-wrap: anywhere; }
+/* The template writes a tool name as _italic_ because Slack mrkdwn has no other marker for one.
+   Here there is a second face, and a tool name is exactly what it is for: the thing the system
+   RAN, sitting beside the argument it ran on, which the same line already puts in backticks.
+   So the italic is spent on the face instead — and on weight, because a Source cell set
+   entirely in one mono is a tool name and an argument with nothing but a space between them.
+   Table cells only: in a paragraph an underscored word is a model emphasising a word, and that
+   one keeps its italic. */
+.rca td em {
+  font-family: var(--font-data); font-style: normal; font-weight: 600; font-size: .92em;
+}
 
 /* ---------- empty, pager ---------- */
 .empty {
@@ -1017,17 +1156,23 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   @supports (backdrop-filter: blur(1px)) {
     .rail { background: var(--glass); backdrop-filter: blur(14px) saturate(1.6); }
   }
-  .rail .brand { padding: 0; margin-right: auto; }
-  .rail nav { flex-direction: row; gap: var(--sp-1); }
+  /* Who gives way when the bar runs out of room. Down the side there is always room; across
+     the top there is not, and flex shrinks every item by its share — so the nav took a cut it
+     cannot absorb (its links are nowrap, so being narrowed only makes them spill past the
+     right edge and drag the whole document sideways with them) while the brand, the one item
+     built to be cut, kept most of its width. Inverted here: navigation holds its size, and the
+     brand absorbs the whole squeeze into the ellipsis it already has. */
+  .rail .brand { padding: 0; margin-right: auto; flex: 0 1 auto; }
+  .rail nav { flex-direction: row; gap: var(--sp-1); flex: 0 0 auto; }
   .rail nav a[aria-current="page"] { box-shadow: inset 0 -2px 0 var(--accent); }
-  form.signout { margin-top: 0; margin-left: var(--sp-2); }
+  form.signout { margin-top: 0; margin-left: var(--sp-2); flex: 0 0 auto; }
   form.signout button { width: auto; }
 }
 @media (max-width: 46rem) {
   :root { --gutter: max(var(--sp-4), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px)); }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
-  .prose { padding: var(--sp-4); }
+  .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
   .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
   /* Neither half of the hint is true here: there is no cursor to drag with and no ctrl key to
      hold. The gesture a phone does have — one finger across the map — needs no instructions. */
@@ -1036,8 +1181,14 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 /* Icons only, and the reason the icons exist. The label is CLIPPED, not removed: it stays in
    the accessible name, so a screen reader still hears "Incidents" and voice control still
    matches on it — the glyph is what a sighted reader navigates by at this width, never what
-   the destination is called. Deleting the text instead would leave four unnamed buttons. */
-@media (max-width: 30rem) {
+   the destination is called. Deleting the text instead would leave four unnamed buttons.
+
+   38rem is measured, not chosen: four labelled destinations, a labelled Sign out and the bar's
+   own gutters ask for 583px, so anything under 608px went sideways — the labels stayed on
+   past the width they fit at, and between 481 and 555px the rail alone was what made every
+   page on the dashboard scroll horizontally. This number belongs to the label text above it;
+   rename a destination and re-measure, because nothing here can work it out at runtime. */
+@media (max-width: 38rem) {
   .rail .lbl {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;

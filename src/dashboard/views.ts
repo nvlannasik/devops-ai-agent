@@ -528,10 +528,13 @@ export function detailPage(d: {
       ? `<a class="standalone" href="${esc(`https://slack.com/app_redirect?channel=${encodeURIComponent(i.channel)}&message_ts=${encodeURIComponent(i.thread_ts)}`)}">Open the Slack thread →</a>`
       : "";
 
-  // Both of these are records of five fields, not lists to scan, so below 40rem they stack into
+  // Both of these are records of five fields, not lists to scan, so below 46rem they stack into
   // captioned pairs rather than scrolling sideways — five columns on a phone put Result and
   // Executed past the right edge, which on a remediation table means the outcome of the change
-  // is the part you cannot see. headers() keeps the <th> text and the cell captions the same
+  // is the part you cannot see. Five is also why the threshold is the incident list's and not
+  // the lower one these tables used to take: they ask for ~740px of columns, so between 40 and
+  // 46rem they were still a table and still scrolling. headers() keeps the <th> text and the
+  // cell captions the same
   // string: they are the same label, and a table whose captions have drifted from its headers
   // is one nobody notices is wrong.
   const remediations =

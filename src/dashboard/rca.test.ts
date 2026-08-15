@@ -117,6 +117,56 @@ test("a wrapped bullet keeps its continuation", () => {
   assert.equal(evidence.rows[0].right, "_k8s_list_pods_ `prod/api-gateway`");
 });
 
+// ---------- prose ----------
+
+// A model separates its paragraphs with a blank line, and .prose-text is white-space: pre-wrap,
+// so that blank line USED to be the spacing: an empty line rendered as an empty line. It is
+// always exactly one line tall whatever the leading is, it cannot be tuned, and it leaves a
+// three-paragraph Root Cause as one undifferentiated block with nothing in it for a reader — or
+// a screen reader — to move between. One <p> each gives the break a margin instead.
+test("a blank line between paragraphs becomes a paragraph, not a blank line", () => {
+  const html = renderRca(
+    ["*Root Cause*", "The probe moved.", "", "The port did not.", "", "*Evidence*", "• a — b"].join("\n")
+  );
+  const paras = [...html.matchAll(/<p class="prose-text">(.*?)<\/p>/gs)].map((m) => m[1]);
+  assert.deepEqual(paras, ["The probe moved.", "The port did not."]);
+  assert.doesNotMatch(html, /<div class="prose-text">/, "the parsed path still emits one block for all of them");
+});
+
+// The newlines INSIDE a paragraph are the model's own, and pre-wrap keeps them: joining them
+// would run a two-line key/value list into a single sentence. Only the blank line splits.
+test("a single newline inside a paragraph stays inside it", () => {
+  const html = renderRca(
+    ["*Root Cause*", "limit: 256Mi", "working set: 380Mi", "", "*Evidence*", "• a — b"].join("\n")
+  );
+  const paras = [...html.matchAll(/<p class="prose-text">(.*?)<\/p>/gs)].map((m) => m[1]);
+  assert.deepEqual(paras, ["limit: 256Mi\nworking set: 380Mi"]);
+});
+
+// The page renders the RCA in the shape it already has in Slack: a label, then what it labels,
+// section after section. One <section> per section is what carries the rule and the space
+// between two of them — and a body is sometimes one element and sometimes two (Evidence is a
+// lead paragraph AND a table), so a sibling selector on the blocks could not tell a boundary
+// between sections from an adjacency inside one.
+test("a heading and its body are one section, however many blocks the body is", () => {
+  const html = renderRca(TEMPLATE);
+  const secs = [...html.matchAll(/<section class="rca-sec">([\s\S]*?)<\/section>/g)].map((m) => m[1]);
+  assert.equal(secs.length, 5, "a section is missing its wrapper, or one wrapper holds two");
+  for (const s of secs) {
+    assert.equal((s.match(/<h3 class="rca-head">/g) ?? []).length, 1, "a section has lost its heading");
+    assert.match(s, /^<h3 class="rca-head">/, "a section no longer opens with its own label");
+  }
+  // A section that opens with a sentence and then tabulates is the case the grid cannot handle
+  // by placement alone: one heading, two blocks, and they have to travel together.
+  const twoBlocks = renderRca(
+    ["*Root Cause*", "The probe moved.", "", "*Evidence*", "Every pod, not one node.", "• a — b"].join("\n")
+  );
+  const evidence = [...twoBlocks.matchAll(/<section class="rca-sec">([\s\S]*?)<\/section>/g)]
+    .map((m) => m[1])
+    .find((s) => s.includes(">Evidence<"))!;
+  assert.match(evidence, /class="prose"[\s\S]*class="table-wrap"/, "the lead and its table were split apart");
+});
+
 // ---------- code fences ----------
 
 const FENCED = [
@@ -155,6 +205,22 @@ test("fenced text renders verbatim: no emphasis applied, every angle bracket esc
   assert.doesNotMatch(html, /<strong>not a heading<\/strong>/);
 });
 
+// On a phone the excerpt has to wrap — a kubelet line is 200 characters against a 35-character
+// box — and wrapped, one line and the next are a single wall of text unless something marks
+// where each began. That marker is a hanging indent, and a hanging indent needs a block per
+// line to hang from. The newline must go when the block arrives: kept, it would be a line
+// break INSIDE a block that is already on its own line, and the excerpt would render at double
+// height with a blank line between every entry.
+test("each line of a fenced excerpt is its own block, and the newlines do not survive twice", () => {
+  const code = /<pre class="rca-code" translate="no"><code>(.*?)<\/code><\/pre>/s.exec(renderRca(FENCED));
+  assert.ok(code, "no code block rendered");
+  assert.deepEqual(
+    [...code[1].matchAll(/<span>(.*?)<\/span>/gs)].map((m) => m[1]),
+    ["• not a bullet", "*not a heading*", "panic: runtime error: invalid memory address &lt;nil&gt;"]
+  );
+  assert.doesNotMatch(code[1], /\n/, "a newline and a block per line would double the excerpt");
+});
+
 // ---------- degrading ----------
 
 // A model that ignores the format must lose its formatting, never its content. One
@@ -163,11 +229,22 @@ test("text that does not look like the template renders plainly instead of being
   const raw = "The api-gateway pods are restarting.\n*This is the important part.*\nNothing else.";
   assert.equal(parseRca(raw), null);
   const html = renderRca(raw);
-  assert.match(html, /<div class="prose"><div class="prose-text">/);
+  assert.match(html, /<div class="prose"><p class="prose-text">/);
   assert.match(html, /\*This is the important part\.\*/, "the markers survive as characters");
   assert.match(html, /The api-gateway pods are restarting\./);
   assert.match(html, /Nothing else\./);
   assert.doesNotMatch(html, /<table/);
+});
+
+// The refused text is still someone's paragraphs, so it gets the same blocks the parsed path
+// gets — and none of its markup, because the formatter it is handed is esc and nothing else.
+// The pairing matters: proseText takes the formatter as an argument, and passing inlineMrkdwn
+// here would restructure exactly the text the parser decided not to restructure.
+test("the degrade path keeps its paragraphs and still interprets nothing", () => {
+  const html = renderRca("It broke.\n*Badly.*\n\nA second paragraph with _underscores_ in it.");
+  const paras = [...html.matchAll(/<p class="prose-text">(.*?)<\/p>/gs)].map((m) => m[1]);
+  assert.deepEqual(paras, ["It broke.\n*Badly.*", "A second paragraph with _underscores_ in it."]);
+  assert.doesNotMatch(html, /<strong>|<em>|<code/, "the degrade path has started rendering mrkdwn");
 });
 
 test("empty and whitespace-only analyses degrade rather than throw", () => {
@@ -231,7 +308,7 @@ test("the rendered tag vocabulary is fixed and small", () => {
   const html = renderRca(TEMPLATE);
   const tags = new Set([...html.matchAll(/<\/?([a-z0-9]+)/g)].map((m) => m[1]));
   const allowed = new Set([
-    "div", "dl", "dt", "dd", "h3", "p", "ul", "li", "pre", "code", "strong", "em",
+    "div", "section", "dl", "dt", "dd", "h3", "p", "ul", "li", "pre", "code", "strong", "em",
     "table", "thead", "tbody", "tr", "th", "td", "span",
   ]);
   for (const t of tags) assert.ok(allowed.has(t), `unexpected tag <${t}> in the RCA output`);
