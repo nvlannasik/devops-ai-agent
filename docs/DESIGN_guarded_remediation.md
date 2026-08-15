@@ -21,6 +21,23 @@
 > current repo from context); the approval card `<@mentions>` the approvers so they get
 > notified. The alert flow is now **format-agnostic**: a recognized recurrence may reply
 > concisely instead of the RCA template — incident store + proposal run either way.
+>
+> **v1.3 (2026-07-22):** 5th action **`k8s_delete_pod`** — delete ONE wedged pod so its
+> controller recreates it. Server refuses pods without a recreating controller
+> (ReplicaSet/StatefulSet/DaemonSet; naked/Job pods = no replacement = outage). GitOps-safe
+> like restart (recreation is reconcile-safe) → not behind the GitOps guard. Proposal rule:
+> only when one pod is sick while siblings are healthy; whole-workload issues → restart.
+>
+> **v1.4 (2026-07-28):** 6th action **`flux_reconcile`** — the only action that restores
+> state instead of introducing it. Proposed automatically when the GitOps resolver reports
+> **cluster/Git drift** (someone changed the cluster outside GitOps), which used to surface
+> as a wrong refusal — see `DESIGN_gitops_pr_remediation.md` §3.4b. It annotates the owning
+> HelmRelease with `reconcile.fluxcd.io/{requestedAt,forceAt}` so Flux re-applies the repo's
+> declared state. NOT in `parseProposal`'s whitelist: the drift path constructs it, the
+> proposal LLM cannot ask for it. Its namespace guard runs on the **workload's** namespace
+> (HelmReleases live in the always-blocked `flux-system`) and the target release is derived
+> from the workload's Flux labels, never named by the caller. Still approval-gated — the
+> drifted value is occasionally the intended one, and then the human wants a PR instead.
 
 ## 1. Goal
 
@@ -199,6 +216,43 @@ call** with structured output produces the proposal:
 - The LLM already has full context (RCA, namespace, workload from tool results); a deterministic rule (`alertname → action`) would drift from reality and need maintenance.
 - The output is **validated** (whitelist + namespace allowlist) **before** any DB insert or card. Failed validation → no card, log a warning. A bad LLM proposal = no card = no execution.
 - **Trade-off (accepted):** +1 LLM round-trip per incident (token + latency). Cleaner and easier to validate than parsing RCA text. The alternative (a `propose_remediation` tool in the final RCA turn) is deferred — a separate call is safer.
+- The call always runs on the **heavy** chain: `proposeRemediation` calls `llm.chat` outside any
+  route context, and the router treats "no context" as heavy (`llm/router.ts`). That is correct —
+  a proposal names a namespace and a workload — but it makes §6.1 worth the trouble.
+
+### 6.1 When the proposal call is worth making (mention path only)
+
+The flow above is the **alert** path, and it asks no question: an alert firing IS the evidence
+that something needs fixing. Mentions are different. Every mention used to trigger a proposal
+call, so `@agent status check` on a healthy cluster spent a heavy call to be told
+`{"action": null}` — and once produced a hallucinated `k8s_rollout_restart` for a Deployment
+that does not exist, caught only by the mandatory dry-run.
+
+`worthProposing(userText, reply, isRca)` in `remediation/proposal.ts` gates it. Propose when
+**any** of three hold, skip otherwise and log the reason:
+
+1. the reply is an RCA — the agent only reaches for the incident template when it diagnosed a fault
+2. the user asked for a change — an explicit request is sufficient evidence on its own (§6's prompt says as much), so it must survive the gate on a perfectly healthy cluster
+3. the answer carries fault evidence — Kubernetes reason strings the agent quotes verbatim out of tool output (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …)
+
+**Deliberately asymmetric.** A false positive costs exactly what the ungated path costs — one
+call that answers `null`. A false negative silently drops a legitimate fix. So every rule is a
+reason to *spend* the call, and skipping is only what is left when none of them fire. Widen the
+vocabulary when it misses; do not tighten it.
+
+Two properties the tests pin down, both non-obvious:
+
+- **A clean bill of health uses the same words a broken one does** — the reply that motivated
+  this gate says "no alerts firing" and "0 restarts in the last hour". Negated forms are stripped
+  before matching, the keyword group repeats (one negation covers a list: *"No alerts are firing
+  and nothing is pending"* has to lose `firing` too), and the strip stops at a contrastive
+  conjunction so *"no logs, **but** it is in CrashLoopBackOff"* keeps its evidence.
+- **Indonesian action verbs need stem matching** — the affix carries the request, so `perbaiki`
+  arrives as `diperbaiki` and `ganti` as `mengganti`. A `\b`-anchored stem matches none of them.
+
+Text-only on purpose: no extra `prometheus_get_alerts` call to ask whether anything is firing.
+The agent has just looked, so the answer is already in the reply, and a second call would add
+latency and a failure mode to the one path whose entire point is spending less.
 
 ## 7. v1 scope (minimal cut)
 
@@ -268,7 +322,16 @@ posted**. `k8s_rollout_restart` stays allowed.
 (Escape hatch if ever needed: `flux suspend` + patch + `resume` as a deliberate,
 human-driven emergency path — NOT automated in this phase.)
 
-### v2 design sketch — GitOps-aware remediation (PR flow)
+### v2 — GitOps-aware remediation (PR flow) — ✅ IMPLEMENTED (2026-07-23)
+**Now shipped as its own design + code: `DESIGN_gitops_pr_remediation.md`.** Several of the
+open questions below were resolved differently than this original sketch — read that doc as
+the source of truth. Key deviations: GitHub is reachable only from the private network, so
+the PR is opened by the **llm-worker over SQS** (not an MCP tool in the cluster); auth is a
+**PAT** for the initial phase (App later); the values key is found by **only changing a key
+already set** in the HelmRelease values (no per-chart convention needed) and the file by
+**grepping the current value** (no cluster→overlay config); all 3 mutating actions
+(image / scale / set_resources) resolver-supported. The original sketch, kept for context:
+
 For Flux-managed workloads the remediation must change the **source**, not the cluster:
 
 ```
@@ -300,5 +363,22 @@ Notes / open questions to resolve before building:
 
 ## 11. v2 (after v1 is proven)
 - **Rate limiting** — max N remediations/hour/namespace via a Redis counter (`INCR remediation:{ns} EX 3600`), same pattern as dedup.
-- **Resolved-alert feedback loop** (roadmap §D) — when an alert resolves, update the `remediations` outcome: did the approved action actually fix it? This data enriches future `incidents` recall.
+- **Did the approved action actually fix it?** — ✅ **SHIPPED (2026-08-08)** as an active check
+  rather than the passive resolved-alert loop originally sketched here. `migrations/006` +
+  `agent/remediation/verify.ts`: approving a card schedules a check **in Postgres** (default 300s
+  later, `REMEDIATION_VERIFY_DELAY_SECONDS`), and whichever replica polls next claims it — so the
+  verdict survives the pod that approved the action. The check is deterministic, no LLM: re-read
+  the alert and the workload's pods, compare against a baseline snapshot taken at approval time,
+  and record one of `recovered` / `unchanged` / `worse` / `inconclusive` on the `remediation_checks`
+  row. `recallForAlert` joins the verdict in, which turns a failed fix into a **negative prior** —
+  the agent can see it already tried this and it did not hold. Three rules that cost live debugging:
+  - `k8s_list_pods` returns the pod **phase**, not container reasons — a CrashLoopBackOff pod is
+    `Running` with `ready:false`, so readiness comes from the `ready` boolean
+  - **`worse` triggers on readiness falling only.** A rollout replaces the pod set, so the old
+    crashing pod's restart counter sits in the baseline while the new pods start at 0 — restart
+    deltas compare different pods and cannot mean regression
+  - `verdict` ≠ `status`. `status='succeeded'` only means the MCP call did not error
+  - The verdict is an **agent** judgement: it goes to `remediation_checks`, never to
+    `incident_feedback`, which is the human-confirmed tier
+  The resolved-alert loop (roadmap §D) still runs alongside it and remains the passive confirmation.
 - **Auto-remediation for low-risk + high-confidence** — e.g. confidence=High + action=restart + non-prod namespace → skip approval. **Explicit opt-in** via env (`ALLOW_AUTO_REMEDIATION_NAMESPACES`), never the default.

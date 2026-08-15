@@ -2,13 +2,20 @@ import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../../config/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition, ContentBlock, TokenUsage } from "./types.js";
 
+// Per-instance overrides so the router can register several Claude backends with different
+// models. Omitting them keeps the previous behaviour: read the single global config.
+export interface ClaudeOptions {
+  apiKey?: string;
+  model?: string;
+}
+
 export class ClaudeClient implements LLMClient {
   private client: Anthropic;
-  private model: string;
+  readonly model: string;
 
-  constructor() {
-    this.client = new Anthropic({ apiKey: config.llm.claude.apiKey });
-    this.model = config.llm.claude.model;
+  constructor(opts: ClaudeOptions = {}) {
+    this.client = new Anthropic({ apiKey: opts.apiKey ?? config.llm.claude.apiKey });
+    this.model = opts.model ?? config.llm.claude.model;
   }
 
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {

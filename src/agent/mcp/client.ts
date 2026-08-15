@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { config } from "../../config/index.js";
-import logger from "../../utils/logger/index.js";
+import logger, { errDetail } from "../../utils/logger/index.js";
 import type { ToolDefinition } from "../llm/types.js";
 
 const MAX_RETRIES = 5;
@@ -60,10 +60,12 @@ export class MCPClient {
       await this.discoverTools();
     } catch (err) {
       if (attempt >= MAX_RETRIES) {
-        throw new Error(`MCP connection failed after ${MAX_RETRIES} attempts: ${err}`);
+        throw new Error(`MCP connection failed after ${MAX_RETRIES} attempts: ${errDetail(err)}`);
       }
       const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-      logger.warn(`MCP connect attempt ${attempt + 1} failed, retrying in ${delay}ms...`);
+      // the reason was previously dropped, so a wrong URL and a bad token looked identical
+      const target = config.mcp.transport === "http" ? config.mcp.http.url : config.mcp.stdio.command;
+      logger.warn(`MCP connect attempt ${attempt + 1}/${MAX_RETRIES + 1} to ${target} failed, retrying in ${delay}ms: ${errDetail(err)}`);
       await sleep(delay);
       await this.connectWithRetry(attempt + 1);
     }
@@ -118,15 +120,23 @@ export class MCPClient {
       // reconnect once on failure, serialized via mutex
       await this.reconnectMutex.acquire();
       try {
-        logger.warn(`Tool call failed, reconnecting: ${err}`);
+        logger.warn(`MCP tool "${name}" failed, reconnecting: ${errDetail(err)}`);
         this.connected = false;
         await this.connectWithRetry(0);
+      } catch (reconnectErr) {
+        // surface BOTH: the reconnect error alone hides why the tool call failed first
+        throw new Error(`MCP tool "${name}" failed (${errDetail(err)}) and reconnect failed: ${errDetail(reconnectErr)}`);
       } finally {
         this.reconnectMutex.release();
       }
-      const result = await this.client.callTool({ name, arguments: input }, undefined, { timeout: config.mcp.toolTimeoutMs });
-      const content = result.content as Array<{ type: string; text?: string }>;
-      return content.map((c) => c.text ?? "").join("\n");
+      try {
+        const result = await this.client.callTool({ name, arguments: input }, undefined, { timeout: config.mcp.toolTimeoutMs });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        return content.map((c) => c.text ?? "").join("\n");
+      } catch (retryErr) {
+        logger.error(`MCP tool "${name}" failed again after reconnect: ${errDetail(retryErr)}`);
+        throw retryErr;
+      }
     }
   }
 

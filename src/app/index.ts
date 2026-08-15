@@ -7,15 +7,15 @@ import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
+import { worthProposing } from "../agent/remediation/proposal.js";
+import { groupIdentity, buildGroupAlertText, type AlertItem } from "../agent/correlation/index.js";
+import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
-import logger from "../utils/logger/index.js";
-
-// how long after a successful remediation to post the pod-status check into the thread
-// ponytail: fixed 90s covers a typical rolling update; env var if workloads need more
-const STATUS_CHECK_DELAY_MS = 90_000;
+import logger, { errDetail } from "../utils/logger/index.js";
+import { withRoute } from "../utils/trace/index.js";
 
 class Semaphore {
   private running = 0;
@@ -47,6 +47,8 @@ export class SlackApp {
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private httpServer: Server | null = null;
+  private verifyTimer: NodeJS.Timeout | null = null;
+  private stopping = false;
 
   constructor(agent: DevOpsAgent) {
     this.agent = agent;
@@ -96,13 +98,22 @@ export class SlackApp {
 
     // catch-all error handler — surfaces silent Slack errors
     this.app.error(async (error) => {
-      logger.error(`[slack] unhandled error: ${error.message ?? error}`);
+      logger.error(`[slack] unhandled error: ${errDetail(error)}`);
     });
   }
 
   // Mount /alert and /health onto any Express router (used by both modes)
   private _mountAlertRoute(router: express.IRouter): void {
+    if (!config.alertWebhook.token) {
+      logger.warn(
+        "ALERT_WEBHOOK_TOKEN not set — /alert is UNAUTHENTICATED. Anyone who can reach this port can trigger investigations and remediation proposals. Set it and configure Alertmanager http_config.authorization.credentials."
+      );
+    }
     router.post("/alert", (req: Request, res: Response) => {
+      if (!this._authorizeAlert(req)) {
+        res.status(401).json({ ok: false, error: "unauthorized" });
+        return;
+      }
       const payload = req.body as AlertmanagerPayload;
       if (!payload || !Array.isArray(payload.alerts)) {
         res.status(400).json({ ok: false, error: "invalid alertmanager payload" });
@@ -113,7 +124,7 @@ export class SlackApp {
       // Notifications + investigations run in the background after this returns.
       res.status(200).json({ ok: true });
       this.handleAlert(payload).catch((err) =>
-        logger.error(`[slack] alert processing failed: ${err instanceof Error ? err.message : err}`)
+        logger.error(`[slack] alert processing failed: ${errDetail(err)}`)
       );
     });
 
@@ -127,6 +138,15 @@ export class SlackApp {
         res.status(503).json({ ok: false, mode, error: err instanceof Error ? err.message : String(err) });
       }
     });
+  }
+
+  // Bearer-token gate for /alert. Unset token = open (a startup warning is logged once).
+  // Constant-time compare so a wrong token never leaks length/prefix via timing.
+  private _authorizeAlert(req: Request): boolean {
+    const expected = config.alertWebhook.token;
+    if (!expected) return true;
+    const provided = bearerToken(req.header("authorization"));
+    return provided !== null && timingSafeEqualStr(provided, expected);
   }
 
   private async handleMention(args: AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">): Promise<void> {
@@ -157,9 +177,11 @@ export class SlackApp {
     // first message (see MEMORY_BANK). Only Alertmanager messages carry [SOURCE: ...].
     const message =
       `[USER MESSAGE — conversation mode by default: answer directly in Slack mrkdwn. ` +
-      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident.]\n${text}`;
+      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident. ` +
+      `If this is not about this cluster's workloads, observability data, incidents or deploys, decline in one line ` +
+      `per Scope of Work and answer nothing else — do not debug or explain code.]\n${text}`;
 
-    // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 3);
+    // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 2);
     // explicit investigation requests (and the alert webhook path) keep the full budget.
     const investigation = wantsInvestigation(text);
     const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
@@ -168,7 +190,14 @@ export class SlackApp {
     try {
       // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
       // format detection when the model bolds the RCA labels with **
-      let reply = toMrkdwn(await this.agent.investigate(threadId, message, budget));
+      // Conversation-mode mentions are the cheap tier. Investigation requests and the alert
+      // path stay heavy by omission — default heavy is deliberate, so a new LLM call added
+      // later gets the strong model rather than a silent downgrade.
+      let reply = toMrkdwn(
+        investigation
+          ? await this.agent.investigate(threadId, message, budget)
+          : await withRoute("light", () => this.agent.investigate(threadId, message, budget))
+      );
       if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
         // Deterministic format backstop — the model sometimes ignores the conversation-mode
         // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
@@ -198,12 +227,18 @@ export class SlackApp {
       // Approval-gated remediation runs for BOTH mention response types: an RCA that
       // implies a fix, or a direct request ("restart X") answered in conversation mode.
       // The user text is part of the proposal context so an explicit command is enough
-      // evidence. Costs one extra LLM call per mention; {"action": null} is the escape.
-      // No incident row to link (no alert labels), so incidentId is null.
-      void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
+      // evidence. No incident row to link (no alert labels), so incidentId is null.
+      // The gate is what keeps a read-only "status check" on a healthy cluster from
+      // spending a heavy LLM call to be told {"action": null} — see worthProposing.
+      const gate = worthProposing(text, reply, isRca);
+      if (gate.propose) {
+        void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
+      } else {
+        logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
+      }
       await this.notifyIfLowConfidence(event.channel, threadId, reply);
     } catch (err) {
-      logger.error(`[slack] investigation failed for thread ${threadId}: ${err}`);
+      logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
     } finally {
       this.semaphore.release();
@@ -239,7 +274,9 @@ export class SlackApp {
       const text = msg.includes("missing_scope")
         ? "⚠️ I can't read this thread: the Slack app is missing the `channels:history` scope (`groups:history` for private channels). Add it under *OAuth & Permissions* and reinstall the app, then try `learn` again."
         : `⚠️ Learn failed: ${msg}`;
-      await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true }).catch(() => {});
+      await client.chat
+        .postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true })
+        .catch((e) => logger.error(`[slack] could not deliver the learn-failure notice to thread ${threadId}: ${errDetail(e)}`));
     }
   }
 
@@ -265,7 +302,7 @@ export class SlackApp {
       if (result.startsWith("📚 Already learned")) return; // repeat reactions stay silent too
       await client.chat.postMessage({ channel, thread_ts: threadTs, text: result, mrkdwn: true });
     } catch (err) {
-      logger.error(`[slack] reaction-learn failed in ${channel}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[slack] reaction-learn failed in ${channel}: ${errDetail(err)}`);
     }
   }
 
@@ -273,50 +310,73 @@ export class SlackApp {
     const channel = config.slack.alertChannel;
     if (!channel) { logger.warn("SLACK_ALERT_CHANNEL not set, skipping"); return; }
 
-    logger.info(`[slack] alert webhook received — ${payload.alerts.length} alert(s)`);
+    // One Alertmanager webhook = one group (its `group_by`, typically alertname+namespace).
+    // Correlate: investigate the whole group ONCE. N crashlooping pods share a root cause —
+    // a thread/investigation/remediation-card per pod was noise + N× LLM cost.
+    const firing = payload.alerts.filter((a) => a.status === "firing");
+    const resolved = payload.alerts.filter((a) => a.status === "resolved");
+    logger.info(`[slack] alert webhook received — ${firing.length} firing, ${resolved.length} resolved`);
 
-    for (const alert of payload.alerts) {
-      const alertName = alert.labels.alertname ?? "Unknown";
-      if (alert.status !== "firing") {
-        if (alert.status === "resolved") void this.handleResolvedAlert(alert);
-        else logger.debug(`[slack] skipping non-firing alert: ${alertName} (${alert.status})`);
-        continue;
-      }
-      if (!(await this.dedup.shouldProcess(alert.labels))) {
-        logger.info(`[slack] duplicate alert suppressed: ${alertName}`);
-        continue;
-      }
-
-      const severity = alert.labels.severity ?? "unknown";
-      logger.info(`[slack] processing alert: ${alertName} severity=${severity}`);
-
-      const issueText = this.buildAlertText(alert);
-
-      // Post the alert + investigating notice up front so it shows in Slack
-      // immediately — never gated behind another alert's multi-minute investigation.
-      const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
-      const threadId = posted.ts!;
-      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
-
-      // Fire-and-forget — the LLM run must not delay the next alert's notification.
-      // Concurrency stays bounded by the semaphore inside the background task.
-      void this.investigateAlertInBackground(channel, threadId, issueText, alert.labels);
+    // No firing alerts left = the group recovered. Run the resolved loop once on the group.
+    if (firing.length === 0) {
+      if (resolved.length > 0) void this.handleResolvedAlert(groupIdentity(payload, resolved), resolved);
+      return;
     }
+
+    const groupLabels = groupIdentity(payload, firing);
+    const alertName = groupLabels.alertname ?? firing[0].labels.alertname ?? "Unknown";
+
+    // Dedup on the GROUP identity: a re-fire of the same group (12h repeat_interval) is
+    // suppressed as a unit, and under agent autoscaling only the first replica investigates.
+    if (!(await this.dedup.shouldProcess(groupLabels))) {
+      logger.info(`[slack] duplicate alert group suppressed: ${alertName} (${firing.length} firing)`);
+      return;
+    }
+
+    const severity = groupLabels.severity ?? firing[0].labels.severity ?? "unknown";
+    logger.info(`[slack] processing alert group: ${alertName} severity=${severity} firing=${firing.length}`);
+
+    const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
+
+    // Post the alert + investigating notice up front so it shows in Slack immediately.
+    // The dedup claim above is already taken at this point: if posting throws
+    // (channel_not_found, not_in_channel, invalid_auth, rate limit) the claim would sit
+    // there for its full 12h TTL and Alertmanager's repeat would be suppressed — a real
+    // incident silently never investigated. Release the claim so the next repeat retries.
+    let threadId: string;
+    try {
+      const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
+      threadId = posted.ts!;
+      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+    } catch (err) {
+      await this.dedup.clear(groupLabels).catch(() => {});
+      logger.error(
+        `[slack] could not post alert group ${alertName} to channel ${channel} — dedup claim released so the next ` +
+        `Alertmanager repeat retries; the alert is NOT investigated: ${errDetail(err)}`
+      );
+      return;
+    }
+
+    // Fire-and-forget — the LLM run must not delay the webhook ack.
+    // Concurrency stays bounded by the semaphore inside the background task.
+    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels);
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
   // mark the incident resolved in the DB, and close the Slack thread with a ✅.
-  private async handleResolvedAlert(alert: AlertmanagerPayload["alerts"][number]): Promise<void> {
-    const alertName = alert.labels.alertname ?? "Unknown";
+  // Operates on the GROUP identity so it lines up with the group-level firing claim.
+  private async handleResolvedAlert(groupLabels: Record<string, string>, resolved: AlertItem[]): Promise<void> {
+    const alertName = groupLabels.alertname ?? "Unknown";
     try {
-      await this.dedup.clear(alert.labels);
-      const thread = await this.agent.resolveIncident(alert.labels);
+      await this.dedup.clear(groupLabels);
+      const thread = await this.agent.resolveIncident(groupLabels);
       if (!thread) {
         logger.debug(`[slack] resolved alert ${alertName} has no stored unresolved incident — dedup cleared only`);
         return;
       }
-      const endedAt = alert.endsAt ? ` at \`${new Date(alert.endsAt).toISOString()}\`` : "";
-      const ns = alert.labels.namespace ? ` in \`${alert.labels.namespace}\`` : "";
+      const ends = resolved.map((a) => a.endsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
+      const endedAt = ends.length > 0 ? ` at \`${new Date(Math.max(...ends)).toISOString()}\`` : "";
+      const ns = groupLabels.namespace ? ` in \`${groupLabels.namespace}\`` : "";
       await this.app.client.chat.postMessage({
         channel: thread.channel,
         thread_ts: thread.threadTs,
@@ -325,26 +385,8 @@ export class SlackApp {
       });
       logger.info(`[slack] alert resolved: ${alertName} — thread updated, incident marked, dedup cleared`);
     } catch (err) {
-      logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${errDetail(err)}`);
     }
-  }
-
-  private buildAlertText(alert: AlertmanagerPayload["alerts"][number]): string {
-    const alertName = alert.labels.alertname ?? "Unknown";
-    const severity = alert.labels.severity ?? "unknown";
-    const emoji = ({ critical: "🔴", warning: "🟡", info: "🔵" } as Record<string, string>)[severity] ?? "⚪";
-
-    const lines: string[] = [
-      `🚨 *${alertName}*`,
-      `*Severity:* ${emoji} \`${severity}\``,
-    ];
-    if (alert.annotations?.summary)     lines.push(`*Summary:* ${alert.annotations.summary}`);
-    if (alert.annotations?.description) lines.push(`*Description:* ${alert.annotations.description}`);
-    if (alert.labels.namespace)         lines.push(`*Namespace:* \`${alert.labels.namespace}\``);
-    if (alert.labels.pod)               lines.push(`*Pod:* \`${alert.labels.pod}\``);
-    if (alert.startsAt)                 lines.push(`*Firing since:* \`${new Date(alert.startsAt).toISOString()}\` (unix: \`${Math.floor(new Date(alert.startsAt).getTime() / 1000)}\`)`);
-
-    return lines.join("\n");
   }
 
   private async investigateAlertInBackground(
@@ -355,17 +397,22 @@ export class SlackApp {
   ): Promise<void> {
     await this.semaphore.acquire();
     try {
-      // Prepend any prior similar incidents so the agent can recognize a recurrence.
-      // Best-effort: a recall failure must not block the investigation.
-      const prior = await this.agent.recallIncidents(labels).catch(() => "");
+      // Prepend prior similar incidents AND what was remediated about them before, so the
+      // agent recognizes a recurrence and its prior fix. Best-effort — recall failures must
+      // not block the investigation.
+      const [priorIncidents, priorRemediations] = await Promise.all([
+        this.agent.recallIncidents(labels, issueText).catch(() => ""),
+        this.agent.recallRemediations(labels).catch(() => ""),
+      ]);
+      const memory = [priorIncidents, priorRemediations].filter(Boolean).join("\n\n");
       // The [SOURCE: ...] marker is the deterministic mode signal for the system prompt:
       // only Alertmanager-driven messages carry it → mandatory investigation mode.
       // Human mentions have no marker → conversation-first (see prompts/system.md).
       const fullIssue =
         `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
-        (prior ? `${prior}\n\n---\n\n${issueText}` : issueText);
+        (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
-      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue));
+      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText }));
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
       // recognized recurrence may be a concise conversational reply (known issue +
       // confirmed fix) — forcing it back into the template via a reformat LLM call
@@ -381,18 +428,19 @@ export class SlackApp {
       }
       await this.agent.markRcaSent(threadId);
       const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId).catch((e) => {
-        logger.error(`[slack] failed to store incident for thread ${threadId}: ${e}`);
+        logger.error(`[slack] failed to store incident for thread ${threadId}: ${errDetail(e)}`);
         return null;
       });
       // Guarded Remediation: best-effort, after the response is posted — never blocks or
       // breaks the investigation flow. Nothing executes without an approval click.
-      // The CONFIRMED prior goes into the proposal context too — a recurrence's proven
-      // fix ("change tag to X") is exactly what the proposal model needs.
-      const proposalContext = prior ? `${prior.slice(0, 1200)}\n\n---\n\n${rca}` : rca;
+      // Prior incidents + prior remediations go into the proposal context too — a
+      // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
+      // proposal model needs to avoid re-proposing.
+      const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
       if (incidentId) void this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext);
       await this.notifyIfLowConfidence(channel, threadId, rca);
     } catch (err) {
-      logger.error(`[slack] background investigation failed for thread ${threadId}: ${err}`);
+      logger.error(`[slack] background investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await this.app.client.chat
         .postMessage({
           channel,
@@ -400,7 +448,7 @@ export class SlackApp {
           text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`,
           mrkdwn: true,
         })
-        .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${e}`));
+        .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${errDetail(e)}`));
     } finally {
       this.semaphore.release();
     }
@@ -432,16 +480,17 @@ export class SlackApp {
       }
       // mention the approvers so the card actually notifies them (same list the buttons enforce)
       const approvers = config.slack.approverUsers.length > 0 ? config.slack.approverUsers : config.slack.oncallUsers;
+      const gitOps = "gitOps" in proposed ? proposed.gitOps : undefined;
       await this.app.client.chat.postMessage({
         channel,
         thread_ts: threadId,
-        text: `🔧 Proposed remediation: ${proposed.proposal.summary} — approve or reject`,
-        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers),
+        text: `${gitOps ? "🔀 Proposed GitOps PR" : "🔧 Proposed remediation"}: ${proposed.proposal.summary} — approve or reject`,
+        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps),
       });
-      logger.info(`[remediation] approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
+      logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
-      logger.error(`[remediation] proposal flow failed for incident ${incidentId}: ${err instanceof Error ? err.message : err}`);
+      logger.error(`[remediation] proposal flow failed for incident ${incidentId}: ${errDetail(err)}`);
     }
   }
 
@@ -457,7 +506,14 @@ export class SlackApp {
     const channel: string | undefined = body.channel?.id;
     const messageTs: string | undefined = body.message?.ts;
     const remediationId = parseInt(actionValue ?? "", 10);
-    if (!userId || !channel || !messageTs || !Number.isFinite(remediationId)) return;
+    if (!userId || !channel || !messageTs || !Number.isFinite(remediationId)) {
+      // a click that silently does nothing is the worst thing to debug — say why
+      logger.warn(
+        `[remediation] ignoring ${approve ? "approve" : "reject"} click with an incomplete payload ` +
+        `(user=${userId ?? "?"} channel=${channel ?? "?"} ts=${messageTs ?? "?"} value=${actionValue ?? "?"})`
+      );
+      return;
+    }
 
     try {
       // Approver gate: SLACK_APPROVER_USERS, falling back to SLACK_ONCALL_USERS.
@@ -491,39 +547,53 @@ export class SlackApp {
       const noteThread: string | undefined = body.message?.thread_ts;
       if (noteThread) await this.agent.noteInThread(noteThread, text);
 
-      // Post-remediation status check: give the rolling update time to converge, then
-      // post the workload's pod status into the thread so the outcome is visible.
-      // ponytail: in-process timer — lost if this pod restarts within the delay; a
-      // durable scheduler is the upgrade path if that ever matters
+      // Post-remediation verification: scheduled in Postgres, not on a timer in this pod, so
+      // a restart between the click and the check costs nothing — whichever replica polls
+      // next answers it. `target` is absent for GitOps PR remediations (nothing is live
+      // until the PR merges and Flux syncs), which is exactly when there's nothing to verify.
       if (target) {
         const threadTs: string = body.message?.thread_ts ?? messageTs;
-        setTimeout(() => void this.postRemediationStatusCheck(channel, threadTs, target), STATUS_CHECK_DELAY_MS);
+        await this.agent
+          .scheduleRemediationCheck(remediationId, channel, threadTs, target)
+          .catch((e) => logger.error(`[remediation] could not schedule verification for ${remediationId}: ${errDetail(e)}`));
       }
     } catch (err) {
       const msg = `⚠️ Remediation handling failed: ${err instanceof Error ? err.message : String(err)}`;
-      logger.error(`[remediation] ${msg}`);
-      await client.chat.update({ channel, ts: messageTs, text: msg, blocks: remediationStatusBlocks(msg) }).catch(() => {});
+      logger.error(`[remediation] ${errDetail(err)}`);
+      // if this update is swallowed the card stays frozen mid-flight and the operator has
+      // no way to tell whether the action ran — say so in the log at least
+      await client.chat
+        .update({ channel, ts: messageTs, text: msg, blocks: remediationStatusBlocks(msg) })
+        .catch((e) => logger.error(`[remediation] card ${messageTs} left showing a stale state — update failed: ${errDetail(e)}`));
     }
   }
 
-  private async postRemediationStatusCheck(
-    channel: string,
-    threadTs: string,
-    target: { namespace: string; name: string }
-  ): Promise<void> {
-    try {
-      const status = await this.agent.remediationStatus(target.namespace, target.name);
-      await this.app.client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text:
-          `🔎 *Status check* — \`${target.namespace}/${target.name}\`, ${Math.round(STATUS_CHECK_DELAY_MS / 1000)}s after remediation:\n` +
-          `\`\`\`\n${status}\n\`\`\``,
-        mrkdwn: true,
-      });
-    } catch (err) {
-      logger.error(`[remediation] status check failed for ${target.namespace}/${target.name}: ${err instanceof Error ? err.message : err}`);
-    }
+  // Drain whatever verification checks are due and post each verdict into its own thread.
+  // The loop is in-process but the schedule is not: it only asks Postgres "is anything due",
+  // so a check outlives the pod that scheduled it. One slow tick can't overlap the next —
+  // the timer is re-armed after the work, not on a fixed interval.
+  private startVerificationPoller(): void {
+    if (!config.incidents.enabled) return; // checks live in Postgres; no DB, no schedule
+    const tick = async (): Promise<void> => {
+      try {
+        for (const msg of await this.agent.runDueRemediationChecks()) {
+          await this.app.client.chat.postMessage({ channel: msg.channel, thread_ts: msg.threadTs, text: msg.text, mrkdwn: true });
+          // the agent should know its own fix didn't hold before the next follow-up question
+          await this.agent.noteInThread(msg.threadTs, `Post-remediation verification: ${msg.text}`);
+        }
+      } catch (err) {
+        logger.error(`[remediation] verification poll failed: ${errDetail(err)}`);
+      } finally {
+        if (!this.stopping) this.armVerificationPoller(tick);
+      }
+    };
+    this.armVerificationPoller(tick);
+    logger.info(`[remediation] verification poller every ${Math.round(config.remediation.verifyPollMs / 1000)}s`);
+  }
+
+  private armVerificationPoller(tick: () => Promise<void>): void {
+    this.verifyTimer = setTimeout(() => void tick(), config.remediation.verifyPollMs);
+    this.verifyTimer.unref(); // auxiliary work must never be what keeps the process alive
   }
 
   private async notifyIfLowConfidence(channel: string, threadId: string, rca: string): Promise<void> {
@@ -566,9 +636,15 @@ export class SlackApp {
       await this.app.start(config.port);
       logger.info(`Slack app started in HTTP Mode on port ${config.port}`);
     }
+    this.startVerificationPoller();
   }
 
   async stop(): Promise<void> {
+    // stop the poller first: a tick that starts now would post into a thread with a Slack
+    // client that's about to close. Anything already due stays due — another pod, or this
+    // one after the restart, claims it.
+    this.stopping = true;
+    if (this.verifyTimer) clearTimeout(this.verifyTimer);
     await this.app.stop();
     if (this.httpServer) {
       await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));
@@ -577,11 +653,10 @@ export class SlackApp {
 }
 
 interface AlertmanagerPayload {
-  alerts: Array<{
-    status: "firing" | "resolved";
-    labels: Record<string, string>;
-    annotations?: Record<string, string>;
-    startsAt?: string;
-    endsAt?: string;
-  }>;
+  // Alertmanager sends one POST per group: `groupLabels` = the `group_by` values,
+  // `commonLabels`/`commonAnnotations` = what every alert in the group shares.
+  groupLabels?: Record<string, string>;
+  commonLabels?: Record<string, string>;
+  commonAnnotations?: Record<string, string>;
+  alerts: AlertItem[];
 }
