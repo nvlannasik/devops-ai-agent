@@ -250,7 +250,7 @@ Two properties the tests pin down, both non-obvious:
 - **Indonesian action verbs need stem matching** — the affix carries the request, so `perbaiki`
   arrives as `diperbaiki` and `ganti` as `mengganti`. A `\b`-anchored stem matches none of them.
 
-Text-only on purpose: no extra `prometheus_get_alerts` call to ask whether anything is firing.
+Text-only on purpose: no extra `alertmanager_get_alerts` call to ask whether anything is firing.
 The agent has just looked, so the answer is already in the reply, and a second call would add
 latency and a failure mode to the one path whose entire point is spending less.
 

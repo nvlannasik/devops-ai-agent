@@ -50,37 +50,62 @@ test("summarizePods distinguishes 'no pods matched' from 'could not read'", () =
 
 // ---- alertState ----
 
-const alerts = (...items: Array<{ name: string; state: string; namespace?: string }>) =>
-  JSON.stringify(items.map((a) => ({ name: a.name, state: a.state, labels: a.namespace ? { namespace: a.namespace } : {} })));
+// the alertmanager_get_alerts shape: groups of alerts, each labelled with its status
+const alerts = (...items: Array<{ name: string; status?: string; namespace?: string }>) =>
+  JSON.stringify({
+    summary: { groups: items.length, alerts: items.length, byStatus: {}, bySeverity: {} },
+    groups: items.map((a) => ({
+      groupLabels: { alertname: a.name },
+      alerts: [{ name: a.name, status: a.status ?? "active", labels: a.namespace ? { namespace: a.namespace } : {} }],
+    })),
+  });
+const noAlerts = JSON.stringify({ summary: { groups: 0, alerts: 0, byStatus: {}, bySeverity: {} }, groups: [] });
 
 test("alertState is 'firing' when the same alert is active in the same namespace", () => {
-  const raw = alerts({ name: "KubePodCrashLooping", state: "firing", namespace: "payments" });
+  const raw = alerts({ name: "KubePodCrashLooping", namespace: "payments" });
   assert.equal(alertState(raw, "KubePodCrashLooping", "payments"), "firing");
 });
 
-test("alertState treats 'pending' as firing — the condition is true again", () => {
-  const raw = alerts({ name: "KubePodCrashLooping", state: "pending", namespace: "payments" });
-  assert.equal(alertState(raw, "KubePodCrashLooping", "payments"), "firing");
+// Every status Alertmanager still holds means the problem is still there. Silencing mutes the
+// notification, not the alert — reading a silenced alert as recovered would let someone close
+// an incident by muting it.
+test("alertState treats a silenced or inhibited alert as still firing", () => {
+  for (const status of ["silenced", "inhibited", "unprocessed", "suppressed"]) {
+    const raw = alerts({ name: "KubePodCrashLooping", status, namespace: "payments" });
+    assert.equal(alertState(raw, "KubePodCrashLooping", "payments"), "firing", `status ${status} read as recovery`);
+  }
 });
 
 test("alertState ignores the same alert in a different namespace", () => {
-  const raw = alerts({ name: "KubePodCrashLooping", state: "firing", namespace: "checkout" });
+  const raw = alerts({ name: "KubePodCrashLooping", namespace: "checkout" });
   assert.equal(alertState(raw, "KubePodCrashLooping", "payments"), "cleared");
 });
 
 test("alertState keeps a namespace-less alert (node-level rule) for its incident's namespace", () => {
-  const raw = alerts({ name: "NodeMemoryPressure", state: "firing" });
+  const raw = alerts({ name: "NodeMemoryPressure" });
   assert.equal(alertState(raw, "NodeMemoryPressure", "payments"), "firing");
 });
 
+test("alertState finds the alert wherever in the groups it sits", () => {
+  const raw = alerts(
+    { name: "SomethingElse", namespace: "payments" },
+    { name: "KubePodCrashLooping", namespace: "payments" }
+  );
+  assert.equal(alertState(raw, "KubePodCrashLooping", "payments"), "firing");
+});
+
 test("alertState is 'cleared' when the alert is gone, 'none' without an alertname", () => {
-  assert.equal(alertState(alerts({ name: "SomethingElse", state: "firing" }), "KubePodCrashLooping", "payments"), "cleared");
-  assert.equal(alertState("[]", null, null), "none");
+  assert.equal(alertState(alerts({ name: "SomethingElse" }), "KubePodCrashLooping", "payments"), "cleared");
+  assert.equal(alertState(noAlerts, "KubePodCrashLooping", "payments"), "cleared");
+  assert.equal(alertState(noAlerts, null, null), "none");
 });
 
 test("alertState is 'unknown' on unreadable output — not 'cleared'", () => {
-  // collapsing these would let a broken Prometheus call read as recovery
+  // collapsing these would let a broken Alertmanager call read as recovery
   assert.equal(alertState("Error: upstream timeout", "KubePodCrashLooping", "payments"), "unknown");
+  // valid JSON, wrong shape (e.g. the old flat array, or an error object) is still unreadable
+  assert.equal(alertState("[]", "KubePodCrashLooping", "payments"), "unknown");
+  assert.equal(alertState('{"error":"forbidden"}', "KubePodCrashLooping", "payments"), "unknown");
 });
 
 // ---- decideVerdict ----

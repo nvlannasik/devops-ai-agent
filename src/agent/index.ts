@@ -34,15 +34,55 @@ import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import type { LLMClient, LLMResponse, Message, ContentBlock, TokenUsage, ToolDefinition } from "./llm/types.js";
+import type { LLMClient, LLMResponse, ContentBlock, TokenUsage, ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 
-const MAX_ITERATIONS = 10;
+export const MAX_ITERATIONS = 10;
 // conversation mode: max distinct pods whose logs may be fetched in one round — a generic
 // name matching many pods ("metallb" → 8) should produce a "which one?" question, not a dump
 const MAX_LOG_FANOUT = 2;
+
+/** Conversation mode: the tool budget is spent. Answer, and stay out of RCA format. */
+export const TOOL_BUDGET_NOTICE =
+  "[TOOL BUDGET REACHED — compose your final answer now from the data above. Tool calls are disabled. " +
+  "Reply in plain Slack mrkdwn — do NOT use the RCA incident format. If something looked anomalous, " +
+  "mention it in one line and offer to investigate.]";
+
+/**
+ * The iteration ceiling. Says nothing about output format: the alert path lands here and its
+ * answer IS the RCA, so the system prompt and the response-mode marker keep deciding the shape.
+ */
+export const ITERATION_CEILING_NOTICE =
+  "[ITERATION LIMIT REACHED — this is your final turn and tool calls are disabled. Write the answer now " +
+  "from the evidence already gathered. Do not ask for more data and do not promise follow-up work. " +
+  "Thin evidence is not a reason to withhold a conclusion: give your best root-cause hypothesis, and if " +
+  "you are producing an RCA set Confidence to Low and name the one check that would confirm it.]";
+
+/**
+ * Both ceilings end a run the same way — one more LLM call with no tools — but they are reached
+ * by different paths and say different things. Returns the notice to inject, or null to keep going.
+ *
+ * The iteration clause is the one that matters. It fires at `maxIterations - 1` so the loop always
+ * keeps a turn in hand to spend on an answer. Without it an alert investigation (which passes no
+ * tool budget, so `maxToolRounds` is Infinity and the first clause can never fire) ran its tenth
+ * round of tools, fell out of the `while`, and discarded every result it had gathered in favour of
+ * an apology — in an on-call thread that had never been shown a single finding.
+ *
+ * The tool budget wins when both apply: conversation mode has a format rule the ceiling must not
+ * overwrite. Exported with its notices so the loop's exit contract is testable without the class.
+ */
+export function forcedFinalAnswer(state: {
+  toolRounds: number;
+  maxToolRounds: number;
+  iterations: number;
+  maxIterations: number;
+}): string | null {
+  if (state.toolRounds >= state.maxToolRounds) return TOOL_BUDGET_NOTICE;
+  if (state.iterations >= state.maxIterations - 1) return ITERATION_CEILING_NOTICE;
+  return null;
+}
 
 // Per-thread skill sets live in memory, like ConversationMemory's rcaThreads. Bounded so a
 // long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
@@ -449,21 +489,26 @@ export class DevOpsAgent {
         const trimmedResults = sanitizeContentBlocks([...executed, ...refusals]);
 
         toolRounds++;
-        if (toolRounds >= maxToolRounds) {
+        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations: MAX_ITERATIONS });
+        if (notice) {
           toolsDisabled = true;
-          trimmedResults.push({
-            type: "text",
-            text: "[TOOL BUDGET REACHED — compose your final answer now from the data above. Tool calls are disabled. Reply in plain Slack mrkdwn — do NOT use the RCA incident format. If something looked anomalous, mention it in one line and offer to investigate.]",
-          });
-          logger.info(`[${threadId}] tool budget (${maxToolRounds} rounds) reached — forcing final answer`);
+          trimmedResults.push({ type: "text", text: notice });
+          logger.info(
+            notice === TOOL_BUDGET_NOTICE
+              ? `[${threadId}] tool budget (${maxToolRounds} rounds) reached — forcing final answer`
+              : `[${threadId}] iteration ceiling (${MAX_ITERATIONS}) reached after ${toolRounds} tool rounds — forcing final answer`
+          );
         }
 
         await this.memory.append(threadId, { role: "user", content: trimmedResults });
       }
     }
 
-    logger.warn(`[${threadId}] Investigation hit max iterations (${MAX_ITERATIONS})`);
-    return "⚠️ Investigation reached maximum iterations. Please review the findings above and try a more specific query.";
+    // Residual only: `forcedFinalAnswer` spends the second-to-last round disabling tools, so
+    // reaching here means the model answered that turn with another tool_use instead of prose.
+    // Nothing was posted to the thread, so don't tell the reader to review findings "above".
+    logger.warn(`[${threadId}] Investigation hit max iterations (${MAX_ITERATIONS}) — model kept calling tools on its final, tool-free turn`);
+    return "⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.";
   }
 
   private async executeToolCalls(threadId: string, content: ContentBlock[]): Promise<ContentBlock[]> {
@@ -825,7 +870,7 @@ export class DevOpsAgent {
 
     for (const check of due) {
       if (maxAttemptsReached(check)) {
-        const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Prometheus could not be read`;
+        const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Alertmanager could not be read`;
         await this.checks.abandon(check.id, detail);
         out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, "inconclusive", detail) });
         continue;
@@ -850,7 +895,7 @@ export class DevOpsAgent {
     const [alert, after] = await Promise.all([
       check.alertname
         ? this.mcp
-            .callTool("prometheus_get_alerts", {})
+            .callTool("alertmanager_get_alerts", {})
             .then((raw) => alertState(raw, check.alertname, check.namespace))
             .catch((err) => {
               logger.warn(`[remediation] alert re-check for ${check.alertname} failed: ${errDetail(err)}`);

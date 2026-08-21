@@ -168,7 +168,7 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 `utils/auth` is unit-tested (`timingSafeEqualStr` match/mismatch/length-safety, `bearerToken` parsing).
 
 ### Readiness `/health`
-- `GET /health` calls `agent.healthCheck()` → checks MCP (`isConnected()` flag) + Postgres (`SELECT 1`, only if incidents enabled) + Redis (`PING`, only if backend=redis).
+- `GET /health` calls `agent.healthCheck()` → checks MCP (`mcp.ping()`) + Postgres (`SELECT 1`, only if incidents enabled) + Redis (`PING`, only if backend=redis).
 - Returns **`503`** when any configured dependency is down, `200` + `{checks}` when all up — so K8s readiness probes stop routing to a pod that can't investigate. Wire `readinessProbe: httpGet /health` in the Deployment.
 - MCP check is a **real MCP `ping` request** (5s timeout) — upgraded from the cached connect flag after testing hit the dead-but-flagged-up case (MCP down after startup, `/health` still 200). On ping failure it also flips `connected` so the next tool call takes the reconnect path.
 - The **MCP server itself** probes its upstreams (Prometheus/Loki/tracing) at startup and logs `Upstream UNREACHABLE` warnings — non-fatal by design (Prometheus down must not take k8s tools down). Surfaces wrong `PROMETHEUS_URL`-style misconfig at deploy time instead of first tool call.
@@ -572,7 +572,7 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
   - **The alert path is not gated** — an alert firing IS the evidence.
   - **A clean bill of health uses the same words a broken one does** ("no alerts firing", "0 restarts in the last hour"), so negated forms are stripped before matching or the gate would never skip anything. The keyword group repeats (`+`) because one negation covers a list ("No alerts are firing and nothing is pending" must lose `firing` too), and the window stops at a contrastive conjunction so "no logs, **but** it is in CrashLoopBackOff" keeps its evidence.
   - **Indonesian action verbs are matched as stems with up to 4 leading chars** — the affix carries the request: `perbaiki` arrives as `diperbaiki`, `ganti` as `mengganti`. A `\b`-anchored stem missed all of them.
-  - Text-only on purpose: no extra MCP call (`prometheus_get_alerts`) to check for active alerts — the agent has just looked, so the answer is already in the reply, and a second call adds latency plus a failure mode to a path whose whole point is spending less.
+  - Text-only on purpose: no extra MCP call (`alertmanager_get_alerts`) to check for active alerts — the agent has just looked, so the answer is already in the reply, and a second call adds latency plus a failure mode to a path whose whole point is spending less.
 - **Proposal observability:** every null path in `proposeRemediation` logs why (raw model output on parse failure, unregistered action, dry-run refusal, duplicate/store failure) — silent no-card failures cost a full debugging round during live testing.
 - **Remediations are recalled as agent memory** (`recallRemediations` → `RemediationStore.recallForAlert`): on the alert path, past executed remediations for the same `(alertname, namespace)` — joined via `remediations.incident_id = incidents.id` — are injected alongside `recallIncidents` into BOTH the investigation and the proposal context ("Previously remediated — same alert: 2026-07-23 set image → repo:v2 — succeeded (PR: ...)"). So a recurrence recalls what was actually DONE (+ the PR/outcome), not just the diagnosis, and the proposal model avoids re-proposing an already-applied fix. Everything's already stored in `remediations` (`params.changes` from→to, `path`, `valuesKey`, `result`=PR URL, `status`) — no schema change; rollback data lives there too (revert the PR = natural GitOps rollback). Keyed by alert → mention-driven flows (no labels) don't recall.
 - **Dry-run refusals are posted to the thread** (`{ refused }` return → "🚫 Remediation not proposed — <server reason>"): the model wanted to act but the MCP server refused (GitOps guard / blocked namespace / bad target) — the human deserves the reason, especially "managed by Flux/Helm, change it in the GitOps repo".
@@ -609,14 +609,23 @@ handled the approval click.
   A failed check is deliberately **left claimed** — the lease expires and the next pass retries
   it, which makes a transient MCP outage a delay rather than a lost verdict. `MAX_ATTEMPTS`
   then abandons it as `inconclusive`.
-- **The alert is the primary signal, pods corroborate.** `prometheus_get_alerts` → `alertState`
-  (`pending` counts as firing: the condition is true again), `k8s_list_pods` → `summarizePods`.
-  Both degrade independently (`Promise.all` with per-call `.catch`).
+- **The alert is the primary signal, pods corroborate.** `alertmanager_get_alerts` → `alertState`,
+  `k8s_list_pods` → `summarizePods`. Both degrade independently (`Promise.all` with per-call
+  `.catch`).
+- **Asked of Alertmanager, not Prometheus.** Alertmanager is where every evaluator's alerts land,
+  so a future log-based alert (Loki Ruler, Kibana) is visible to the re-check; `/api/v1/alerts`
+  would have scored a still-paging incident as recovered. **Every status Alertmanager returns
+  means still firing** — `silenced` most of all, because a human muted the notification, not the
+  problem, and reading it as recovery would let someone close an incident by muting it.
+  Alertmanager drops resolved alerts, so *presence* is the signal and absence is the recovery.
+  The trade: an alert re-firing inside its `for:` window is still `pending` in the evaluator and
+  has not reached Alertmanager, so it reads as cleared — deliberate (Alertmanager is the source of
+  truth), and `decideVerdict` still refuses "recovered" while any pod is unready.
 - **`k8s_list_pods` returns the pod *phase*, not container reasons.** A CrashLoopBackOff pod
   reports `status: "Running"` with `ready: false` — counting phases alone scores a crash loop
   as healthy. Readiness must come from the `ready` boolean.
 - **`summarizePods` returns `null` for unreadable output, and `null` is never a healthy zero.**
-  Same rule for `alertState`: `"unknown"` (Prometheus unreadable) and `"none"` (mention-driven,
+  Same rule for `alertState`: `"unknown"` (Alertmanager unreadable) and `"none"` (mention-driven,
   no alert behind the remediation) are separate states — collapsing them would let a broken tool
   call read as "there is no alert", i.e. as success.
 - **`worse` is a readiness regression and only that.** A rollout replaces the pod set, so a
@@ -856,62 +865,20 @@ user text in the same turn.
 - `SLACK_SIGNING_SECRET` verifies request authenticity
 
 ## Environment Variables
-```
-SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN
-SLACK_ALERT_CHANNEL, SLACK_ONCALL_USERS
 
-LLM_PROVIDER            # claude | openai-compatible | private-llm
-ANTHROPIC_API_KEY, CLAUDE_MODEL   # default claude-opus-4-8
-OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_MODEL
-MAX_TOKENS              # output ceiling for claude + openai-compatible (default 8096)
-
-# Private LLM (SQS)
-SQS_REGION, SQS_REQUEST_QUEUE_NAME, SQS_RESPONSE_QUEUE_NAME
-SQS_LLM_TIMEOUT_SECONDS, SQS_POLL_WAIT_SECONDS
-AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  # local dev only; use IRSA on EKS
-
-MCP_TRANSPORT, MCP_STDIO_ARGS, MCP_HTTP_URL
-MCP_AUTH_TOKEN          # bearer token for MCP http transport; must match the server's MCP_AUTH_TOKEN
-MEMORY_BACKEND, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_TLS   # conversation cache + multi-pod dedup
-DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD, DB_SSL_MODE   # durable incident memory; disabled if DB_HOST unset
-MAX_CONCURRENT_INVESTIGATIONS
-REMEDIATION_VERIFY_DELAY_SECONDS   # wait before "did that fix it?" (default 300)
-REMEDIATION_VERIFY_POLL_SECONDS    # how often a replica looks for due checks (default 30)
-LOG_LEVEL   # error | warn | info | http | debug
-```
+The full table — every variable, its default, and whether it is required — lives in
+[`README.md`](README.md#configuration) and in `.env.example`, both checked against
+`src/config/index.ts`. The digest that used to sit here had fallen ~12 variables behind
+(dashboard, GitOps queues, `MENTION_TOOL_ROUNDS`, `INVESTIGATION_TIMEOUT_SECONDS`,
+`ALERT_WEBHOOK_TOKEN`, ...). Read the README; do not re-copy it here.
 
 ## File Structure
-```
-src/
-├── agent/
-│   ├── index.ts                  # Orchestrator — agentic loop, parallel tool calls
-│   ├── confidence/index.ts       # parseConfidence() — anchored regex, no false positives
-│   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks()
-│   ├── correlation/index.ts      # groupIdentity(), commonLabels(), buildGroupAlertText() — one investigation per Alertmanager group
-│   ├── dedup/index.ts            # AlertDeduplicator: fingerprint + TTL
-│   ├── llm/
-│   │   ├── index.ts              # createLLMClient() factory
-│   │   ├── claude.ts             # Anthropic + prompt caching
-│   │   ├── openai-compatible.ts
-│   │   ├── sqs.ts                # SQSLLMClient: queue name resolution + auto-create
-│   │   └── types.ts
-│   ├── incidents/index.ts        # IncidentMemory: durable recall/store (Postgres) + ping()
-│   ├── mcp/client.ts             # MCPClient: reconnect + mutex + isConnected() + bearer auth
-│   ├── memory/index.ts           # Redis/in-memory, hasRca/markRcaSent
-│   ├── remediation/
-│   │   ├── index.ts              # RemediationStore: propose/claim/finish + recallForAlert (joins the verdict)
-│   │   ├── proposal.ts           # parseProposal() whitelist gate, buildProposalPrompt()
-│   │   └── verify.ts             # post-remediation verdict: summarizePods/alertState/decideVerdict + RemediationCheckStore
-│   └── prompts/system.ts         # buildStaticSystemPrompt(), buildTimeContext()
-├── app/index.ts                  # SlackApp: Bolt + ExpressReceiver + /health readiness + error handler
-├── config/index.ts
-├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
-├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
-└── utils/
-    ├── auth/index.ts             # timingSafeEqualStr(), bearerToken() — /alert webhook auth
-    ├── logger/index.ts           # Winston, LOG_LEVEL support
-    └── slack/blocks.ts           # isRcaResponse(), buildRcaBlocks()
-```
+
+The authoritative tree lives in [`README.md`](README.md#project-structure) and is kept in
+sync with the code — it covers every module, including the ones this section predates
+(`context/`, `skills/`, `dashboard/`, `gitops/`, `feedback/`, `intent/`, `scope/`,
+`usage/`, `utils/trace/`). Keeping a second copy here is what let it drift; do not
+reintroduce one.
 
 ## AWS Authentication
 

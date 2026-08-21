@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const SKILL_MAX_CHARS = 8000;
 export const MAX_MATCHED_SKILLS = 3;
-export const TRIGGER_MAX_CHARS = 4000;
+const TRIGGER_MAX_CHARS = 4000;
 
 const REQUIRED_KEYS = ["name", "description", "when"] as const;
 const NAME_RE = /^[a-z0-9-]+$/;

@@ -10,7 +10,7 @@ import logger from "../../utils/logger/index.js";
 export type Verdict = "recovered" | "unchanged" | "worse" | "inconclusive";
 
 // "none" = this remediation has no alert behind it (mention-driven, no incident labels);
-// "unknown" = Prometheus was asked and could not be read. Collapsing the two would let a
+// "unknown" = Alertmanager was asked and could not be read. Collapsing the two would let a
 // broken tool call read as "there is no alert", i.e. as success.
 export type AlertState = "firing" | "cleared" | "unknown" | "none";
 
@@ -69,9 +69,30 @@ export function summarizePods(raw: string, namePrefix: string): PodHealth | null
   };
 }
 
-// Is the alert that paged us still active? "pending" counts as firing: the rule's condition
-// is true again and only the `for:` window hasn't elapsed — that is the problem coming back,
-// not a recovery.
+type HeldAlert = { name?: unknown; status?: unknown; labels?: Record<string, unknown> };
+
+// alertmanager_get_alerts returns { summary, groups: [{ groupLabels, alerts: [...] }] }.
+const alertsIn = (g: unknown): HeldAlert[] => {
+  const list = (g as { alerts?: unknown } | null)?.alerts;
+  return Array.isArray(list) ? (list.filter((a) => !!a && typeof a === "object") as HeldAlert[]) : [];
+};
+
+/**
+ * Is the alert that paged us still active? Asked of Alertmanager, not Prometheus: Alertmanager
+ * is the fan-in point for every evaluator, so a log-based alert (Loki Ruler, Kibana) is visible
+ * here and invisible to `/api/v1/alerts`. Asking the partial source would score a still-paging
+ * incident as recovered.
+ *
+ * Every status Alertmanager hands back means STILL FIRING — `silenced` most of all, because a
+ * human muted the notification, not the problem, and `inhibited` means a bigger alert is
+ * covering this one. Alertmanager drops resolved alerts from its response, so presence is the
+ * signal and absence is the recovery.
+ *
+ * The trade against the old Prometheus read: an alert re-firing inside its `for:` window is
+ * still `pending` in the evaluator and has not reached Alertmanager, so it reads as cleared
+ * here. That is deliberate — Alertmanager is the source of truth — and `decideVerdict` still
+ * refuses to call it recovered while any pod is unready.
+ */
 export function alertState(raw: string, alertname: string | null, namespace: string | null): AlertState {
   if (!alertname) return "none";
   let parsed: unknown;
@@ -80,19 +101,20 @@ export function alertState(raw: string, alertname: string | null, namespace: str
   } catch {
     return "unknown";
   }
-  if (!Array.isArray(parsed)) return "unknown";
+  const groups = (parsed as { groups?: unknown } | null)?.groups;
+  if (!Array.isArray(groups)) return "unknown";
 
-  const active = parsed.some((a) => {
-    if (!a || typeof a !== "object") return false;
-    const rec = a as { name?: unknown; state?: unknown; labels?: Record<string, unknown> };
-    if (rec.name !== alertname) return false;
-    // Only reject on a namespace we can actually compare — an alert without the label
-    // (node-level rules) still counts for the namespace it was investigated under.
-    const ns = rec.labels?.namespace;
-    if (namespace && typeof ns === "string" && ns !== namespace) return false;
-    return rec.state === "firing" || rec.state === "pending";
-  });
-  return active ? "firing" : "cleared";
+  const held = groups.some((g) =>
+    alertsIn(g).some((rec) => {
+      if (rec.name !== alertname) return false;
+      // Only reject on a namespace we can actually compare — an alert without the label
+      // (node-level rules) still counts for the namespace it was investigated under.
+      const ns = rec.labels?.namespace;
+      if (namespace && typeof ns === "string" && ns !== namespace) return false;
+      return true;
+    })
+  );
+  return held ? "firing" : "cleared";
 }
 
 // The decision table. `before` is the pod snapshot taken at approval time, so "worse" means
@@ -107,7 +129,7 @@ export function decideVerdict(
   const parts: string[] = [];
   if (alert === "firing") parts.push(`\`${ctx.alertname}\` is still firing`);
   if (alert === "cleared") parts.push(`\`${ctx.alertname}\` is no longer firing`);
-  if (alert === "unknown") parts.push(`could not read alert state from Prometheus`);
+  if (alert === "unknown") parts.push(`could not read alert state from Alertmanager`);
   parts.push(after ? `${after.ready}/${after.total} pods ready, ${after.restarts} restart(s)` : "pod state unreadable");
 
   // "worse" is readiness falling, and only that. A rollout replaces the pod set, so a

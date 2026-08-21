@@ -3,7 +3,7 @@
 // per-page control in the filter bar mixed the two — it needed Apply to take effect and it
 // sat nowhere near the pager it governed. Ten fits on a laptop screen without scrolling.
 export const PAGE_SIZE = 10;
-export const PAGE_MAX = 1000000; // a safe integer that exceeds any reasonable pagination need
+const PAGE_MAX = 1000000; // a safe integer that exceeds any reasonable pagination need
 
 export interface Filters {
   from: Date | null;

@@ -7,7 +7,7 @@ const call = (name: string, input: Record<string, unknown>): ContentBlock =>
   ({ type: "tool_use", id: `id-${name}-${JSON.stringify(input)}`, name, input }) as ContentBlock;
 
 test("first round defines the namespace scope", () => {
-  const scope = namespacesOf([call("k8s_list_pods", { namespace: "nginx-ingress" }), call("prometheus_get_alerts", {})]);
+  const scope = namespacesOf([call("k8s_list_pods", { namespace: "nginx-ingress" }), call("alertmanager_get_alerts", {})]);
   assert.deepEqual([...scope], ["nginx-ingress"]);
 });
 
@@ -15,7 +15,7 @@ test("drifting into another namespace is flagged; in-scope and namespace-less ca
   const scope = new Set(["nginx-ingress"]);
   const drift = call("k8s_list_pods", { namespace: "monitoring" });
   const inScope = call("k8s_get_pod_logs", { namespace: "nginx-ingress", pod_name: "x" });
-  const nsLess = call("prometheus_get_alerts", {});
+  const nsLess = call("alertmanager_get_alerts", {});
   assert.deepEqual(outOfScope([drift, inScope, nsLess], scope), [drift]);
 });
 
