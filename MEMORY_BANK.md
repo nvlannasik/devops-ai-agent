@@ -413,25 +413,45 @@ from/to stays one range and severity/state one pair at every width. All three co
 text input neither, so `align-items: end` lined up their *bottoms* and left the captions above them
 on three different baselines.
 
-**The chart is HTML, not SVG (`src/dashboard/chart.ts`).** `svg.ts` is gone. An SVG scales its
-*text* with its drawing, so the same caption that read fine in a 900px hero rendered near 4px in a
-320px one, and `viewBox="0 0 720 168"` pinned a 4.3:1 letterbox at every width — a flat strip on a
-desktop, an illegible sliver on a phone. A `viewBox` cannot be changed from CSS; a grid can.
-`barChart()` now computes bar heights **as percentages** and nothing else — every proportion the
-reader sees (plot height, bar gap, which period labels survive) is a CSS decision taken against the
-chart's own width. Load-bearing details:
+**The chart is a `lineChart()` — an SVG line over an HTML grid (`src/dashboard/chart.ts`).**
+`svg.ts` is gone. The SVG holds the **line and nothing else**; every piece of text (per-period
+value, axis labels, caption) is HTML at the page's own sizes. That split is the whole point: the
+chart was once one plain `<svg viewBox="0 0 720 168">` with its type inside it, and an SVG scales
+its *text* with its drawing, so the same caption that read fine in a 900px hero rendered near 4px
+in a 320px one while the `viewBox` pinned a 4.3:1 letterbox at every width. A `viewBox` cannot be
+changed from CSS. Here it is a **unit square stretched with `preserveAspectRatio="none"`**, so the
+plot's height is a `clamp()` and every other proportion is a CSS decision taken against the chart's
+own width. Load-bearing details:
+- **One `--h` per point, rounded once**, drives both renderers: the HTML dot is placed at
+  `bottom: var(--h)`, the polyline vertex at `y = 100 - h`. Rounding separately for each is how a
+  dot ends up a hair off its own line.
+- **The plot grid has no column gap** (the axis below still does). Vertices are placed at
+  `(i + .5) / n` of the plot's width; a gap is a `clamp()` in px, which moves every track centre by
+  an amount no server-rendered percentage can know, and the dots drift off the line.
+- **`.chart-line` is `height: calc(100% - 1.15rem)`, never `auto`.** An SVG with a `viewBox` has an
+  intrinsic aspect ratio, and `auto` hands the sizing back to it — the unit square then draws itself
+  *square* and the line detaches from the dots by however far the plot is from square (measured 407px
+  adrift at 768). Both bugs here were found by measuring in headless Chrome, not by reading markup.
+- **The dot's centring margin is on `bottom`/`left`, not `top`.** An element offset from the bottom
+  edge is placed by the bottom of its margin box, so a negative `margin-top` is simply unused — a
+  constant 4.5px float above the line at every width. Drift is 0px at 1920/1440/1024/768/390.
+- `vector-effect: non-scaling-stroke` on `.chart-stroke`. The stretch is non-uniform, so a plain
+  `stroke-width` renders as a wedge — thin where the box is wide, thick where it is tall.
 - Heights ride in `style="--h:63.6%"`. That works only because the dashboard CSP is
   `style-src 'unsafe-inline'` with **no** `script-src` — inline style attributes are permitted, and
   the value is re-derived with `Number()` (Postgres hands `int8` back as a string) so a hostile row
-  can put neither a script nor a `NaN` in the attribute.
+  can put neither a script nor a `NaN` in the attribute or in the path data.
 - Ticks are pre-marked `data-thin` **counting from the end**, and CSS hides them below 26rem. The
   newest period is the one a reader looks at first; counting forwards would drop exactly that one.
   The surviving ticks get `overflow: visible` so they may use the hidden neighbour's track — clipped
   to their own they render as `05-1`.
-- The last bar is `data-current` (dashed, no fill) and the caption says why: unmarked, a partial
-  week reads as a collapse in incident volume.
-- Bar values are hidden below 34rem rather than shrunk. Below that width they are the first thing
+- The last point is `data-current` (a hollow ring, not a disc) and the caption says why: unmarked,
+  a partial week reads as a collapse in incident volume.
+- Point values are hidden below 34rem rather than shrunk. Below that width they are the first thing
   to become unreadable, and the axis plus the hero figure still carry the numbers.
+- **A single point draws no line** — a one-vertex polyline renders nothing and a one-vertex area is
+  a sliver of noise; the dot alone carries it. An all-zero series still draws its line, flat along
+  the baseline, because the absence *is* the reading.
 
 **Section and stat glyphs (`ICON` + `section()` in `views.ts`).** The same inline-`<svg>`
 mechanism as the rail, extended to every `<h2>` and to the overview's stat cards, so a page of

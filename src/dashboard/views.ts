@@ -1,6 +1,6 @@
 import { cell, esc, fmtDate, fmtInt, fmtPct, headers, table } from "./html.js";
 import { renderRca } from "./rca.js";
-import { barChart } from "./chart.js";
+import { lineChart } from "./chart.js";
 import { topologyDiagram } from "./topology-svg.js";
 import { TOPO_SCRIPT } from "./topology-script.js";
 import { STYLES } from "./styles.js";
@@ -361,7 +361,7 @@ export function overviewPage(o: Overview, recent: IncidentRow[]): string {
            <span class="hero-value">${esc(fmtInt(o.totalIncidents))}</span>
            <span class="hero-unit">investigated</span>
          </p>
-         <div class="hero-chart">${barChart(o.weekly, { label: "incidents per week" })}</div>
+         <div class="hero-chart">${lineChart(o.weekly, { label: "incidents per week" })}</div>
        </div>
      </section>
      ${section(ICON.chip, "Token usage")}

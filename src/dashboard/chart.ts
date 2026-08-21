@@ -5,30 +5,36 @@ export interface Point {
   value: number;
 }
 
-// A hand-rolled bar chart, drawn as a CSS grid rather than an SVG. Sixty lines still beats a
-// charting dependency for one chart, and it still renders server-side with no JavaScript.
+// A hand-rolled line chart. Thirty lines still beats a charting dependency for one chart, and it
+// still renders server-side with no JavaScript.
 //
-// It used to be an <svg viewBox="0 0 720 168">, and that is exactly what made it the least
-// responsive thing on the page: an SVG scales its TEXT with its drawing, so the same 10px
-// caption that reads fine in a 900px hero renders near 4px in a 320px one. The chart was a
-// fixed 4.3:1 letterbox at every width — a flat strip on a desktop, an illegible sliver on a
-// phone, with twelve period labels collapsing into one run of digits. A viewBox cannot be
-// changed from a media query; a CSS grid can be changed from anything.
+// The drawing is an SVG because a line is geometry — bars could be a CSS grid, a polyline cannot.
+// This is NOT the old <svg viewBox="0 0 720 168"> that made the chart the least responsive thing
+// on the page: that one held its TEXT inside the drawing, so the same 10px caption that read
+// fine in a 900px hero rendered near 4px in a 320px one, and its fixed aspect ratio made a
+// letterbox strip of the plot at every width. Here the SVG holds the line and nothing else. Every
+// piece of text — the per-period value, the axis labels, the caption — is ordinary HTML at the
+// page's own sizes, laid over the drawing in the same grid tracks the ticks use. The viewBox is a
+// unit square stretched with preserveAspectRatio="none", so the plot's height is a CSS clamp
+// rather than a ratio frozen at authoring time, and the stroke stays 2px through that stretch
+// because of vector-effect (see styles.ts) instead of turning into a wedge.
 //
-// So: the bar HEIGHTS are the only thing this function computes (as percentages, which is what
-// makes them resolution-independent), and every proportion the reader actually sees — the plot
-// height, the bar gap, which labels survive a narrow column — is a CSS decision in styles.ts,
-// taken against the chart's own width via a container query. Text is text again, at the size
-// the rest of the page uses.
+// So the only geometry computed here is the position of each point, in percent, which is what
+// makes it resolution-independent. The dots and the labels are HTML reading the same percentage
+// out of --h, which is why they land exactly on the line: one number, two renderers.
 
 // Below this width the period labels cannot all fit, so the markup pre-marks the ones CSS may
 // drop. Counted from the END so the newest period is never the one that disappears — it is the
 // week in progress, and it is the column a reader looks at first.
 const THIN_EVERY = 2;
 
-export function barChart(points: Point[], opts: { label?: string } = {}): string {
+// Two decimals in the path data. The plot is at most ~900px wide, so a hundredth of a percent is
+// a tenth of a pixel — past this the digits are markup weight buying sub-pixel precision.
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+export function lineChart(points: Point[], opts: { label?: string } = {}): string {
   const chartLabel = opts.label ?? "chart";
-  const caption = `${esc(chartLabel)} · the last column is the period in progress`;
+  const caption = `${esc(chartLabel)} · the last point is the period in progress`;
 
   if (points.length === 0) {
     // An empty series is the normal state of a fresh deployment, not an edge case.
@@ -44,31 +50,54 @@ export function barChart(points: Point[], opts: { label?: string } = {}): string
   // same trust level as anything else out of the database — so the number that drives layout is
   // re-derived with Number() (non-numeric lands on 0, never on a NaN in a style attribute) while
   // the number the reader sees goes through esc() like every other rendered value.
-  const heights = points.map((p) => {
+  const values = points.map((p) => {
     const n = Number(p.value);
     return Number.isFinite(n) && n > 0 ? n : 0;
   });
   // max || 1 keeps an all-zero series (and therefore a fresh install) from dividing by zero
-  const max = Math.max(...heights) || 1;
+  const max = Math.max(...values) || 1;
   const last = points.length - 1;
+
+  // ONE number per point, rounded once, and both renderers read it: --h drives the HTML dot and
+  // its value label, 100 - h is the SVG's y. Rounding separately for each is how a dot ends up
+  // sitting a hair off its own line.
+  const h = values.map((v) => Math.round((v / max) * 1000) / 10);
+  // The x of a point is the CENTRE of its column, so the line's vertices sit under the axis
+  // labels — which is why the plot grid has no gap: with one, a track centre is a percentage the
+  // markup cannot know (the gap is a clamp in px) and the dots would drift off the line.
+  const x = points.map((_, i) => round2(((i + 0.5) / points.length) * 100));
 
   const cols = points
     .map((p, i) => {
-      // A non-zero period that rounds to nothing still gets a visible stub (min-height in CSS);
-      // a genuinely empty one stays empty, because a bar where there were no incidents is a lie.
-      const pct = Math.round((heights[i]! / max) * 1000) / 10;
-      const zero = heights[i] === 0 ? ` data-zero` : "";
-      // The final bar is the period in progress. Marking it is information, not decoration:
+      // The final point is the period in progress. Marking it is information, not decoration:
       // unmarked, a partial week reads as a collapse in incident volume.
       const current = i === last ? ` data-current` : "";
       return (
-        `<div class="chart-col" title="${esc(p.label)}: ${esc(p.value)}">` +
-        `<div class="chart-bar" style="--h:${pct}%"${zero}${current}>` +
+        `<div class="chart-col" style="--h:${h[i]}%" title="${esc(p.label)}: ${esc(p.value)}"${current}>` +
         `<span class="chart-value">${esc(p.value)}</span>` +
-        `</div></div>`
+        `<i class="chart-dot"></i>` +
+        `</div>`
       );
     })
     .join("");
+
+  // A single point is a dot, not a line: a one-vertex polyline draws nothing and a one-vertex
+  // area is a sliver of noise, so neither is emitted. The column above still renders it.
+  const line =
+    points.length < 2
+      ? ""
+      : (() => {
+          const verts = points.map((_, i) => `${x[i]},${round2(100 - h[i]!)}`).join(" ");
+          // The area is the same vertices closed down to the baseline. It is a fill, so the
+          // non-uniform stretch costs it nothing.
+          const area = `${x[0]},100 ${verts} ${x[last]},100`;
+          return (
+            `<svg class="chart-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" focusable="false">` +
+            `<polygon class="chart-area" points="${area}"/>` +
+            `<polyline class="chart-stroke" points="${verts}"/>` +
+            `</svg>`
+          );
+        })();
 
   const ticks = points
     .map((p, i) => {
@@ -83,7 +112,7 @@ export function barChart(points: Point[], opts: { label?: string } = {}): string
 
   return (
     `<figure class="chart" style="--n:${points.length}">` +
-    `<div class="chart-plot" role="img" aria-label="${esc(`${chartLabel}: ${readOut}`)}">${cols}</div>` +
+    `<div class="chart-plot" role="img" aria-label="${esc(`${chartLabel}: ${readOut}`)}">${line}${cols}</div>` +
     `<div class="chart-axis" aria-hidden="true">${ticks}</div>` +
     `<figcaption class="chart-caption">${caption}</figcaption>` +
     `</figure>`

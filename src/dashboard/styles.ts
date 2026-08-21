@@ -894,46 +894,82 @@ form.signout button {
 .title-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-6); }
 
 /* ---------- charts ---------- */
-/* HTML and CSS, not SVG. The markup carries only the bar heights, as percentages; every
-   proportion a reader sees is decided here. That is the whole reason it stopped being an
-   <svg viewBox>: a viewBox fixes the drawing's aspect ratio at authoring time AND scales the
-   type inside it, so one file had to serve a 900px hero and a 340px phone with the same shape —
-   a letterbox strip at one end and 4px axis labels at the other. Here the plot's height is a
-   clamp, the labels are ordinary text at the page's own caption size, and both answer to the
-   width of the chart's own frame. */
+/* An SVG line over an HTML grid. The SVG holds the line and NOTHING else; every piece of text —
+   the per-period value, the axis labels, the caption — is HTML at the page's own sizes. That
+   split is the whole point. The chart was once a plain <svg viewBox="0 0 720 168"> with its type
+   inside it, and a viewBox fixes the drawing's aspect ratio at authoring time AND scales the type
+   with it, so one file had to serve a 900px hero and a 340px phone with the same shape: a
+   letterbox strip at one end, 4px axis labels at the other. Here the plot's height is a clamp,
+   the type is type, and both answer to the width of the chart's own frame. */
 .chart { margin: 0; display: flex; flex-direction: column; gap: var(--sp-3); container: chart / inline-size; }
 /* The columns come from --n on the figure, so the plot and the axis below it are two grids with
-   identical tracks — every tick stays under its own bar without either knowing the count.
+   identical tracks — every tick stays under its own point without either knowing the count.
    The dashed hairline at half scale is a background gradient rather than an element: it is a
-   reading aid for the bars, and an empty <div> in the DOM would be a reading aid for nobody. */
+   reading aid for the line, and an empty <div> in the DOM would be a reading aid for nobody.
+
+   NO column gap here, unlike the axis below. The markup puts each vertex at the centre of its
+   column as a percentage of the PLOT; a gap is a clamp in px, which shifts every track centre by
+   an amount no server-rendered percentage can know, and the dots would drift off their own line.
+   The axis keeps its gap because a label only has to sit under its column, not on a curve.
+
+   padding-top leaves room for the value labels to sit above the topmost dot without the line
+   being pushed down; the SVG is absolutely positioned inside that padding box, so it and the dots
+   share one coordinate space. */
 .chart-plot {
+  position: relative;
   display: grid; grid-template-columns: repeat(var(--n, 12), minmax(0, 1fr));
-  gap: clamp(2px, 1.4cqi, 10px);
   height: clamp(7rem, 30cqi, 14rem);
   padding-top: 1.15rem;
   border-bottom: 1px solid var(--border);
   background-image: repeating-linear-gradient(to right, var(--border) 0 2px, transparent 2px 6px);
   background-size: 100% 1px; background-position: 0 50%; background-repeat: no-repeat;
 }
-.chart-col { min-width: 0; height: 100%; display: flex; align-items: flex-end; }
-/* min-height keeps a small-but-real week visible instead of rounding it away to nothing; a week
-   that genuinely had no incidents opts out of it, because a bar where there were none is a lie. */
-.chart-bar {
-  position: relative; width: 100%; height: var(--h, 0%); min-height: 2px;
-  background: var(--text-dim); border-radius: 2px 2px 0 0;
+/* The unit-square viewBox is stretched to the plot with preserveAspectRatio="none" — that is what
+   frees the height from the ratio. The stretch is non-uniform, so a plain stroke-width would come
+   out as a wedge: thin where the box is wide, thick where it is tall, and different on every
+   screen. vector-effect draws the stroke in device pixels AFTER the transform, so 2px is 2px. */
+/* width/height 100% of the inset box, NOT auto. An SVG with a viewBox has an intrinsic aspect
+   ratio, and height:auto hands the sizing back to it — the unit-square viewBox then draws itself
+   square and the line detaches from the dots by however far the plot is from square (measured:
+   407px adrift at 768). The four insets already state the box; these two make the drawing take it.
+   The height is stated against the containing block rather than left to bottom:0 for the same
+   reason: a percentage is resolved, an auto is negotiated with the intrinsic ratio and loses. */
+.chart-line {
+  position: absolute; inset: 1.15rem 0 0;
+  width: 100%; height: calc(100% - 1.15rem);
 }
-.chart-bar[data-zero] { min-height: 0; background: none; }
-/* The last bar is the week in progress. Marking it is information, not decoration: without it
-   the final column always reads as a collapse in incident volume. Drawn as an OUTLINE rather
-   than in the accent colour — a saturated bar draws the eye to the one number that is not yet
-   true, and an unfilled box is the shape of a count still being filled in. */
-.chart-bar[data-current] {
-  background: none;
-  border: 1.5px dashed var(--text-dim); border-bottom: 0;
+.chart-stroke {
+  fill: none; stroke: var(--accent); stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+/* The fill under the line is atmosphere, not a second reading of the data — the line already
+   carries the value. Kept faint enough that the dashed half-scale rule stays visible through it,
+   because that rule is what makes a height readable as a quantity. */
+.chart-area { fill: var(--accent); opacity: .09; stroke: none; }
+/* Each column is a full-height positioning context for one dot and its label. The dot is placed
+   from the BOTTOM at the same --h the polyline used for its vertex, so the two agree by
+   construction rather than by arithmetic done twice. */
+.chart-col { position: relative; min-width: 0; height: 100%; }
+/* Half the dot's size pulled back on the two edges it is positioned FROM — bottom and left — so
+   its centre lands on --h rather than its edge. margin-top would do nothing here: an element
+   offset from the bottom edge is placed by the bottom of its margin box, so a negative top margin
+   is simply unused and the whole dot floats half its height above the line (measured: 4.5px). */
+.chart-dot {
+  position: absolute; bottom: var(--h, 0%); left: 50%;
+  width: 7px; height: 7px; margin: 0 0 -3.5px -3.5px;
+  border-radius: 50%; background: var(--accent);
+}
+/* The last point is the week in progress. Marking it is information, not decoration: without it
+   the final vertex always reads as a collapse in incident volume. A ring rather than a disc —
+   a hollow mark is the shape of a count still being filled in, and it needs no second colour. */
+.chart-col[data-current] .chart-dot {
+  background: var(--surface); border: 2px solid var(--accent);
+  width: 9px; height: 9px; margin: 0 0 -4.5px -4.5px;
 }
 .chart-value {
-  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
-  margin-bottom: 3px; line-height: 1;
+  position: absolute; bottom: var(--h, 0%); left: 50%; transform: translateX(-50%);
+  margin-bottom: .5rem; line-height: 1;
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   color: var(--text-dim);
 }
@@ -954,8 +990,8 @@ form.signout button {
   background-image: none; border-bottom-style: dashed;
   margin: 0; color: var(--text-dim); font-size: var(--fs-sm);
 }
-/* Thinning, in the order the reader can afford to lose things. The per-bar counts go first —
-   every one of them is in the tables below and each bar keeps its title= — which is what buys
+/* Thinning, in the order the reader can afford to lose things. The per-point counts go first —
+   every one of them is in the tables below and each column keeps its title= — which is what buys
    the period labels room to stay legible. Then every second period label is hidden, counted
    from the newest backwards in the markup so the week in progress is never the one that goes.
    visibility, not display: the tick keeps its grid track, so the labels that remain stay
@@ -990,8 +1026,8 @@ form.signout button {
    mistake above. A tool family especially: the agent knows the server ADVERTISED it, not that
    calling it works, so any colour there would be a health claim the page cannot make.) */
 /* The diagram carries its own sizing. It used to borrow .chart for this, back when the incident
-   chart was an <svg> too; .chart is now the flex wrapper around an HTML bar chart, and inheriting
-   it here meant an SVG getting display:flex, a gap, and container-type:inline-size — the last of
+   chart was one plain <svg>; .chart is now the flex wrapper around a figure whose SVG is only the
+   line, and inheriting it here meant an SVG getting display:flex, a gap, and container-type:inline-size — the last of
    which contains the element's own contents out of its intrinsic sizing, so the viewBox's aspect
    ratio stopped driving the height and the whole map collapsed to the replaced-element default.
    height:auto is what lets the viewBox set the proportion; overflow:visible keeps the arrowheads
@@ -1144,8 +1180,10 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   form.filters button:hover, .signin-form button:hover { filter: brightness(1.1); }
   form.signout button:hover { color: var(--text); background: var(--surface-2); }
   .pages a:hover { border-color: var(--accent); color: var(--accent); }
-  .chart-col:hover .chart-bar { background: var(--text); }
-  .chart-col:hover .chart-bar[data-current] { background: none; border-color: var(--text); }
+  /* The dot grows rather than changing colour: the accent is the line's identity, and a point
+     that turns a different hue on hover reads as a different KIND of point. */
+  .chart-col:hover .chart-dot { transform: scale(1.5); }
+  .chart-col[data-current]:hover .chart-dot { transform: scale(1.35); }
   .chart-col:hover .chart-value { color: var(--text); }
 }
 
@@ -1218,9 +1256,9 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 }
 @media (prefers-reduced-motion: no-preference) {
   a, .pages a, .rail nav a, form.filters button, .signin-form button,
-  form.signout button, .topo-tools button, .chart-bar, tbody tr {
+  form.signout button, .topo-tools button, .chart-dot, .chart-value, tbody tr {
     transition: color .12s ease, background-color .12s ease, border-color .12s ease,
-                fill .12s ease, text-decoration-color .12s ease;
+                fill .12s ease, text-decoration-color .12s ease, transform .12s ease;
   }
 }
 `;
