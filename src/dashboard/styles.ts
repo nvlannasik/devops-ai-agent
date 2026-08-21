@@ -185,20 +185,21 @@ main {
   padding: clamp(var(--sp-6), 3cqi, var(--sp-8)) var(--gutter) var(--sp-12);
   container: page / inline-size;
 }
-/* A page that holds an argument gets a narrower column than a page that holds figures. The
-   overview wants every pixel a big display has — four stat tiles and a twelve-week chart all
-   get better the wider they are. The incident page does not: its subject is the RCA, and a
-   line of argument that runs the width of a large monitor is a line the eye loses its place
-   returning from. So this is THE measure — the only width on the page. Nothing inside the RCA
-   caps itself; paragraph, list and table all end on this edge, the same edge the fact strip
-   above them ends on. A cap on the text alone would stop it short of a column it shares with
-   blocks that have no cap at all, which is exactly the ragged right this page had before.
-   58rem is the floor, not a taste: main's content box lands at 55rem here, and the stat strip
-   breaks 4 tiles into two rows once its container drops under 54rem (see .stats below). Narrow
-   this and the header above the RCA comes apart. :has, rather than a flag threaded through
-   layout(), because the rule IS the condition — the measure follows the prose, and a page that
-   grows one later gets it free. */
-.pane:has(.prose) { --maxw: 58rem; }
+/* The incident page used to cap itself at 58rem — a reading measure, so a line of argument did
+   not run the width of a large monitor. It is gone, deliberately: the cap applied to the whole
+   PAGE, not to the prose, so above ~1180px the fact strip, both record tables and the RCA all
+   froze at one width and the page stopped answering the screen at all. A measure that stops the
+   figures growing to buy the sentences a shorter line is paying the wrong block. The page now
+   follows the column like every other; if the RCA's line length needs a ceiling later it goes on
+   the text, inside .doc, where it costs the tables nothing. */
+/* A document laid out as ONE block instead of a run of loose children. Without it every strip
+   in a skill page is its own full-width band sized only by its content — an eyebrow is 880x11 —
+   and the page is a stack of bands rather than a document. Width comes from the column, so the
+   block follows the screen at every size; the RCA's 58rem measure is deliberately NOT applied
+   here, because what a skill page holds is a preformatted playbook, not sentences: wrapping it
+   to a reading measure hides the right-hand half of every line the author wrote at their own
+   width. min-width 0 for the same reason main needs it — the <pre> must not widen the page. */
+.doc { width: 100%; min-width: 0; }
 
 /* auto on top, 0 on the bottom: horizontally centred like main, and pushed to the foot of a
    short page rather than left floating under a two-row table. */
@@ -655,9 +656,12 @@ form.signout button {
 .prose { margin: 0; }
 /* The UI face, one step up in size with an open line-height. That is what makes this read as
    prose — a paragraph is prose because of its size and its leading, not because of its serifs.
-   The measure is NOT set here. It is the page's (.pane:has(.prose)), so a paragraph ends on
-   the same right edge as the fact strip and the tables; a max-width of its own would stop the
-   text short of a column it shares with blocks that have no measure at all. */
+   The measure is NOT set here, and a 68ch cap was tried and taken back out. It does shorten the
+   line — a measured 728px at every width — but the section rule above each paragraph belongs to
+   the DOCUMENT and keeps the column, so the two ends stop in different places: at 1920 the rule
+   ran to x=1748 while the text ended at x=1116, leaving 632px of hairline over nothing (448px at
+   1440; gone by 1024). That is the same ragged right the panels used to produce, moved from the
+   frame to the divider and made worse by the wider column. One right edge, or none. */
 .prose-text {
   font-family: var(--font-ui); font-size: var(--fs-md); line-height: 1.7;
   margin: 0; white-space: pre-wrap; overflow-wrap: break-word; text-wrap: pretty;
@@ -686,8 +690,8 @@ form.signout button {
 /* No width of its own. The RCA takes the column the page gives it, which is the same column the
    fact strip and the section rules above it take — a block that stops short of the panel over it
    reads as a rendering fault, however well-measured the number behind it is. The measure is the
-   PAGE's instead (see .pane:has(.prose)), so there is exactly one width on this page and nothing
-   for a second number to drift from. */
+   PAGE's instead (.doc, which takes the column), so there is exactly one width on this page and
+   nothing for a second number to drift from. */
 .rca-head {
   font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.02em; line-height: 1.25;
   margin: 0 0 var(--sp-3); text-wrap: balance;
@@ -816,6 +820,23 @@ form.signout button {
    one keeps its italic. */
 .rca td em {
   font-family: var(--font-data); font-style: normal; font-weight: 600; font-size: .92em;
+}
+
+/* ---------- skill ---------- */
+/* The skill text, exactly as the model receives it. Wrapped, not scrolled — the opposite call
+   from .rca-code above, and for the opposite reason: a log line is one record and breaking it
+   destroys the record, while a skill body is prose the author wrapped by hand at whatever width
+   their editor had. Scrolling it sideways would hide the right-hand half of every sentence
+   behind a gesture, on the page whose entire purpose is reading the thing.
+   pre-wrap, so the author's own line breaks and indentation survive — the numbered steps in a
+   playbook are structure, and re-flowing them into a paragraph is a different document.
+   The width comes from .doc, which comes from the column — nothing here declares one, so the
+   block and the headings above it end on the same right edge at every screen size. */
+.skill-body {
+  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.6;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);
+  padding: var(--sp-5); margin: 0;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
 /* ---------- empty, pager ---------- */

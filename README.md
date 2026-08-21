@@ -328,6 +328,7 @@ set `DASHBOARD_ENABLED=true` and a `DASHBOARD_PASSWORD`.
 /incidents   filterable list, 10 rows a page
 /incidents/N one incident: the RCA parsed into sections, its remediations & verdicts
 /topology    namespace map
+/context     what the agent sends the model: skill registry + token budget per backend
 /healthz     open (probe target) — everything else needs the session cookie
 ```
 
@@ -355,6 +356,25 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 - **RCA Output Format** — Slack Block Kit formatting rules
 - **Severity / Confidence thresholds**
 
+### Skills (`prompts/skills/`)
+
+The system prompt carries what applies to *every* investigation. Anything that applies to
+*one symptom* is a skill: a Markdown file with frontmatter (`name`, `description`, `when`)
+whose body is injected only when `when` matches the incoming alert or message. `when` is
+either `always` or a case-insensitive regex — `crashloop|restarting|restart count`.
+`crashloopbackoff.md`, `oomkilled.md`, `pvc-pending.md`, `rca-format.md` and the rest ship in
+the repo; drop in another file and restart — no rebuild, no code change.
+
+At most `MAX_MATCHED_SKILLS` (3) skills are injected per turn, each capped at
+`SKILL_MAX_CHARS` (8000), ranked by match count. Loading is **fail-fast**: a malformed
+frontmatter, a duplicate `name`, or an empty skills directory throws at startup rather than
+letting the agent run without an RCA output format. The `/context` dashboard page shows what
+loaded.
+
+Skills ride in as a separate message, never appended to the system prompt — that keeps the
+cached prompt byte-identical across turns, so a per-incident playbook never invalidates the
+prompt cache.
+
 ## Key Features
 
 | Feature | Details |
@@ -368,7 +388,8 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 | Remediation memory | Past executed remediations (+ their PRs/outcomes and verification verdicts) for the same alert are recalled into future investigations & proposals, so a recurrence's proven fix isn't re-proposed — and a fix that didn't work comes back as a negative prior. All remediations persist in the `remediations` table (change from→to, file, PR URL, status) |
 | Incident Dashboard | Optional read-only web view (own listener, own port, shared-password cookie) over the same Postgres — overview, filterable incident list, per-incident RCA + remediation verdicts, namespace map |
 | MCP Reconnect | Exponential backoff + mutex-protected |
-| Context Window | Tool results truncated to 8000 chars, history to 40 messages |
+| Context Assembly | Every request is assembled, not accumulated: tool results compacted to 8000 chars, conversation history trimmed to 50 messages, then the whole thing fitted to a per-backend token budget (`fitToBudget()`) that drops oldest-first rather than letting the provider reject the call |
+| Skills | Per-symptom playbooks in `prompts/skills/*.md`, selected by a `when` regex and injected as a separate message — top 3 per turn, system prompt stays byte-identical so the prompt cache holds |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
 | Follow-up Mode | `markRcaSent` flag prevents RCA format on follow-ups |
 | Response-Mode Markers | Every entry point stamps a per-message marker (`[SOURCE: Alertmanager ...]` / `[USER MESSAGE ...]` / `[FOLLOW-UP ...]`) — alerts always investigate, plain mentions stay conversational |
@@ -389,7 +410,12 @@ src/
 ├── agent/
 │   ├── index.ts                  # Agentic loop, parallel tool calls
 │   ├── confidence/index.ts       # parseConfidence()
-│   ├── context/index.ts          # trimHistory(), sanitizeContentBlocks()
+│   ├── context/                  # Request assembly — the whole prompt is built per call
+│   │   ├── index.ts              # assembleRequest(), injectSkills(), trimToWindow(), sanitizeContentBlocks()
+│   │   ├── budget.ts             # estimateTokens(), fitToBudget() — oldest-first drop
+│   │   ├── compact.ts            # compactToolResult() — MAX_TOOL_RESULT_CHARS
+│   │   └── resolve-budget.ts     # Per-backend context window → Budget
+│   ├── skills/                   # index.ts (registry + `when` matching), frontmatter.ts
 │   ├── correlation/index.ts      # One webhook = one group = one investigation (not N pods, N threads)
 │   ├── dedup/index.ts            # AlertDeduplicator
 │   ├── llm/
@@ -415,8 +441,9 @@ src/
 ├── dashboard/                    # Read-only incident dashboard (own listener, own CSP)
 │   ├── server.ts, auth.ts        # Routing + per-route CSP; shared password → signed cookie
 │   ├── queries.ts, filters.ts    # Read-only SQL; filter parsing + fixed-size pagination
-│   ├── views.ts, html.ts, styles.ts, svg.ts   # Server-rendered pages, esc(), inline icons
-│   ├── rca.ts                    # Slack-mrkdwn RCA → per-section tables
+│   ├── views.ts, html.ts, styles.ts, chart.ts  # Server-rendered pages, esc(), inline SVG charts
+│   ├── rca.ts                    # Slack-mrkdwn RCA → per-section cards
+│   ├── context.ts                # /context — loaded skills + resolved budget per backend
 │   └── topology.ts, topology-svg.ts, topology-script.ts   # Namespace map (only page with JS)
 ├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
 ├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
@@ -428,7 +455,8 @@ src/
     └── slack/                    # blocks.ts (isRcaResponse/buildRcaBlocks), remediation-card.ts, split.ts
 
 migrations/    001…006 — run at pod startup, advisory-locked
-prompts/       system.md — editable without a rebuild
+prompts/       system.md + skills/*.md — editable without a rebuild
+docs/          DESIGN_*.md per subsystem, BENCHMARK_agent_stack.md (scenarios + scoring)
 ```
 
 ## AWS Authentication

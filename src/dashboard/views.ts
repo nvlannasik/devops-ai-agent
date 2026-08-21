@@ -579,7 +579,11 @@ export function detailPage(d: {
     i.alertname,
     // The id is a real identifier, so it earns the caption slot above the title. The sections
     // below it are not numbered: they are facts about one incident, not a sequence.
-    `<p class="eyebrow">Incident #${esc(i.id)}</p>
+    // .doc is the same wrapper the skill page uses, and for the same reason: laid straight into
+    // <main> these blocks are loose full-width bands sized only by their content, not one
+    // document. See the .doc rule in styles.ts.
+    `<div class="doc">
+     <p class="eyebrow">Incident #${esc(i.id)}</p>
      <h1>${esc(i.alertname)}</h1>
      <div class="title-meta">
        ${severityBadge(i.severity)}
@@ -604,7 +608,8 @@ export function detailPage(d: {
      ${section(ICON.wrench, "Remediation")}
      ${remediations}
      ${section(ICON.speech, "On-call feedback")}
-     ${feedback}`,
+     ${feedback}
+     </div>`,
     "/incidents"
   );
 }
@@ -806,8 +811,10 @@ export function topologyPage(t: Topology, nonce: string): string {
 // function named `num` beside the CSS class named "num" that these very cells pass.
 
 // A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
-// stack rather than pairs. The body hangs off the description in a <details>: native disclosure,
-// no JavaScript, and the summary is already the line the reader wanted.
+// stack rather than pairs. The body does NOT hang off the row: it is 8000 chars at most and a
+// <details> inside a table cell expands the row it sits in, so opening one pushed every skill
+// below it off the screen and gave the text the width of one column to wrap in. It gets its own
+// page instead (skillPage), which the name links to.
 function skillRows(skills: ContextView["skills"]): string {
   // No empty state on purpose: loadSkills throws at boot on a directory with no .md files, so a
   // running agent always has skills. An "empty" table here would be a state the process cannot
@@ -817,17 +824,68 @@ function skillRows(skills: ContextView["skills"]): string {
     skills
       .map((s) =>
         `<tr role="row">` +
-        cell("Skill", `<code translate="no">${esc(s.name)}</code>`) +
+        // The name is the link, not a "view" column: it is what the reader is already looking
+        // at, and a row whose target is named twice reads as two destinations. `skillHref`
+        // encodes because nothing here may assume the loader's name rule still holds.
+        cell("Skill", `<a href="${esc(skillHref(s.name))}"><code translate="no">${esc(s.name)}</code></a>`, "primary") +
         cell("When", s.when === "always"
           ? `<span class="badge">ALWAYS</span>`
           : `<code translate="no">${esc(s.when)}</code>`) +
         cell("Size", `${fmtInt(s.chars)} chars`) +
-        cell("Description",
-          `<details><summary>${esc(s.description)}</summary><pre>${esc(s.body)}</pre></details>`) +
+        cell("Description", esc(s.description)) +
         `</tr>`
       )
       .join(""),
     "stack"
+  );
+}
+
+// encodeURIComponent inside the path segment, esc() on the whole attribute at the call site —
+// the same two layers the incident page's Slack link takes. A skill name matches [a-z0-9-] at
+// load time (NAME_RE in agent/skills), so today neither layer has anything to do; that rule
+// lives in another module and this one does not get to assume it.
+const skillHref = (name: string): string => `/context/${encodeURIComponent(name)}`;
+
+/**
+ * One skill, whole. The body is the text the model is handed verbatim, so it is rendered
+ * preformatted and escaped — never parsed as markdown. What the agent reads and what this page
+ * shows have to be the same string, and a renderer is a second interpretation of it.
+ */
+export function skillPage(s: ContextView["skills"][number]): string {
+  const always = s.when === "always";
+  // Everything below is ONE block, not a stack of strips laid straight into <main>. The
+  // difference is real: loose children each take the column's full width and their own content
+  // height, so a page of them is a run of full-bleed bands (an eyebrow renders 880x11) with
+  // nothing declaring that they are one document. .doc is that declaration — it establishes the
+  // block formatting context the sections' margins collapse inside, and it is the element the
+  // width rule attaches to, so the page follows the column instead of a measure of its own.
+  return layout(
+    s.name,
+    `<div class="doc">
+     <p class="eyebrow">Skill</p>
+     <h1 translate="no">${esc(s.name)}</h1>
+     <div class="title-meta">
+       ${always ? `<span class="badge">ALWAYS</span>` : `<span class="badge" data-tone="info">MATCHED</span>`}
+       <span class="meta">${fmtInt(s.chars)} chars</span>
+       <a class="standalone" href="/context">← All skills</a>
+     </div>
+     <p class="meta">${esc(s.description)}</p>
+
+     ${section(ICON.bolt, "Trigger")}
+     <p class="meta">${
+       always
+         ? `Carried into every investigation, whatever the alert says.`
+         : `Carried when this pattern matches the alert text. The match is case-insensitive, and ` +
+           `it is distinct matches that rank a skill against the others, not how often one word repeats.`
+     }</p>
+     ${always ? "" : `<pre class="skill-body" translate="no">${esc(s.when)}</pre>`}
+
+     ${section(ICON.context, "Skill text")}
+     <p class="meta">Injected verbatim into the first user message of an investigation — never into
+       the system prompt, which is cached whole and would miss on every call if it varied.</p>
+     <pre class="skill-body">${esc(s.body)}</pre>
+     </div>`,
+    "/context"
   );
 }
 
@@ -869,7 +927,7 @@ export function contextPage(v: ContextView): string {
      ${section(ICON.context, "Skills")}
      <p class="meta">Selected from the alert text and carried in the first user message, never in
        the system prompt — a system prompt that varied per investigation would miss the model's
-       prompt cache on every call. Expand a description to read the skill itself.</p>
+       prompt cache on every call. Open a skill to read the text the model is handed.</p>
      ${skillRows(v.skills)}
 
      ${section(ICON.chip, "Budget per backend")}

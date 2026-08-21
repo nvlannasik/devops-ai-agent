@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage, contextPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage, contextPage, skillPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { STYLES } from "./styles.js";
 import type { IncidentDetail, IncidentPage, IncidentRow, Overview, Tokens } from "./queries.js";
@@ -681,6 +681,7 @@ const everyPage = (): [string, string][] => [
   ["detail", detailPage({ incident: { ...row, rca: "x", channel: "C1", thread_ts: "1.0" }, remediations: [], feedback: [] })],
   ["topology", topologyPage(baseTopology, NONCE)],
   ["context", contextPage(CTX)],
+  ["skill", skillPage(CTX.skills[1]!)],
 ];
 
 // h2's own gap is the distance out to the hairline. Reusing it between a glyph and the word
@@ -760,27 +761,25 @@ test("main and the footer are pinned to the pane rather than to their content", 
   }
 });
 
-// The narrower reading column is bought with `.pane:has(.prose)`, which means the selector and
-// the markup are a coupling nothing else checks: rename the class on the RCA frame and the rule
-// silently stops matching, leaving the incident page at the overview's 88rem with half of every
-// card empty. The condition must hold where the argument is and nowhere else.
-test("the reading measure follows the prose, and only the prose", () => {
-  const rule = STYLES.match(/^\.pane:has\(\.prose\) \{([^}]*)\}/m);
-  assert.ok(rule, "no reading-measure rule to check");
-  assert.match(rule[1], /--maxw:/, "the rule has to move the measure, not something else");
-
+// The incident page used to buy a 58rem reading column with `.pane:has(.prose)`. It applied to
+// the PAGE, so above ~1180px the fact strip and both record tables froze at that width too and
+// the page stopped answering the screen — measured 928px of main at both 1440 and 1920. A
+// measure that stops the figures growing to shorten the sentences is charged to the wrong block.
+// If a line-length ceiling comes back it belongs on the text, inside .doc.
+test("no page-wide measure is charged for the RCA's line length", () => {
+  // The RULE, not the name: a comment may still mention where the measure used to live.
+  assert.doesNotMatch(
+    STYLES,
+    /^\.pane:has\(\.prose\)/m,
+    "the page is capped for the sake of its prose again"
+  );
   const incident: IncidentDetail = {
     ...row, rca: "the container hit its limit", channel: "C1", thread_ts: "1785282508.001",
   };
   assert.match(
     detailPage({ incident, remediations: [], feedback: [] }),
     /class="prose/,
-    "the incident page is the argument page — it has to satisfy the selector"
-  );
-  assert.doesNotMatch(
-    listPage(page([row]), parseFilters(new URLSearchParams(""))),
-    /class="prose/,
-    "a table of incidents is figures, and keeps the full width"
+    "the RCA still marks its prose — a later text-level measure has this to hang on"
   );
 });
 
@@ -985,6 +984,10 @@ test("a section's lead paragraph is not flush against its own table", () => {
 // two read as one column instead of a panel with a ragged margin beside it. Any max-width
 // declared inside the RCA breaks that: the capped block stops short while its uncapped
 // neighbours run on, and the 240px strip down the right comes straight back.
+// Re-confirmed by measurement after the page measure was removed: a 68ch cap on .prose-text
+// holds the line at 728px, but the section rule above it belongs to the document and keeps the
+// column — 632px of hairline over nothing at 1920, 448px at 1440. A wider column makes the cap
+// worse, not better, so this rule outlives the layout it was written against.
 test("nothing inside the RCA sets a width of its own", () => {
   for (const sel of [".rca", ".prose", ".prose-text", ".rca-list", ".rca-head"]) {
     const rule = STYLES.match(new RegExp(`^\\${sel} \\{([^}]*)\\}`, "m"));
@@ -997,18 +1000,19 @@ test("nothing inside the RCA sets a width of its own", () => {
   }
 });
 
-// --maxw for this page is a floor, not a preference. main's content box sits ~3rem inside it,
-// and the stat strip breaks its four tiles into two rows once its container drops under 54rem.
-// Narrowing the reading measure past that point silently rearranges the header above the RCA,
-// which is the panel the RCA was just aligned to.
-test("the incident page stays wide enough to keep the stat strip in one row", () => {
-  const page = STYLES.match(/^\.pane:has\(\.prose\) \{[^}]*--maxw: ([\d.]+)rem/m);
-  assert.ok(page, "the incident page's column is gone");
+// The same floor, now stated against the only measure left. main's content box sits ~3rem inside
+// --maxw, and the stat strip breaks its four tiles into two rows once its container drops under
+// 54rem — so any page measure below that step silently rearranges the header above the RCA. This
+// was the rule that made 58rem a floor rather than a taste; it outlives the rule it was written
+// for, because a narrower --maxw would break the strip on every page, not just this one.
+test("the page measure stays wide enough to keep the stat strip in one row", () => {
+  const maxw = STYLES.match(/^:root \{[\s\S]*?--maxw: ([\d.]+)rem/m);
+  assert.ok(maxw, "the page's column is gone");
   const step = STYLES.match(/@container page \(max-width: ([\d.]+)rem\) \{ \.stats \{/);
   assert.ok(step, "the stat strip's 4->2 step is gone");
   assert.ok(
-    Number(page[1]) >= Number(step[1]) + 3,
-    `--maxw ${page[1]}rem leaves the container at or under the ${step[1]}rem step — the fact strip will wrap to two rows`
+    Number(maxw[1]) >= Number(step[1]) + 3,
+    `--maxw ${maxw[1]}rem leaves the container at or under the ${step[1]}rem step — the fact strip will wrap to two rows`
   );
 });
 
@@ -1209,10 +1213,54 @@ test("the page runs no JavaScript — the claim its CSP makes", () => {
   assert.doesNotMatch(contextPage(CTX), /<script/i);
 });
 
-test("a skill body is readable without leaving the page", () => {
+// The body used to hang off the description in a <details> inside the row. It is up to 8000
+// chars, so opening one pushed every skill below it off the screen and wrapped the text in one
+// column's width. The list is now a list: description in the row, body on its own page.
+test("the list names each skill and links it to its own page, and holds no body", () => {
   const html = contextPage(CTX);
-  assert.match(html, /<details><summary>First tool calls for a container killed at its memory limit<\/summary>/);
-  assert.match(html, /<pre>1\. k8s_describe_pod<\/pre>/);
+  assert.match(html, /<a href="\/context\/oomkilled"><code translate="no">oomkilled<\/code><\/a>/);
+  assert.match(html, /First tool calls for a container killed at its memory limit/);
+  assert.doesNotMatch(html, /<details/, "a body inside a row is what this page moved away from");
+  assert.doesNotMatch(html, /k8s_describe_pod/, "the body belongs to the skill page, not the list");
+});
+
+// Laid straight into <main>, each block is its own full-width band sized only by its content —
+// the eyebrow measured 880x11 — and the column stopped growing at 58rem, so past ~1180px the
+// page ignored the screen entirely. One wrapper that takes its width from the column is what
+// makes it a document: measured 1360 / 1176 / 760 / 468 at 1920 / 1440 / 1024 / 390.
+test("a document page is one block that takes the column's width, capped by nothing of its own", () => {
+  const rule = STYLES.match(/^\.doc \{([^}]*)\}/m);
+  assert.ok(rule, ".doc has no rule — the wrapper is markup with no layout behind it");
+  assert.match(rule[1], /width: 100%/, "an auto-width block shrinks to its content, not the column");
+  assert.doesNotMatch(rule[1], /max-width/, "a measure here would stop the page following the screen");
+  assert.doesNotMatch(STYLES, /\.pane:has\(\.skill-body\)/, "a skill body is a playbook, not a reading measure");
+
+  // Both document-shaped pages, both wrapped: a skill and an RCA are each one thing read top to
+  // bottom, and either one laid loose into <main> is a run of bands instead.
+  assert.match(skillPage(CTX.skills[1]!), /<div class="doc">/);
+  assert.match(
+    detailPage({ incident: { ...row, rca: "x", channel: "C1", thread_ts: "1.0" }, remediations: [], feedback: [] }),
+    /<div class="doc">/
+  );
+});
+
+test("a skill page carries the whole body, its trigger, and the way back", () => {
+  const html = skillPage(CTX.skills[1]!);
+  assert.match(html, /<h1 translate="no">oomkilled<\/h1>/);
+  assert.match(html, /<pre class="skill-body">1\. k8s_describe_pod<\/pre>/);
+  assert.match(html, /<pre class="skill-body" translate="no">oomkill\|exit code 137<\/pre>/);
+  assert.match(html, /<a class="standalone" href="\/context">/);
+  // The rail still marks Context: a skill page is a page of that section, not a fifth destination.
+  assert.match(html, /<a href="\/context" aria-current="page">/);
+});
+
+// "always" is not a regex and has no pattern to show — printing the word in a code block would
+// present a literal as if it were the thing being matched.
+test("an always-on skill states that instead of showing a pattern", () => {
+  const html = skillPage(CTX.skills[0]!);
+  assert.match(html, /<span class="badge">ALWAYS<\/span>/);
+  assert.match(html, /whatever the alert says/);
+  assert.doesNotMatch(html, /<pre class="skill-body" translate="no">/);
 });
 
 // Both "light" and "10,746" also appear in the budget table's own row for that backend, so
@@ -1228,11 +1276,21 @@ test("the effective budget is stated, not left to be inferred from the table", (
 });
 
 // Assert the escaped form is PRESENT — asserting the raw form is absent passes on a blank page.
-test("a skill body and a regex are escaped, not rendered", () => {
-  const html = contextPage({
-    ...CTX,
-    skills: [{ name: "x", description: 'a "quoted" one', when: '5xx|<b>|"q"', chars: 10, body: "<script>alert(1)</script>" }],
-  });
+// A skill is a file on disk that an operator wrote; the `when` regex is full of the characters
+// markup is made of. The check follows the body to the page that now renders it — moving a
+// value to a new template is exactly when an esc() gets dropped.
+const HOSTILE_SKILL = {
+  name: "x", description: 'a "quoted" one', when: '5xx|<b>|"q"', chars: 10, body: "<script>alert(1)</script>",
+} as const;
+
+test("a skill regex is escaped, not rendered, in the list", () => {
+  const html = contextPage({ ...CTX, skills: [{ ...HOSTILE_SKILL }] });
+  assert.match(html, /5xx\|&lt;b&gt;\|&quot;q&quot;/);
+  assert.doesNotMatch(html, /<b>/);
+});
+
+test("a skill body and a regex are escaped, not rendered, on the skill page", () => {
+  const html = skillPage({ ...HOSTILE_SKILL });
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /5xx\|&lt;b&gt;\|&quot;q&quot;/);
   assert.doesNotMatch(html, /<script>alert/);

@@ -5,6 +5,7 @@ import { DashboardServer, matchRoute, METHODS } from "./server.js";
 import { DashboardQueries } from "./queries.js";
 import { config } from "../config/index.js";
 import { SESSION_COOKIE, mintSession } from "./auth.js";
+import type { SkillView } from "./context.js";
 
 // config is `as const` for the TYPE system only — nothing freezes it at runtime — so the
 // dashboard can be turned on for this one isolated test-file process (node:test's default
@@ -112,13 +113,13 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 // resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
 async function withServer<T>(
   fn: (port: number) => Promise<T>,
-  opts: { unconfigured?: boolean } = {}
+  opts: { unconfigured?: boolean; skills?: SkillView[] } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(new DashboardQueries(null));
+  const dashboard = new DashboardServer(new DashboardQueries(null), undefined, () => opts.skills ?? []);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -396,6 +397,42 @@ test("an oversized login body is refused rather than read", async () => {
 test("/context is a route, and a trailing slash is the same route", () => {
   assert.deepEqual(matchRoute("/context"), { kind: "context" });
   assert.deepEqual(matchRoute("/context/"), { kind: "context" });
+});
+
+// The name is carried through decoded, and whether it EXISTS is the handler's question — the
+// router owns no copy of the loader's NAME_RE, so a name this pattern accepts and the loader
+// would reject is a 404 from the lookup rather than a second rule to keep in step.
+test("/context/<name> is a skill route, decoded, and one segment deep", () => {
+  assert.deepEqual(matchRoute("/context/oomkilled"), { kind: "skill", name: "oomkilled" });
+  assert.deepEqual(matchRoute("/context/oomkilled/"), { kind: "skill", name: "oomkilled" });
+  assert.deepEqual(matchRoute("/context/rca%20format"), { kind: "skill", name: "rca format" });
+  assert.deepEqual(matchRoute("/context/a/b"), { kind: "notfound" });
+  // decodeURIComponent throws on a lone %, which is a bad path and not a bad server
+  assert.deepEqual(matchRoute("/context/%zz"), { kind: "notfound" });
+  // capped before decoding, so a megabyte of path is never compared against anything
+  assert.deepEqual(matchRoute(`/context/${"x".repeat(129)}`), { kind: "notfound" });
+});
+
+// These servers run with no database (DashboardQueries(null)), which is the point: a skill is
+// read out of the running process, so its page must answer on the /context side of the DB gate
+// rather than falling through to "No database configured".
+test("a skill page serves from the loaded skills while the database is down", async () => {
+  const skills: SkillView[] = [
+    { name: "oomkilled", description: "a container at its memory limit", when: "oomkill", chars: 21, body: "1. k8s_describe_pod" },
+  ];
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /context/oomkilled HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(res, /1\. k8s_describe_pod/);
+    assert.doesNotMatch(res, /No database configured/);
+
+    const missing = await raw(port, "GET /context/nosuchskill HTTP/1.1", authed);
+    assert.match(status(missing), /^HTTP\/1\.1 404\b/);
+
+    // and it is behind the password like every other page
+    const anon = await raw(port, "GET /context/oomkilled HTTP/1.1");
+    assert.match(status(anon), /^HTTP\/1\.1 303\b/);
+  }, { skills });
 });
 
 // The read-only invariant, asserted rather than assumed. A route absent from METHODS answers 405

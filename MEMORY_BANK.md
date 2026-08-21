@@ -302,13 +302,20 @@ The rules now:
 - **The stat shelf steps 4 → 2 → 1** (`@container page` at 54rem and 26rem) and never `auto-fit`.
   `auto-fit` on the token shelf produced a 3+1 band with an orphan tile, and a shelf that is not a
   clean divisor of its row reads as a bug.
-- **A page of figures and a page of argument get different measures.** `--maxw` is 88rem, and
-  `.pane:has(.prose)` drops it to 62rem. The overview and the incident *list* improve with every
-  pixel a big display has; the incident *page* does not — `.prose-text` stops at 68ch however wide
-  its frame grows, so past a point the extra width is empty card and an Evidence table whose second
-  column drifts a hand's width from its first. `:has()` rather than a flag threaded through
-  `layout()`: the rule *is* the condition. `views.test.ts` pins the coupling, because renaming the
-  class on the RCA frame would silently stop the selector matching.
+- **There is one measure, `--maxw` (88rem), and the reading measure that used to compete with it
+  is gone.** `.pane:has(.prose)` dropped the incident page to 58rem so a line of argument would not
+  run the width of a large monitor. The rule was removed: it capped the **page**, not the prose, so
+  above ~1180px the fact strip, both record tables and the RCA all froze together — `main` measured
+  928px at 1440 **and** at 1920, i.e. the page ignored the screen. Buying the sentences a shorter
+  line by stopping the figures growing charges the wrong block. A line-length ceiling, if it comes
+  back, belongs on the text inside `.doc`, where it costs the tables nothing. `views.test.ts` pins
+  the absence of the page-wide rule and, separately, the `--maxw >= step + 3` floor that keeps the
+  fact strip in one row.
+- **A document page is one wrapper.** `detailPage` and `skillPage` put their whole body in
+  `<div class="doc">` (`width: 100%; min-width: 0`, and deliberately **no** measure). Without it
+  every block is a loose full-width band sized only by its own content — a measured `p.eyebrow` of
+  880×11 — a stack of strips rather than a document. With it, both pages follow the column: 1360 /
+  1176 / 760 / 468 at viewports of 1920 / 1440 / 1024 / 390.
 - **A shelf's sub-lines are all-or-nothing.** `.stat dd` is bottom-anchored (`margin-top: auto`)
   so values line up across a row without reserving a blank caption line — reserving one
   (`min-height` on `dt`) was itself the whitespace being complained about. But the anchor pulls the

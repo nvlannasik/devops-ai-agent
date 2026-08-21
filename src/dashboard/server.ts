@@ -4,7 +4,7 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters } from "./filters.js";
-import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, topologyPage } from "./views.js";
+import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, skillPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
 import { buildContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
@@ -22,7 +22,8 @@ import {
 
 export type Route =
   | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "login" | "logout" }
-  | { kind: "detail"; id: number };
+  | { kind: "detail"; id: number }
+  | { kind: "skill"; name: string };
 
 export function matchRoute(pathname: string): Route {
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
@@ -33,6 +34,19 @@ export function matchRoute(pathname: string): Route {
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
   if (p === "/context") return { kind: "context" };
+  // The name is matched loosely and resolved against the loaded skills, not against this
+  // pattern: a page that 404s from the router would have to repeat the loader's NAME_RE
+  // (agent/skills/index.ts) and the two would drift. The cap is what keeps a megabyte-long
+  // path from being decoded and compared at all. decodeURIComponent throws on a malformed
+  // %-escape — that is a 404, not a 500, so it is caught here rather than left to bubble.
+  const s = /^\/context\/([^/]{1,128})$/.exec(p);
+  if (s) {
+    try {
+      return { kind: "skill", name: decodeURIComponent(s[1]!) };
+    } catch {
+      return { kind: "notfound" };
+    }
+  }
   // digit count capped at 15: any 15-digit string is < 10^15, safely under
   // Number.MAX_SAFE_INTEGER (~9.007e15, 16 digits) — so isSafeInteger below is never the
   // thing doing the rejecting for an in-bound match, it is defense in depth. Without the
@@ -336,6 +350,14 @@ export class DashboardServer {
         contextPage(buildContextView(this.skills(), tools.length, JSON.stringify(tools))),
         "text/html; charset=utf-8"
       );
+    }
+
+    // Same side of the database gate as /context, for the same reason: a skill is read out of
+    // the running process, so this page answers while Postgres is down.
+    if (route.kind === "skill") {
+      const skill = this.skills().find((s) => s.name === route.name);
+      if (!skill) return send(404, errorPage("Not found", `No skill named ${route.name}.`));
+      return send(200, skillPage(skill), "text/html; charset=utf-8");
     }
 
     if (!this.queries.enabled) {
