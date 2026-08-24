@@ -216,17 +216,15 @@ export class DashboardQueries {
     } else if (config.incidents.enabled) {
       // 5s slot wait: with max 3 and no auth in front, a burst otherwise queues waiters
       // with no timer at all, holding HTTP requests open indefinitely
-      this.pool = createPool(3, 5000);
+      //
+      // statement_timeout is enforced by Postgres, so a runaway query dies at the server
+      // rather than occupying the event loop that also handles alerts. It is set in the
+      // connection's startup packet (see createPool) rather than by a `SET` from a 'connect'
+      // listener — that listener cannot be awaited, so the first query on each new connection
+      // used to start before the SET landed, both raising pg's "client is already executing a
+      // query" deprecation and leaving that first query unbounded.
+      this.pool = createPool(3, 5000, 3000);
       this.pool.on("error", (err: Error) => logger.error(`[dashboard] pool error: ${err.message}`));
-      // enforced by Postgres, so a runaway query dies at the server rather than
-      // occupying the event loop that also handles alerts
-      this.pool.on("connect", (c) => {
-        void c.query("SET statement_timeout = 3000").catch((err: unknown) =>
-          logger.warn(
-            `[dashboard] SET statement_timeout failed — connection has no statement_timeout: ${errDetail(err)}`
-          )
-        );
-      });
     } else {
       this.pool = null;
     }
