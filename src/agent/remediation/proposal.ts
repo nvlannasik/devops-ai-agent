@@ -164,11 +164,41 @@ const NEGATED =
 const FAULT_EVIDENCE =
   /\b(crashloop\w*|oomkill\w*|out of memory|imagepull\w*|errimagepull|createcontainer\w*|runcontainer\w*|invalidimagename|failedscheduling|unschedulable|evicted|backoff|node ?notready|not ready|unhealthy|degraded|unavailable|failing|failed|erroring|crashing|restarting|flapping|stuck|wedged|throttl\w*|saturat\w*|exhaust\w*|starv\w*|firing|disk pressure|memory pressure|timed out)\b/i;
 
-// `isRca` is the strongest signal there is: the agent only reaches for the incident template
-// when it found something to diagnose.
-export function worthProposing(userText: string, reply: string, isRca: boolean): { propose: boolean; reason: string } {
+// "ya" / "oke" / "go ahead" — how a person actually approves something already on the table.
+// Anchored at the start so it is the message's whole point, not a word buried in a sentence.
+const AFFIRMATIVE =
+  /^(ya|iya|yoi|ok|oke|okay|sip|siap|boleh|setuju|lanjut|lanjutkan|gas|jalankan|yes|yep|yeah|sure|proceed|go|go ahead|do it)\b/i;
+
+// Any of these anywhere in the message and it is not an approval, whatever it opened with:
+// "ya tapi jangan sekarang" agrees with the diagnosis, not with doing the thing.
+const DISSENT = /\b(jangan|tidak|nggak|ngga|gak|belum|batal|tunggu|nanti|cancel|no|don'?t|do not|stop|hold|wait)\b/i;
+
+const isApproval = (text: string): boolean => AFFIRMATIVE.test(text.trim()) && !DISSENT.test(text);
+
+/**
+ * `isRca` is the strongest signal there is: the agent only reaches for the incident template
+ * when it found something to diagnose.
+ *
+ * `previousReply` is what the agent said in the turn BEFORE this one, and it exists for the
+ * case this gate used to miss entirely: the agent proposes a concrete change in prose, the
+ * person answers "ya", and nothing happens — because "ya" names no action and the agent's own
+ * confirmation ("Siap, nanti ada kardus approval...") carries no fault vocabulary either. The
+ * intent lived across two turns and the gate only ever looked at one.
+ *
+ * Deliberately narrow: a bare approval opens the gate ONLY when the previous turn actually put
+ * a change on the table. An "ok thanks" after a status report still proposes nothing.
+ */
+export function worthProposing(
+  userText: string,
+  reply: string,
+  isRca: boolean,
+  previousReply = ""
+): { propose: boolean; reason: string } {
   if (isRca) return { propose: true, reason: "RCA response — a fault was diagnosed" };
   if (ACTION_INTENT.test(userText)) return { propose: true, reason: "the user asked for a change" };
+  if (isApproval(userText) && ACTION_INTENT.test(previousReply)) {
+    return { propose: true, reason: "the user approved the change proposed in the previous turn" };
+  }
   const hit = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE);
   if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")` };
   return { propose: false, reason: "read-only question, no fault evidence in the answer" };

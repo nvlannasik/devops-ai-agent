@@ -627,6 +627,22 @@ export class DevOpsAgent {
     });
   }
 
+  /**
+   * The last thing the agent said in this thread. The remediation gate needs it: "ya" only
+   * means "do it" when something was proposed to do. Read BEFORE the current turn runs —
+   * afterwards this turn's own reply is the last assistant message.
+   */
+  async lastAssistantText(threadId: string): Promise<string> {
+    const history = await this.memory.get(threadId).catch(() => []);
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i]!;
+      if (m.role !== "assistant") continue;
+      const text = typeof m.content === "string" ? m.content : this.extractText(m.content);
+      if (text.trim()) return text;
+    }
+    return "";
+  }
+
   private extractText(content: ContentBlock[]): string {
     return content
       .filter((c) => c.type === "text")
