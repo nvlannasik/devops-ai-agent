@@ -230,3 +230,47 @@ test("recallForAlert carries the verification verdict — 'succeeded' alone does
   assert.equal(rows[0].verdict, "unchanged");
   assert.match(rows[0].detail!, /still firing/);
 });
+
+// ---- worthProposing: approval carried across two turns ----
+//
+// The production thread this comes from: the agent proposed an image change in prose, the
+// operator answered "oke", and no card was ever posted — "oke" names no action, and the
+// agent's own confirmation carried no fault vocabulary either. The intent lived across two
+// turns and the gate only ever looked at one, so the agent promised a card it never created.
+
+const PROPOSED_A_CHANGE =
+  "Perubahan image yang saya identifikasi:\n• Target: Deployment `sarang-tani/sarang-tani-web`\n" +
+  "• Image saat ini: `docker.io/nvlannasik/sarang-tani-web:weqeq` → usul ganti ke `...:b684919`";
+
+test("a bare approval proposes, when the previous turn put a change on the table", () => {
+  for (const answer of ["oke", "ya", "iya", "lanjut", "gas", "go ahead", "yes"]) {
+    const gate = worthProposing(answer, "Siap, saya siapkan.", false, PROPOSED_A_CHANGE);
+    assert.equal(gate.propose, true, answer);
+    assert.match(gate.reason, /approved the change proposed in the previous turn/);
+  }
+});
+
+test("a bare approval proposes nothing when nothing was proposed", () => {
+  const gate = worthProposing("oke", "Siap.", false, ALL_GREEN);
+  assert.equal(gate.propose, false);
+  assert.match(gate.reason, /no fault evidence/);
+});
+
+test("agreeing with the diagnosis is not agreeing to the action", () => {
+  for (const answer of ["ya tapi jangan sekarang", "oke, tunggu dulu", "ya nanti saja", "yes but hold"]) {
+    assert.equal(worthProposing(answer, "Siap.", false, PROPOSED_A_CHANGE).propose, false, answer);
+  }
+});
+
+// The word has to be the point of the message, not buried in it — otherwise "kenapa ya pod ini
+// restart terus" reads as approval of whatever came before.
+test("an affirmative word inside a question is not an approval", () => {
+  const gate = worthProposing("kenapa ya image nya salah", "Karena tag-nya tidak ada.", false, PROPOSED_A_CHANGE);
+  assert.match(gate.reason, /fault evidence|no fault evidence/);
+  assert.equal(gate.reason.includes("approved the change"), false);
+});
+
+test("the previous turn is optional — the old three-argument calls still gate the same way", () => {
+  assert.equal(worthProposing("status check", ALL_GREEN, false).propose, false);
+  assert.equal(worthProposing("restart the deployment", "ok", false).propose, true);
+});

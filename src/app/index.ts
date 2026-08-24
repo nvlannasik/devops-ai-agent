@@ -195,6 +195,9 @@ export class SlackApp {
     const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
 
     await this.semaphore.acquire();
+    // Captured before the investigation appends this turn's own messages: a bare "ya" is an
+    // approval only if the agent put a change on the table in the turn before it.
+    const previousReply = await this.agent.lastAssistantText(threadId).catch(() => "");
     try {
       // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
       // format detection when the model bolds the RCA labels with **
@@ -238,7 +241,7 @@ export class SlackApp {
       // evidence. No incident row to link (no alert labels), so incidentId is null.
       // The gate is what keeps a read-only "status check" on a healthy cluster from
       // spending a heavy LLM call to be told {"action": null} — see worthProposing.
-      const gate = worthProposing(text, reply, isRca);
+      const gate = worthProposing(text, reply, isRca, previousReply);
       if (gate.propose) {
         void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
       } else {
