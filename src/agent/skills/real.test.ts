@@ -45,6 +45,17 @@ test("each playbook is reachable from a realistic alert line", () => {
   }
 });
 
+// imagepullbackoff points AT gitops-drift instead of repeating the "compare declared against
+// running" procedure. That only works if both arrive in the same message — otherwise the
+// cross-reference is a dangling pointer and the playbook silently loses its first step.
+test("an image-pull alert selects gitops-drift alongside imagepullbackoff", () => {
+  const alert =
+    'KubePodImagePullBackOff: pod api-7f9 in dev — Failed to pull image "ghcr.io/acme/api:v9.9.9": manifest unknown';
+  const names = loadSkills(resolveSkillsDir()).select(alert, new Set()).selected.map((s) => s.name);
+  assert.ok(names.includes("imagepullbackoff"), `selected: ${names.join(", ")}`);
+  assert.ok(names.includes("gitops-drift"), `selected: ${names.join(", ")}`);
+});
+
 // The content moved; it must not also stay. A section present in both places is sent twice and
 // drifts the moment one copy is edited.
 test("the moved sections are gone from the system prompt and live only in skills", () => {

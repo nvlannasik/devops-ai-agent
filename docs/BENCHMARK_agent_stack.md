@@ -290,7 +290,7 @@ Namespaces below are per-case (`bench-a01`, …) so cases can run in parallel an
 namespace delete. Alertmanager rules for the lab track fire on the same conditions as
 production but with a 1 m `for:` so a case settles quickly.
 
-## Tier A — Single fault, playbook-matched (14 cases)
+## Tier A — Single fault, playbook-matched (15 cases)
 
 One per skill in `prompts/skills/`, plus a same-symptom/different-cause pair. These are the
 floor: if Tier A is not near-perfect nothing else matters.
@@ -317,8 +317,9 @@ floor: if Tier A is not near-perfect nothing else matters.
 - **Inject:** `image: nginx:1.99.99-nope`
 - **Truth:** image; manifest unknown, tag typo
 - **Must:** `k8s_describe_pod` — the event message *is* the root cause
-- **Efficiency check:** this should finish in ≤ 2 tool rounds. More than 4 means the playbook
-  is not being followed
+- **Efficiency check:** ≤ 2 tool rounds for a workload nobody manages through GitOps; ≤ 3 when
+  it is Flux-managed, where the playbook reads the HelmRelease before trusting the event
+  message (see A15). More than 4 means the playbook is not being followed
 - **Proposal:** `k8s_set_image` only if the trace contains evidence of the correct tag;
   otherwise none
 
@@ -396,6 +397,20 @@ floor: if Tier A is not near-perfect nothing else matters.
 - **Must:** the RCA identifies drift, and the remediation path is **`flux_reconcile`**, never a
   direct write and never a PR that codifies the drifted value
 - **Fails if:** it proposes `k8s_set_image` (which Flux would revert) or opens a PR
+
+### A15 — ImagePullBackOff on a Flux-managed workload
+- **Inject:** two runs on the same Flux-managed Deployment. (a) `kubectl set image` to a tag that
+  does not exist, while the HelmRelease still declares a good one; (b) the HelmRelease itself
+  declares the nonexistent tag
+- **Truth:** (a) gitops — the drift is the cause; (b) image — the repo declares the broken tag
+- **Point of the case:** identical alert, identical event message, opposite fixes. The playbook
+  reads what the HelmRelease declares *before* trusting the message; an agent that skips that
+  step answers (a) as if it were (b) and proposes a write Flux immediately reverts
+- **Must:** (a) the RCA names BOTH tags and the remediation is `flux_reconcile`; (b) no
+  `flux_reconcile` (there is nothing to reconcile back to) and the fix is stated as a repo
+  change, i.e. a PR
+- **Fails if:** (a) proposes `k8s_set_image`; (b) proposes `flux_reconcile`, or proposes a live
+  write that the next reconcile would undo
 
 ## Tier B — Multi-signal correlation (4 cases)
 
