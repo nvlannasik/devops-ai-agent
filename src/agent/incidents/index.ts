@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import type { UnresolvedIncident } from "./reconcile.js";
 import { parseConfidence } from "../confidence/index.js";
 import logger from "../../utils/logger/index.js";
 
@@ -51,6 +52,25 @@ export function queryTerms(text: string): string[] {
 // cache semantics), this is a system-of-record: resolved RCAs persist so the agent can
 // recognize recurring incidents instead of re-diagnosing from scratch every time.
 // Schema is owned by migrations/ (see src/db/migrate.ts), not created here.
+// What a status flip hands back: the thread to tell, and the label set the dedup claim was
+// taken under. `resolved_by` is who last set the status — 'alertmanager' (webhook),
+// 'reconciler' (the sweeper), or a Slack user id when on-call said so.
+export type ResolvedIncident = {
+  channel: string | null;
+  threadTs: string | null;
+  alertname: string;
+  namespace: string | null;
+  groupLabels: Record<string, string> | null;
+};
+
+const shapeResolved = (r: Record<string, any>): ResolvedIncident => ({
+  channel: r.channel ?? null,
+  threadTs: r.thread_ts ?? null,
+  alertname: r.alertname,
+  namespace: r.namespace ?? null,
+  groupLabels: r.group_labels ?? null,
+});
+
 export class IncidentMemory {
   constructor(
     private readonly pool: Pool | null,
@@ -189,19 +209,22 @@ export class IncidentMemory {
 
   // D. resolved-alert loop: mark the newest unresolved incident for this alert as
   // resolved and return its Slack thread so the app can post the ✅ update there.
-  async markResolved(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
+  async markResolved(
+    labels: Record<string, string>,
+    by = "alertmanager"
+  ): Promise<{ channel: string; threadTs: string } | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
     if (!alertname) return null;
     try {
       const { rows } = await this.pool.query(
-        `UPDATE incidents SET resolved_at = now()
+        `UPDATE incidents SET resolved_at = now(), resolved_by = $3, cleared_seen_at = NULL
           WHERE id = (
             SELECT id FROM incidents
              WHERE alertname = $1 AND namespace IS NOT DISTINCT FROM $2 AND resolved_at IS NULL
              ORDER BY created_at DESC LIMIT 1)
           RETURNING channel, thread_ts`,
-        [alertname, labels.namespace ?? null]
+        [alertname, labels.namespace ?? null, by]
       );
       if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
       return { channel: rows[0].channel, threadTs: rows[0].thread_ts };
@@ -263,8 +286,8 @@ export class IncidentMemory {
     if (!alertname) return null;
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, confidence, root_cause, rca, channel, thread_ts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO incidents (alertname, namespace, severity, confidence, root_cause, rca, channel, thread_ts, group_labels)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
          RETURNING id`,
         [
           alertname,
@@ -277,6 +300,10 @@ export class IncidentMemory {
           rca,
           slack?.channel ?? null,
           slack?.threadTs ?? null,
+          // the dedup claim was taken on THIS label set (Alertmanager commonLabels, usually
+          // richer than group_by) — alertname+namespace hashes to a different fingerprint,
+          // so without storing it nothing outside the webhook can release the claim
+          JSON.stringify(labels),
         ]
       );
       const id = Number(rows[0].id);
@@ -286,6 +313,111 @@ export class IncidentMemory {
       return id;
     } catch (err) {
       logger.error(`[incidents] store failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
+  // --- Status reconciliation + on-call status feedback (migrations/007) ---------------
+  //
+  // The webhook is not a reliable channel for "this alert is over": it fires once, is never
+  // repeated, and is acked before it is processed. Everything below is the second way to
+  // reach the same state, driven either by Alertmanager's own current view (the sweeper) or
+  // by the on-call engineer in the thread.
+
+  // The sweeper's candidates. `minAgeSeconds` keeps freshly-opened incidents out of reach:
+  // an alert needs resolve_timeout + group_interval (5m + 5m by default) before Alertmanager's
+  // view of it is settled enough to read absence as recovery.
+  async listUnresolved(minAgeSeconds: number, limit: number): Promise<UnresolvedIncident[]> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT id, alertname, namespace, channel, thread_ts, group_labels, cleared_seen_at
+           FROM incidents
+          WHERE resolved_at IS NULL
+            AND alertname IS NOT NULL
+            AND created_at < now() - ($1::int * interval '1 second')
+          ORDER BY created_at
+          LIMIT $2`,
+        [minAgeSeconds, limit]
+      );
+      return rows.map((r: Record<string, any>) => ({
+        id: Number(r.id),
+        alertname: r.alertname,
+        namespace: r.namespace ?? null,
+        channel: r.channel ?? null,
+        threadTs: r.thread_ts ?? null,
+        groupLabels: r.group_labels ?? null,
+        clearedSeenAt: r.cleared_seen_at ? new Date(r.cleared_seen_at).toISOString() : null,
+      }));
+    } catch (err) {
+      logger.error(`[incidents] listUnresolved failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
+  }
+
+  // First pass that saw the alert gone. Only ever sets the timestamp — the second pass reads
+  // it to decide, so overwriting it here would restart the confirmation window forever.
+  async noteClearedSeen(ids: number[]): Promise<void> {
+    await this.updateCleared(
+      ids,
+      `UPDATE incidents SET cleared_seen_at = now() WHERE id = ANY($1::bigint[]) AND cleared_seen_at IS NULL`
+    );
+  }
+
+  // The alert is back before the window elapsed — drop the sighting so it has to be seen
+  // clear twice again from scratch.
+  async resetClearedSeen(ids: number[]): Promise<void> {
+    await this.updateCleared(ids, `UPDATE incidents SET cleared_seen_at = NULL WHERE id = ANY($1::bigint[])`);
+  }
+
+  private async updateCleared(ids: number[], sql: string): Promise<void> {
+    if (!this.pool || ids.length === 0) return;
+    try {
+      await this.pool.query(sql, [ids]);
+    } catch (err) {
+      logger.error(`[incidents] cleared-sighting update failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Close one incident by id. `resolved_at IS NULL` in the WHERE is the concurrency guard,
+   * not decoration: with several replicas sweeping, exactly one UPDATE returns a row, so
+   * exactly one pod posts the checkmark into the thread.
+   *
+   * Returns what the caller needs to finish the job — the thread to post in and the label set
+   * to release the dedup claim under.
+   */
+  async markResolvedById(id: number, by: string): Promise<ResolvedIncident | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `UPDATE incidents SET resolved_at = now(), resolved_by = $2, cleared_seen_at = NULL
+          WHERE id = $1 AND resolved_at IS NULL
+          RETURNING channel, thread_ts, alertname, namespace, group_labels`,
+        [id, by]
+      );
+      return rows.length > 0 ? shapeResolved(rows[0]) : null;
+    } catch (err) {
+      logger.error(`[incidents] markResolvedById ${id} failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
+  // On-call says it is not over. Same guard in reverse: only a currently-resolved row flips,
+  // so a second `reopen` is reported as "already firing" instead of silently doing nothing.
+  // The cleared sighting goes too — the sweeper must re-earn its two passes.
+  async reopenById(id: number, by: string): Promise<ResolvedIncident | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `UPDATE incidents SET resolved_at = NULL, resolved_by = $2, cleared_seen_at = NULL
+          WHERE id = $1 AND resolved_at IS NOT NULL
+          RETURNING channel, thread_ts, alertname, namespace, group_labels`,
+        [id, by]
+      );
+      return rows.length > 0 ? shapeResolved(rows[0]) : null;
+    } catch (err) {
+      logger.error(`[incidents] reopenById ${id} failed: ${err instanceof Error ? err.message : err}`);
       return null;
     }
   }

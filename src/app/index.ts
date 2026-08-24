@@ -7,6 +7,7 @@ import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
+import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, type AlertItem } from "../agent/correlation/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
@@ -170,6 +171,13 @@ export class SlackApp {
       return;
     }
 
+    // `@agent resolved` / `@agent reopen` — on-call's word on the incident's status, which
+    // beats both the webhook and the sweeper. Only inside a thread that maps to a stored
+    // incident: anywhere else "resolved" is just a word in a sentence, and the mention falls
+    // through to the normal agent flow.
+    const status = parseStatusCommand(text);
+    if (status && (await this.handleStatusCommand(event.channel, threadId, event.user ?? "unknown", status))) return;
+
     await say({ text: "🤖 On it...", thread_ts: threadId });
 
     // Per-message mode marker — same mechanism as the [FOLLOW-UP] prefix. Distant
@@ -278,6 +286,35 @@ export class SlackApp {
         .postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true })
         .catch((e) => logger.error(`[slack] could not deliver the learn-failure notice to thread ${threadId}: ${errDetail(e)}`));
     }
+  }
+
+  // Returns false when this thread isn't a stored incident, so the caller can fall through to
+  // the agent instead of answering "I can't do that" to what was probably an ordinary message.
+  private async handleStatusCommand(
+    channel: string,
+    threadTs: string,
+    user: string,
+    command: StatusCommand
+  ): Promise<boolean> {
+    const incidentId = await this.agent.findIncidentForThread(channel, threadTs).catch(() => null);
+    if (incidentId === null) return false;
+    try {
+      const { text, clearDedup } = await this.agent.setIncidentStatus(channel, threadTs, user, command);
+      // Released before the message goes out: a failed Slack post is cosmetic, a held claim
+      // silently suppresses the alert's next firing.
+      if (clearDedup) {
+        await this.dedup
+          .clear(clearDedup)
+          .catch((e) => logger.error(`[status] releasing the dedup claim for incident ${incidentId} failed: ${errDetail(e)}`));
+      }
+      await this.app.client.chat.postMessage({ channel, thread_ts: threadTs, text, mrkdwn: true });
+    } catch (err) {
+      logger.error(`[status] ${command} failed for incident ${incidentId}: ${errDetail(err)}`);
+      await this.app.client.chat
+        .postMessage({ channel, thread_ts: threadTs, text: `⚠️ Could not change the incident status — check the agent logs.` })
+        .catch(() => {});
+    }
+    return true;
   }
 
   // E step 5: reaction-triggered learn. Deliberately SILENT when the thread isn't a
@@ -583,6 +620,24 @@ export class SlackApp {
         }
       } catch (err) {
         logger.error(`[remediation] verification poll failed: ${errDetail(err)}`);
+      }
+      // Missed-resolved reconciliation rides the same poller — same shape of work (ask
+      // Postgres what is outstanding, ask the cluster, post the result) and no second timer.
+      // Its own try: a Slack outage failing a verdict post must not also stop incidents from
+      // being closed, because closing them is what releases the dedup claims.
+      try {
+        for (const inc of await this.agent.runIncidentReconcile()) {
+          // Claim first, message second: a lost message is cosmetic, a held claim suppresses
+          // the next firing of this alert for the claim's whole TTL.
+          await this.dedup
+            .clear(inc.groupLabels)
+            .catch((e) => logger.error(`[reconcile] releasing the dedup claim for ${inc.groupLabels.alertname} failed: ${errDetail(e)}`));
+          if (inc.channel && inc.threadTs) {
+            await this.app.client.chat.postMessage({ channel: inc.channel, thread_ts: inc.threadTs, text: inc.text, mrkdwn: true });
+          }
+        }
+      } catch (err) {
+        logger.error(`[reconcile] incident reconciliation pass failed: ${errDetail(err)}`);
       } finally {
         if (!this.stopping) this.armVerificationPoller(tick);
       }
