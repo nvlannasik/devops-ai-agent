@@ -12,6 +12,15 @@ export interface Filters {
   namespace: string | null;
   severity: string | null;
   resolved: boolean | null;
+  /**
+   * A post-remediation verdict the incident must have (recovered | unchanged | worse |
+   * inconclusive). URL-only, with no field in the filter form: the form's six controls are a
+   * fixed 6 -> 3 -> 2 ladder and six is what divides evenly at every step, so a seventh
+   * control would re-cut every row. It is set by following a figure that already names it —
+   * the overview's "Made it worse" — and the list shows a removable chip while it is on, which
+   * is what keeps a filter nobody can see from being a filter nobody can clear.
+   */
+  verdict: string | null;
   page: number;
 }
 
@@ -55,6 +64,10 @@ export function parseFilters(params: URLSearchParams): Filters {
     alertname: str(params, "alertname"),
     namespace: str(params, "namespace"),
     severity: str(params, "severity"),
+    // Through an allowlist, not passed through: it reaches SQL as a bound parameter either
+    // way, but a value outside the four a checker can write matches nothing, and silently
+    // returning an empty page is a worse answer than ignoring a filter that cannot be true.
+    verdict: VERDICTS.includes(str(params, "verdict") ?? "") ? str(params, "verdict") : null,
     // absent means "either" — distinct from an explicit false. unrecognised values also
     // collapse to null (no filter), never to a boolean that contradicts the intent.
     resolved: resolveBool(params, "resolved"),
@@ -73,6 +86,10 @@ export function parseFilters(params: URLSearchParams): Filters {
 // as interpolated text; RANGES in queries.ts is what maps a step to them. parseRange is the
 // gate that keeps the key inside the three literals, so a `?range=` from the URL can only ever
 // select one of them.
+// The four a post-remediation check can conclude (agent/remediation/verify.ts). Listed here
+// because this is where a URL becomes a query, and the gate belongs with the parsing.
+export const VERDICTS: readonly string[] = ["recovered", "unchanged", "worse", "inconclusive"];
+
 export const RANGES = ["24h", "7d", "30d"] as const;
 export type Range = (typeof RANGES)[number];
 export const DEFAULT_RANGE: Range = "30d";

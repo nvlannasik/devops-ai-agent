@@ -117,13 +117,23 @@ export const NAV_COUNT_CAP = 999;
 
 // One predicate, two queries. The page and its count MUST filter identically — a drifted
 // copy shows a page of rows under a total that does not include them — so there is one copy
-// and both interpolate it. It is a module constant with no input in it; $1..$6 are bound.
+// and both interpolate it. It is a module constant with no input in it; $1..$7 are bound.
+//
+// $7 is the only one that leaves the incidents table. A verdict belongs to a remediation's
+// CHECK, two joins away, so it is an EXISTS rather than a join on the outer query — an
+// incident with three remediations must appear once, and joining would return it three times
+// and break both the page and the count in the same stroke.
 const INCIDENT_WHERE = `WHERE ($1::timestamptz IS NULL OR created_at >= $1)
             AND ($2::timestamptz IS NULL OR created_at <  $2)
             AND ($3::text IS NULL OR alertname = $3)
             AND ($4::text IS NULL OR namespace = $4)
             AND ($5::text IS NULL OR severity  = $5)
-            AND ($6::boolean IS NULL OR (resolved_at IS NOT NULL) = $6)`;
+            AND ($6::boolean IS NULL OR (resolved_at IS NOT NULL) = $6)
+            AND ($7::text IS NULL OR EXISTS (
+                  SELECT 1
+                    FROM remediations r
+                    JOIN remediation_checks rc ON rc.remediation_id = r.id
+                   WHERE r.incident_id = incidents.id AND rc.verdict = $7))`;
 
 // The window is now chosen per request (see parseRange in filters.ts), which is exactly the
 // day the comment that used to stand here was written for: every one of these values is
@@ -445,7 +455,7 @@ export class DashboardQueries {
     // over-fetch by one: tells us whether a next page exists without trusting the count below
     const limit = PAGE_SIZE + 1;
     const offset = (f.page - 1) * PAGE_SIZE;
-    const args = [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved];
+    const args = [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved, f.verdict];
     // The rows query goes first and stays first: three tests read calls[0] for the filter
     // parameters, the LIMIT and the OFFSET.
     const [page, count] = await Promise.all([
@@ -454,11 +464,11 @@ export class DashboardQueries {
            FROM incidents
           ${INCIDENT_WHERE}
           ORDER BY created_at DESC
-          LIMIT $7 OFFSET $8`,
+          LIMIT $8 OFFSET $9`,
         [...args, limit, offset]
       ),
       this.pool.query(
-        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE} LIMIT $7) c`,
+        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE} LIMIT $8) c`,
         [...args, COUNT_CAP]
       ),
     ]);

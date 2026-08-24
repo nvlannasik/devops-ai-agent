@@ -364,3 +364,38 @@ test("the open count is cached apart from the overview", async () => {
 test("with no pool the badge count is zero rather than a throw", async () => {
   assert.equal(await new DashboardQueries(null).openIncidents(), 0);
 });
+
+// A verdict belongs to a remediation's CHECK, two joins away from the incident. It is an
+// EXISTS rather than a join on the outer query: an incident with three remediations must
+// appear once, and joining would return it three times and break the page and the count in
+// the same stroke.
+test("the verdict filter is an EXISTS, not a join that would duplicate rows", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("verdict=worse")));
+  const rows = calls[0];
+  assert.match(rows.sql, /EXISTS \(/);
+  assert.match(rows.sql, /JOIN remediation_checks rc ON rc\.remediation_id = r\.id/);
+  assert.doesNotMatch(rows.sql, /FROM incidents\s+JOIN/, "an outer join would duplicate an incident per remediation");
+  assert.equal(rows.params[6], "worse", "the verdict is bound, never interpolated");
+});
+
+// The page and its count must filter identically or the summary describes a different set
+// from the rows under it. One predicate, both queries.
+test("the verdict reaches the count query too", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("verdict=recovered")));
+  const [rows, count] = calls;
+  assert.match(count.sql, /EXISTS \(/);
+  assert.equal(rows.params[6], "recovered");
+  assert.equal(count.params[6], "recovered");
+});
+
+// LIMIT and OFFSET moved to $8/$9 when the verdict took $7. They stay last, which is what the
+// pagination tests read them off.
+test("adding the verdict did not disturb the limit and offset binds", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("page=2")));
+  assert.equal(calls[0].params.at(-2), PAGE_SIZE + 1);
+  assert.equal(calls[0].params.at(-1), PAGE_SIZE);
+  assert.match(calls[0].sql, /LIMIT \$8 OFFSET \$9/);
+});

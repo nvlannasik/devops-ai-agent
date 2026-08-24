@@ -603,6 +603,10 @@ export function overviewPage(
   const severitySlices = o.severity.map((r) => ({
     label: r.severity,
     value: r.n,
+    // The last dead end on this panel. A severity IS a filter the list already has a field
+    // for, so following one lands on a page that explains itself — the Severity select comes
+    // up set to the value that was clicked.
+    href: `/incidents?severity=${encodeURIComponent(r.severity)}`,
     // Through the same allowlist every other tone on the page goes through. A typo in an alert
     // rule, or a severity label this dashboard has never seen, draws in the neutral stroke
     // rather than being passed into an attribute selector that would not match it anyway.
@@ -699,6 +703,14 @@ export function overviewPage(
                icon: ICON.wrench, label: "Made it worse", value: fmtInt(worse),
                sub: `${fmtInt(unchanged)} not fixed · ${fmtInt(inconclusive + o.verdictsPending)} unverified`,
                tone: worse > 0 ? "critical" : undefined,
+               // Only when there are any. A tile reading zero has nothing to show, and a link
+               // to an empty list is the dead end this was supposed to stop being.
+               ...(worse > 0
+                 ? {
+                     href: "/incidents?verdict=worse",
+                     hrefLabel: `Made it worse — see the ${fmtInt(worse)} incidents a remediation left worse`,
+                   }
+                 : {}),
              },
            ],
            "pair"
@@ -815,6 +827,7 @@ export function listPage(
     if (f.namespace) q.set("namespace", f.namespace);
     if (f.severity) q.set("severity", f.severity);
     if (f.resolved !== null) q.set("resolved", String(f.resolved));
+    if (f.verdict) q.set("verdict", f.verdict);
     // page=1 is omitted: a link that restates the default is a query string the reader has to
     // read past to see which filters are actually on.
     if (page > 1) q.set("page", String(page));
@@ -822,10 +835,29 @@ export function listPage(
     return s ? `/incidents?${s}` : "/incidents";
   };
 
+  // Dropping a filter always returns to page 1: the result set is about to be larger, and
+  // page 7 of the old one is not a place in the new one.
+  const qsWithout = (key: string): string => {
+    const q = new URLSearchParams(qs(1).split("?")[1] ?? "");
+    q.delete(key);
+    const out = q.toString();
+    return out ? `/incidents?${out}` : "/incidents";
+  };
+
   const sel = (v: string, cur: string | null, label: string): string =>
     `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(label)}</option>`;
 
-  const filtered = !!(f.from || f.to || f.alertname || f.namespace || f.severity || f.resolved !== null);
+  const filtered = !!(f.from || f.to || f.alertname || f.namespace || f.severity || f.resolved !== null || f.verdict);
+
+  // The one filter with no field in the form, so the one that would otherwise be invisible:
+  // a reader who followed "Made it worse" would land on a shortened list with nothing saying
+  // why. A chip states it and removes it — the × drops the verdict and keeps everything else,
+  // which is what makes it a chip rather than a second Clear.
+  const chips = f.verdict
+    ? `<ul class="chips"><li><span class="chip-key">verdict</span>${esc(f.verdict)}` +
+      `<a href="${esc(qsWithout("verdict"))}" aria-label="Remove the ${esc(f.verdict)} verdict filter">×</a>` +
+      `</li></ul>`
+    : "";
 
   // Two different absences. No rows on page 1 means the filters matched nothing; no rows on
   // page 7 means the range ended earlier than the URL claims — usually a bookmark outliving
@@ -863,6 +895,7 @@ export function listPage(
          ${filtered ? `<a href="/incidents">Clear</a>` : ""}
        </div>
      </form>
+     ${chips}
      ${incidentTable(p.rows, nothing, now)}
      ${pager(p, f, qs)}`,
     {
@@ -1005,7 +1038,11 @@ export function detailPage(
     // document. See the .doc rule in styles.ts.
     `<div class="doc">
      <p class="eyebrow">Incident #${esc(i.id)}</p>
-     <h1>${esc(i.alertname)}</h1>
+     <!-- breakable(), not esc(): the same CamelCase break points the list offers. The h1's
+          overflow-wrap: anywhere is only the floor, and a floor breaks mid-word —
+          "KubernetesContainerOo / mKiller" at 390px, while the same string in the table below
+          broke at the hump. One name, two break rules, on one page. -->
+     <h1>${breakable(i.alertname)}</h1>
      <div class="title-meta">
        ${severityBadge(i.severity)}
        ${stateBadge(i.resolved_at)}

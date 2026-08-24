@@ -626,7 +626,13 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    read twelve periods in. */
 @container hero (max-width: 30rem) {
   .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
-  .hero-figure { flex-direction: row; align-items: baseline; gap: var(--sp-3); }
+  /* justify-content has to be reset with the axis. It is 'center' on the column above, where
+     it centres the pair VERTICALLY against a tall chart — flip the direction and the same
+     declaration starts centring them horizontally, which floated the count into the middle of
+     the panel as the only block on the page not aligned to the column's left edge. */
+  .hero-figure {
+    flex-direction: row; align-items: baseline; justify-content: flex-start; gap: var(--sp-3);
+  }
 }
 
 /* One stat shelf, three homes: the overview's summary panel, its token totals, and the incident
@@ -661,6 +667,25 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 @container page (max-width: 26rem) {
   .stats.facts .stat { flex-direction: row; align-items: baseline; justify-content: space-between; gap: var(--sp-4); }
   .stats.facts .stat dd { margin-top: 0; font-size: var(--fs-base); text-align: right; }
+  /* And the shelf gives up the card treatment entirely, which is the other half of the same
+     decision. Laying the caption and the value on one line exists to buy height back — four
+     stacked tiles were a third of a phone screen above the analysis a reader came for — and
+     giving every tile a border, a shadow and a 16px gap handed that height straight back and
+     then some (measured 315px at 390px, against ~190px for this). One panel, hairline
+     dividers: the construction the shelf had before the cards, kept for the one variant and
+     the one width where it is worth more than the cards are. */
+  .stats.facts {
+    gap: 0; background: var(--surface-raised);
+    border: 1px solid var(--border); border-radius: var(--r);
+    box-shadow: var(--shadow-sm); overflow: hidden;
+  }
+  .stats.facts .stat {
+    background: none; border: 0; border-radius: 0; box-shadow: none;
+    padding: var(--sp-3) var(--sp-4);
+  }
+  .stats.facts .stat + .stat { border-top: 1px solid var(--border); }
+  /* The spine survives the loss of the card — it is the row's severity, not the card's. */
+  .stats.facts .stat[data-tone] { box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent); }
 }
 /* A column with the value pushed to the FLOOR of the tile by margin-top:auto. Grid stretches
    every tile in a band to the same height, so a value anchored to the bottom lands on the same
@@ -1355,6 +1380,35 @@ form.signout button {
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
+/* ---------- filter chips ---------- */
+/* For a filter with no field in the form. The form's six controls show their own state; this
+   is for the one set by following a figure — the overview's "Made it worse" — which would
+   otherwise shorten the list with nothing on screen saying why.
+   One chip today. It is a list because the moment there are two, a row that wraps and keeps
+   every label is the difference between a filter you can remove and one you cannot find. */
+.chips {
+  list-style: none; margin: 0 0 var(--sp-4); padding: 0;
+  display: flex; flex-wrap: wrap; gap: var(--sp-2);
+}
+.chips li {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  padding: .3em .3em .3em .7em; border-radius: var(--r-pill);
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: var(--fs-sm); color: var(--text);
+}
+.chip-key {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim);
+}
+/* The remove control is a LINK, not a button: it goes to a URL with one parameter dropped,
+   which is a navigation and needs no script. 1.5rem square so a finger has something to hit
+   without the chip growing into a control-sized object. */
+.chips a {
+  display: grid; place-items: center; flex: 0 0 auto;
+  width: 1.5rem; height: 1.5rem; border-radius: 50%;
+  color: var(--text-dim); text-decoration: none; line-height: 1;
+}
+
 /* ---------- empty, pager ---------- */
 /* A panel like every other panel, not a dashed outline. The dashed border was the page saying
    "something is missing here" — but on this dashboard an empty state is almost never a hole: a
@@ -1607,10 +1661,25 @@ form.signout button {
   display: flex; flex-direction: column; gap: var(--sp-2);
   width: 100%;
 }
-.donut-legend li {
+.donut-legend li { font-size: var(--fs-sm); }
+/* The grid moved off the <li> and onto whatever is inside it, so a linked row and an inert one
+   lay out identically — the anchor takes the grid when there is one, the li keeps it when
+   there is not. Without this the anchor would be a third grid item and the three cells would
+   collapse into one. */
+.donut-legend li > a,
+.donut-legend li > .donut-swatch {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center; gap: var(--sp-3);
-  font-size: var(--fs-sm);
+}
+.donut-legend li > a {
+  color: inherit; text-decoration: none;
+  margin: calc(var(--sp-1) * -1) calc(var(--sp-2) * -1);
+  padding: var(--sp-1) var(--sp-2); border-radius: var(--r-sm);
+}
+/* An inert row has no anchor to carry the grid, so the li carries it instead. */
+.donut-legend li:not(:has(> a)) {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: var(--sp-3);
 }
 .donut-swatch {
   width: .625rem; height: .625rem; border-radius: 3px;
@@ -1870,6 +1939,8 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   form.filters button:hover, .signin-form button:hover { filter: brightness(1.08); }
   form.signout button:hover { color: var(--text); background: var(--surface-2); }
   .pages a:hover { border-color: var(--accent); color: var(--accent); }
+  .chips a:hover { background: var(--surface-raised); color: var(--text); }
+  .donut-legend li > a:hover { background: var(--surface-2); }
   /* The dot grows rather than changing colour: the accent is the line's identity, and a point
      that turns a different hue on hover reads as a different KIND of point. */
   .chart-col:hover .chart-dot { transform: scale(1.5); }

@@ -913,20 +913,37 @@ test("a CamelCase alert name offers its humps as break points, and stays escaped
   assert.doesNotMatch(listPage(page([{ ...row, alertname: "a&B" }]), parseFilters(new URLSearchParams(""))), /&<wbr>|&amp<wbr>/);
 });
 
-// The list gets <wbr>s put through it; the incident page's <h1> does not — it prints the
-// alertname whole, because a heading peppered with break opportunities reads as one. So the
-// break has to come from the stylesheet, and without it the title alone was 40px wider than a
-// 320px screen and took the document with it. Both halves are asserted: the CSS that breaks
-// it, and the markup fact that nothing else will.
-test("the incident title breaks the identifier rather than the page", () => {
+// The title now takes the same <wbr>s the list does, which REVERSES what this test used to
+// assert. The old reasoning was that "a heading peppered with break opportunities reads as
+// one" — and that is true of a soft hyphen, which renders a visible hyphen at the break. A
+// <wbr> renders nothing: where the line fits it is invisible, and where the line must break
+// the browser takes the offered hump instead of inventing a split mid-word. At 390px the
+// heading read "KubernetesContainerOo / mKiller" while the same string in the table below
+// broke at the hump — one name, two rules, one page.
+//
+// overflow-wrap: anywhere stays, and stays load-bearing: it is what lowers the heading's
+// min-content width, so a name with no humps at all still cannot widen the document.
+test("the incident title breaks at the humps, like the list does", () => {
   const h1 = STYLES.match(/^h1 \{([^}]*)\}/m);
   assert.ok(h1, "no h1 rule to check");
-  assert.match(h1[1], /overflow-wrap: anywhere/);
-  assert.match(
-    detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }),
-    /<h1>KubernetesContainerOomKiller<\/h1>/,
-    "the title is one unbroken word — the stylesheet is the only thing that can break it"
+  assert.match(h1[1], /overflow-wrap: anywhere/, "the floor under a name with no humps");
+  const html = detailPage(
+    { incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }
   );
+  assert.match(html, /<h1>Kubernetes<wbr>Container<wbr>Oom<wbr>Killer<\/h1>/);
+  // <title> is an attribute-like text node with no markup in it — a <wbr> there would print
+  // literally in the browser tab.
+  assert.match(html, /<title>KubernetesContainerOomKiller — DevOps AI Agent<\/title>/);
+});
+
+// The <wbr> pass runs on already-escaped text everywhere it is used, and the heading is no
+// exception — the same guarantee the list carries.
+test("the title's break points cannot be a way back in", () => {
+  const html = detailPage(
+    { incident: { ...row, alertname: `<img src=x>A`, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }
+  );
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x&gt;/);
 });
 
 // What a model puts in an evidence cell is a metric selector, an image digest or a pod name:
@@ -2195,4 +2212,90 @@ test("the prompt body is escaped", () => {
 test("a skill called 'prompt' cannot shadow the prompt page", () => {
   assert.deepEqual(matchRoute("/prompt"), { kind: "prompt" });
   assert.deepEqual(matchRoute("/context/prompt"), { kind: "skill", name: "prompt" });
+});
+
+// ---------- the last dead ends ----------
+
+// A severity IS a filter the list already has a field for, so following one lands on a page
+// that explains itself: the Severity select comes up set to the value that was clicked.
+test("the donut's legend rows lead to the incidents behind them", () => {
+  const html = overviewPage(
+    { ...emptyOverview, severity: [{ severity: "critical", n: 27 }, { severity: "warning", n: 44 }] },
+    []
+  );
+  assert.match(html, /<a href="\/incidents\?severity=critical" aria-label="critical: 27 incidents">/);
+  assert.match(html, /<a href="\/incidents\?severity=warning"/);
+  // the whole row is the target, not just the name — a three-column grid whose middle cell is
+  // the only clickable part is a target a pointer has to aim at
+  assert.match(html, /<a href="\/incidents\?severity=critical"[^>]*><span class="donut-swatch"/);
+});
+
+// The most consequential figure on the page, and until now it went nowhere.
+test("the worse figure leads to the incidents behind it, and only when there are any", () => {
+  const some = overviewPage({ ...emptyOverview, verdicts: { recovered: 4, worse: 2 } }, []);
+  assert.match(some, /href="\/incidents\?verdict=worse"/);
+  assert.match(some, /aria-label="Made it worse — see the 2 incidents a remediation left worse"/);
+
+  // a tile reading zero has nothing to show, and a link to an empty list is the dead end this
+  // was supposed to stop being
+  const none = overviewPage({ ...emptyOverview, verdicts: { recovered: 4 } }, []);
+  assert.doesNotMatch(none, /verdict=worse/);
+});
+
+// ---------- the verdict filter ----------
+
+// URL-only: the form's six controls are a fixed 6 -> 3 -> 2 ladder and six is what divides
+// evenly at every step. A seventh control would re-cut every row of it.
+test("a verdict filter is parsed, and only from the four a checker can write", () => {
+  assert.equal(parseFilters(new URLSearchParams("verdict=worse")).verdict, "worse");
+  assert.equal(parseFilters(new URLSearchParams("verdict=recovered")).verdict, "recovered");
+  // anything else is ignored rather than returning an empty page for a filter that cannot be true
+  assert.equal(parseFilters(new URLSearchParams("verdict=exploded")).verdict, null);
+  assert.equal(parseFilters(new URLSearchParams("")).verdict, null);
+});
+
+// A filter nobody can see is a filter nobody can clear.
+test("the verdict filter shows as a chip that removes only itself", () => {
+  const f = parseFilters(new URLSearchParams("verdict=worse&severity=critical&page=3"));
+  const html = listPage(page([row]), f);
+  assert.match(html, /<ul class="chips">/);
+  assert.match(html, /<span class="chip-key">verdict<\/span>worse/);
+  // the × drops the verdict and keeps the rest — and returns to page 1, because page 3 of the
+  // old result set is not a place in the larger new one
+  const remove = html.match(/aria-label="Remove the worse verdict filter"/) ? html : "";
+  assert.ok(remove, "no remove control");
+  assert.match(html, /href="\/incidents\?severity=critical"[^>]*aria-label="Remove/);
+});
+
+test("no chip row when nothing needs one", () => {
+  assert.doesNotMatch(bodyOf(listPage(page([row]), parseFilters(new URLSearchParams("severity=critical")))), /class="chips"/);
+});
+
+// Paging has to carry it or the second page silently drops the filter.
+test("the verdict survives paging", () => {
+  const f = parseFilters(new URLSearchParams("verdict=worse"));
+  const html = listPage(page([row], { hasMore: true, total: 40 }), f);
+  assert.match(html, /href="\/incidents\?verdict=worse&amp;page=2"/);
+});
+
+// ---------- the narrow-width fixes ----------
+
+// justify-content has to be reset with the axis: `center` centres the pair vertically on the
+// column and horizontally the moment the direction flips.
+test("the hero count stays on the column's left edge when the axis flips", () => {
+  const q = STYLES.match(/@container hero \(max-width: 30rem\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(q, "no hero container query");
+  assert.match(q, /\.hero-figure \{[\s\S]*?justify-content: flex-start/);
+});
+
+// Laying the caption and the value on one line exists to buy height back; giving every tile a
+// border, a shadow and a 16px gap handed it straight back — 315px against ~190px at 390px.
+test("the fact shelf drops the card treatment at the width it was built for", () => {
+  const q = STYLES.match(/@container page \(max-width: 26rem\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(q, "no 26rem block");
+  assert.match(q, /\.stats\.facts \{[^}]*gap: 0/);
+  assert.match(q, /\.stats\.facts \.stat \{[^}]*box-shadow: none/);
+  assert.match(q, /\.stats\.facts \.stat \+ \.stat \{ border-top/);
+  // the spine is the row's severity, not the card's, and survives the loss of the card
+  assert.match(q, /\.stats\.facts \.stat\[data-tone\] \{ box-shadow: inset var\(--spine-w\)/);
 });

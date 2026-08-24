@@ -126,6 +126,8 @@ export interface Slice {
   value: number;
   /** The page's severity vocabulary — "critical" | "warning" | "info" | "ok" — or "" for none. */
   tone: string;
+  /** Where this slice leads, if anywhere. A legend row without one stays inert. */
+  href?: string;
 }
 
 // The circumference trick, and the reason this needs no arc maths at all: a circle of radius
@@ -192,14 +194,20 @@ export function donutChart(slices: Slice[], opts: { label?: string } = {}): stri
     })
     .join("");
 
+  // The row is the target where there is one, and the whole row rather than the name: a
+  // three-column grid whose middle cell is the only thing clickable is a target a pointer has
+  // to aim at. The swatch and the count come along inside the anchor.
   const legend = slices
-    .map(
-      (s, i) =>
-        `<li${s.tone ? ` data-tone="${esc(s.tone)}"` : ""}>` +
+    .map((s, i) => {
+      const inner =
         `<span class="donut-swatch" aria-hidden="true"></span>` +
         `<span class="donut-name">${esc(s.label)}</span>` +
-        `<span class="donut-n">${esc(values[i])}</span></li>`
-    )
+        `<span class="donut-n">${esc(values[i])}</span>`;
+      const row = s.href
+        ? `<a href="${esc(s.href)}" aria-label="${esc(`${s.label}: ${values[i]} incidents`)}">${inner}</a>`
+        : inner;
+      return `<li${s.tone ? ` data-tone="${esc(s.tone)}"` : ""}>${row}</li>`;
+    })
     .join("");
 
   // One accessible name for the whole figure, the same way lineChart states its series — a ring
