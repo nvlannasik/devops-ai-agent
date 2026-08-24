@@ -140,19 +140,44 @@ test("no skills means the history is returned untouched", () => {
 // The realistic squeeze is a huge PINNED tool result, not a huge skill: skills are capped at
 // 8000 chars, so three of them never fill a 32k window on their own. The pins are unconditional,
 // and one 66k-char log dump in the most recent message is what leaves no room for the advice.
-test("a small window drops skills that a large window keeps", () => {
+//
+// The always-skill is the exception, and used to not be: with a 66k-char pin the request is
+// already past the window and the caller sends it anyway, so dropping the output format saved
+// nothing and cost the one thing that makes the answer parseable downstream.
+test("a small window drops matched skills but never the always-skill", () => {
   const history: Message[] = [
     { role: "user", content: "alert" },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "z".repeat(66_000) }] },
   ];
-  const skills = [skill("rca-format", "f".repeat(6_000), "always")];
+  const skills = [skill("rca-format", "f".repeat(6_000), "always"), skill("oomkilled", "m".repeat(2_000))];
   const big = assembleRequest({ history, systemPrompt: SYSTEM, tools: [], skills, budget: BUDGET });
   const small = assembleRequest({
     history, systemPrompt: SYSTEM, tools: [], skills, budget: { contextTokens: 32_000, reserveTokens: 9_120 },
   });
-  assert.deepEqual(big.skillsUsed, ["rca-format"]);
-  assert.deepEqual(small.skillsUsed, []);
-  assert.deepEqual(small.skillsDropped, ["rca-format"]);
+  assert.deepEqual(big.skillsUsed, ["rca-format", "oomkilled"]);
+  assert.deepEqual(small.skillsUsed, ["rca-format"]);
+  assert.deepEqual(small.skillsDropped, ["oomkilled"]);
+});
+
+// Seen in production: skills [rollout-stuck, pod-pending] kept, rca-format DROPPED. The fill is
+// greedy — a skill that does not fit is skipped and the loop continues — so the biggest skill
+// went first and the small ones slid into the slack it left. rca-format IS the biggest (1834
+// chars against ~550 for a playbook), so the output format lost to two optional playbooks.
+test("a tight window keeps the always-skill over smaller matched ones", () => {
+  const history: Message[] = [
+    { role: "user", content: "alert" },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "z".repeat(60_000) }] },
+  ];
+  const skills = [
+    skill("rca-format", "f".repeat(1_834), "always"),
+    skill("rollout-stuck", "r".repeat(558)),
+    skill("pod-pending", "p".repeat(563)),
+  ];
+  const out = assembleRequest({
+    history, systemPrompt: SYSTEM, tools: [], skills, budget: { contextTokens: 32_000, reserveTokens: 9_120 },
+  });
+  assert.ok(out.skillsUsed.includes("rca-format"), `output format dropped: ${out.skillsUsed.join(", ")}`);
+  assert.equal(out.skillsDropped.includes("rca-format"), false);
 });
 
 test("the tool schemas are charged to the budget", () => {

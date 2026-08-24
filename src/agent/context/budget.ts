@@ -42,11 +42,27 @@ export interface FitResult {
   messagesDropped: number;
 }
 
-// Keep-order, i.e. the reverse of drop-order: an always-skill outranks a matched one, and within
-// a rank the smaller body is kept first — so the largest matched playbook is the first thing to
-// go. No name is special-cased here; with one always-skill this is exactly "rca-format drops
-// last", and if a second is ever added the tie-break is size rather than identity.
+// Keep-order within the matched playbooks: the smaller body is kept first, so the largest is the
+// first thing to go. Always-skills are not in this competition at all — see reserveAlways.
 const keepRank = (s: Skill): number => (s.when === "always" ? 0 : 1);
+
+/**
+ * An always-skill is a contract, not a preference: `rca-format` is what makes the answer
+ * parseable by everything downstream (isRcaResponse, buildRcaBlocks, the incident store).
+ *
+ * It used to compete for budget with the matched playbooks, and lost, because the fill below is
+ * greedy: a skill that does not fit is skipped and the loop continues, so the biggest skill is
+ * dropped first while smaller ones slide into the slack it left. rca-format IS the biggest one
+ * (1834 chars against ~550 for a playbook), so under pressure the output format was dropped and
+ * two optional playbooks were kept in its place — the exact inversion of the intended order.
+ *
+ * So it is taken off the top instead. If the window is so small that even this does not fit, an
+ * unformatted answer is the worse failure: the caller already logs and sends over-budget.
+ */
+const splitAlways = (skills: readonly Skill[]): { always: Skill[]; matched: Skill[] } => ({
+  always: skills.filter((s) => keepRank(s) === 0),
+  matched: skills.filter((s) => keepRank(s) !== 0),
+});
 
 // Greedy fill in keep-order over whatever `used` leaves. Both callers go through here: an empty
 // history is still a budget, and handing back an unmeasured skill list would overflow the window
@@ -88,9 +104,12 @@ export function fitToBudget(input: {
   available: number;
 }): FitResult {
   const { history, available } = input;
+  const { always, matched } = splitAlways(input.skills);
+  const reserved = always.reduce((n, s) => n + estimateTokens(s.body), 0);
+
   if (history.length === 0) {
-    const { kept, dropped } = fitSkills(input.skills, 0, available);
-    return { history: [], skills: kept, skillsDropped: dropped, messagesDropped: 0 };
+    const { kept, dropped } = fitSkills(matched, reserved, available);
+    return { history: [], skills: [...always, ...kept], skillsDropped: dropped, messagesDropped: 0 };
   }
 
   const cost = history.map(estimateMessage);
@@ -103,7 +122,7 @@ export function fitToBudget(input: {
 
   const pinned: number[] = [first];
   for (let i = pinFrom; i <= last; i++) if (i > first) pinned.push(i);
-  let used = pinned.reduce((n, i) => n + cost[i]!, 0);
+  let used = reserved + pinned.reduce((n, i) => n + cost[i]!, 0);
 
   // History before skills, against the same counter. Reversing these two blocks lets a skill
   // that happens to fit consume budget a message needed, which is the trade this whole function
@@ -116,7 +135,7 @@ export function fitToBudget(input: {
     middle.unshift(history[i]!);
   }
 
-  const { kept, dropped: skillsDropped } = fitSkills(input.skills, used, available);
+  const { kept, dropped: skillsDropped } = fitSkills(matched, used, available);
 
   const tail = history.slice(pinFrom).filter((_, k) => pinFrom + k > first);
   let out = [history[first]!, ...middle, ...tail];
@@ -126,5 +145,5 @@ export function fitToBudget(input: {
   while (start < out.length - 1 && carriesToolResult(out[start]!)) start++;
   if (start > 1) out = [out[0]!, ...out.slice(start)];
 
-  return { history: out, skills: kept, skillsDropped, messagesDropped: history.length - out.length };
+  return { history: out, skills: [...always, ...kept], skillsDropped, messagesDropped: history.length - out.length };
 }
