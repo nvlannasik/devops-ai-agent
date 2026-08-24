@@ -201,7 +201,15 @@ test("responses carry a no-JS CSP and nosniff", async () => {
         /content-security-policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'/i,
         `${path} should carry the script-free policy`
       );
-      assert.doesNotMatch(res, /script-src/i, `${path} needs no script-src at all`);
+      // Split at the header boundary. Asserting over the WHOLE response made the test
+      // constrain prose: the stylesheet is inlined into every page, and a CSS comment
+      // explaining why the drawer cannot use a script mentioned the directive by name and
+      // failed this. The header is what carries the policy, so the header is what is checked —
+      // and the body gets the stronger assertion the old one never made, that no page which
+      // claims a script-free policy actually ships a script.
+      const [head, body = ""] = res.split("\r\n\r\n");
+      assert.doesNotMatch(head, /script-src/i, `${path} needs no script-src at all`);
+      assert.doesNotMatch(body, /<script/i, `${path} declares no script-src but ships a script`);
     }
     assert.match(await raw(port, "GET / HTTP/1.1", authed), /x-content-type-options: nosniff/i);
   });
@@ -442,4 +450,36 @@ test("a skill page serves from the loaded skills while the database is down", as
 test("only the session routes accept a non-GET method", () => {
   assert.deepEqual(Object.keys(METHODS).sort(), ["login", "logout"]);
   assert.equal("context" in METHODS, false);
+});
+
+// The prompt is read out of the running process, so this page answers while Postgres is down —
+// which is one of the times someone most wants to know what the agent is being told.
+test("/prompt renders the core prompt and needs no database", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /prompt HTTP/1.1", authed);
+    assert.match(res, /^HTTP\/1\.1 200/);
+    assert.match(res, /prompts\/system\.md/);
+    assert.match(res, /class="skill-body"/);
+  });
+});
+
+test("/prompt is behind the password like every other page", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /prompt HTTP/1.1");
+    assert.match(res, /^HTTP\/1\.1 30[23]/, "an unauthenticated read must redirect to sign-in");
+  });
+});
+
+// It carried the badge on every page but this one: /context was the single render path that
+// never asked for the count. A page-by-page argument is a page-by-page chance to forget one.
+test("/context carries the rail badge like every other page", async () => {
+  await withServer(async (port) => {
+    for (const path of ["/context", "/prompt", "/topology"]) {
+      const res = await raw(port, `GET ${path} HTTP/1.1`, authed);
+      assert.match(res, /^HTTP\/1\.1 200/, `${path} did not render`);
+      // no database in these tests, so openCount is undefined and no badge is drawn — what is
+      // asserted is that the page went through the chrome that would draw one
+      assert.match(res, /<header class="rail">/, `${path} rendered without the rail`);
+    }
+  });
 });

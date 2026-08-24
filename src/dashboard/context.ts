@@ -25,7 +25,16 @@ export interface BackendBudget {
 }
 
 export interface ContextView {
-  core: { lines: number; chars: number; tokens: number };
+  /**
+   * The core prompt, and the TEXT of it — not just its size.
+   *
+   * `body` is what `buildStaticSystemPrompt()` returned, which reads prompts/system.md ONCE and
+   * caches it for the life of the process. That is exactly why it is worth rendering: the file
+   * is editable without a rebuild, so what git holds, what is on the pod's disk, and what this
+   * process is actually sending can all be three different things — and only the third decides
+   * what the agent says. Nothing else exposes it short of an exec into the pod.
+   */
+  core: { lines: number; chars: number; tokens: number; body: string };
   skills: SkillView[];
   backends: BackendBudget[];
   /** The smallest window — the one every request is actually built to fit. */
@@ -69,6 +78,7 @@ export function buildContextView(
     lines: prompt.split("\n").length,
     chars: prompt.length,
     tokens: estimateTokens(prompt),
+    body: prompt,
   };
   const toolTokens = toolCount > 0 ? estimateTokens(toolsJson) : 0;
   const reserve = config.llm.maxTokens + BUDGET_SAFETY_MARGIN;

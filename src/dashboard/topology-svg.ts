@@ -295,7 +295,15 @@ export function topologyDiagram(t: Topology): string {
       : "");
 
   return (
-    `<svg viewBox="0 0 ${W} ${height}" class="topo" role="group" aria-label="${esc(summary)}">` +
+    // --topo-w is the width this map was LAID OUT for, published so the stylesheet can refuse
+    // to draw it any smaller. The text lives inside the SVG (unlike the chart, which moved its
+    // type out to HTML for exactly this reason), so shrinking the drawing shrinks the type with
+    // it: at a 390px screen the 11.5-unit labels rendered near 4.9px. Below this width the map
+    // scrolls inside .topo-view instead of scaling — a map is a thing you pan.
+    // Emitted rather than hard-coded in CSS so the number cannot drift from the layout that
+    // produced it; the same reason the chart publishes its point count.
+    `<svg viewBox="0 0 ${W} ${height}" class="topo" style="--topo-w:${W}px"` +
+    ` role="group" aria-label="${esc(summary)}">` +
     `<defs>` +
     `<pattern id="topo-grid" width="22" height="22" patternUnits="userSpaceOnUse">` +
     `<circle cx="1" cy="1" r="1" class="topo-dot"/></pattern>` +

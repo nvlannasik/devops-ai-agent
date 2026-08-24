@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COUNT_CAP, DashboardQueries } from "./queries.js";
+import { COUNT_CAP, DashboardQueries, NAV_COUNT_CAP } from "./queries.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 
 type Call = { sql: string; params: unknown[] };
@@ -139,13 +139,55 @@ test("a window with no LLM calls reports zeros rather than NaN", async () => {
 // An interval spliced into the SQL text is an injection site the moment the window stops
 // being a module constant — which is exactly the change someone will make to add a range
 // picker. Bound as $1 it can never become one.
-test("the 30-day window is bound as a parameter, never interpolated into the SQL", async () => {
+test("the window is bound as a parameter, never interpolated into the SQL", async () => {
   const calls: Call[] = [];
   await new DashboardQueries(stub(calls)).overview();
   const windowed = calls.filter((c) => c.sql.includes("$1::interval"));
   assert.ok(windowed.length >= 5, "the recurring, totals, remediation, feedback and token queries");
-  for (const c of windowed) assert.deepEqual(c.params, ["30 days"], `not bound: ${c.sql}`);
+  // $1 is the interval in every one of them. The series query binds two more — the date_trunc
+  // field and the to_char format — which is the whole point of that construction: they LOOK
+  // like they would have to be spliced into the SQL and they do not.
+  for (const c of windowed) {
+    assert.equal(c.params[0], "30 days", `not bound: ${c.sql}`);
+  }
   for (const c of calls) assert.doesNotMatch(c.sql, /interval '30 days'/);
+});
+
+// The range comes off a query string. If the bucket or its label format were interpolated,
+// this is the test that would not exist — so it asserts the shape that makes them bindable:
+// no range value appears anywhere in the SQL text of any query.
+test("the bucket and its label format are bound too, never spliced into the SQL text", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).overview("24h");
+  const series = calls.find((c) => c.sql.includes("date_trunc($2"));
+  assert.ok(series, "no series query — or its bucket stopped being a bound parameter");
+  assert.deepEqual(series.params, ["24 hours", "hour", "HH24:00"]);
+  for (const c of calls) {
+    assert.doesNotMatch(c.sql, /date_trunc\('/, `bucket spliced into SQL: ${c.sql}`);
+    assert.doesNotMatch(c.sql, /interval '24 hours'/);
+  }
+});
+
+// Three ranges, three cached answers. One slot would have each range evicting the others every
+// time somebody moved the control, which on a 60s TTL is a full re-query per click.
+test("the overview cache is keyed by range, so the three do not evict each other", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls));
+  await q.overview("24h");
+  const afterFirst = calls.length;
+  await q.overview("7d");
+  assert.ok(calls.length > afterFirst, "a different range must issue its own queries");
+  const afterSecond = calls.length;
+  await q.overview("24h");
+  assert.equal(calls.length, afterSecond, "the first range was evicted by the second");
+});
+
+// An unrecognised ?range= must not reach RANGES[] as a key and produce undefined.
+test("an unknown range falls back to the default rather than querying with undefined", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).overview("90d" as never);
+  const windowed = calls.filter((c) => c.sql.includes("$1::interval"));
+  for (const c of windowed) assert.equal(c.params[0], "30 days");
 });
 
 test("with no pool the dashboard reports itself disabled instead of throwing", async () => {
@@ -237,4 +279,88 @@ test("total never falls below the rows the caller is already holding", async () 
 test("with no pool the list reports an empty, uncapped page instead of throwing", async () => {
   const out = await new DashboardQueries(null).list(parseFilters(new URLSearchParams("")));
   assert.deepEqual(out, { rows: [], hasMore: false, total: 0, capped: false });
+});
+
+// ---------- post-remediation verdicts ----------
+
+// `status` is what the MCP call returned; `verdict` is what the cluster did about it. The
+// dashboard could only ever see the first, which is how a restart that returned 200 and fixed
+// nothing counted as a success.
+test("detail joins each remediation to its verification check", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, (sql) => (sql.includes("FROM incidents") ? [{ id: 7 }] : [])));
+  await q.detail(7);
+
+  const rem = calls.find((c) => c.sql.includes("FROM remediations"));
+  assert.ok(rem, "no remediation query");
+  assert.match(rem.sql, /LEFT JOIN remediation_checks/, "an inner join hides unapproved remediations");
+  assert.match(rem.sql, /c\.verdict/);
+  assert.match(rem.sql, /c\.detail AS verdict_detail/);
+  // status and verdict must both survive — merging them is the bug this exists to prevent
+  assert.match(rem.sql, /r\.status/);
+});
+
+test("overview counts what the checks concluded, over the same window", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).overview();
+  const checks = calls.find((c) => c.sql.includes("FROM remediation_checks"));
+  assert.ok(checks, "the verdicts are never queried");
+  assert.deepEqual(checks.params, ["30 days"]);
+  // NULL is kept as its own group rather than coalesced: a check still waiting is not a
+  // verdict, and folding it into "inconclusive" reports an answer that was never given.
+  assert.doesNotMatch(checks.sql, /coalesce\(verdict/);
+});
+
+test("a pending check is counted as pending, never as a verdict", async () => {
+  const q = new DashboardQueries(
+    stub([], (sql) =>
+      sql.includes("FROM remediation_checks")
+        ? [
+            { verdict: "recovered", n: 4 },
+            { verdict: "worse", n: 1 },
+            { verdict: null, n: 3 },
+          ]
+        : []
+    )
+  );
+  const o = await q.overview();
+  assert.deepEqual(o.verdicts, { recovered: 4, worse: 1 });
+  assert.equal(o.verdictsPending, 3);
+  assert.equal(o.verdicts.null, undefined, "a NULL verdict must not become a bucket named null");
+});
+
+// ---------- the rail's badge count ----------
+
+// Deliberately not the overview's "Open" figure: that one is bounded by the selected range,
+// and a badge that shrank when someone switched to 24h would be reporting the control rather
+// than the cluster.
+test("the open count is every unresolved incident, whenever it fired", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls, () => [{ n: 17 }])).openIncidents();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /resolved_at IS NULL/);
+  assert.doesNotMatch(calls[0].sql, /interval/, "the badge is not bounded by the overview's range");
+});
+
+// An exact count over a growing table is a scan on the same 3-connection pool that serves
+// alerts, and four digits in a nav badge is not a number anyone reads.
+test("the open count is bounded", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).openIncidents();
+  assert.match(calls[0].sql, new RegExp(`LIMIT ${NAV_COUNT_CAP + 1}`));
+});
+
+// It is asked for on EVERY page render, not just the overview — so it gets its own slot rather
+// than riding along with a query that only the overview runs.
+test("the open count is cached apart from the overview", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, () => [{ n: 3 }]));
+  assert.equal(await q.openIncidents(), 3);
+  const after = calls.length;
+  assert.equal(await q.openIncidents(), 3);
+  assert.equal(calls.length, after, "a second call inside the TTL must issue no query");
+});
+
+test("with no pool the badge count is zero rather than a throw", async () => {
+  assert.equal(await new DashboardQueries(null).openIncidents(), 0);
 });

@@ -1,9 +1,11 @@
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, topologyPage, contextPage, skillPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
+import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
-import type { IncidentDetail, IncidentPage, IncidentRow, Overview, Tokens } from "./queries.js";
+import type { IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
 
@@ -24,9 +26,12 @@ const row: IncidentRow = {
   severity: "warning", confidence: "high", root_cause: "container hit its memory limit",
 };
 const emptyOverview: Overview = {
+  range: "30d", seriesUnit: "per day",
   weekly: [], recurring: [], totalIncidents: 0, resolvedIncidents: 0,
-  remediationSucceeded: 0, remediationFailed: 0, feedback: {},
+  mttrMs: null, severity: [],
+  remediationSucceeded: 0, remediationFailed: 0, verdicts: {}, verdictsPending: 0, feedback: {},
   tokens: { calls: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, byBackend: [] },
+  prev: { totalIncidents: 0, openIncidents: 0, mttrMs: null, feedbackTotal: 0 },
 };
 
 test("layout emits a complete, self-contained document with inline styles", () => {
@@ -275,7 +280,11 @@ test("each topology table takes the narrow layout its own cells call for", () =>
 
   // The opt-out, asserted rather than assumed: stacking this one would put the expanded tool
   // list between a family and the count it belongs to.
-  assert.match(html, /<table><thead><tr><th>Family<\/th>/, "the capability table stays a table at every width");
+  assert.match(
+    html,
+    /<table class="caps"><thead><tr><th>Family<\/th>/,
+    "the capability table stays a table at every width"
+  );
 
   for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
     const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
@@ -429,11 +438,10 @@ test("the state panel opens the page, above the hero", () => {
 // sub-line and the fourth none puts that fourth value a line above its neighbours.
 // Matches the variants too (`stats facts`): a variant changes how a stacked tile lays out, not
 // what a shelf is allowed to hold.
+// The opening tag is KEPT in each slice: the variant is on the class, and a caller has to be
+// able to tell a four-wide shelf from the two-wide `pair` that lives inside a panel.
 const shelvesOf = (html: string): string[] =>
-  html
-    .split(/<dl class="stats[^"]*">/)
-    .slice(1)
-    .map((s) => s.slice(0, s.indexOf("</dl>")));
+  [...html.matchAll(/<dl class="stats[^"]*">[\s\S]*?<\/dl>/g)].map((m) => m[0]);
 
 test("every stat shelf holds four figures, and a shelf's sub-lines are all or none", () => {
   const pages = [
@@ -441,12 +449,21 @@ test("every stat shelf holds four figures, and a shelf's sub-lines are all or no
     detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] }),
   ];
   const shelves = pages.flatMap(shelvesOf);
-  assert.equal(shelves.length, 3, "the state panel, the token totals, the incident fact bar");
+  assert.equal(
+    shelves.length, 4,
+    "the state panel, the outcomes pair, the token totals, the incident fact bar"
+  );
   for (const shelf of shelves) {
     const stats = shelf.split(`<div class="stat"`).slice(1);
-    assert.equal(stats.length, 4);
+    // Four, or the two-wide `pair` variant that lives inside a panel. Never three and never
+    // five: the ladder only ever halves, so anything else orphans a tile on a row of its own.
+    const pair = shelf.startsWith(`<dl class="stats pair">`);
+    assert.equal(stats.length, pair ? 2 : 4, shelf.slice(0, 40));
     const withSub = stats.filter((s) => s.includes("<span>")).length;
-    assert.ok(withSub === 0 || withSub === 4, `shelf mixes ${withSub} sub-lines into 4 figures`);
+    assert.ok(
+      withSub === 0 || withSub === stats.length,
+      `shelf mixes ${withSub} sub-lines into ${stats.length} figures`
+    );
   }
 });
 
@@ -458,11 +475,11 @@ test("open incidents wear the severity spine, and only while any are open", () =
     html.slice(html.indexOf(`<dl class="stats">`), html.indexOf("</dl>"));
 
   const busy = shelf(overviewPage({ ...emptyOverview, totalIncidents: 10, resolvedIncidents: 7 }, []));
-  assert.match(busy, /<div class="stat" data-tone="critical"><dt>[\s\S]*?Open<\/dt><dd>3/);
+  assert.match(busy, /<div class="stat" data-tone="critical" data-linked><dt>[\s\S]*?>Open<\/span>[\s\S]*?<dd>3/);
   assert.equal(busy.match(/data-tone=/g)?.length, 1, "nothing else on the shelf is toned");
 
   const quiet = shelf(overviewPage({ ...emptyOverview, totalIncidents: 10, resolvedIncidents: 10 }, []));
-  assert.match(quiet, /<div class="stat"><dt>[\s\S]*?Open<\/dt><dd>0/, "no tone when nothing is open");
+  assert.match(quiet, /<div class="stat" data-linked><dt>[\s\S]*?>Open<\/span>[\s\S]*?<dd>0/, "no tone when nothing is open");
   assert.doesNotMatch(quiet, /data-tone=/);
 });
 
@@ -478,10 +495,10 @@ test("token usage totals the window and breaks it down by backend AND model", ()
   // denominator of the total above it, not a fourth kind of token.
   assert.match(
     html,
-    /Total tokens<\/dt><dd>1,293,199<span>input \+ output over 412 calls<\/span>/,
+    /Total tokens<\/span><\/dt><dd>1,293,199<span>input \+ output over 412 calls<\/span>/,
     "input + output, thousands-separated, over the call count"
   );
-  assert.match(html, /Cache reads<\/dt><dd>950,004<span>12,003 written<\/span>/);
+  assert.match(html, /Cache reads<\/span><\/dt><dd>950,004<span>12,003 written<\/span>/);
   // the model is what the router question is actually about — a heavy backend answering
   // what a light one could have is only visible if the model is on the row
   assert.match(html, /qwen3-32b/);
@@ -599,7 +616,8 @@ test("a table of short values is a stack with its captions beside them", () => {
   }
   // The alert name is the longest string on the page and takes the same wrap points the
   // incident list gives it — the hanging indent leaves it a narrower column than the table did.
-  assert.match(html, /data-label="Alert">Kube<wbr>Pod<wbr>Crash<wbr>Looping</);
+  // The name is a link into the list filtered to it, so the wrap points sit inside the anchor.
+  assert.match(html, /data-label="Alert"><a href="[^"]*">Kube<wbr>Pod<wbr>Crash<wbr>Looping</);
 });
 
 // Severity and Confidence arrive as sections; rendered as sections they spend a heading and a
@@ -650,6 +668,12 @@ test("backendRows escapes name, kind, model, route, and endpoint", () => {
 
 // ---------- the rail ----------
 
+// The stylesheet is inlined into every page and names every class the markup does, so a
+// doesNotMatch against the whole document is always satisfied by the CSS. Everything below
+// asserts against the BODY.
+const bodyOf = (html: string): string => html.split("</style>")[1] ?? "";
+
+
 test("the rail carries every destination as an icon beside a text label", () => {
   const html = layout("Test", "<p>hi</p>");
   assert.match(html, /<header class="rail">/);
@@ -665,7 +689,10 @@ test("the rail carries every destination as an icon beside a text label", () => 
 test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
-  assert.equal(icons.length, 5, "four destinations and the sign-out button");
+  assert.equal(
+    icons.length, 8,
+    "the drawer's two states, the brand mark, four destinations and the sign-out button"
+  );
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
@@ -720,12 +747,15 @@ test("every glyph on every page is decorative and inherits its colour", () => {
 // an injection site the day one is built from a row instead of a literal.
 test("a stat renders its glyph as markup and its label as text", () => {
   const html = overviewPage({ ...emptyOverview, tokens }, []);
-  assert.match(html, /<dt><svg class="ico"[\s\S]*?<\/svg>Total tokens<\/dt>/);
+  assert.match(
+    html,
+    /<dt><span class="kpi-icon" aria-hidden="true"><svg class="ico"[\s\S]*?<\/svg><\/span><span class="lbl">Total tokens<\/span><\/dt>/
+  );
   assert.doesNotMatch(html, /&lt;svg/, "the glyph is markup, not escaped source");
 });
 
 test("the rail marks where you are, and marks it once", () => {
-  const html = layout("Incidents", "<p>hi</p>", "/incidents");
+  const html = layout("Incidents", "<p>hi</p>", { current: "/incidents" });
   assert.match(html, /<a href="\/incidents" aria-current="page">/);
   // matched on the link, not on the bare attribute: the inline stylesheet selects on it too
   assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
@@ -852,14 +882,17 @@ test("only a record table lets its headers wrap", () => {
 // document sideways with them. Between 481 and 555px that was the whole cause of a horizontal
 // scrollbar on every page of the dashboard. The brand is what gives way — it is the only item
 // in the bar built to be cut, and it already carries the ellipsis to show it.
-test("nothing in the top bar gives way except the brand", () => {
-  for (const sel of [String.raw`\.rail nav`, String.raw`form\.signout`]) {
-    assert.match(STYLES, new RegExp(`${sel} \\{[^}]*flex: 0 0 auto`), `${sel} can be squeezed into an overflow`);
-  }
-  const brand = STYLES.match(/^\.rail \.brand \{([^}]*)\}/m);
-  assert.ok(brand, "no .brand rule to check");
+// The brand moved out of the rail and into the top bar, where it is the item built to be cut:
+// it has the ellipsis, so it is what absorbs a squeeze rather than the controls beside it.
+test("the brand is what gives way in the top bar, not the controls", () => {
+  const brand = STYLES.match(/^\.topbar \.brand \{([^}]*)\}/m);
+  assert.ok(brand, "no .topbar .brand rule to check");
   assert.match(brand[1], /min-width: 0/);
   assert.match(brand[1], /text-overflow: ellipsis/);
+  // Its glyph tile must not shrink with it: a squeezed 4px tile is a rendering fault, not a mark.
+  assert.match(STYLES, /\.topbar \.brand-mark \{[^}]*flex: 0 0 auto/);
+  // And when the rail lies down across the top, sign-out holds its size for the same reason.
+  assert.match(STYLES, /form\.signout \{[^}]*flex: 0 0 auto/);
 });
 
 test("a CamelCase alert name offers its humps as break points, and stays escaped", () => {
@@ -1182,7 +1215,7 @@ test("an out-of-range page offers the way back instead of blaming the filters", 
 // ---------- /context ----------
 
 const CTX: ContextView = {
-  core: { lines: 267, chars: 24_100, tokens: 8_034 },
+  core: { lines: 267, chars: 24_100, tokens: 8_034, body: "You are an expert DevOps AI Agent.\n\n## Scope of Work\nThis connected infrastructure only." },
   skills: [
     { name: "rca-format", description: "The exact Slack mrkdwn shape every RCA must take", when: "always", chars: 1_820, body: "*📍 Root Cause*\none paragraph" },
     { name: "oomkilled", description: "First tool calls for a container killed at its memory limit", when: "oomkill|exit code 137", chars: 940, body: "1. k8s_describe_pod" },
@@ -1220,7 +1253,9 @@ test("the list names each skill and links it to its own page, and holds no body"
   const html = contextPage(CTX);
   assert.match(html, /<a href="\/context\/oomkilled"><code translate="no">oomkilled<\/code><\/a>/);
   assert.match(html, /First tool calls for a container killed at its memory limit/);
-  assert.doesNotMatch(html, /<details/, "a body inside a row is what this page moved away from");
+  // Against the BODY: the stylesheet is inlined into every page, and the comment explaining
+  // why the MCP table is laid out fixed names the element this asserts the absence of.
+  assert.doesNotMatch(bodyOf(html), /<details/, "a body inside a row is what this page moved away from");
   assert.doesNotMatch(html, /k8s_describe_pod/, "the body belongs to the skill page, not the list");
 });
 
@@ -1298,4 +1333,866 @@ test("a skill body and a regex are escaped, not rendered, on the skill page", ()
 
 test("the nav offers Context and marks it current on its own page", () => {
   assert.match(contextPage(CTX), /<a href="\/context" aria-current="page">/);
+});
+
+// ---------- self-refresh ----------
+
+// The overview is the page left open on a second monitor. A <meta> refresh rather than a
+// script: this route sends no script-src at all, and a full re-request is also what re-runs
+// the queries behind it.
+test("the overview re-requests itself, and says so", () => {
+  const html = overviewPage({ ...emptyOverview, tokens }, []);
+  assert.match(html, new RegExp(`<meta http-equiv="refresh" content="${REFRESH_SECONDS}">`));
+  assert.match(html, /class="topbar-note live"/);
+});
+
+// A reader who has typed a filter is WORKING. Reloading the page under them mid-way through
+// row seven is worse than leaving it stale, so the watch view is unfiltered page 1 and
+// nothing else.
+test("the incident list refreshes only while it is a watch view", () => {
+  const watching = listPage(page([row]), parseFilters(new URLSearchParams("")));
+  assert.match(watching, /<meta http-equiv="refresh"/);
+
+  for (const qs of ["severity=critical", "namespace=prod", "page=2", "resolved=false"]) {
+    assert.doesNotMatch(
+      listPage(page([row]), parseFilters(new URLSearchParams(qs))),
+      /<meta http-equiv="refresh"/,
+      `?${qs} is a query someone typed, not a view left open`
+    );
+  }
+});
+
+// Every other page is read once and navigated away from — and the sign-in page reloading
+// itself would discard a half-typed password.
+test("no other page refreshes itself", () => {
+  const others = [
+    detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] }),
+    topologyPage(baseTopology, NONCE),
+    contextPage(CTX),
+    loginPage(),
+    errorPage("Not found", "No incident with id 9."),
+  ];
+  for (const html of others) assert.doesNotMatch(html, /http-equiv="refresh"/);
+});
+
+// ---------- the time range ----------
+
+test("the range control is three links, with the current one marked and the default bare", () => {
+  const html = overviewPage({ ...emptyOverview, range: "7d", seriesUnit: "per day" }, []);
+  const seg = html.slice(html.indexOf(`<nav class="seg"`), html.indexOf("</nav>"));
+  assert.match(seg, /<a href="\/\?range=24h">24h<\/a>/);
+  assert.match(seg, /<a href="\/\?range=7d" aria-current="true">7d<\/a>/);
+  // the default range is the bare path: a URL that restates the default is noise in the bar
+  assert.match(seg, /<a href="\/">30d<\/a>/);
+  assert.equal([...seg.matchAll(/aria-current/g)].length, 1, "exactly one range is current");
+});
+
+// The window is in the heading and in the recurring table's empty state, and both read it off
+// the same value the queries were run with — a heading that says "30 days" over figures
+// measured across 24 hours is the failure this guards.
+test("the page names the window it was actually measured over", () => {
+  assert.match(overviewPage({ ...emptyOverview, range: "24h" }, []), /last 24 hours/);
+  assert.match(overviewPage({ ...emptyOverview, range: "7d" }, []), /last 7 days/);
+  assert.match(overviewPage({ ...emptyOverview, range: "30d" }, []), /last 30 days/);
+});
+
+// ---------- deltas ----------
+
+test("a delta reports the direction it moved and whether that is good news", () => {
+  const worse = overviewPage(
+    { ...emptyOverview, totalIncidents: 20, resolvedIncidents: 5,
+      prev: { totalIncidents: 20, openIncidents: 10, mttrMs: null, feedbackTotal: 0 } },
+    []
+  );
+  // 15 open against 10: up by 5, and up is bad news for open incidents
+  assert.match(worse, /<span class="delta" data-dir="up" data-tone="critical">5<\/span>/);
+
+  const better = overviewPage(
+    { ...emptyOverview, totalIncidents: 20, resolvedIncidents: 18,
+      prev: { totalIncidents: 20, openIncidents: 10, mttrMs: null, feedbackTotal: 0 } },
+    []
+  );
+  assert.match(better, /<span class="delta" data-dir="down" data-tone="ok">8<\/span>/);
+});
+
+// Down is GOOD for a time to resolve and BAD for a resolution rate, so direction and judgement
+// are two separate inputs. A component that inferred one from the other is wrong on half the
+// shelf — which is the whole reason delta() takes `better`.
+test("a shorter time to resolve is good news even though the arrow points down", () => {
+  const html = overviewPage(
+    { ...emptyOverview, mttrMs: 10 * 60_000, resolvedIncidents: 3, totalIncidents: 3,
+      prev: { totalIncidents: 3, openIncidents: 0, mttrMs: 30 * 60_000, feedbackTotal: 0 } },
+    []
+  );
+  assert.match(html, /<span class="delta" data-dir="down" data-tone="ok">20m<\/span>/);
+});
+
+// Every figure is up by infinity against a window that held nothing. That is a rendering
+// artefact, not a finding.
+test("no delta is drawn against an empty previous window", () => {
+  const html = overviewPage({ ...emptyOverview, totalIncidents: 9, resolvedIncidents: 2 }, []);
+  assert.doesNotMatch(html, /class="delta"/);
+});
+
+// An unchanged figure is neither good news nor bad, and colouring it either way is a claim
+// the number does not make.
+test("an unchanged figure gets an arrow and no tone", () => {
+  const html = overviewPage(
+    { ...emptyOverview, totalIncidents: 10, resolvedIncidents: 6,
+      prev: { totalIncidents: 10, openIncidents: 4, mttrMs: null, feedbackTotal: 0 } },
+    []
+  );
+  assert.match(html, /<span class="delta" data-dir="flat">0<\/span>/);
+});
+
+// ---------- duration ----------
+
+// Both timestamps were already on this shelf; the interval between them — the only number that
+// says how bad the incident WAS — had to be worked out by subtracting one tile from another.
+test("the incident page states how long it took, or how long it has been open", () => {
+  const fired = new Date("2026-08-24T02:00:00Z");
+  const now = new Date("2026-08-24T05:30:00Z");
+
+  const open = detailPage(
+    { incident: { ...row, created_at: fired, resolved_at: null, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] },
+    now
+  );
+  assert.match(open, /Open for<\/span>[\s\S]*?<dd>3h 30m<span>still firing/);
+  // still firing is a state, not a zero duration — the tile says so with the warning tone
+  assert.match(open, /<div class="stat" data-tone="warning">[\s\S]*?Open for/);
+
+  const done = detailPage(
+    { incident: { ...row, created_at: fired, resolved_at: new Date("2026-08-24T02:45:00Z"), rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] },
+    now
+  );
+  assert.match(done, /Time to resolve<\/span>[\s\S]*?<dd>45m<span>fired to resolved/);
+  // Scoped to the shelf: this incident's SEVERITY is "warning", and the page says so on the
+  // badge beside the title. What must not be toned is the duration tile.
+  const shelf = done.slice(done.indexOf(`<dl class="stats facts">`), done.indexOf("</dl>"));
+  assert.doesNotMatch(shelf, /data-tone=/, "a resolved duration is not a warning");
+});
+
+// ---------- relative time ----------
+
+// The absolute instant never leaves the page — it moves into datetime= and title=, which is
+// what keeps it machine-readable and one hover from an on-call who needs to paste it.
+test("timestamps read as relative and keep the exact instant in the element", () => {
+  const now = new Date("2026-07-29T00:00:00Z");
+  const html = listPage(page([row]), parseFilters(new URLSearchParams("")), now);
+  assert.match(html, /<time datetime="2026-07-28T23:48:00\.000Z" title="2026-07-28 23:48Z">12m ago<\/time>/);
+});
+
+// One instant per response, threaded from the caller. Computed per row instead, a list
+// rendered across a minute boundary says "1h ago" and "59m ago" about two incidents a second
+// apart — the kind of inconsistency nobody reports and everybody notices.
+test("every row on a page is dated against the same instant", () => {
+  const now = new Date("2026-07-29T00:00:00Z");
+  const rows = [
+    { ...row, id: 1, created_at: new Date("2026-07-28T23:00:00Z") },
+    { ...row, id: 2, created_at: new Date("2026-07-28T22:59:59Z") },
+  ];
+  const html = listPage(page(rows), parseFilters(new URLSearchParams("")), now);
+  assert.match(html, />1h ago</);
+  assert.doesNotMatch(html, />59m ago</, "the second row was dated against a later clock");
+});
+
+// `grid-row: 2` on .pane put the sign-in card at the bottom of the viewport: body.bare has one
+// row, so naming the second one created an implicit row above it. Auto-placement is correct in
+// all three layouts — beside the rail, under it, and alone on a bare page — so the pane names
+// no row at all, and this is what keeps it that way.
+test("the pane places itself, so a chrome-less page starts at the top", () => {
+  const pane = STYLES.match(/^\.pane \{([^}]*)\}/m);
+  assert.ok(pane, "no .pane rule to check");
+  assert.doesNotMatch(pane[1], /grid-row/, "a named row breaks the bare layout");
+  assert.doesNotMatch(STYLES, /\.pane \{[^}]*grid-row/);
+});
+
+// The top bar is stuck at 0 and the rail is stuck under it. CSS cannot read a sibling's
+// height, so the two agree through a token — and a literal in either place is a rail that
+// slides under the bar the next time the bar's contents change.
+test("the rail's sticky offset is the top bar's height, by token", () => {
+  assert.match(STYLES, /\.topbar \{[^}]*height: var\(--topbar-h\)/);
+  assert.match(STYLES, /\.rail \{[^}]*top: var\(--topbar-h\)/);
+  assert.match(STYLES, /\.rail \{[^}]*height: calc\(100vh - var\(--topbar-h\)\)/);
+});
+
+// ---------- affordance ----------
+
+// The restyle gave every stat card a shadow and a hover lift, which is a page telling a reader
+// "this can be clicked". Two of them now can. The rest must not make the promise: the lift is
+// scoped to [data-linked], and only a tile with a real destination carries it.
+test("only a stat with somewhere to go is marked as going anywhere", () => {
+  const html = overviewPage({ ...emptyOverview, tokens, totalIncidents: 10, resolvedIncidents: 7 }, []);
+  const linked = [...html.matchAll(/<div class="stat"[^>]*data-linked[^>]*>/g)];
+  assert.equal(linked.length, 2, "Open and Resolved lead to the filtered list; nothing else does");
+  assert.match(html, /<a class="stat-link" href="\/incidents\?resolved=false"/);
+  assert.match(html, /<a class="stat-link" href="\/incidents\?resolved=true"/);
+
+  // The incident page's fact shelf is identity, not a way in — no link, so no promise.
+  // Scoped to the shelf: the stylesheet is inlined into every page and names the selector too.
+  const detail = detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] });
+  const facts = detail.slice(detail.indexOf(`<dl class="stats facts">`), detail.indexOf("</dl>"));
+  assert.ok(facts, "no fact shelf to check");
+  assert.doesNotMatch(facts, /data-linked/);
+  assert.doesNotMatch(facts, /stat-link/);
+});
+
+// The visible label is one word and the destination is a filtered list, so the anchor has to
+// say more than the tile shows or a screen reader hears four links called "Open", "Resolved"…
+test("a linked stat names its destination for a reader who cannot see the tile", () => {
+  const html = overviewPage({ ...emptyOverview, totalIncidents: 10, resolvedIncidents: 7 }, []);
+  assert.match(html, /aria-label="Open — see the 3 incidents still firing"/);
+  assert.match(html, /aria-label="Resolved — see the 7 incidents that closed"/);
+});
+
+// The lift is a promise; the CSS is where it is kept or broken.
+test("the hover lift is scoped to linked tiles in the stylesheet too", () => {
+  assert.match(STYLES, /\.stat\[data-linked\]:hover \{[^}]*transform: translateY/);
+  assert.doesNotMatch(STYLES, /^\s*\.stat:hover/m, "an unscoped lift promises what inert tiles cannot keep");
+});
+
+// ---------- state emphasis ----------
+
+// The column exists to say which incidents are still live. Firing wore the neutral badge and
+// resolved wore green, so the live rows were the quietest thing in it.
+test("the state column emphasises firing, not resolved", () => {
+  const html = listPage(page([{ ...row, resolved_at: null }]), parseFilters(new URLSearchParams("")));
+  assert.match(html, /<span class="badge" data-live>firing<\/span>/);
+  // and it spends weight rather than colour — severity is one cell to the left already
+  assert.match(STYLES, /\.badge\[data-live\] \{[^}]*color: var\(--text\)/);
+  assert.doesNotMatch(STYLES, /\.badge\[data-live\] \{[^}]*var\(--critical\)/);
+
+  const resolved = listPage(page([{ ...row, resolved_at: new Date() }]), parseFilters(new URLSearchParams("")));
+  assert.match(resolved, /<span class="badge" data-tone="ok">resolved<\/span>/);
+});
+
+// ---------- tone vocabulary ----------
+
+// A mark (a spine, a dot, an arc, a swatch) is a graphic and needs 3:1; type in a tone needs
+// 4.5:1 on its own tint. One ramp cannot be both, and the one that could be read as 11px type
+// on white is the one that turned amber into brown.
+test("marks and type draw from different ramps", () => {
+  for (const t of ["critical", "warning", "info", "ok"]) {
+    assert.match(
+      STYLES,
+      new RegExp(`\\[data-tone="${t}"\\]\\s*\\{[^}]*--spine: var\\(--mark-${t}\\)`),
+      `${t}'s mark is not drawn from the graphic ramp`
+    );
+    assert.match(
+      STYLES,
+      new RegExp(`\\[data-tone="${t}"\\]\\s*\\{[^}]*--ink: var\\(--${t}\\)`),
+      `${t}'s type is not drawn from the readable ramp`
+    );
+  }
+  // and a badge's label is type, while its dot is a mark
+  assert.match(STYLES, /\.badge\[data-tone\] \{[^}]*color: var\(--ink\)/);
+  assert.match(STYLES, /\.badge::before \{[^}]*background: var\(--spine/);
+});
+
+// ---------- one segmented control ----------
+
+// The topology page's scale control and the overview's time range are the same component doing
+// the same job. The markup differs because the mechanism does (radios cannot be links); the
+// look must not.
+test("the topology scale control is the shared segmented control", () => {
+  assert.match(topologyPage(baseTopology, NONCE), /<div class="topo-bar"><div class="seg">/);
+  assert.match(STYLES, /\.seg a, \.seg label, \.seg button \{/);
+});
+
+// ---------- empty states ----------
+
+// A window with no incidents is the good outcome, and a fresh deployment is the ordinary first
+// hour. A dashed outline says "this failed to load"; a real surface says "this is the answer".
+test("an empty state is a panel, and wears the glyph of the section it stands in", () => {
+  const html = detailPage({ incident: { ...row, rca: "", channel: null, thread_ts: null }, remediations: [], feedback: [] });
+  assert.match(html, /<div class="empty"><span class="kpi-icon" aria-hidden="true"><svg class="ico"/);
+  assert.doesNotMatch(STYLES, /\.empty \{[^}]*border: 1px dashed/);
+  // the wrench stands in for Remediation, the speech bubble for on-call — the same glyphs
+  // those sections carry when they do have rows
+  assert.equal([...html.matchAll(/<div class="empty">/g)].length, 3, "RCA, remediation, feedback");
+});
+
+// ---------- post-remediation verdicts ----------
+
+// A remediation row, with the check that annotates it. Defaults describe the ordinary case —
+// an approved action whose check has not run yet — so a test states only what it is about.
+const remRow = (over: Partial<RemediationRow> = {}): RemediationRow => ({
+  action: "restart_deployment",
+  params: { name: "speaker" },
+  status: "succeeded",
+  approved_by: "U123",
+  result: "rollout complete",
+  created_at: new Date("2026-08-24T02:20:00Z"),
+  executed_at: new Date("2026-08-24T02:21:00Z"),
+  verdict: null,
+  verdict_detail: null,
+  check_status: "pending",
+  checked_at: null,
+  due_at: new Date("2026-08-24T02:26:00Z"),
+  ...over,
+});
+const withRem = (r: RemediationRow, now = new Date("2026-08-24T02:22:00Z")): string =>
+  detailPage(
+    { incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [r], feedback: [] },
+    now
+  );
+
+// THE test for this feature. The two facts disagree exactly where it matters: the call
+// returned 200 and the alert kept firing. Before this the page showed only the first half.
+test("status and verdict are both rendered, and are allowed to disagree", () => {
+  const html = withRem(remRow({
+    status: "succeeded",
+    verdict: "unchanged",
+    verdict_detail: "`KubeOom` is still firing; 2/3 pods ready, 4 restart(s)",
+    check_status: "done",
+  }));
+  assert.match(html, /data-label="Status"><span class="badge" data-tone="ok">succeeded<\/span>/);
+  assert.match(html, /data-label="Verdict"><span class="badge" data-tone="warning">unchanged<\/span>/);
+  // and the evidence the verdict was read from travels with it
+  assert.match(html, /2\/3 pods ready, 4 restart\(s\)/);
+});
+
+// The spine is the row's one-glance reading, so it has to carry the fact that describes the
+// cluster rather than the one that describes the API.
+test("the row's tone follows the verdict, and falls back to the status only without one", () => {
+  const disagreeing = withRem(remRow({ status: "succeeded", verdict: "worse", check_status: "done" }));
+  const rows = disagreeing.match(/<tr role="row" data-tone="(\w+)">/g) ?? [];
+  assert.ok(rows.some((r) => r.includes('data-tone="critical"')), "a worse verdict must tone the row");
+
+  // no check at all — an unapproved proposal — falls back to what the call said
+  const noCheck = withRem(remRow({ status: "failed", verdict: null, check_status: null, due_at: null }));
+  assert.match(noCheck, /<tr role="row" data-tone="critical">/);
+});
+
+// "pending" with no horizon is indistinguishable from a poller that has stopped.
+test("a check that has not run says when it will, forwards", () => {
+  const html = withRem(remRow({ due_at: new Date("2026-08-24T02:26:00Z") }), new Date("2026-08-24T02:22:00Z"));
+  assert.match(html, /<span class="badge">checking<\/span>/);
+  assert.match(html, /next check in 4m/);
+  // fmtAgo clamps a future instant to "just now" — using it here would report a check that
+  // is four minutes away as one that already ran.
+  assert.doesNotMatch(html, /next check just now/);
+});
+
+test("a check whose time has passed says so rather than counting backwards", () => {
+  const html = withRem(remRow({ due_at: new Date("2026-08-24T02:00:00Z") }), new Date("2026-08-24T02:22:00Z"));
+  assert.match(html, /check overdue/);
+});
+
+// A remediation that was proposed and never approved was never going to be verified. A
+// "pending" it will never leave is worse than saying nothing.
+test("a remediation with no check shows a dash, not a pending state", () => {
+  const html = withRem(remRow({ status: "proposed", verdict: null, check_status: null, due_at: null }));
+  const cell = html.match(/data-label="Verdict">([\s\S]*?)<\/td>/)?.[1];
+  assert.ok(cell, "no verdict cell");
+  assert.doesNotMatch(cell, /checking/);
+  assert.match(cell, /—/);
+});
+
+// "we looked and the evidence says nothing either way" is not a finding, and a colour would
+// make it one.
+test("inconclusive carries no tone", () => {
+  const html = withRem(remRow({ verdict: "inconclusive", check_status: "done" }));
+  assert.match(html, /data-label="Verdict"><span class="badge">inconclusive<\/span>/);
+});
+
+// ---------- the overview figure that was measuring the wrong thing ----------
+
+// It reported `status = succeeded` over all remediations — how many API calls did not error.
+// The tile now reports verdicts, and the call counts drop to the sub-line where they belong.
+test("the remediation tile reports what the cluster did, not what the API returned", () => {
+  const html = overviewPage(
+    { ...emptyOverview,
+      remediationSucceeded: 9, remediationFailed: 1,
+      verdicts: { recovered: 3, unchanged: 5, inconclusive: 2 } },
+    []
+  );
+  // 3 recovered of 10 that reached a verdict — not 9 of 10 calls that returned 200
+  assert.match(html, />Remediation verified<\/span>[\s\S]*?<dd>30%/);
+  assert.match(html, /9 of 10 calls succeeded/);
+  assert.doesNotMatch(html, /Remediation applied/, "the old label described the wrong measurement");
+});
+
+// A check still waiting is not a failure and not a success; counting it either way moves the
+// percentage for a reason nobody did.
+test("a pending check is left out of the denominator", () => {
+  const html = overviewPage(
+    { ...emptyOverview, verdicts: { recovered: 1, unchanged: 1 }, verdictsPending: 8 },
+    []
+  );
+  assert.match(html, />Remediation verified<\/span>[\s\S]*?<dd>50%/);
+});
+
+// The single most consequential thing this system can do, and it had no representation on the
+// page at all.
+test("a remediation that made things worse is impossible to skim past", () => {
+  const html = overviewPage(
+    { ...emptyOverview, verdicts: { recovered: 4, worse: 1 }, verdictsPending: 2 },
+    []
+  );
+  // its own figure, in the outcomes panel
+  assert.match(html, />Made it worse<\/span>[\s\S]*?<dd>1</);
+  // and the tile above it wears the tone, so the top of the page carries it too
+  assert.match(html, /<div class="stat" data-tone="critical">[\s\S]*?Remediation verified/);
+});
+
+// At zero it keeps its place: a reader has to see that the answer is none rather than infer
+// it from a tile that is not there.
+test("the worse figure is shown at zero, untoned", () => {
+  const html = overviewPage({ ...emptyOverview, verdicts: { recovered: 4 } }, []);
+  assert.match(html, />Made it worse<\/span>[\s\S]*?<dd>0</);
+  assert.doesNotMatch(html, /<div class="stat" data-tone="critical">[\s\S]*?Made it worse/);
+});
+
+// Found by looking at the render: falling back to the status while a check was still pending
+// put a green spine on a row whose outcome nobody had measured yet — `succeeded` reading as
+// "it worked", which is the exact masquerade this feature exists to stop.
+test("a row whose check has not concluded carries no tone at all", () => {
+  const html = withRem(remRow({ status: "succeeded", verdict: null, check_status: "pending" }));
+  const tr = html.match(/<tr role="row"[^>]*>/g)?.find((t) => !t.includes("data-tone")) ?? "";
+  assert.equal(tr, `<tr role="row">`, "a pending verdict must not borrow the call's green");
+  // and the cell still says a check is coming, so the absence of a tone is not an absence of
+  // information
+  assert.match(html, /checking/);
+});
+
+// ---------- vertical rhythm ----------
+
+// The page had none: spacing came from the headings' own margins, so any two blocks a heading
+// separated were spaced and any two it did not were touching. The KPI shelf sat edge to edge
+// with the hero, and the token shelf with the backend table — both are one section holding two
+// blocks, which is the case nothing covered.
+test("stacked blocks are spaced by the page, not by whichever of them owns a margin", () => {
+  assert.match(STYLES, /main > \* \+ \* \{ margin-top: var\(--stack\); \}/);
+  // and the components it covers must not have opted themselves out with a margin of their own
+  assert.match(STYLES, /\.stats \{[^}]*margin: 0/, ".stats declaring its own margin would fight the rule");
+});
+
+// Three levels, each clearly larger than the one nested inside it. When the block step and the
+// section step were both --sp-6 a section boundary said nothing the heading had not already
+// said, and at the grid step the hero read as a fifth KPI card.
+test("the grid, block and section steps are three distinct sizes", () => {
+  assert.match(STYLES, /--stack: var\(--sp-6\);/);
+  assert.match(STYLES, /\.stats \{[^}]*gap: var\(--sp-4\)/, "peer cards sit on the smallest step");
+  // the section step's FLOOR has to clear --stack, or the two collapse into one reading
+  const h2 = STYLES.match(/^h2, \.eyebrow \{[\s\S]*?\}/m)?.[0] ?? "";
+  assert.match(h2, /margin: clamp\(var\(--sp-8\)/, "the section step must start above --stack");
+});
+
+// A document page's body is a single .doc, so main's rule never reaches inside it — which is
+// what keeps an eyebrow tight against the title it labels.
+test("the rhythm does not loosen the lockups inside a document page", () => {
+  const html = detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] });
+  const body = html.split("</style>")[1];
+  const main = body.slice(body.indexOf(`<main id="main">`), body.indexOf("</main>"));
+  const children = [...main.matchAll(/<(div|section|h1|h2|p|table|figure)\b/g)];
+  assert.ok(children.length > 0);
+  assert.match(main, /<main id="main"><div class="doc">/, "the doc wrapper is what shields the lockups");
+});
+
+// The whole stylesheet is one template literal, so a backtick in a CSS comment ends it and the
+// file stops compiling. That has happened three times while writing these comments — always
+// from quoting a CSS keyword the way prose quotes code. This is the cheap guard: the source
+// must contain exactly one backtick after the opening one, and it must be the closing one.
+test("no comment in the stylesheet contains a backtick", async () => {
+  const src = await readFile(new URL("./styles.ts", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export const STYLES = `") + "export const STYLES = `".length);
+  assert.equal(
+    (body.match(/`/g) ?? []).length,
+    1,
+    "a backtick inside the CSS ends the template literal — quote CSS keywords with ' instead"
+  );
+});
+
+// Two cards side by side are one row and must end on the same line. `align-items: start` made
+// each take its own content height, so above 58rem the ring stood about 90px taller than the
+// two-tile shelf beside it and the row read as ragged. Only visible at wide widths — below
+// 58rem there is one column and nothing to align.
+test("the outcomes panels are one row, so they end together", () => {
+  const split = STYLES.match(/^\.split \{[\s\S]*?\}/m)?.[0] ?? "";
+  assert.ok(split, "no .split rule");
+  assert.match(split, /align-items: stretch/);
+  assert.doesNotMatch(split, /align-items: start/, "start is what made the row ragged");
+});
+
+// A stretched card is taller than its contents, and the shorter of the two would otherwise end
+// in a hundred pixels of nothing. The caption stays at the top; the figure block takes the
+// leftover room symmetrically.
+test("a stretched card centres its figures instead of leaving a void", () => {
+  assert.match(STYLES, /\.split > \.card \{[^}]*display: flex[^}]*flex-direction: column/);
+  assert.match(STYLES, /\.split > \.card > \.donut,\s*\.split > \.card > \.stats \{[^}]*margin-top: auto/);
+});
+
+// ---------- the rail ----------
+
+// Four destinations were one flat list, and they are two different kinds of thing: what the
+// cluster did, and what this process is. The caption is associated with its own list rather
+// than floating above it, so the grouping exists for a screen reader too.
+test("the rail groups its destinations, and each caption labels its own list", () => {
+  const html = layout("Test", "<p>hi</p>", { current: "/" });
+  assert.match(html, /<p class="rail-group" id="rail-g0">Monitor<\/p><ul aria-labelledby="rail-g0">/);
+  assert.match(html, /<p class="rail-group" id="rail-g1">Agent<\/p><ul aria-labelledby="rail-g1">/);
+  // still four destinations, and still exactly one marked
+  assert.equal([...html.matchAll(/<li><a href="/g)].length, 4);
+  assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
+});
+
+// The number a reader wants is now visible from every page, not only from the overview.
+test("the rail carries the open count on the destination that lists them", () => {
+  const html = layout("Test", "<p>hi</p>", { current: "/", openIncidents: 17 });
+  assert.match(html, /<a href="\/incidents">[\s\S]*?<span class="rail-count">17<span class="sr-only"> open<\/span><\/span>/);
+  // and only there — a count beside Topology would be counting nothing it lists
+  assert.equal([...html.matchAll(/class="rail-count"/g)].length, 1);
+});
+
+// "Nothing is on fire" is what an absent badge already says. A rail that always carries a
+// number trains the eye to stop reading it.
+test("no badge at zero", () => {
+  assert.doesNotMatch(bodyOf(layout("Test", "<p>hi</p>", { openIncidents: 0 })), /rail-count/);
+});
+
+// undefined is not zero. A page that could not read the count must not assert that nothing is
+// firing — that is exactly the wrong thing to say when the reason is that the database is down.
+test("no badge when the count is unknown", () => {
+  assert.doesNotMatch(bodyOf(layout("Test", "<p>hi</p>", {})), /rail-count/);
+  assert.doesNotMatch(bodyOf(layout("Test", "<p>hi</p>", { openIncidents: undefined })), /rail-count/);
+});
+
+// Four digits in a nav badge is not a number anyone reads.
+test("the badge is bounded", () => {
+  assert.match(layout("Test", "<p>hi</p>", { openIncidents: 4000 }), />999\+<span class="sr-only">/);
+  assert.match(layout("Test", "<p>hi</p>", { openIncidents: 999 }), />999<span class="sr-only">/);
+});
+
+// The session note moved out of the top bar, where it was also the first thing dropped when the
+// bar ran out of room — a poor place for the only statement that this dashboard is read-only.
+test("the session note sits at the foot of the rail, not in the top bar", () => {
+  const html = layout("Test", "<p>hi</p>", { current: "/" });
+  assert.match(html, /<div class="rail-foot"><p class="rail-note">Read-only · session \d+h<\/p>/);
+  const bar = bodyOf(html).slice(
+    bodyOf(html).indexOf(`<header class="topbar">`),
+    bodyOf(html).indexOf(`<header class="rail">`)
+  );
+  assert.doesNotMatch(bar, /session/, "the note is the rail's now");
+});
+
+// Only the live indicator describes THIS page, which is what the bar is for.
+test("the top bar keeps the live indicator and nothing else of its own", () => {
+  const refreshing = layout("Test", "<p>hi</p>", { refresh: true });
+  assert.match(refreshing, /<span class="topbar-note live">updates every \d+s<\/span>/);
+  const still = bodyOf(layout("Test", "<p>hi</p>", { refresh: false }));
+  assert.doesNotMatch(still, /topbar-note/);
+});
+
+// A bare page has no rail at all, so it has no badge and no note to render.
+test("a bare page renders neither the badge nor the note", () => {
+  const html = bodyOf(layout("Sign in", "<p>hi</p>", { chrome: "bare", openIncidents: 9 }));
+  assert.doesNotMatch(html, /rail-count|rail-note|rail-group/);
+});
+
+// The count is chrome, so every page carries it — including the two with no database of their
+// own. A page that forgot to thread it through would silently lose the badge on that route.
+test("every page renders the badge, not just the ones with a database", () => {
+  const pages: [string, string][] = [
+    ["overview", overviewPage({ ...emptyOverview, tokens }, [], new Date(), 17)],
+    ["list", listPage(page([row]), parseFilters(new URLSearchParams("")), new Date(), 17)],
+    ["detail", detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] }, new Date(), 17)],
+    ["topology", topologyPage(baseTopology, NONCE, 17)],
+    ["context", contextPage(CTX, 17)],
+    ["skill", skillPage(CTX.skills[0], 17)],
+  ];
+  for (const [name, html] of pages) {
+    assert.match(html, /<span class="rail-count">17/, `${name} drops the badge`);
+  }
+});
+
+// Measured, not eyeballed: --text-dim at .75 alpha over the light surface renders #828a93,
+// which is 3.50:1 — under the 4.5:1 this 11px text needs. What makes a rail caption read as a
+// caption is its size, tracking and case, none of which cost contrast.
+test("nothing in the rail dims itself with opacity", () => {
+  for (const sel of ["\\.rail-group", "\\.rail-note"]) {
+    const rule = STYLES.match(new RegExp(`^${sel} \\{[^}]*\\}`, "m"))?.[0] ?? "";
+    assert.ok(rule, `no ${sel} rule`);
+    assert.doesNotMatch(rule, /opacity/, `${sel} buys its hierarchy with contrast it cannot spare`);
+  }
+});
+
+// The separation is a hairline plus a weight step — not colour, which belongs to severity.
+test("sign out is not shaped like a fifth destination", () => {
+  assert.match(STYLES, /form\.signout button \{[^}]*font-weight: 500/);
+  assert.match(STYLES, /\.rail-foot \{[^}]*border-top: 1px solid var\(--border\)/);
+});
+
+// Below 60rem the rail lies down, and the structure that made sense down a column has to be
+// unmade: a caption belongs above the items it labels, and inline between them it reads as a
+// sixth and seventh destination. This is a viewport media query, so it cannot be rendered in
+// the preview harness — the guard is that the block still resets each thing it has to.
+test("the horizontal bar unmakes the column's structure", () => {
+  const bar = STYLES.match(/@media \(max-width: 60rem\)[^{]*\{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(bar, "no bar block");
+  assert.match(bar, /\.rail-group \{ display: none/, "captions would read as extra destinations");
+  assert.match(bar, /\.rail nav ul \{[^}]*flex-direction: row/);
+  assert.match(bar, /\.rail-foot \{[^}]*border-top: 0/, "a rule above a foot that is no longer a foot");
+  assert.match(bar, /\.rail-note \{ display: none/, "the page footer carries it in full anyway");
+  // the grouping survives for a screen reader — the lists stay lists
+  assert.doesNotMatch(bar, /\.rail nav ul \{[^}]*display: contents/);
+});
+
+// ---------- the mobile drawer ----------
+
+// A checkbox, because a page with no script policy has no other way to hold a toggle. The
+// objection that ruled out a COLLAPSE toggle does not apply: that one is a preference and would
+// have to survive navigation, which a server-rendered page cannot do. A drawer is transient,
+// and closing when you pick a destination is what it should do.
+test("the drawer is a checkbox the label toggles, and ships no script", () => {
+  const html = layout("Test", "<p>hi</p>", { current: "/" });
+  const body = bodyOf(html);
+  assert.match(body, /<input type="checkbox" id="nav-open" class="nav-state" aria-label="Navigation menu">/);
+  assert.match(body, /<label class="nav-toggle" for="nav-open" aria-hidden="true">/);
+  assert.doesNotMatch(body, /<script/, "the whole point of the checkbox is that there is none");
+});
+
+// The combinator only reaches forward, so the input has to precede everything it styles.
+test("the checkbox precedes the scrim and the rail it opens", () => {
+  const body = bodyOf(layout("Test", "<p>hi</p>", { current: "/" }));
+  const input = body.indexOf(`id="nav-open"`);
+  assert.ok(input >= 0);
+  assert.ok(input < body.indexOf(`class="nav-scrim"`), "the scrim is out of the combinator's reach");
+  assert.ok(input < body.indexOf(`<header class="rail">`), "the rail is out of the combinator's reach");
+});
+
+// The label carries no accessible name: the checkbox has it, and naming both announces the
+// control twice.
+test("the drawer control is named once", () => {
+  const body = bodyOf(layout("Test", "<p>hi</p>", { current: "/" }));
+  assert.equal([...body.matchAll(/aria-label="Navigation menu"/g)].length, 1);
+  assert.match(body, /<label class="nav-toggle"[^>]*aria-hidden="true"/);
+  // the scrim duplicates a control that is already in the tab order, so it is hidden too
+  assert.match(body, /<label class="nav-scrim" for="nav-open" aria-hidden="true">/);
+});
+
+// A drawer that is only translated out of sight is still in the tab order: a keyboard user
+// lands in a menu they cannot see. visibility is what takes it out.
+test("the closed drawer is out of the tab order, not merely off-screen", () => {
+  // Matched on the rules themselves, not on the block. There are two @media blocks at 46rem —
+  // the typographic one and the drawer — and a regex anchored to the breakpoint picks whichever
+  // comes first in the file.
+  assert.match(STYLES, /\.rail \{[^}]*transform: translateX\(-100%\)[^}]*visibility: hidden/);
+  assert.match(STYLES, /#nav-open:checked ~ \.rail \{[^}]*transform: none; visibility: visible/);
+});
+
+// The input is a 1px box in the corner, so its own ring would be invisible — it has to be
+// painted on the label a pointer actually sees.
+test("the drawer control shows a focus ring", () => {
+  assert.match(STYLES, /\.nav-state:focus-visible ~ \.topbar \.nav-toggle \{[^}]*outline: 2px solid var\(--accent\)/);
+});
+
+// A bare page has no rail, so it has nothing to open.
+test("a bare page ships no drawer machinery", () => {
+  const body = bodyOf(layout("Sign in", "<p>hi</p>", { chrome: "bare" }));
+  assert.doesNotMatch(body, /nav-open|nav-toggle|nav-scrim/);
+});
+
+// The bar and the drawer are different answers at different widths and must not both apply:
+// the bar block now stops where the drawer starts.
+test("the bar and the drawer do not overlap", () => {
+  assert.match(STYLES, /@media \(max-width: 60rem\) and \(min-width: 46\.0625rem\)/);
+  assert.match(STYLES, /@media \(max-width: 46rem\) \{/);
+});
+
+// It replaced an icons-only bar that clipped every label. A drawer keeps them, so the clip is
+// gone — and it has to be, because the rail now also carries group captions and a badge.
+test("nothing clips the rail's labels any more", () => {
+  assert.doesNotMatch(STYLES, /\.rail \.lbl \{/);
+});
+
+// The drawer is the one place motion carries meaning — it comes from the edge it lives on,
+// which says it was always there rather than that it appeared. Guarded like every other
+// transition in this sheet, and the visibility delay is what lets the slide be seen at all.
+test("the drawer slides, behind the reduced-motion guard", () => {
+  assert.match(STYLES, /\.rail \{ transition: transform \.22s ease, visibility 0s linear \.22s; \}/);
+  assert.match(STYLES, /#nav-open:checked ~ \.rail \{ transition: transform \.22s ease, visibility 0s; \}/);
+  const guard = STYLES.slice(0, STYLES.indexOf(".rail { transition: transform"));
+  assert.match(guard.slice(-260), /@media \(prefers-reduced-motion: no-preference\)/);
+});
+
+// ---------- the dependency map ----------
+
+// An arrow is nothing but its stroke, and in the light scheme a node box is nothing but its
+// outline (--surface and --surface-raised are the same white, so the box has no fill contrast
+// at all). Both were drawn in --border-strong — a BORDER token — at 1.65:1, against the 3:1 a
+// load-bearing graphic needs. Every mark on that map carrying STATE already cleared it.
+test("the map's structural strokes come off the mark ramp, not a border token", () => {
+  for (const sel of ["\\.topo-box", "\\.topo-edge", "\\.topo-edge-soft", "\\.topo-arrow"]) {
+    const rule = STYLES.match(new RegExp(`^${sel} \\{[^}]*\\}`, "m"))?.[0] ?? "";
+    assert.ok(rule, `no ${sel} rule`);
+    assert.match(rule, /var\(--mark-line\)/, `${sel} still draws in a border token`);
+    assert.doesNotMatch(rule, /var\(--border-strong\)/);
+  }
+  assert.match(STYLES, /--mark-line: #7d8797/);
+});
+
+// The cluster outline and the dot grid stay where they are, and that is a decision rather than
+// an oversight: a cluster groups boxes that position and a band label already group, and a dot
+// grid is a texture. Neither carries information, so neither has a contrast bar to clear.
+test("the map's decorative lines are left alone", () => {
+  assert.match(STYLES, /\.topo-cluster \{[^}]*stroke: var\(--border\)/);
+  assert.match(STYLES, /\.topo-dot \{ fill: var\(--border\); \}/);
+});
+
+// The text lives inside the SVG, so shrinking the drawing shrinks the type: at 390px the
+// 11.5-unit labels rendered near 4.9px. The floor comes from the drawing itself so it cannot
+// drift from the layout that produced it.
+test("the map never draws smaller than it was laid out for", () => {
+  const html = topologyPage(baseTopology, NONCE);
+  assert.match(html, /class="topo" style="--topo-w:\d+px"/);
+  assert.match(STYLES, /\.topo-view \.topo \{ width: 100%; min-width: var\(--topo-w, \d+px\); \}/);
+  assert.match(STYLES, /\.topo-view \{[^}]*overflow-x: auto/, "the floor is only safe if it scrolls");
+});
+
+// The vocabulary was never stated: an amber dashed box meant "not configured" and a teal edge
+// meant "over SQS via llm-worker" — the one fact the diagram exists to make obvious — and a
+// reader had to already know.
+test("the map carries a key, drawn with the same classes as the map", () => {
+  const t: Topology = {
+    ...baseTopology,
+    outbound: [{ label: "SQS", detail: "q", meta: "", configured: false }],
+    backends: [{ name: "b", kind: "private-llm", model: "m", route: "light", endpoint: "sqs://x", viaWorker: true }],
+  };
+  const html = topologyPage(t, NONCE);
+  assert.match(html, /<ul class="topo-legend">/);
+  // the swatches ARE fragments of the drawing, so a restyle cannot leave the key behind
+  assert.match(html, /class="topo-box topo-self"/);
+  // A <rect>, not a line — the diagram marks a worker-reached backend by the stroke of its
+  // chip, and a line carrying .topo-edge as well came out grey at equal specificity. The
+  // swatch has to be the same ELEMENT as the thing it stands for, not merely the same classes.
+  assert.match(html, /<rect[^>]*class="topo-box topo-backend topo-backend-worker"/);
+  assert.doesNotMatch(html, /<path[^>]*topo-backend-worker/);
+  assert.match(html, /class="topo-box topo-off"/);
+  assert.match(html, /reached over SQS via llm-worker/);
+  assert.match(html, /not configured/);
+});
+
+// A key that explains a colour which is not on screen is a key that has to be read past.
+test("the key only explains what was actually drawn", () => {
+  const clean: Topology = {
+    ...baseTopology,
+    inbound: [{ label: "Slack", detail: "socket", meta: "", configured: true }],
+    backends: [{ name: "b", kind: "claude", model: "m", route: "heavy", endpoint: "api", viaWorker: false }],
+  };
+  const html = topologyPage(clean, NONCE);
+  const legend = html.slice(html.indexOf(`<ul class="topo-legend">`), html.indexOf("</ul>", html.indexOf(`<ul class="topo-legend">`)));
+  assert.doesNotMatch(legend, /topo-off/, "nothing is unconfigured");
+  assert.doesNotMatch(legend, /topo-backend-worker/, "no backend takes the worker");
+  // the agent is always drawn, and the affordance always applies
+  assert.match(legend, /topo-self/);
+  assert.match(legend, /Every box links to its row below/);
+});
+
+// The live toolbar carries a "Drag to pan" hint and is hidden until the script runs, so
+// without one nothing announced that the boxes go anywhere.
+test("the script-free page states the affordance the toolbar would have", () => {
+  const html = topologyPage(baseTopology, NONCE);
+  assert.match(html, /<li class="topo-legend-note">Every box links to its row below\.<\/li>/);
+});
+
+// The floor that keeps the type legible is also what makes the frame clip, and on a platform
+// with overlay scrollbars nothing on screen says the rest is one drag away. Revealed by CSS
+// rather than decided in the renderer: whether it overflows is a question about the CONTENT
+// COLUMN's width, and at the same viewport that column is 13.5rem narrower with a rail beside
+// it than without — only a container query knows.
+test("a clipped map says it can be dragged", () => {
+  const html = topologyPage(baseTopology, NONCE);
+  assert.match(html, /<li class="topo-scroll-hint">Drag the map sideways to see the rest\.<\/li>/);
+  assert.match(STYLES, /\.topo-scroll-hint \{ display: none; \}/);
+  assert.match(STYLES, /@container page \(max-width: 53rem\) \{[\s\S]*?\.topo-scroll-hint \{ display: flex; \}/);
+});
+
+// Expanding a family used to move the count column sideways under the reader's pointer, on the
+// very click that was supposed to reveal something. Auto layout sizes columns from content, so
+// inserting a list of tool names re-divided the whole table.
+test("opening a tool family cannot move the count column", () => {
+  const t: Topology = {
+    ...baseTopology,
+    capabilities: [
+      { name: "kubernetes", tools: [{ name: "k8s_restart_deployment", write: true }, { name: "k8s_list_pods", write: false }] },
+      { name: "loki", tools: [{ name: "loki_query", write: false }] },
+    ],
+  };
+  const html = topologyPage(t, NONCE);
+  // the hook the rule hangs off — the only table on the dashboard that carries a class
+  assert.match(html, /<table class="caps">/);
+  assert.match(STYLES, /table\.caps \{ table-layout: fixed; \}/);
+  // fixed layout takes its widths from the header row, so that is where the width is stated
+  assert.match(STYLES, /table\.caps th:last-child, table\.caps td:last-child \{ width: 6rem; \}/);
+});
+
+// The exception has to stay narrow. Every other table wants the auto algorithm: it divides the
+// frame in proportion to what each column could use, which is what balances the RCA's Evidence
+// table at roughly 65/35 without a number being written down anywhere.
+test("no other table is laid out fixed", () => {
+  assert.equal([...STYLES.matchAll(/table-layout: fixed/g)].length, 1);
+  assert.doesNotMatch(STYLES, /^table \{[^}]*table-layout/m, "a blanket rule would flatten Evidence");
+});
+
+// The disclosure lives in exactly one table, and the skills table's deliberate absence of one
+// is what keeps that true — a <details> there would expand a row and push every skill below it
+// off the screen, which is the reason skillPage exists.
+test("the MCP tools table is the only table with a disclosure in a cell", () => {
+  assert.doesNotMatch(bodyOf(contextPage(CTX)), /<details/);
+  // and the one that does have it is the one that carries the class. baseTopology has no
+  // capabilities at all — it renders the empty state, not a table — so this needs its own.
+  const t: Topology = { ...baseTopology, capabilities: [{ name: "loki", tools: [{ name: "loki_query", write: false }] }] };
+  const caps = bodyOf(topologyPage(t, NONCE));
+  assert.match(caps, /<table class="caps">[\s\S]*<details>/);
+  assert.equal([...caps.matchAll(/<table class="caps">/g)].length, 1, "one table carries the class");
+  assert.equal([...caps.matchAll(/<details>/g)].length, 1, "one disclosure, in that table");
+});
+
+// ---------- the core prompt ----------
+
+// The page showed the core prompt's SIZE while showing every skill's text in full — the
+// conditional half rendered, the unconditional and larger half hidden.
+test("the context page leads to the prompt instead of only measuring it", () => {
+  const html = contextPage(CTX);
+  assert.match(html, /<a class="standalone" href="\/prompt">Read the prompt →<\/a>/);
+  // the numbers stay: the link is a way in, not a replacement for the summary
+  assert.match(html, /267 lines/);
+});
+
+// On its own page for the reason skillPage exists: 24,000 characters inline would bury the
+// budget table under four screens of prompt.
+test("the prompt page renders the text the process is holding", () => {
+  const html = promptPage(CTX);
+  assert.match(html, /<pre class="skill-body">You are an expert DevOps AI Agent\./);
+  assert.match(html, /prompts\/system\.md/);
+  assert.match(html, /267 lines · 24,100 chars · about 8,034 tokens/);
+  // the rail keeps Context lit, the way a skill page does
+  assert.match(html, /<a href="\/context" aria-current="page">/);
+});
+
+// The distinction the page exists for. buildStaticSystemPrompt reads the file once and caches
+// it, and the file is editable without a rebuild — so git, the pod's disk and this string can
+// all disagree, and only this one decides what the agent says.
+test("the prompt page says the text is the running copy, not the file", () => {
+  const html = promptPage(CTX);
+  assert.match(html, /this process is holding/);
+  assert.match(html, /read once at boot and cached/);
+});
+
+// It is file content rather than LLM output, which is a weaker threat — and it goes through
+// esc() anyway, because the rule in this file has no exceptions.
+test("the prompt body is escaped", () => {
+  const hostile: ContextView = { ...CTX, core: { ...CTX.core, body: `<img src=x onerror="alert(1)">` } };
+  const html = promptPage(hostile);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+});
+
+// A skill's name is a filename and the skill route matches one segment under /context, so a
+// reserved word there could one day be shadowed by a file someone adds to prompts/skills. A
+// route that cannot collide beats a guard that has to remember to.
+test("a skill called 'prompt' cannot shadow the prompt page", () => {
+  assert.deepEqual(matchRoute("/prompt"), { kind: "prompt" });
+  assert.deepEqual(matchRoute("/context/prompt"), { kind: "skill", name: "prompt" });
 });

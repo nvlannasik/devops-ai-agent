@@ -3,10 +3,10 @@ import { randomBytes } from "node:crypto";
 import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
-import { parseFilters } from "./filters.js";
-import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, skillPage, topologyPage } from "./views.js";
+import { parseFilters, parseRange } from "./filters.js";
+import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
-import { buildContextView, type SkillView } from "./context.js";
+import { buildContextView, type ContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
 import {
   LoginThrottle,
@@ -21,7 +21,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "login" | "logout" }
   | { kind: "detail"; id: number }
   | { kind: "skill"; name: string };
 
@@ -34,6 +34,11 @@ export function matchRoute(pathname: string): Route {
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
   if (p === "/context") return { kind: "context" };
+  // Top level, NOT /context/something, and that is structural rather than stylistic: a skill's
+  // name is a filename, the skill route below matches one path segment under /context, and so
+  // any reserved word there could one day be shadowed by a file someone adds to prompts/skills.
+  // A route that cannot collide beats a guard that has to remember to.
+  if (p === "/prompt") return { kind: "prompt" };
   // The name is matched loosely and resolved against the loaded skills, not against this
   // pattern: a page that 404s from the router would have to repeat the loader's NAME_RE
   // (agent/skills/index.ts) and the two would drift. The cap is what keeps a megabyte-long
@@ -234,6 +239,35 @@ export class DashboardServer {
     return redirect(next, { "set-cookie": sessionCookie(mintSession(password), config.dashboard.cookieSecure) });
   }
 
+  /**
+   * Everything /context and /prompt render from, built the same way for both.
+   *
+   * Two callers now, and they must agree: the prompt page states the size of the text it is
+   * showing, and a second construction here would let those two numbers describe different
+   * strings.
+   */
+  private contextView(): ContextView {
+    const tools = this.mcpTools();
+    return buildContextView(this.skills(), tools.length, JSON.stringify(tools));
+  }
+
+  /**
+   * The rail's badge count, or undefined if it cannot be read.
+   *
+   * undefined rather than 0 on failure, and the distinction is the point: a zero badge would
+   * assert that nothing is firing, which is exactly the wrong thing to say when the reason we
+   * have no number is that the database did not answer. No badge says nothing.
+   */
+  private async openCount(): Promise<number | undefined> {
+    if (!this.queries.enabled) return undefined;
+    try {
+      return await this.queries.openIncidents();
+    } catch (err) {
+      logger.warn(`[dashboard] open-incident count failed, rendering without the badge: ${errDetail(err)}`);
+      return undefined;
+    }
+  }
+
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const send = (
       code: number,
@@ -338,16 +372,23 @@ export class DashboardServer {
       // <script> tag. Minted here rather than per-page so there is exactly one of them and
       // nothing has to agree about how it was generated.
       const nonce = newNonce();
-      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce), "text/html; charset=utf-8", {
+      // The badge is chrome, so every page carries it — including the two that need no database
+      // of their own. It is a cached count, so asking for it here costs nothing most of the
+      // time, and a failure to read it must not take out a page that does not otherwise depend
+      // on Postgres: it falls back to no badge rather than to an error.
+      const open = await this.openCount();
+      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce, open), "text/html; charset=utf-8", {
         "content-security-policy": csp(nonce),
       });
     }
 
     if (route.kind === "context") {
-      const tools = this.mcpTools();
+      // openCount was missing here and nowhere else: /context rendered without the rail's
+      // badge while every other page carried it. A page-by-page argument is a page-by-page
+      // chance to forget one.
       return send(
         200,
-        contextPage(buildContextView(this.skills(), tools.length, JSON.stringify(tools))),
+        contextPage(this.contextView(), await this.openCount()),
         "text/html; charset=utf-8"
       );
     }
@@ -357,7 +398,18 @@ export class DashboardServer {
     if (route.kind === "skill") {
       const skill = this.skills().find((s) => s.name === route.name);
       if (!skill) return send(404, errorPage("Not found", `No skill named ${route.name}.`));
-      return send(200, skillPage(skill), "text/html; charset=utf-8");
+      return send(200, skillPage(skill, await this.openCount()), "text/html; charset=utf-8");
+    }
+
+    if (route.kind === "prompt") {
+      // Same side of the database gate as /context and a skill page: the prompt is read out of
+      // the running process, so it renders while Postgres is down — which is one of the times
+      // someone most wants to know what the agent is being told.
+      return send(
+        200,
+        promptPage(this.contextView(), await this.openCount()),
+        "text/html; charset=utf-8"
+      );
     }
 
     if (!this.queries.enabled) {
@@ -366,21 +418,30 @@ export class DashboardServer {
 
     try {
       switch (route.kind) {
+        // ONE instant per response, taken here and threaded into every page that renders a
+        // relative timestamp. Computed per row instead, a list rendered across a minute
+        // boundary would say "1h ago" and "59m ago" about two incidents a second apart.
         case "overview": {
-          const [o, recent] = await Promise.all([
-            this.queries.overview(),
+          const now = new Date();
+          const range = parseRange(url.searchParams);
+          const [o, recent, open] = await Promise.all([
+            this.queries.overview(range),
             this.queries.list(parseFilters(new URLSearchParams())),
+            this.openCount(),
           ]);
-          return send(200, overviewPage(o, recent.rows));
+          return send(200, overviewPage(o, recent.rows, now, open));
         }
         case "list": {
+          const now = new Date();
           const f = parseFilters(url.searchParams);
-          return send(200, listPage(await this.queries.list(f), f));
+          const [p, open] = await Promise.all([this.queries.list(f), this.openCount()]);
+          return send(200, listPage(p, f, now, open));
         }
         case "detail": {
-          const d = await this.queries.detail(route.id);
+          const now = new Date();
+          const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
-          return send(200, detailPage(d));
+          return send(200, detailPage(d, now, open));
         }
       }
     } catch (err) {

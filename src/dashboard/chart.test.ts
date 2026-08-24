@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lineChart } from "./chart.js";
+import { donutChart, lineChart } from "./chart.js";
 import { STYLES } from "./styles.js";
 
 const series = [
@@ -151,4 +151,65 @@ test("the stroke does not scale with the non-uniform stretch", () => {
   // thin where the box is wide and thick where it is tall, differently on every screen.
   assert.match(STYLES, /\.chart-stroke \{[^}]*vector-effect: non-scaling-stroke/s);
   assert.match(lineChart(series), /preserveAspectRatio="none"/);
+});
+
+// ---------- donut ----------
+
+const split = [
+  { label: "critical", value: 12, tone: "critical" },
+  { label: "warning", value: 31, tone: "warning" },
+  { label: "info", value: 7, tone: "info" },
+];
+
+test("donutChart draws one arc per slice, sized as a share of the whole", () => {
+  const html = donutChart(split);
+  assert.equal(html.match(/class="donut-arc"/g)?.length, 3);
+  // 50 total: 12 -> 24, 31 -> 62, 7 -> 14. The dash array is <arc> <rest of the ring>,
+  // which only works because the circle's circumference is exactly 100 units.
+  assert.match(html, /stroke-dasharray="24 76"/);
+  assert.match(html, /stroke-dasharray="62 38"/);
+  assert.match(html, /stroke-dasharray="14 86"/);
+});
+
+// A ring where every arc starts at twelve o'clock is a stack of overlapping arcs, not a
+// breakdown — each slice has to begin where the one before it ended.
+test("each arc starts where the previous one ended", () => {
+  const html = donutChart(split);
+  const offsets = [...html.matchAll(/stroke-dashoffset="(-?[\d.]+)"/g)].map((m) => m[1]);
+  // offset runs backwards around the ring: 0, -24, -86 (24+62)
+  assert.deepEqual(offsets, ["0", "-24", "-86"]);
+});
+
+test("donutChart carries the tone on the arc AND names the slice in the legend", () => {
+  const html = donutChart(split);
+  assert.match(html, /data-tone="critical"/);
+  // severity must never be colour-alone: the legend prints the name and the count beside
+  // every swatch, so the ring is a summary of the legend rather than the only reading.
+  assert.match(html, /critical/);
+  assert.match(html, /31/);
+});
+
+test("donutChart escapes a slice label — severity is an Alertmanager label, not a literal", () => {
+  const html = donutChart([{ label: `<img src=x>`, value: 1, tone: "" }]);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x&gt;/);
+});
+
+test("donutChart renders an empty breakdown without dividing by zero", () => {
+  const html = donutChart([]);
+  assert.doesNotMatch(html, /NaN/);
+  assert.match(html, /no data yet/i);
+});
+
+// An all-zero series is what a window with no incidents looks like — it must not become
+// three arcs of Infinity.
+test("donutChart survives an all-zero breakdown", () => {
+  const html = donutChart([{ label: "critical", value: 0, tone: "critical" }]);
+  assert.doesNotMatch(html, /NaN|Infinity/);
+});
+
+test("the donut's classes all exist in the stylesheet", () => {
+  for (const cls of ["donut", "donut-ring", "donut-arc", "donut-legend", "donut-total"]) {
+    assert.ok(STYLES.includes(`.${cls}`), `.${cls} is emitted but never styled`);
+  }
 });

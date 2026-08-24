@@ -24,6 +24,91 @@ export function fmtDate(d: Date | string | null | undefined): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
 }
 
+// How long ago, in the largest unit that still says something. This is the reading an on-call
+// actually needs — "how long has this been firing" is the first question of a page, and an
+// absolute UTC stamp answers it only after subtraction done in the reader's head.
+//
+// Nothing is given up for it: timeTag() below keeps the exact instant in datetime= (machine
+// readable) and in title= (one hover away), so the precise value never leaves the page. This
+// is the LABEL, not the data.
+//
+// It stops at 30 days, where a count of days stops being readable — "47d ago" is arithmetic
+// again, and the date itself is both shorter and exact. The ladder deliberately has no weeks:
+// a week is a unit people convert from days anyway, and the boundary between "13d" and "2w"
+// is where a reader has to start trusting the rounding.
+//
+// `now` is a parameter with a default rather than a bare Date.now() so the tests can pin an
+// instant; every caller in the page render passes the one timestamp taken at the top of the
+// response, which is also what keeps a list of thirty rows internally consistent.
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const AGO_CEILING = 30 * DAY;
+
+export function fmtAgo(d: Date | string | null | undefined, now: Date = new Date()): string {
+  if (!d) return "—";
+  const t = d instanceof Date ? d : new Date(d);
+  const ms = t.getTime();
+  if (!Number.isFinite(ms)) return "—";
+  // Clamped at zero rather than signed. The dashboard's clock and Postgres's are two clocks,
+  // and a few seconds of skew would otherwise print "-0m ago" on the newest row on the page —
+  // which is the row a reader looks at first.
+  const delta = Math.max(0, now.getTime() - ms);
+  if (delta < MINUTE) return "just now";
+  if (delta < HOUR) return `${Math.floor(delta / MINUTE)}m ago`;
+  if (delta < DAY) return `${Math.floor(delta / HOUR)}h ago`;
+  if (delta < AGO_CEILING) return `${Math.floor(delta / DAY)}d ago`;
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * The relative reading as the visible text, the absolute instant as the element's data.
+ *
+ * `datetime` is the ISO string, which is what makes the value machine-readable at all — the
+ * page had no <time> element anywhere before this, so every timestamp on it was prose to a
+ * parser. `title` carries the same instant in the page's own UTC format, so the exact value
+ * is one hover away and the on-call who needs to paste it into a Loki query still can.
+ */
+export function timeTag(d: Date | string | null | undefined, now: Date = new Date()): string {
+  if (!d) return "—";
+  const t = d instanceof Date ? d : new Date(d);
+  if (!Number.isFinite(t.getTime())) return "—";
+  return (
+    `<time datetime="${esc(t.toISOString())}" title="${esc(fmtDate(t))}">` +
+    `${esc(fmtAgo(t, now))}</time>`
+  );
+}
+
+/**
+ * A duration, read in at most two units.
+ *
+ * Two, not three: the third is always below the precision anything on this page is measured to,
+ * and "2h 14m 9s" is materially harder to compare against the tile beside it than "2h 14m" is.
+ * A zero second unit is dropped rather than printed — "2h" is exactly two hours, and "2h 0m"
+ * says the same thing while implying the minutes were measured and found to be none.
+ *
+ * null is not zero. avg() over nothing is NULL, which means "nothing resolved in this window";
+ * a zero-millisecond mean time to resolve would mean every incident closed instantly. The two
+ * render differently on purpose.
+ */
+export function fmtDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "—";
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  const s = Math.round(n / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const rem = m % 60;
+    return rem ? `${h}h ${rem}m` : `${h}h`;
+  }
+  const d = Math.floor(h / 24);
+  const rem = h % 24;
+  return rem ? `${d}d ${rem}h` : `${d}d`;
+}
+
 export function fmtPct(n: number, d: number): string {
   if (!d) return "—";
   return `${Math.round((n / d) * 100)}%`;
@@ -67,12 +152,18 @@ const NARROW_ATTR: Record<Narrow, string> = {
   pairs: " data-stack data-pairs",
 };
 
-export const table = (head: string, body: string, narrow?: Narrow): string => {
+/**
+ * `cls` is for a table that needs a rule of its own. Exactly one does — the MCP tools table,
+ * which is the only table on this dashboard with a disclosure inside a cell and therefore the
+ * only one whose column widths would otherwise move after render. See `table.caps` in styles.ts.
+ */
+export const table = (head: string, body: string, narrow?: Narrow, cls?: string): string => {
   const [t, rg, r] = narrow
     ? [` role="table"${NARROW_ATTR[narrow]}`, ` role="rowgroup"`, ` role="row"`]
     : ["", "", ""];
+  const c = cls ? ` class="${esc(cls)}"` : "";
   return (
-    `<div class="table-wrap"><table${t}>` +
+    `<div class="table-wrap"><table${t}${c}>` +
     `<thead${rg}><tr${r}>${head}</tr></thead>` +
     `<tbody${rg}>${body}</tbody></table></div>`
   );

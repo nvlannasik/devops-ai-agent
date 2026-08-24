@@ -64,3 +64,22 @@ export function parseFilters(params: URLSearchParams): Filters {
     page: Math.max(1, Math.min(PAGE_MAX, int(params, "page", 1))),
   };
 }
+
+// The overview's time range. Three fixed steps, not a free-form interval: every one of them is
+// a bucket size as well as a length — 24h is read per hour, a week and a month per day — and a
+// range someone can type is a range with no series that fits it.
+//
+// The value reaches SQL as TWO bound parameters (the interval and the date_trunc field), never
+// as interpolated text; RANGES in queries.ts is what maps a step to them. parseRange is the
+// gate that keeps the key inside the three literals, so a `?range=` from the URL can only ever
+// select one of them.
+export const RANGES = ["24h", "7d", "30d"] as const;
+export type Range = (typeof RANGES)[number];
+export const DEFAULT_RANGE: Range = "30d";
+
+export function parseRange(params: URLSearchParams): Range {
+  const v = params.get("range")?.trim().toLowerCase();
+  // An unrecognised value falls back rather than erroring: a stale bookmark should still show
+  // the page, and there is no destructive reading of "the default window".
+  return (RANGES as readonly string[]).includes(v ?? "") ? (v as Range) : DEFAULT_RANGE;
+}
