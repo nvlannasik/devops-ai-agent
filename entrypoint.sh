@@ -28,8 +28,14 @@ if [ "$AWS_AUTH_MODE" = "iam-anywhere" ]; then
     exit 1
   fi
 
-  mkdir -p /root/.aws
-  cat > /root/.aws/config <<EOF
+  # Not ~/.aws/config: the container runs as uid 1001 with a read-only root
+  # filesystem, so $HOME (/root, from the base image) is not writable and never
+  # will be. AWS_CONFIG_FILE is the first thing the SDK checks before falling back
+  # to ~/.aws/config, so point it at the writable emptyDir the chart mounts at
+  # /tmp. Exported below so `exec "$@"` passes it to the node process.
+  AWS_CONFIG_FILE="${AWS_CONFIG_FILE:-/tmp/aws/config}"
+  mkdir -p "$(dirname "$AWS_CONFIG_FILE")"
+  cat > "$AWS_CONFIG_FILE" <<EOF
 [default]
 credential_process = /usr/local/bin/aws_signing_helper credential-process \
   --certificate ${CERT_PATH} \
@@ -39,8 +45,9 @@ credential_process = /usr/local/bin/aws_signing_helper credential-process \
   --role-arn ${AWS_ROLE_ARN}
 region = ${AWS_REGION}
 EOF
+  export AWS_CONFIG_FILE
 
-  echo "[entrypoint] AWS auth mode: iam-anywhere, cert expires: $(openssl x509 -enddate -noout -in $CERT_PATH 2>/dev/null || echo 'unknown')"
+  echo "[entrypoint] AWS auth mode: iam-anywhere, config: $AWS_CONFIG_FILE, cert expires: $(openssl x509 -enddate -noout -in $CERT_PATH 2>/dev/null || echo 'unknown')"
 
 else
   echo "[entrypoint] AWS auth mode: ${AWS_AUTH_MODE} — skipping credential setup"

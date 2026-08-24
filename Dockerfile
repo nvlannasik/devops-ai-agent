@@ -73,6 +73,7 @@ COPY migrations/ ./migrations/
 EXPOSE 3000
 EXPOSE 3001
 
-# entrypoint.sh generate ~/.aws/config dari env vars, lalu exec CMD
+# entrypoint.sh generate AWS config (AWS_CONFIG_FILE, default /tmp/aws/config —
+# not ~/.aws: uid 1001 + read-only rootfs) dari env vars, lalu exec CMD
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "dist/index.js"]

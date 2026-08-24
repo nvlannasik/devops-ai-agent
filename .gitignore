@@ -147,3 +147,5 @@ vite.config.ts.timestamp-*
 .superpowers/
 # graphify build output — the workspace graph lives one level up, in riset/
 graphify-out/
+
+.claude/

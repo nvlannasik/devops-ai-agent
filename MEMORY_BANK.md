@@ -913,7 +913,7 @@ Controlled by `AWS_AUTH_MODE` env var (read by `entrypoint.sh`):
 
 | Mode | Setup | Use case |
 |------|-------|----------|
-| `iam-anywhere` | Writes `~/.aws/config` with `credential_process` pointing to `aws_signing_helper` | On-premise / private network with X.509 cert |
+| `iam-anywhere` | Writes `$AWS_CONFIG_FILE` (default `/tmp/aws/config`) with `credential_process` pointing to `aws_signing_helper` | On-premise / private network with X.509 cert |
 | `irsa` | No setup — IRSA injects credentials via projected service account token | EKS with IRSA |
 | `env` | No setup — `AWS_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY` already in env | Local dev, CI/CD |
 | `instance-profile` | No setup — EC2 instance metadata used | EC2, ECS |
