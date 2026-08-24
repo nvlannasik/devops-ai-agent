@@ -129,6 +129,22 @@ export const config = {
   // distinct from conversation memory (Redis cache); this is a long-lived record.
   incidents: {
     enabled: !!process.env.DB_HOST,
+    // Missed-resolved reconciliation (migrations/007). Alertmanager's resolved webhook fires
+    // once and is acked before it is processed, so one failure strands an incident as firing
+    // AND holds its dedup claim, suppressing the alert's next real firing. This asks
+    // Alertmanager instead of waiting for a POST that is never resent.
+    reconcile: {
+      enabled: process.env.INCIDENT_RECONCILE_ENABLED !== "false",
+      // Alertmanager's view of an alert settles only after resolve_timeout (5m) + the route's
+      // group_interval (5m). Before that, absence means "not routed yet", not "recovered".
+      minAgeSeconds: parseInt(process.env.INCIDENT_RECONCILE_MIN_AGE_SECONDS ?? "600"),
+      // The alert must read as cleared on two passes this far apart before anything closes:
+      // a single cleared reading is also what an alert flapping through its `for:` window
+      // looks like mid-flap.
+      confirmSeconds: parseInt(process.env.INCIDENT_RECONCILE_CONFIRM_SECONDS ?? "120"),
+      // Per pass — one indexed SELECT plus at most this many single-row UPDATEs.
+      batchLimit: parseInt(process.env.INCIDENT_RECONCILE_BATCH ?? "50"),
+    },
     db: {
       host: process.env.DB_HOST,
       port: parseInt(process.env.DB_PORT ?? "5432"),
