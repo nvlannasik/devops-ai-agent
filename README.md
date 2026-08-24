@@ -102,6 +102,10 @@ Covered areas, grouped:
 | `INVESTIGATION_TIMEOUT_SECONDS` | Wall-clock budget per investigation (bounds how long a slot is held) | `300` |
 | `REMEDIATION_VERIFY_DELAY_SECONDS` | How long after an approved remediation to check whether it worked. Needs to outlast a rolling update — a half-converged workload reads as "not fixed" | `300` |
 | `REMEDIATION_VERIFY_POLL_SECONDS` | How often to look for due verification checks (one indexed query; only bounds how late a verdict lands) | `30` |
+| `INCIDENT_RECONCILE_ENABLED` | Close incidents whose alert Alertmanager no longer holds, when the resolved webhook never arrived. Set `false` to disable | `true` |
+| `INCIDENT_RECONCILE_MIN_AGE_SECONDS` | How old an incident must be before the sweeper may judge it — Alertmanager's view settles only after `resolve_timeout` + `group_interval` | `600` |
+| `INCIDENT_RECONCILE_CONFIRM_SECONDS` | The alert must read as cleared on two passes this far apart before anything closes (one reading also matches an alert flapping through its `for:` window) | `120` |
+| `INCIDENT_RECONCILE_BATCH` | Unresolved incidents examined per pass | `50` |
 | `GITOPS_REMEDIATION_ENABLED` | Route Flux-managed workloads to a GitOps PR instead of a live write | `false` |
 | `DASHBOARD_ENABLED` | Read-only incident dashboard on a second HTTP listener | `false` |
 | `DASHBOARD_PORT` | | `3001` |

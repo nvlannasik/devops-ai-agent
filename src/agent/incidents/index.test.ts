@@ -48,7 +48,9 @@ test("store returns the inserted id and persists the Slack thread link", async (
   const id = await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, { channel: "C123", threadTs: "1720.99" });
   assert.equal(id, 42);
   assert.match(captured!.sql, /RETURNING id/);
-  assert.deepEqual(captured!.params.slice(-2), ["C123", "1720.99"]); // channel, thread_ts
+  // channel, thread_ts, and the group identity the dedup claim was taken under — without
+  // that last one nothing outside the resolved webhook can release the claim
+  assert.deepEqual(captured!.params.slice(-3), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}']);
 });
 
 test("store fires onStored with the inserted id and thread ts (the usage backfill link)", async () => {

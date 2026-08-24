@@ -683,6 +683,43 @@ handled the approval click.
 - Tunables: `REMEDIATION_VERIFY_DELAY_SECONDS` (default 300 — 90s answered while the rolling
   update was still converging) and `REMEDIATION_VERIFY_POLL_SECONDS` (default 30).
 
+### Incident status has three writers, not one (`agent/incidents/reconcile.ts`, `migrations/007`)
+`resolved_at` used to be written only by the Alertmanager resolved webhook. That is a single
+delivery of a notification that is **never repeated** — `repeat_interval` covers firing only,
+and a group whose alerts all resolved is dropped once its resolved notification goes out — and
+`/alert` acks `200` **before** processing the payload, so anything failing after the ack (Slack
+down, Postgres down, pod killed mid-handler) loses the event for good.
+
+- **The visible symptom is the smaller half.** The incident reads as firing forever in the
+  dashboard; worse, `handleResolvedAlert` is also the only caller of `dedup.clear`, so the
+  group's claim is held for its full TTL and the alert's **next real firing is suppressed and
+  never investigated**. That is the reason this exists.
+- **The sweeper** (`runIncidentReconcile`, on the existing verification poller — no second
+  timer) asks Alertmanager what it currently holds and closes what it does not. It reuses
+  `alertState` from `remediation/verify.ts` rather than deriving "still firing" a second way.
+- **Two passes, never one.** An alert re-firing inside its rule's `for:` window is still
+  `pending` in the evaluator and invisible to Alertmanager, so one cleared reading is also what
+  a flap looks like mid-flap. `cleared_seen_at` records the first sighting (in Postgres, so it
+  survives restarts and works across replicas); only a second cleared reading `confirmSeconds`
+  later closes anything.
+- **No evidence is never recovery.** A failed tool call, an unparseable response, or a
+  **truncated** one (`omitted > 0` — absence is the whole signal, and a capped response can hide
+  the alert that paged) ends the pass with nothing closed.
+- **`group_labels` is why the claim can be released at all.** The dedup fingerprint is hashed
+  from Alertmanager's `commonLabels`, which is richer than `group_by`; `alertname`+`namespace`
+  hashes to something else entirely. `store()` now persists the exact label set the claim was
+  taken under. Rows predating 007 fall back to alertname+namespace, best-effort.
+- **`@agent resolved` / `@agent reopen`** — on-call's word, and it beats both other writers.
+  Deterministic prefix command like `learn`, **not** an LLM call: a state correction is the one
+  message that must not be re-interpreted. Indonesian and English; negations (`belum selesai`,
+  `unresolved`) are matched first so they can never read as a close, and ordinary thread talk
+  (`ok`, `done`, `thanks`) matches nothing. Outside an incident thread it falls through to the
+  normal agent flow rather than answering "I can't do that".
+- **`resolved_by`** records which of the three closed it: `alertmanager`, `reconciler`, or a
+  Slack user id.
+- Tunables: `INCIDENT_RECONCILE_ENABLED`, `_MIN_AGE_SECONDS` (600 = `resolve_timeout` 5m +
+  `group_interval` 5m), `_CONFIRM_SECONDS` (120), `_BATCH` (50).
+
 ### Context Assembly & Skills
 Bounds what actually reaches the LLM call, on both axes that used to be unbounded: which prompt
 content ships (all of it, always) and how large a single tool result can grow (as large as the
