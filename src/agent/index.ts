@@ -112,6 +112,11 @@ export function forcedFinalAnswer(state: {
 // long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
 // insertion-order, and a thread that outlives its entry simply re-selects from its next message.
 export const MAX_TRACKED_THREADS = 500;
+// Ceiling on the playbooks one investigation may accumulate. Selection runs again on every
+// tool round (see runInvestigation), and each of those rounds may match up to
+// MAX_MATCHED_SKILLS more — without a ceiling a long investigation ends up carrying the whole
+// directory. Earliest wins: the alert's own playbook outranks one a later log line suggested.
+export const MAX_THREAD_SKILLS = 5;
 
 export type ThreadSkills = Map<string, Skill[]>;
 
@@ -139,7 +144,11 @@ export function selectForThread(
   if (overflow.length > 0) {
     logger.info(`[${threadId}] skills over the cap, not loaded: ${overflow.join(", ")}`);
   }
-  const merged = selected.length > 0 ? [...known, ...selected] : known;
+  const merged = selected.length > 0 ? [...known, ...selected].slice(0, MAX_THREAD_SKILLS) : known;
+  const capped = [...known, ...selected].length - merged.length;
+  if (capped > 0) {
+    logger.info(`[${threadId}] ${capped} skill(s) past the per-thread cap of ${MAX_THREAD_SKILLS}, not loaded`);
+  }
 
   tracked.delete(threadId); // re-insert so this thread becomes the most recent
   tracked.set(threadId, merged);
@@ -149,6 +158,26 @@ export function selectForThread(
     tracked.delete(oldest);
   }
   return merged;
+}
+
+/**
+ * The text a tool round actually produced — tool_result payloads plus any synthesized notice.
+ * Returned per block rather than joined: `select` truncates its trigger, and one long result
+ * would otherwise push a later result's decisive line ("Failed to pull image") out of the
+ * window entirely.
+ */
+export function evidenceTexts(blocks: readonly ContentBlock[]): string[] {
+  const out: string[] = [];
+  for (const b of blocks) {
+    const text =
+      b.type === "tool_result" && typeof b.content === "string"
+        ? b.content
+        : b.type === "text"
+          ? (b.text ?? "")
+          : "";
+    if (text.trim()) out.push(text);
+  }
+  return out;
 }
 
 const zeroUsage = (): TokenUsage => ({
@@ -342,7 +371,7 @@ export class DevOpsAgent {
 
     // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
     // prior incidents, and a previous incident's RCA must not select this one's playbook.
-    const skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+    let skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
 
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
     // to execute state-changing actions on its own. Write tools are reachable only via
@@ -525,6 +554,22 @@ export class DevOpsAgent {
         }
 
         await this.memory.append(threadId, { role: "user", content: trimmedResults });
+
+        // Playbooks are picked from the alert text, and a generic alert name says nothing about
+        // which failure mode it is: "KubernetesPodNotHealthy" fires for an OOMKill, a failed
+        // probe and an unpullable image alike, so none of their playbooks match and the model
+        // investigates with the output format alone. The evidence is what names the failure —
+        // the events say `ImagePullBackOff` — so match against that too, one result at a time
+        // (each gets its own trigger window rather than sharing one truncated concatenation).
+        // selectForThread keeps what is already loaded, so this only ever adds.
+        for (const text of evidenceTexts(trimmedResults)) {
+          const before = skills.length;
+          skills = selectForThread(this.skills, this.threadSkills, threadId, text);
+          const added = skills.slice(before).map((s) => s.name);
+          if (added.length > 0) {
+            logger.info(`[${threadId}] playbook matched from tool evidence, not the alert text: ${added.join(", ")}`);
+          }
+        }
       }
     }
 
