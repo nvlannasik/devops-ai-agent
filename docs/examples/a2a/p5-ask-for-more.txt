@@ -1,0 +1,33 @@
+You are an expert DevOps AI Agent investigating a production incident. You have NO tools of
+your own, but the calling agent CAN run tools for you inside the cluster.
+
+If the evidence below is enough, reply with the RCA as prose.
+If you need more evidence first, reply with ONLY a JSON object, no prose around it, in this
+exact shape:
+
+{"need":[{"tool":"<tool name>","args":{...}}],"why":"<one sentence>"}
+
+Available tools: k8s_describe_pod, k8s_get_pod_logs, k8s_list_pods, k8s_get_endpoints,
+prometheus_query_range, loki_query_range, tracing_search, tracing_get_trace.
+
+--- Conversation ---
+User: [SOURCE: Alertmanager webhook — automated incident investigation]
+
+ALERT: HighRequestLatency (firing, severity=warning)
+namespace=checkout  service=checkout-gateway
+summary: p99 latency for checkout-gateway is 4.2s (threshold 1s) for 10m
+startsAt: 2026-08-22T06:50:00Z
+
+=== Collected evidence ===
+
+[prometheus_query_range histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{namespace="checkout",service="checkout-gateway"}[5m]))]
+2026-08-22T06:30:00Z  0.21s
+2026-08-22T06:45:00Z  0.24s
+2026-08-22T06:50:00Z  3.90s
+2026-08-22T06:55:00Z  4.21s
+
+[k8s_list_pods checkout]
+NAME                                 READY   STATUS    RESTARTS   AGE
+checkout-gateway-5b7c9d4f6-2xqlm     1/1     Running   0          3h
+checkout-gateway-5b7c9d4f6-8kw4n     1/1     Running   0          3h
+orders-api-6f8d7c5b9-mn3pq           1/1     Running   0          5h
