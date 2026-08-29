@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../../config/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition, ContentBlock, TokenUsage } from "./types.js";
+import { sanitizeForWire } from "./sanitize.js";
 
 // Per-instance overrides so the router can register several Claude backends with different
 // models. Omitting them keeps the previous behaviour: read the single global config.
@@ -18,7 +19,10 @@ export class ClaudeClient implements LLMClient {
     this.model = opts.model ?? config.llm.claude.model;
   }
 
-  async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
+  async chat(rawMessages: Message[], tools: ToolDefinition[], rawSystemPrompt: string): Promise<LLMResponse> {
+    // Lone surrogates make the body unparseable for the server, identically on every
+    // backend — see sanitize.ts. Guarded here, at the wire, not at the producers.
+    const { messages, systemPrompt } = sanitizeForWire(rawMessages, rawSystemPrompt);
     const response = await this.client.messages.create({
       model: this.model,
       max_tokens: config.llm.maxTokens,

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectForThread, evidenceTexts, MAX_TRACKED_THREADS, MAX_THREAD_SKILLS, type ThreadSkills } from "./index.js";
+import { selectForThread, evidenceTexts, resolveSkillNames, MAX_TRACKED_THREADS, MAX_THREAD_SKILLS, type ThreadSkills } from "./index.js";
 import { loadSkills, resolveSkillsDir } from "./skills/index.js";
 
 const registry = loadSkills(resolveSkillsDir());
@@ -75,4 +75,38 @@ test("evidenceTexts reads tool results and skips everything else", () => {
     { type: "tool_use" as const, id: "3", name: "k8s_list_pods", input: {} },
   ];
   assert.deepEqual(evidenceTexts(blocks), ["Error: ImagePullBackOff", "tool budget exhausted"]);
+});
+
+// ---- Rehydrating a thread's playbooks after a restart ----
+//
+// threadSkills is an in-process Map while the conversation is in Redis, so a rollout used to
+// leave a live thread with its history and none of its playbooks. Names are stored; they are
+// resolved back against the LIVE registry, because prompts/skills/ is editable between two
+// turns of the same thread and a thread must never re-inject a skill the directory has lost.
+test("stored playbook names resolve back to skills, in stored order", () => {
+  const resolved = resolveSkillNames(registry, ["rca-format", "oomkilled"]);
+  assert.deepEqual(resolved.map((s) => s.name), ["rca-format", "oomkilled"]);
+  assert.ok(resolved.every((s) => s.body.length > 0), "bodies come from the registry, never from storage");
+});
+
+test("a name the registry no longer has is dropped, not carried as a dangling entry", () => {
+  assert.deepEqual(
+    resolveSkillNames(registry, ["rca-format", "playbook-deleted-last-week"]).map((s) => s.name),
+    ["rca-format"]
+  );
+  assert.deepEqual(resolveSkillNames(registry, ["playbook-deleted-last-week"]), []);
+  assert.deepEqual(resolveSkillNames(registry, []), []);
+});
+
+// What a restarted pod does: rehydrate the stored set, then keep accumulating on top of it
+// instead of starting the thread's playbooks over from the new message alone.
+test("a rehydrated thread keeps its playbooks and still adds new ones", () => {
+  const tracked: ThreadSkills = new Map();
+  tracked.set("T-restart", resolveSkillNames(registry, ["rca-format", "high-latency"]));
+
+  const after = selectForThread(registry, tracked, "T-restart", "now the pod is OOMKilled too");
+  const names = after.map((s) => s.name);
+  assert.ok(names.includes("high-latency"), "the pre-restart playbook was lost");
+  assert.ok(names.includes("oomkilled"), "the new symptom's playbook was not added");
+  assert.equal(names.filter((n) => n === "rca-format").length, 1, "a rehydrated skill was added twice");
 });

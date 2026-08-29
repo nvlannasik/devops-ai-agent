@@ -68,6 +68,238 @@ logs" question). Enforced in code instead:
 - **Namespace scope lock (deterministic, `agent/scope/`):** in conversation mode, the FIRST tool round defines the question's namespaces (the model's initial targeting has always been correct); later rounds calling into other namespaces are refused ("out of scope — answer with what you have / ask before expanding"). Kills the recurring failure where logs full of "upstream timed out" lured the model into `monitoring` on a plain "show me nginx logs" question. Namespace-less calls (prometheus/loki queries) and an empty first-round scope are never blocked. Unit-tested. **The empty-first-round-scope escape is what makes `k8s_cluster_health` usable**: a cluster-wide scan passes no `namespace`, so round 1 sets an empty scope, the lock disables itself, and round 2 may drill into whichever namespace the scan surfaced. Don't "fix" the empty case into a block — that would turn the health scan into a dead end.
 - `MENTION_TOOL_ROUNDS` default is **2** (was 3): discover → fetch covers the common flows exactly; a 3rd round only ever fed wandering. Tunable via env without rebuild.
 
+### A group can span more than one subject, and the card used to hide it
+One HighErrorRate rule fired 4 alerts across 2 services. The Slack card read
+`Summary: ... (service checkout-gateway)` and `Affected pods (4)`. Both were wrong, and the text
+is not decoration — `app/index.ts:384` posts it to Slack **and** feeds it to `investigate()`, so
+the RCA was built around one of the two services.
+
+- **`alerts[0].annotations` is never the group's voice.** Alertmanager's `commonAnnotations` is
+  empty the moment a rule templates its subject ("…for service checkout-gateway" vs "…for service
+  storefront"), and the old fallback then presented one member's description as everyone's.
+  `commonAnnotationsOf()` (the mirror of `commonLabels`) is the intersection; when it is empty the
+  first member's text is still shown but labelled **`Summary (1 of 4)`**, so it cannot pass for the
+  group. For `n === 1` the intersection IS that alert's annotations, so single alerts are unchanged.
+- **`Services (N)` names what the group really spans** when the subjects differ.
+  `distinctSubjects()` walks `service → deployment → workload → app`, first key present wins.
+  `job` is deliberately not in that list — it is the scrape job, identical across a group.
+- **Pods are de-duplicated.** A rule firing per `(pod, status)` yields two alerts per pod, and the
+  printed count was the alert count: "4 affected pods" for two.
+
+### Delegation has a deterministic trigger, because the model never pulled it
+Given the tool, an unlimited budget and a 342-token prompt section, the model did not delegate
+once across three firing incidents — including one carrying 388k characters of Loki output and two
+related alerts. Same finding as every other guard here: a rule the model must remember does not
+hold, a marker on the message does.
+
+- **The webhook logs its subjects whether or not the hint fires** (`[slack] group subjects: ...`),
+  naming the raw label keys when none matched. A hint that returned `""` left no trace, so "the
+  model declined to delegate" and "the group never looked multi-subject" read identically — and
+  they need opposite fixes (the label vocabulary vs. the model's judgement).
+- `delegationHint()` (`subagent/`) is built at the webhook from `distinctSubjects(firing)` and
+  prepended to the alert message. It names the services, asks for one delegate each in the FIRST
+  turn (capped at `maxFanout`), and — the actual point — demands a verdict: **one cascade, or
+  separate incidents**, with the evidence that decided it.
+- **The condition is read off the labels, not guessed.** One rule firing for two services IS two
+  candidate causes. `correlation/index.ts` used to assume the first reading silently ("every alert
+  in the payload shares a root cause"); nothing in a payload settles it, and now nothing pretends to.
+- Empty string when the flag is off, when there is one subject, or when there are none — the alert
+  message is untouched, the same rule that keeps the tool and the prompt section out of the OFF side.
+- It still tells the model what to do if `delegate_investigation` is absent from its tool list, so
+  the hint cannot strand a run whose budget was finite.
+
+### Sub-agent delegation (`agent/subagent/`, `SUBAGENT_ENABLED`, opt-in)
+The lead investigation can hand ONE hypothesis to a delegate that runs the same loop in its own
+context and returns findings as a `tool_result`. Built for multi-hypothesis incidents, where the
+evidence for one candidate cause was contaminating the reasoning about another inside a window
+that is only 32k on the private LLM.
+
+- **OFF must be today's behaviour byte for byte**, because OFF is the baseline ON is measured
+  against. So the tool is *not registered* when the flag is off — not registered-and-refused: the
+  tools array is cached as one block (`llm/claude.ts` marks the last tool ephemeral) and counts
+  against the context budget, so a present-but-unusable tool moves both. `withDelegateTool()` owns
+  that decision and `subagent/index.test.ts` pins it.
+- **It is the same loop, not a second one.** `runInvestigation()` grew `maxIterations`, `deadline`
+  and `depth` options; a delegate is that function with a smaller budget. Every guard worth having
+  lives in that loop — the `[WRITE]` filter, the namespace scope lock, the log fan-out cap,
+  `forcedFinalAnswer()` — and a copy of the loop is a copy of them that drifts. The write-tool
+  exclusion in particular must never be re-derived at a second call site.
+- **`SUBAGENT_TOOL_ROUNDS` is finite on purpose.** A delegate with a tool budget gets the
+  conversation-mode guards that an alert investigation's `Infinity` switches off, and its budget
+  notice already carries "do NOT use the RCA format" — the right shape for findings.
+- **Delegates are split out of the round BEFORE the scope lock.** A delegate call carries no
+  namespace, so letting it reach `namespacesOf()` on the first round would lock the scope to the
+  empty set — the case that disables the lock for the whole run.
+- **Only an infinite tool budget is offered delegation** (`offersDelegation()`). A finite budget
+  means conversation mode, where `MENTION_TOOL_ROUNDS` is 2: one delegate spends half the rounds
+  the whole question gets and takes `CHILD_DEADLINE_RESERVE_MS` off the parent's clock doing it,
+  and it cannot pay for itself out of that. Infinite is exactly the set worth delegating from —
+  the alert path, and a mention `wantsInvestigation()` reads as an explicit investigation request
+  — because those are the runs that weigh several competing causes and end in an RCA. The first
+  deployed build offered it on the mention path too, where it was a token cost on every call and
+  could never have earned it back.
+- **Depth is fixed at 1.** A delegate is never offered the tool. Nesting multiplies LLM calls and
+  wall clock geometrically inside a deadline that only shrinks. Stated independently of the budget
+  clause even though a delegate's `SUBAGENT_TOOL_ROUNDS` is finite and would fail that one too:
+  the two answer different questions, and neither should rest on the other holding.
+- **The child's deadline is the parent's minus `CHILD_DEADLINE_RESERVE_MS` (60s)**, and delegation
+  is refused outright once less than that remains. The parent still has to read the findings and
+  compose an answer; a child running to the parent's own deadline delivers evidence to a run that
+  has already given up. Reasoning composes take 60-90s over SQS, so this is the constraint that
+  decides whether the feature is usable at all — delegates therefore run in **parallel**, never in
+  sequence.
+- **The model has to be told delegation exists, in the system prompt.** The first deployed build
+  carried the tool and its full description on the alert path with an unlimited budget and never
+  once called it — one tool description among fifty is not where a model forms strategy.
+  `DELEGATION_SECTION` (`prompts/system.ts`, ~342 tokens) is appended by `composeSystemPrompt()`
+  only when the flag is set.
+  - **Conditional and still cacheable:** `SUBAGENT_ENABLED` is env, fixed for the process, so the
+    string is one constant per process — one ephemeral block, no per-request rewrite. Flag off
+    returns the file byte for byte, which is what keeps OFF the baseline. It is also counted into
+    the context budget automatically, since `resolveBudget` measures `buildStaticSystemPrompt()`.
+  - **It keys on the TOOL LIST, not on the flag**, because the two disagree by design: delegation
+    is offered only to an unlimited budget, so on a plain mention the section ships while the tool
+    does not. "When it is not in your tool list, investigate everything yourself" is one sentence;
+    a second cached prompt to keep the two in step would be a second thing to keep in step.
+  - It says when NOT to delegate as loudly as when to — the over-correction to watch for is a
+    delegate spawned to fetch one value.
+- **A delegate stamps its own response-mode marker** (`DELEGATE_MARKER`), self-describing so
+  `prompts/system.md` needs no clause — that file is the one static cached block, shared with the
+  OFF side. Same rule as every other entry point (see §Response Mode): without a marker the model
+  produces a full RCA, which is the wrong shape for something whose reader is the lead run.
+- **Sub-thread ids are `${threadId}/sub-N`.** Prefixed, so grepping the Slack thread id still finds
+  every child across the agent and llm-worker logs, and the sub id isolates one. The sub-thread is
+  scratch: `memory.clear()` + `threadSkills.delete()` in a `finally`, or every delegate leaks a
+  Redis key and an entry in a Map capped at `MAX_TRACKED_THREADS`.
+- **`UsageStore.linkToIncident` claims the sub-threads too** (`thread_ts LIKE '<ts>/sub-%'`). A
+  delegate logs its tokens under its own sub-thread id — that is the run that spent them — but the
+  incident is the parent's, and the original exact-match backfill left every delegated call
+  unattributed forever, silently hiding the cost of the feature being evaluated.
+- **Delegates take no semaphore slot.** `maxConcurrentInvestigations` is enforced in
+  `app/index.ts` around the entry points; a child waiting on a permit its own parent holds is a
+  deadlock.
+- **Refusals are synthesized `tool_result`s, never dropped calls** (fan-out cap, no time left, blank
+  hypothesis, child threw). An unanswered `tool_use` is a 400 from Anthropic, not a smaller request.
+- **Known ceiling:** the child returns prose and is *told* to cite the tool behind each claim —
+  there is no schema enforcing it. Evidence grounding is what the benchmark scores
+  (`docs/BENCHMARK_agent_stack.md`), so if the lead starts repeating uncited claims as fact, the
+  upgrade is a structured return (`{claim, tool, args, excerpt}`), not a longer prompt. Likewise
+  the delegate inherits the parent's whole tool set: a per-delegate tool subset is the stronger
+  scope guard, deferred because it adds a second thing the model can get wrong.
+
+### Thread memory has two halves and they must have the same lifetime
+A mention on an alert thread investigated `sample-apps` and ended up querying `default`. The
+labels were never missing — `fitToBudget` pins `history[0]` unconditionally, so the alert text was
+in every request. Three things around it gave way in the same turn, and the fixes are two:
+
+- **Playbooks were in-process while the conversation was in Redis.** `threadSkills` was a plain
+  `Map` on `DevOpsAgent`, keyed by the same threadId as `conv:`. The 01:47 rollout brought a live
+  thread back with 11 messages of history and `skills: [rca-format]` where it had been carrying
+  `high-latency`, `high-error-rate` and `pod-not-ready` — a latency follow-up answered without the
+  latency playbook, silently, with no log line saying a playbook had been lost. Now
+  `ConversationMemory.getSkills/setSkills` persist the **names** under `skills:<threadId>` on the
+  conversation's own 24h TTL, `clear()` drops all three keys, and `runInvestigation` rehydrates
+  once per process per thread. Names, not bodies: `resolveSkillNames()` resolves against the LIVE
+  registry, so a skill deleted from `prompts/skills/` since does not come back.
+- **The anchor was one pinned sentence at the far end of the window.** `buildMentionMarker()`
+  (`prompts/system.ts`) now restates the thread's alertname and namespace on **every** mention —
+  the same reasoning that already duplicates the mode and scope rules into the marker. The
+  identity comes from Postgres (`IncidentMemory.threadAlertIdentity`), the only durable source;
+  null for a thread that was never an alert, and then the clause is absent rather than empty.
+  **It anchors, it does not forbid** — leaving the namespace is allowed when a tool result already
+  read points there, and the model has to say which one did. The cross-namespace hop that prompted
+  this may well have been correct: the Loki output named a Service the workload really calls.
+  Blocking is the deterministic lock's job, not this one's.
+- **The third thing is still open, deliberately:** the namespace scope lock disabled itself.
+  `namespacesOf()` reads only a `namespace` **tool parameter**, and the round-1 calls were all
+  `prometheus_query_range` / `loki_query_range`, which carry the namespace inside the query
+  string. Empty first-round scope → the lock switches off for the run (the documented
+  `k8s_cluster_health` escape, which fires far more often than intended: a Prometheus/Loki opening
+  is the standard one for latency and error questions). Parsing `namespace="..."` out of the query
+  string would close it — and would also have stopped the agent following a hostname the logs
+  named. Don't tighten it until a wrong hop is observed that the marker did not catch.
+
+### Evidence grounding check (`agent/grounding/`, deterministic)
+The agent found a Service `default/order-services-svc` with no ready endpoints and then named a
+Deployment `order-service` behind it — a name derived from the Service's, returned by no tool.
+The remediation dry-run refused the action (`deployments.apps "order-service" not found`, posted
+to the thread), but nothing guarded the **claim**: the invented name still reached Slack, then
+`incidents.root_cause`, then the next investigation as recall context. The dry-run guards what
+the agent does; this guards what it says.
+
+- `groundingGaps(answer, history)` returns the resource names an answer asserts that no
+  `tool_result` in the thread ever returned. `SlackApp.warnIfUngrounded()` posts them as their
+  own thread message after the answer, on **both** paths (mention and alert), best-effort.
+- **Posted as a separate message, never appended to the RCA.** The RCA is parsed by shape
+  downstream (`buildRcaBlocks`, `extractSection`, `dashboard/rca.ts`) and a line past the last
+  section is a line every one of those parsers would have to learn.
+- **Candidates come from the backticks**, which the RCA format already mandates for resource
+  names (`prompts/skills/rca-format.md`) — the model's own marking, not a heuristic. They are then
+  filtered to a DNS-1123 shape, so PromQL, metric names (underscores), selectors (`app=nginx`),
+  quantities (`512Mi`, `98%`), timestamps and reason strings (`CrashLoopBackOff`) each fail on a
+  character they contain. A bare word with no `-`/`.`/`/` is skipped: it would flag a wording
+  difference, not an invention.
+- **The two boundary rules are the whole design, and they pull opposite ways.** A trailing `-`
+  counts as grounded, because a Deployment is only ever seen as its pods' prefix
+  (`checkout-gateway` → `checkout-gateway-6b747db7c9-zwdcv`) and an exact-token test would flag
+  every correctly-named workload in every RCA. A trailing letter or digit does NOT, because
+  `order-service` sits inside `order-services-svc` as a plain prefix — a substring test would
+  have declared the invented name grounded by the very Service it was invented from. Both
+  directions are pinned in `grounding/index.test.ts`.
+- **Evidence is every tool RESULT plus every tool ARGUMENT** — not assistant text (one
+  hallucination would confirm the next) and not the alert message, whose recall block is a past
+  incident's `root_cause` and therefore the exact channel an invented name propagates through.
+  Arguments were added after the check's first real firing was a **false positive**:
+  `sample-apps` flagged in an RCA whose only calls were `k8s_list_events{namespace:"sample-apps"}`
+  and an empty Prometheus query. A tool scoped to a namespace routinely does not repeat that
+  namespace in its body, so nearly every RCA naming its own namespace would have been flagged —
+  and a check that cries wolf is one nobody reads by the second week. It is weaker, and still
+  catches the failure it exists for: `order-service` was derived from a Service name and asserted
+  in prose, never passed to any tool. What it can no longer catch is a name the model invents AND
+  queries, whose empty result is visible on its own.
+- Namespace-qualified names are split: `sample-apps/orders-api` is two claims, and tool output
+  names the namespace and the workload separately. **The consequence is a known blind spot** — a
+  workload seen in namespace A grounds a claim about namespace B. This cluster has exactly that
+  shape: `default/order-services-svc` is an orphaned Service whose selector matches labels that
+  only exist on `sample-apps/orders-api`, so a cross-namespace mix-up has both halves individually
+  true. Pairing would need the namespace and the name to co-occur inside one tool result, which
+  their output formats do not agree on; worth adding only once a wrong pair is actually observed.
+- **What it does not catch is the reasoning, only the naming.** The same incident produced a
+  correct observation (a Service with zero endpoints), an invented Deployment behind it
+  (`order-service`, caught here and by the dry-run), and a wrong inference — a Service selector
+  only ever matches pods in its OWN namespace, so an orphan pointing at another namespace's
+  labels can never have endpoints and is a cleanup item, not a downstream dependency. No
+  name-level check reaches that; it is a benchmark case (Tier C, adversarial).
+
+### Lone surrogates make the request unparseable — guard at the wire (`agent/llm/sanitize.ts`)
+A remediation proposal failed on **all three backends at once** with the same 400:
+
+```
+The request body is not valid JSON: no low surrogate in string: line 1 column 2973
+```
+
+Not a backend problem. Emoji are UTF-16 surrogate pairs and the RCA format is full of them
+(🔴 📍 📈); `buildProposalPrompt`'s `rca.slice(0, 2500)` landed between the two halves of one, and
+`JSON.stringify` emitted the survivor as a bare `\ud83d` escape, which every strict parser on the
+other end rejects. Identical payload on every backend, so the router's up-only failover spent the
+whole chain re-sending the same broken bytes and logged three backend failures for one bug of ours.
+
+- **`sanitizeForWire()` is called first in all three `LLMClient.chat()` implementations**
+  (claude, openai-compatible, sqs), not at the producers. There are at least five fixed-offset
+  slices over model-written text (`remediation/proposal.ts`, `context/compact.ts`,
+  `app/index.ts`'s memory slice, the recall snippets in `incidents/`) and the model itself can
+  emit a lone surrogate that no producer-side fix would ever see.
+- It walks **every** string in the payload, `input` on a `tool_use` included — those arguments are
+  the model's too, and they ride back into history next turn. **Tools are deliberately not walked:**
+  they come from the MCP server, are static for the process, and are cached as one block.
+- Replacement is **U+FFFD, not deletion** — half an emoji carries nothing, and the replacement
+  character says a character was lost rather than quietly closing the gap.
+- `stripLoneSurrogates` calls `test()` on a `g`-flagged regex, so it must reset `lastIndex` first
+  or every other call answers false. `sanitize.test.ts` pins that.
+- **llm-worker needs no copy of this** (unlike `toOpenAIMessages`): it forwards what the agent
+  already sanitized, and its only `slice`s are log-only. A lone surrogate in the model's *reply*
+  comes back through the agent's history and is caught on the next request.
+
 ### Reasoning-model token exhaustion (private-llm)
 The private LLM is a reasoning model: `completion_tokens` includes hidden thinking, which
 once consumed the ENTIRE 8096 budget → `finish_reason=length`, empty content, and the user

@@ -9,14 +9,20 @@ import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { worthProposing } from "../agent/remediation/proposal.js";
-import { groupIdentity, buildGroupAlertText, type AlertItem } from "../agent/correlation/index.js";
+import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
+import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
+import { buildMentionMarker } from "../agent/prompts/system.js";
 import { withRoute } from "../utils/trace/index.js";
+
+// How many ungrounded names the thread warning lists before it summarises the rest. A wall of
+// them says the same thing as five of them — the answer is not standing on its evidence.
+const UNGROUNDED_SHOWN = 5;
 
 class Semaphore {
   private running = 0;
@@ -183,11 +189,10 @@ export class SlackApp {
     // Per-message mode marker — same mechanism as the [FOLLOW-UP] prefix. Distant
     // system-prompt rules alone don't hold: the model defaults to RCA format for any
     // first message (see MEMORY_BANK). Only Alertmanager messages carry [SOURCE: ...].
-    const message =
-      `[USER MESSAGE — conversation mode by default: answer directly in Slack mrkdwn. ` +
-      `Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident. ` +
-      `If this is not about this cluster's workloads, observability data, incidents or deploys, decline in one line ` +
-      `per Scope of Work and answer nothing else — do not debug or explain code.]\n${text}`;
+    // The alert clause restates what the thread is about next to the question. history[0] is
+    // pinned and still carries it, but a pinned sentence at the far end of the window loses to
+    // the freshest tool result — see buildMentionMarker.
+    const message = buildMentionMarker(text, await this.agent.threadAlertIdentity(event.channel, threadId));
 
     // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 2);
     // explicit investigation requests (and the alert webhook path) keep the full budget.
@@ -247,6 +252,7 @@ export class SlackApp {
       } else {
         logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
       }
+      await this.warnIfUngrounded(event.channel, threadId, reply);
       await this.notifyIfLowConfidence(event.channel, threadId, reply);
     } catch (err) {
       logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
@@ -399,7 +405,20 @@ export class SlackApp {
 
     // Fire-and-forget — the LLM run must not delay the webhook ack.
     // Concurrency stays bounded by the semaphore inside the background task.
-    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels);
+    // Computed here, where the alerts are: a group spanning more than one service is two
+    // candidate causes stated by the payload itself, and that is the condition the model never
+    // recognised on its own. Empty string whenever delegation is not on the table.
+    const subjects = distinctSubjects(firing);
+    const hint = delegationHint(subjects, config.subagents);
+    // Logged whether or not it fires. A hint that returns "" left no trace at all, so "the model
+    // did not delegate" and "the group never looked multi-subject" read identically in the log —
+    // and they need completely different fixes (the label vocabulary vs. the model's judgement).
+    logger.info(
+      `[slack] group subjects: ${
+        subjects ? `${subjects.key}=[${subjects.values.join(", ")}]` : `none (labels: ${[...new Set(firing.flatMap((a) => Object.keys(a.labels)))].sort().join(", ")})`
+      } — delegation hint ${hint ? "emitted" : "not emitted"}`
+    );
+    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint);
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
@@ -433,7 +452,9 @@ export class SlackApp {
     channel: string,
     threadId: string,
     issueText: string,
-    labels: Record<string, string>
+    labels: Record<string, string>,
+    /** "" unless the group spans more than one subject and delegation is enabled. */
+    delegation: string
   ): Promise<void> {
     await this.semaphore.acquire();
     try {
@@ -449,7 +470,7 @@ export class SlackApp {
       // only Alertmanager-driven messages carry it → mandatory investigation mode.
       // Human mentions have no marker → conversation-first (see prompts/system.md).
       const fullIssue =
-        `[SOURCE: Alertmanager webhook — automated incident investigation]\n\n` +
+        `[SOURCE: Alertmanager webhook — automated incident investigation]${delegation}\n\n` +
         (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
       const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText }));
@@ -478,6 +499,7 @@ export class SlackApp {
       // proposal model needs to avoid re-proposing.
       const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
       if (incidentId) void this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext);
+      await this.warnIfUngrounded(channel, threadId, rca);
       await this.notifyIfLowConfidence(channel, threadId, rca);
     } catch (err) {
       logger.error(`[slack] background investigation failed for thread ${threadId}: ${errDetail(err)}`);
@@ -652,6 +674,33 @@ export class SlackApp {
   private armVerificationPoller(tick: () => Promise<void>): void {
     this.verifyTimer = setTimeout(() => void tick(), config.remediation.verifyPollMs);
     this.verifyTimer.unref(); // auxiliary work must never be what keeps the process alive
+  }
+
+  /**
+   * Posts the evidence-grounding gaps as their own message rather than editing the answer: the
+   * RCA is parsed by shape downstream (buildRcaBlocks, dashboard/rca.ts, extractSection), and a
+   * line appended past the last section is a line those parsers have to be taught about.
+   *
+   * Best-effort, like every other post-answer step here — a check that cannot run must not take
+   * the investigation down with it.
+   */
+  private async warnIfUngrounded(channel: string, threadId: string, answer: string): Promise<void> {
+    try {
+      const names = await this.agent.ungroundedNames(threadId, answer);
+      if (names.length === 0) return;
+      const shown = names.slice(0, UNGROUNDED_SHOWN).map((n) => `\`${n}\``).join(", ");
+      const rest = names.length - UNGROUNDED_SHOWN;
+      await this.app.client.chat.postMessage({
+        channel,
+        thread_ts: threadId,
+        text:
+          `⚠️ *Not backed by evidence:* ${shown}${rest > 0 ? ` (+${rest} more)` : ""} — named above, ` +
+          `but returned by no tool call in this thread. Verify before acting on them.`,
+        mrkdwn: true,
+      });
+    } catch (err) {
+      logger.warn(`[slack] grounding check failed for thread ${threadId}: ${errDetail(err)}`);
+    }
   }
 
   private async notifyIfLowConfidence(channel: string, threadId: string, rca: string): Promise<void> {

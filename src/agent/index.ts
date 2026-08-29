@@ -19,6 +19,16 @@ import { resolveBudget } from "./context/resolve-budget.js";
 import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
+import { groundingGaps } from "./grounding/index.js";
+import {
+  DELEGATE_TOOL,
+  DELEGATE_MARKER,
+  capFanout,
+  childDeadline,
+  hypothesisOf,
+  subThreadId,
+  withDelegateTool,
+} from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
@@ -40,7 +50,7 @@ import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import type { LLMClient, LLMResponse, ContentBlock, TokenUsage, ToolDefinition } from "./llm/types.js";
+import type { LLMClient, LLMResponse, ContentBlock, Message, TokenUsage, ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
@@ -118,6 +128,24 @@ export const MAX_TRACKED_THREADS = 500;
 // directory. Earliest wins: the alert's own playbook outranks one a later log line suggested.
 export const MAX_THREAD_SKILLS = 5;
 
+/**
+ * The last four exist for sub-agent delegation: a delegate is the same loop run with a smaller
+ * budget, a borrowed deadline, and no delegate tool of its own. They are options rather than a
+ * second loop because the guards that matter — the [WRITE] filter, the namespace scope lock, the
+ * log fan-out cap, the forced final answer — live in that loop, and a copy of it is a copy of
+ * them that drifts.
+ */
+export interface InvestigateOptions {
+  maxToolRounds?: number;
+  trigger?: string;
+  /** Defaults to MAX_ITERATIONS. */
+  maxIterations?: number;
+  /** Absolute epoch ms. Defaults to now + config.investigationTimeoutMs. */
+  deadline?: number;
+  /** 0 = the lead investigation, 1 = a delegate. Only depth 0 is offered the delegate tool. */
+  depth?: number;
+}
+
 export type ThreadSkills = Map<string, Skill[]>;
 
 /** What the dashboard renders. Strings only — no RegExp crosses this boundary. */
@@ -158,6 +186,19 @@ export function selectForThread(
     tracked.delete(oldest);
   }
   return merged;
+}
+
+/**
+ * Resolves stored playbook names back to skills against the LIVE registry. A name that no longer
+ * resolves is dropped rather than carried as a dangling string: `prompts/skills/` is editable
+ * between two turns of the same thread, and a thread must never re-inject a skill the directory
+ * no longer has. Order follows the stored list, so the alert's own playbook keeps its rank.
+ *
+ * Exported for the wiring test — the class method around it is a thin caller.
+ */
+export function resolveSkillNames(registry: SkillRegistry, names: readonly string[]): Skill[] {
+  const byName = new Map(registry.all().map((s) => [s.name, s]));
+  return names.map((n) => byName.get(n)).filter((s): s is Skill => s !== undefined);
 }
 
 /**
@@ -342,11 +383,11 @@ export class DevOpsAgent {
   // Everything below runs inside the trace context so outbound SQS requests carry the
   // threadId — that is what lets you grep one id across the agent log, the llm-worker
   // log, and the Slack thread when an answer comes out wrong.
-  investigate(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
+  investigate(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
     return withTrace(threadId, () => this.runInvestigation(threadId, userMessage, opts));
   }
 
-  private async runInvestigation(threadId: string, userMessage: string, opts: { maxToolRounds?: number; trigger?: string } = {}): Promise<string> {
+  private async runInvestigation(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
@@ -355,6 +396,8 @@ export class DevOpsAgent {
     // kept chasing anomalies into other namespaces on plain data questions. Once the
     // budget is spent, the next LLM call gets NO tools — it must answer with what it has.
     const maxToolRounds = opts.maxToolRounds ?? Infinity;
+    const maxIterations = opts.maxIterations ?? MAX_ITERATIONS;
+    const depth = opts.depth ?? 0;
     let toolRounds = 0;
     let toolsDisabled = false;
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
@@ -371,21 +414,35 @@ export class DevOpsAgent {
 
     // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
     // prior incidents, and a previous incident's RCA must not select this one's playbook.
+    // A thread outlives a pod: its conversation comes back from Redis, so its playbooks have to
+    // as well or the follow-up answers with a different skill set than the turn it follows.
+    await this.rehydrateThreadSkills(threadId);
     let skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+    this.persistThreadSkills(threadId, skills);
 
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
     // to execute state-changing actions on its own. Write tools are reachable only via
     // the proposal dry-run and the human-approved execution path (direct callTool).
-    const tools = this.mcp.getTools().filter((t) => !t.description.startsWith("[WRITE]"));
+    const tools = withDelegateTool(
+      this.mcp.getTools().filter((t) => !t.description.startsWith("[WRITE]")),
+      config.subagents,
+      { depth, maxToolRounds }
+    );
     const systemPrompt = buildStaticSystemPrompt();
     let iterations = 0;
     let totalUsage = zeroUsage();
 
-    const deadline = investigationStart + config.investigationTimeoutMs;
+    // A delegate inherits a deadline instead of taking a fresh one: its whole point is to finish
+    // inside the parent's budget, and config.investigationTimeoutMs would hand it the full 300s
+    // the parent is already spending.
+    const deadline = opts.deadline ?? investigationStart + config.investigationTimeoutMs;
 
-    while (iterations < MAX_ITERATIONS) {
+    while (iterations < maxIterations) {
       if (Date.now() > deadline) {
-        logger.warn(`[${threadId}] Investigation exceeded ${config.investigationTimeoutMs}ms budget after ${iterations} LLM calls`);
+        // The budget is the deadline, not the configured timeout: a delegate is given what is
+        // left of its parent's, so naming config.investigationTimeoutMs here reported 300s at a
+        // sub-thread that never had more than a fraction of it.
+        logger.warn(`[${threadId}] Investigation exceeded its ${deadline - investigationStart}ms budget after ${iterations} LLM calls`);
         return "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.";
       }
       iterations++;
@@ -502,6 +559,24 @@ export class DevOpsAgent {
         let executable = response.content.filter((c) => c.type === "tool_use");
         const refusals: ContentBlock[] = [];
 
+        // Delegation is intercepted here, before the conversation-mode guards below. The MCP
+        // server has no such tool, and a delegate must not reach namespacesOf(): it carries no
+        // namespace, so a first round of nothing but delegates would lock the scope to the empty
+        // set — which is the case that disables the lock for the rest of the run.
+        let delegateResults: ContentBlock[] = [];
+        const delegateCalls = executable.filter((t) => t.name === DELEGATE_TOOL);
+        if (delegateCalls.length > 0) {
+          executable = executable.filter((t) => t.name !== DELEGATE_TOOL);
+          const { run, refusals: overflow } = capFanout(delegateCalls, config.subagents.maxFanout);
+          if (overflow.length > 0) {
+            logger.info(
+              `[${threadId}] ${delegateCalls.length} delegates requested, fan-out cap is ` +
+              `${config.subagents.maxFanout} — ${overflow.length} refused`
+            );
+          }
+          delegateResults = [...(await this.runDelegates(threadId, run, deadline)), ...overflow];
+        }
+
         if (maxToolRounds !== Infinity) {
           // Namespace scope lock: the first tool round defines the question's namespaces.
           if (scopeNamespaces === null) {
@@ -539,17 +614,17 @@ export class DevOpsAgent {
         }
 
         const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable) : [];
-        const trimmedResults = sanitizeContentBlocks([...executed, ...refusals]);
+        const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);
 
         toolRounds++;
-        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations: MAX_ITERATIONS });
+        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations });
         if (notice) {
           toolsDisabled = true;
           trimmedResults.push({ type: "text", text: notice });
           logger.info(
             notice === TOOL_BUDGET_NOTICE
               ? `[${threadId}] tool budget (${maxToolRounds} rounds) reached — forcing final answer`
-              : `[${threadId}] iteration ceiling (${MAX_ITERATIONS}) reached after ${toolRounds} tool rounds — forcing final answer`
+              : `[${threadId}] iteration ceiling (${maxIterations}) reached after ${toolRounds} tool rounds — forcing final answer`
           );
         }
 
@@ -567,6 +642,7 @@ export class DevOpsAgent {
           skills = selectForThread(this.skills, this.threadSkills, threadId, text);
           const added = skills.slice(before).map((s) => s.name);
           if (added.length > 0) {
+            this.persistThreadSkills(threadId, skills);
             logger.info(`[${threadId}] playbook matched from tool evidence, not the alert text: ${added.join(", ")}`);
           }
         }
@@ -576,8 +652,68 @@ export class DevOpsAgent {
     // Residual only: `forcedFinalAnswer` spends the second-to-last round disabling tools, so
     // reaching here means the model answered that turn with another tool_use instead of prose.
     // Nothing was posted to the thread, so don't tell the reader to review findings "above".
-    logger.warn(`[${threadId}] Investigation hit max iterations (${MAX_ITERATIONS}) — model kept calling tools on its final, tool-free turn`);
+    logger.warn(`[${threadId}] Investigation hit max iterations (${maxIterations}) — model kept calling tools on its final, tool-free turn`);
     return "⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.";
+  }
+
+  /**
+   * Runs each delegated hypothesis as its own investigation, in parallel, and returns one
+   * tool_result per call — including for the ones that could not run, because an unanswered
+   * tool_use is a 400 from Anthropic rather than a smaller request.
+   *
+   * The delegates go through `investigate()` rather than `runInvestigation()` so each gets its
+   * own trace context: the sub-thread id is prefixed with the parent's, so grepping the Slack
+   * thread id still finds every child across the agent and llm-worker logs, and grepping the
+   * sub id isolates one of them. They do NOT take a semaphore slot — that lives in app/index.ts
+   * around the entry points, and a child waiting on a permit its own parent is holding is a
+   * deadlock at MAX_CONCURRENT_INVESTIGATIONS.
+   */
+  private async runDelegates(threadId: string, calls: ContentBlock[], parentDeadline: number): Promise<ContentBlock[]> {
+    const cutoff = childDeadline(parentDeadline);
+    const block = (id: string | undefined, content: string): ContentBlock =>
+      ({ type: "tool_result" as const, tool_use_id: id, content });
+
+    return Promise.all(
+      calls.map(async (call, i) => {
+        const hypothesis = hypothesisOf(call);
+        if (!hypothesis) {
+          return block(call.id, "Error: delegate_investigation needs a non-empty `hypothesis` — state the claim to test.");
+        }
+        if (Date.now() >= cutoff) {
+          logger.warn(`[${threadId}] delegate refused — less than the reserve left before the investigation deadline`);
+          return block(
+            call.id,
+            "Error: not enough time left in this investigation's budget to delegate. Answer with the evidence already gathered."
+          );
+        }
+
+        const sub = subThreadId(threadId, i + 1);
+        const start = Date.now();
+        logger.info(`[${threadId}] → delegate ${sub}: ${truncate(hypothesis, 160)}`);
+        try {
+          const findings = await this.investigate(sub, `${DELEGATE_MARKER}\n${hypothesis}`, {
+            maxToolRounds: config.subagents.toolRounds,
+            maxIterations: config.subagents.maxIterations,
+            deadline: cutoff,
+            depth: 1,
+            // Playbooks are selected from the hypothesis, not from the parent's alert text: the
+            // delegate is investigating one failure mode, and that is the text describing it.
+            trigger: hypothesis,
+          });
+          logger.info(`[${threadId}] ← delegate ${sub} ok (${Date.now() - start}ms, ${findings.length} chars)`);
+          return block(call.id, `[delegate: ${hypothesis}]\n${findings}`);
+        } catch (e) {
+          logger.error(`[${threadId}] ← delegate ${sub} failed (${Date.now() - start}ms): ${errDetail(e)}`);
+          return block(call.id, `Error: this delegated investigation failed (${errDetail(e)}). Continue without it and say in your answer that this hypothesis was not tested.`);
+        } finally {
+          // A sub-thread is scratch space: nothing reads it after the findings come back, and
+          // leaving it behind leaks one Redis key (24h TTL) and one threadSkills entry per
+          // delegate against a Map capped at MAX_TRACKED_THREADS.
+          await this.memory.clear(sub).catch((e) => logger.warn(`[${threadId}] delegate ${sub} memory cleanup failed: ${errDetail(e)}`));
+          this.threadSkills.delete(sub);
+        }
+      })
+    );
   }
 
   private async executeToolCalls(threadId: string, content: ContentBlock[]): Promise<ContentBlock[]> {
@@ -641,6 +777,60 @@ export class DevOpsAgent {
       if (text.trim()) return text;
     }
     return "";
+  }
+
+  /**
+   * The alert a Slack thread is anchored to, for the mention path's per-message marker.
+   * Null whenever the thread was never an alert (a plain question) or incident memory is off.
+   */
+  async threadAlertIdentity(channel: string, threadTs: string): Promise<{ alertname: string; namespace: string | null } | null> {
+    return this.incidents.threadAlertIdentity(channel, threadTs).catch((err) => {
+      logger.warn(`[${threadTs}] could not read the thread's alert identity: ${errDetail(err)}`);
+      return null;
+    });
+  }
+
+  /**
+   * Rebuilds this thread's accumulated playbooks from durable memory when this process has never
+   * seen the thread — after a restart, a rollout, or on another replica. Names are resolved
+   * against the live registry, so a skill deleted from `prompts/skills/` since simply does not
+   * come back rather than resurrecting as a dangling name.
+   */
+  private async rehydrateThreadSkills(threadId: string): Promise<void> {
+    if (this.threadSkills.has(threadId)) return; // this process already owns the thread's set
+    const names = await this.memory.getSkills(threadId).catch((err) => {
+      logger.warn(`[${threadId}] could not read stored playbooks — reselecting: ${errDetail(err)}`);
+      return [] as string[];
+    });
+    const known = resolveSkillNames(this.skills, names);
+    if (known.length === 0) return;
+    this.threadSkills.set(threadId, known);
+    logger.info(`[${threadId}] playbooks restored from memory: ${known.map((s) => s.name).join(", ")}`);
+  }
+
+  // Fire-and-forget, like recordUsage: losing a playbook name costs the next turn a reselection,
+  // and blocking an investigation on a cache write would be the worse trade.
+  private persistThreadSkills(threadId: string, skills: readonly Skill[]): void {
+    void this.memory
+      .setSkills(threadId, skills.map((s) => s.name))
+      .catch((err) => logger.warn(`[${threadId}] could not store playbooks: ${errDetail(err)}`));
+  }
+
+  /**
+   * Resource names the answer asserts that no tool result in this thread ever returned — see
+   * agent/grounding/. Read AFTER the answer is produced and BEFORE the caller acts on it; the
+   * dry-run guards a proposed action, this guards the claim, and the claim is what reaches Slack
+   * and `incidents.root_cause` whether or not any action follows.
+   */
+  async ungroundedNames(threadId: string, answer: string): Promise<string[]> {
+    const history = await this.memory.get(threadId).catch(() => [] as Message[]);
+    const gaps = groundingGaps(answer, history);
+    if (gaps.length > 0) {
+      logger.warn(
+        `[${threadId}] answer names ${gaps.length} resource(s) absent from every tool result: ${gaps.join(", ")}`
+      );
+    }
+    return gaps;
   }
 
   private extractText(content: ContentBlock[]): string {

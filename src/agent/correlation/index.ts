@@ -27,6 +27,38 @@ export function commonLabels(alerts: AlertItem[]): Record<string, string> {
 }
 
 /**
+ * Annotations every alert in the set agrees on, word for word. The mirror of commonLabels, and
+ * it exists because Alertmanager's own `commonAnnotations` is empty the moment a rule templates
+ * the subject into its text — "error rate for service checkout-gateway" and "...for service
+ * storefront" are different strings, so a 4-alert group across two services arrives with none.
+ */
+export function commonAnnotationsOf(alerts: AlertItem[]): Record<string, string> {
+  const [first, ...rest] = alerts;
+  if (!first?.annotations) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(first.annotations)) {
+    if (rest.every((a) => a.annotations?.[k] === v)) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * What the alerts are ABOUT, deduplicated: the first of these labels that any alert carries
+ * decides, and the same key is then read across the whole group so the list cannot mix kinds.
+ * `job` is deliberately absent — it is the scrape job (`kubernetes-pods`), identical across a
+ * group and therefore never a subject.
+ */
+const SUBJECT_LABELS = ["service", "deployment", "workload", "app"] as const;
+
+export function distinctSubjects(alerts: AlertItem[]): { key: string; values: string[] } | null {
+  for (const key of SUBJECT_LABELS) {
+    const values = [...new Set(alerts.map((a) => a.labels[key]).filter(Boolean) as string[])].sort();
+    if (values.length > 0) return { key, values };
+  }
+  return null;
+}
+
+/**
  * The label set to key the group on (dedup / incident store / remediation). Prefer what
  * Alertmanager already computed (`commonLabels`, then the `group_by` `groupLabels`), and
  * fall back to the intersection so non-Alertmanager senders still work. Guaranteed non-empty
@@ -72,19 +104,40 @@ export function buildGroupAlertText(
   const severity = groupLabels.severity ?? alerts[0]?.labels.severity ?? "unknown";
   const emoji = SEVERITY_EMOJI[severity] ?? "⚪";
   const n = alerts.length;
-  const ann = nonEmpty(commonAnnotations) ?? alerts[0]?.annotations ?? {};
+  // NOT `alerts[0].annotations` as a fallback: for a group whose rule templates the subject into
+  // its text that silently presents ONE member's description as the group's, which is how a
+  // 4-alert group across two services rendered as a checkout-gateway-only incident — to the
+  // on-call and to the agent, since this text is also the investigation's input. For n === 1 the
+  // intersection IS alerts[0]'s annotations, so a single alert renders exactly as before.
+  const shownAnn = nonEmpty(commonAnnotations) ?? nonEmpty(commonAnnotationsOf(alerts)) ?? {};
+  // A group whose members disagree still has something worth printing; it just may not speak for
+  // the group, and the label has to say so.
+  const ann = nonEmpty(shownAnn) ? shownAnn : (alerts[0]?.annotations ?? {});
+  const annSpeaksForGroup = nonEmpty(shownAnn) !== undefined || n === 1;
+  const annSuffix = annSpeaksForGroup ? "" : ` (1 of ${n})`;
 
   const lines: string[] = [
     `🚨 *${alertName}*${n > 1 ? ` — ${n} alerts` : ""}`,
     `*Severity:* ${emoji} \`${severity}\``,
   ];
-  if (ann.summary) lines.push(`*Summary:* ${clean(ann.summary)}`);
-  if (ann.description) lines.push(`*Description:* ${clean(ann.description)}`);
+  if (ann.summary) lines.push(`*Summary${annSuffix}:* ${clean(ann.summary)}`);
+  if (ann.description) lines.push(`*Description${annSuffix}:* ${clean(ann.description)}`);
 
   const namespace = groupLabels.namespace ?? alerts[0]?.labels.namespace;
   if (namespace) lines.push(`*Namespace:* \`${namespace}\``);
 
-  const pods = alerts.map((a) => a.labels.pod).filter(Boolean) as string[];
+  // The scope line the annotations above may not carry. Only when the group really spans more
+  // than one: for a single subject the summary already names it.
+  const subjects = distinctSubjects(alerts);
+  if (subjects && subjects.values.length > 1) {
+    const label = subjects.key.charAt(0).toUpperCase() + subjects.key.slice(1);
+    lines.push(`*${label}s (${subjects.values.length}):* ${subjects.values.map((v) => `\`${v}\``).join(", ")}`);
+  }
+
+  // Distinct pods, not one entry per alert. A rule that fires per (pod, status) produces two
+  // alerts for one pod, and the count printed here was the alert count — "4 affected pods" for
+  // two, which is the wrong number to hand someone at 3am.
+  const pods = [...new Set(alerts.map((a) => a.labels.pod).filter(Boolean) as string[])];
   if (n === 1 && pods.length === 1) {
     lines.push(`*Pod:* \`${pods[0]}\``);
   } else if (pods.length > 0) {

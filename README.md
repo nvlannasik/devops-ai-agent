@@ -100,6 +100,10 @@ Covered areas, grouped:
 | `MAX_CONCURRENT_INVESTIGATIONS` | | `5` |
 | `MENTION_TOOL_ROUNDS` | Tool-call rounds for plain mentions (each round batches parallel calls); explicit investigation requests & alerts are uncapped. Budget resets per message | `2` |
 | `INVESTIGATION_TIMEOUT_SECONDS` | Wall-clock budget per investigation (bounds how long a slot is held) | `300` |
+| `SUBAGENT_ENABLED` | Let the lead investigation delegate one hypothesis at a time to a sub-agent running the same loop in its own context. Offered only where the tool budget is unlimited (alerts and explicit investigation requests), never on a plain mention. Off means the tool is not registered at all, so off is the unchanged baseline | `false` |
+| `SUBAGENT_MAX_FANOUT` | Hypotheses delegated per turn; they run in parallel | `3` |
+| `SUBAGENT_TOOL_ROUNDS` | Tool-call rounds a delegate gets. Finite on purpose — a budget is what engages the namespace scope lock and the log fan-out guard | `3` |
+| `SUBAGENT_MAX_ITERATIONS` | LLM calls a delegate gets before it must answer from what it has | `5` |
 | `REMEDIATION_VERIFY_DELAY_SECONDS` | How long after an approved remediation to check whether it worked. Needs to outlast a rolling update — a half-converged workload reads as "not fixed" | `300` |
 | `REMEDIATION_VERIFY_POLL_SECONDS` | How often to look for due verification checks (one indexed query; only bounds how late a verdict lands) | `30` |
 | `INCIDENT_RECONCILE_ENABLED` | Close incidents whose alert Alertmanager no longer holds, when the resolved webhook never arrived. Set `false` to disable | `true` |
@@ -437,6 +441,8 @@ src/
 │   │   ├── proposal.ts           # worthProposing() — mention-path gate on the proposal call
 │   │   └── verify.ts             # Durable post-remediation check + verdict
 │   ├── scope/index.ts            # Namespace scope lock helpers
+│   ├── grounding/index.ts        # Resource names asserted but never returned by a tool
+│   ├── subagent/index.ts         # Delegate tool, fan-out cap, child deadline/marker (SUBAGENT_ENABLED)
 │   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
 │   ├── usage/index.ts            # Per-call token accounting → llm_usage
 │   └── prompts/system.ts         # Static prompt + time context

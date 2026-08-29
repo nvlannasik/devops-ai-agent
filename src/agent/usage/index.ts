@@ -39,8 +39,13 @@ export class UsageStore {
   async linkToIncident(incidentId: number, threadTs: string): Promise<void> {
     if (!this.pool) return;
     try {
+      // The LIKE arm claims the sub-agents' rows. A delegate logs its usage under its own
+      // sub-thread id (`<threadTs>/sub-N`, agent/subagent/) because that is the run that spent
+      // the tokens — but the incident it spent them on is the parent's, and an exact match left
+      // every delegated call unattributed forever, which is the one number this table exists for.
       await this.pool.query(
-        `UPDATE llm_usage SET incident_id = $1 WHERE thread_ts = $2 AND incident_id IS NULL`,
+        `UPDATE llm_usage SET incident_id = $1
+           WHERE (thread_ts = $2 OR thread_ts LIKE $2 || '/sub-%') AND incident_id IS NULL`,
         [incidentId, threadTs]
       );
     } catch (err) {

@@ -244,6 +244,27 @@ export class IncidentMemory {
     return rows.length > 0 ? Number(rows[0].id) : null;
   }
 
+  /**
+   * What alert this thread is about. Separate from findIncidentByThread (which answers "which
+   * row", for feedback and remediation) because this answers "what is this conversation
+   * anchored to" — the mention path stamps it on every message.
+   *
+   * The anchor has to be durable and this is the only place that is: the alert text sits at
+   * history[0] and is pinned, but by the third round it is one sentence at the far end of the
+   * window against whatever the freshest tool result says, and that is how a question about
+   * `sample-apps` ended up querying `default`.
+   */
+  async threadAlertIdentity(channel: string, threadTs: string): Promise<{ alertname: string; namespace: string | null } | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(
+      `SELECT alertname, namespace FROM incidents
+         WHERE channel = $1 AND thread_ts = $2 ORDER BY created_at DESC LIMIT 1`,
+      [channel, threadTs]
+    );
+    if (rows.length === 0) return null;
+    return { alertname: String(rows[0].alertname), namespace: rows[0].namespace ?? null };
+  }
+
   // Store human-confirmed feedback (the trusted tier). Idempotent per (incident_id,
   // trigger_key) via the unique index — a duplicate trigger is reported, not an error.
   async storeFeedback(

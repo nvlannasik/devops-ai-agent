@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { config } from "../../config/index.js";
 import logger from "../../utils/logger/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition, ContentBlock } from "./types.js";
+import { sanitizeForWire } from "./sanitize.js";
 
 // Our Message[] is Anthropic-shaped; an OpenAI-compatible backend needs native
 // tool_calls / role:"tool". This used to be `JSON.stringify(m.content)` — which fed the
@@ -93,7 +94,10 @@ export class OpenAICompatibleClient implements LLMClient {
     };
   }
 
-  async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
+  async chat(rawMessages: Message[], tools: ToolDefinition[], rawSystemPrompt: string): Promise<LLMResponse> {
+    // Lone surrogates make the body unparseable for the server, identically on every
+    // backend — see sanitize.ts. Guarded here, at the wire, not at the producers.
+    const { messages, systemPrompt } = sanitizeForWire(rawMessages, rawSystemPrompt);
     let response;
     try {
       response = await this.client.chat.completions.create(this.body(messages, tools, systemPrompt));

@@ -10,6 +10,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
+import { sanitizeForWire } from "./sanitize.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
 import { truncate } from "../../utils/truncate/index.js";
 import { currentTrace } from "../../utils/trace/index.js";
@@ -106,7 +107,10 @@ export class SQSLLMClient implements LLMClient {
     });
   }
 
-  async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
+  async chat(rawMessages: Message[], tools: ToolDefinition[], rawSystemPrompt: string): Promise<LLMResponse> {
+    // Lone surrogates make the body unparseable for the server, identically on every
+    // backend — see sanitize.ts. Guarded here, at the wire, not at the producers.
+    const { messages, systemPrompt } = sanitizeForWire(rawMessages, rawSystemPrompt);
     await this.ensureStarted();
     const requestId = randomUUID();
 

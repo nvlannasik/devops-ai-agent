@@ -175,4 +175,20 @@ export const config = {
   // must answer with what it has — the deterministic scope guard for conversation mode.
   // 2 covers the common flows exactly (discover → fetch); a 3rd round only ever fed wandering
   mentionToolRounds: parseInt(process.env.MENTION_TOOL_ROUNDS ?? "2"),
+
+  // Sub-agent delegation (src/agent/subagent/). Opt-in, and OFF is meant to be today's
+  // behaviour byte for byte — the tool is not registered at all, so neither the tools cache
+  // block nor the context budget moves. That is what makes ON/OFF a comparison rather than a
+  // preference. Depth is fixed at 1: a delegate never gets the tool.
+  subagents: {
+    enabled: process.env.SUBAGENT_ENABLED === "true",
+    // Hypotheses delegated per turn. They run in parallel, so this is also the peak number of
+    // concurrent investigations one incident can add — the app's semaphore bounds entry points,
+    // not children.
+    maxFanout: parseInt(process.env.SUBAGENT_MAX_FANOUT ?? "3"),
+    // Finite on purpose: a delegate with a tool budget gets the conversation-mode guards
+    // (namespace scope lock, log fan-out) that an alert investigation's Infinity switches off.
+    toolRounds: parseInt(process.env.SUBAGENT_TOOL_ROUNDS ?? "3"),
+    maxIterations: parseInt(process.env.SUBAGENT_MAX_ITERATIONS ?? "5"),
+  },
 } as const;

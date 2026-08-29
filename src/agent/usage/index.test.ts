@@ -75,6 +75,16 @@ test("linkToIncident only claims rows that are not yet linked", async () => {
   assert.deepEqual(calls[0].params, [42, "1785282508.001"]);
 });
 
+// A delegate logs under its own sub-thread id (`<threadTs>/sub-N`), so an exact-match backfill
+// left every delegated LLM call unattributed forever — the one number this table exists for.
+test("linkToIncident claims the sub-agents' rows too", async () => {
+  const calls: Call[] = [];
+  await new UsageStore(stubPool(calls)).linkToIncident(42, "1785282508.001");
+  assert.match(calls[0].sql, /thread_ts LIKE \$2 \|\| '\/sub-%'/);
+  // still only one parameter for the thread — the pattern is built in SQL, never interpolated
+  assert.deepEqual(calls[0].params, [42, "1785282508.001"]);
+});
+
 // Same shape, same distinction as record()'s null-pool test above.
 test("linkToIncident: no pool configured is a no-op — no query attempted, nothing logged", async (t) => {
   const warn = t.mock.method(logger, "warn");

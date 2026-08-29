@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commonLabels, groupIdentity, buildGroupAlertText, type AlertItem } from "./index.js";
+import {
+  commonLabels,
+  commonAnnotationsOf,
+  distinctSubjects,
+  groupIdentity,
+  buildGroupAlertText,
+  type AlertItem,
+} from "./index.js";
 
 const alert = (labels: Record<string, string>, extra: Partial<AlertItem> = {}): AlertItem => ({
   status: "firing",
@@ -147,4 +154,73 @@ test("buildGroupAlertText omits the Labels line when nothing is left over", () =
   const bare = alert({ alertname: "X", namespace: "prod", severity: "warning", pod: "p" });
   const text = buildGroupAlertText({ alertname: "X", namespace: "prod", severity: "warning" }, [bare]);
   assert.doesNotMatch(text, /\*Labels:\*/);
+});
+
+// ---- A group that spans more than one subject ----
+//
+// The production card: one rule, 4 alerts, 2 services, 2 pods. It rendered as
+// "Summary: ... (service checkout-gateway)" and "Affected pods (4)" — one member's description
+// presented as the group's, and the alert count printed as a pod count. This text is not
+// decoration: app/index.ts posts it to Slack AND feeds it to investigate().
+const errorRate = (service: string, pod: string, status: string): AlertItem => ({
+  status: "firing",
+  labels: { alertname: "HighErrorRate", severity: "critical", namespace: "sample-apps", service, pod, status },
+  annotations: {
+    summary: `High error rate detected (service ${service})`,
+    description: `The error rate for service ${service} has exceeded 5% in the last 5 minutes.`,
+  },
+});
+
+const fourAlerts = [
+  errorRate("checkout-gateway", "checkout-gateway-6b747db7c9-zwdcv", "504"),
+  errorRate("checkout-gateway", "checkout-gateway-6b747db7c9-zwdcv", "503"),
+  errorRate("storefront", "storefront-64896f9bd4-8dxxr", "504"),
+  errorRate("storefront", "storefront-64896f9bd4-8dxxr", "503"),
+];
+const groupLabels = { alertname: "HighErrorRate", severity: "critical", namespace: "sample-apps" };
+
+test("a rule that templates its subject leaves no common annotation", () => {
+  assert.deepEqual(commonAnnotationsOf(fourAlerts), {});
+  // and a single alert's own annotations ARE the intersection, so n === 1 is unchanged
+  assert.deepEqual(commonAnnotationsOf([fourAlerts[0]]), fourAlerts[0].annotations);
+});
+
+test("a description that speaks for one member is labelled as such, not as the group's", () => {
+  const text = buildGroupAlertText(groupLabels, fourAlerts, {});
+  assert.match(text, /\*Summary \(1 of 4\):\*/);
+  assert.match(text, /\*Description \(1 of 4\):\*/);
+});
+
+test("a group that does agree keeps the plain label", () => {
+  const shared = [errorRate("checkout-gateway", "pod-a", "504"), errorRate("checkout-gateway", "pod-b", "503")];
+  const text = buildGroupAlertText(groupLabels, shared, {});
+  assert.match(text, /\*Summary:\*/);
+  assert.doesNotMatch(text, /1 of 2/);
+});
+
+test("the services the group really spans are named", () => {
+  assert.deepEqual(distinctSubjects(fourAlerts), { key: "service", values: ["checkout-gateway", "storefront"] });
+  assert.match(buildGroupAlertText(groupLabels, fourAlerts, {}), /\*Services \(2\):\* `checkout-gateway`, `storefront`/);
+});
+
+// One subject needs no scope line — the summary already names it.
+test("a single-subject group gets no services line", () => {
+  const one = [errorRate("checkout-gateway", "pod-a", "504"), errorRate("checkout-gateway", "pod-b", "503")];
+  assert.doesNotMatch(buildGroupAlertText(groupLabels, one, {}), /Services \(/);
+});
+
+// The count was the alert count. A rule firing per (pod, status) makes that twice the truth.
+test("affected pods are distinct, and the count matches the list", () => {
+  const text = buildGroupAlertText(groupLabels, fourAlerts, {});
+  assert.match(text, /\*Affected pods \(2\):\* `checkout-gateway-6b747db7c9-zwdcv`, `storefront-64896f9bd4-8dxxr`/);
+  assert.doesNotMatch(text, /Affected pods \(4\)/);
+});
+
+test("subject detection falls through the label vocabulary and ignores the scrape job", () => {
+  const byApp = [
+    alert({ alertname: "A", app: "web", job: "kubernetes-pods" }),
+    alert({ alertname: "A", app: "api", job: "kubernetes-pods" }),
+  ];
+  assert.deepEqual(distinctSubjects(byApp), { key: "app", values: ["api", "web"] });
+  assert.equal(distinctSubjects([alert({ alertname: "A", job: "kubernetes-pods" })]), null);
 });

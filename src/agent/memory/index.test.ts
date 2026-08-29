@@ -64,3 +64,80 @@ test("threads are isolated from each other", async () => {
   assert.equal((await memory.get("a"))[0].content, "issue A");
   assert.equal((await memory.get("b"))[0].content, "issue B");
 });
+
+// ---- Durable playbooks (skills:<threadId>) ----
+//
+// The regression: DevOpsAgent.threadSkills was a plain in-process Map while the conversation sat
+// in Redis. After a rollout a live thread came back with its history and none of its playbooks —
+// a latency follow-up answered without the latency playbook, and nothing in the log said so.
+
+type RedisCall = { cmd: string; args: unknown[] };
+
+const stubRedis = (store: Map<string, string>, calls: RedisCall[] = []) =>
+  ({
+    get: async (k: string) => {
+      calls.push({ cmd: "get", args: [k] });
+      return store.get(k) ?? null;
+    },
+    set: async (k: string, v: string, ...rest: unknown[]) => {
+      calls.push({ cmd: "set", args: [k, v, ...rest] });
+      store.set(k, v);
+      return "OK";
+    },
+    del: async (...keys: string[]) => {
+      calls.push({ cmd: "del", args: keys });
+      for (const k of keys) store.delete(k);
+      return keys.length;
+    },
+    exists: async (k: string) => (store.has(k) ? 1 : 0),
+  }) as never;
+
+test("in-memory backend round-trips a thread's playbooks", async () => {
+  const memory = new ConversationMemory();
+  assert.deepEqual(await memory.getSkills("t1"), [], "an unseen thread has no playbooks, not undefined");
+  await memory.setSkills("t1", ["rca-format", "high-latency"]);
+  assert.deepEqual(await memory.getSkills("t1"), ["rca-format", "high-latency"]);
+});
+
+test("playbooks survive in Redis under their own key, with the conversation's TTL", async () => {
+  const store = new Map<string, string>();
+  const calls: RedisCall[] = [];
+  await new ConversationMemory(stubRedis(store, calls)).setSkills("t1", ["rca-format", "oomkilled"]);
+
+  const write = calls.find((c) => c.cmd === "set")!;
+  assert.equal(write.args[0], "skills:t1", "must not collide with conv: or rca:");
+  assert.equal(write.args[2], "EX", "a playbook set that outlives its conversation is worse than none");
+  assert.equal(write.args[3], 86400);
+
+  // A second instance is what a restarted pod is.
+  assert.deepEqual(await new ConversationMemory(stubRedis(store)).getSkills("t1"), ["rca-format", "oomkilled"]);
+});
+
+test("a corrupt or wrongly-shaped playbook entry costs the playbooks, never the thread", async () => {
+  const store = new Map<string, string>();
+  const memory = new ConversationMemory(stubRedis(store));
+
+  store.set("skills:t1", "{not json");
+  assert.deepEqual(await memory.getSkills("t1"), []);
+
+  store.set("skills:t2", '{"name":"rca-format"}'); // an object, not an array
+  assert.deepEqual(await memory.getSkills("t2"), []);
+
+  store.set("skills:t3", '["rca-format", 42, null]');
+  assert.deepEqual(await memory.getSkills("t3"), ["rca-format"], "non-strings are dropped, not stringified");
+});
+
+test("clear() drops the playbooks with the conversation on both backends", async () => {
+  const memory = new ConversationMemory();
+  await memory.setSkills("t1", ["rca-format"]);
+  await memory.clear("t1");
+  assert.deepEqual(await memory.getSkills("t1"), []);
+
+  const store = new Map<string, string>();
+  const calls: RedisCall[] = [];
+  const redisMemory = new ConversationMemory(stubRedis(store, calls));
+  await redisMemory.setSkills("t1", ["rca-format"]);
+  await redisMemory.clear("t1");
+  assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1"]);
+  assert.deepEqual(await redisMemory.getSkills("t1"), []);
+});
