@@ -860,7 +860,23 @@ export class DevOpsAgent {
     // write tools present at all? (server-side flag off = never propose)
     if (!this.mcp.getTools().some((t) => t.description.startsWith("[WRITE]"))) return null;
 
-    const response = await this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM);
+    // Light route, like reformatToConversation(): this is a constrained transform of an RCA
+    // that already exists, not an investigation — no tools, one shape to emit — and it was
+    // measured at 15.1s on the heavy chain, which is a self-hosted reasoning model spending
+    // most of its output budget thinking about a form it has to fill in.
+    //
+    // Safe to downgrade because nothing downstream trusts the text: parseProposal() rejects
+    // anything off-shape, the action must be a registered MCP tool, the dry-run exercises the
+    // server's guardrails, and a human still approves the card. The router escalates into the
+    // heavy chain on its own if the light backend fails deterministically.
+    //
+    // What it does NOT protect: a light backend that emits confident, well-formed prose that
+    // simply is not a proposal. parseProposal() returns null and the incident silently gets no
+    // card — the "[remediation] no actionable proposal from model" line below is the only
+    // symptom, so that log is what to grep if approval cards stop appearing.
+    const response = await withRoute("light", () =>
+      this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM)
+    );
     this.recordUsage(null, response); // no Slack thread at this call site — never invent one
     const text = this.extractText(response.content);
     const proposal = parseProposal(text);

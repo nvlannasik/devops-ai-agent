@@ -117,7 +117,7 @@ export function buildGroupAlertText(
   const annSuffix = annSpeaksForGroup ? "" : ` (1 of ${n})`;
 
   const lines: string[] = [
-    `🚨 *${alertName}*${n > 1 ? ` — ${n} alerts` : ""}`,
+    `:alert: *${alertName}*${n > 1 ? ` — ${n} alerts` : ""}`,
     `*Severity:* ${emoji} \`${severity}\``,
   ];
   if (ann.summary) lines.push(`*Summary${annSuffix}:* ${clean(ann.summary)}`);

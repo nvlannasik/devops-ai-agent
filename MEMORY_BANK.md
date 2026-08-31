@@ -108,6 +108,39 @@ hold, a marker on the message does.
 - It still tells the model what to do if `delegate_investigation` is absent from its tool list, so
   the hint cannot strand a run whose budget was finite.
 
+### Delegation does not fire in a linear-chain topology, and that is expected
+Four deploys with `SUBAGENT_ENABLED=true`, zero delegations. Not a broken trigger — the signal it
+reads is not produced by this cluster, and the reason is in the alert rule itself:
+
+```
+rate(http_server_requests_total{status=~"5.."}[5m]) > 0.05
+```
+
+`http_server_requests_total` counts requests a service SERVED. A workload failing its readiness
+probe is removed from the Service endpoints, receives nothing, and its 5xx counter stays flat: a
+fully broken backend DISAPPEARS from an error-rate metric rather than showing up in it. Down
+loadgen → storefront → checkout-gateway → orders-api, only the edge service still serves and still
+returns 5xx, so a two-alert group carries one distinct `service` and `delegationHint()` correctly
+returns `""`. That same investigation's RCA named three pods failing readiness — the multi-subject
+condition existed in the cluster, never in Alertmanager.
+
+Multi-subject needs a fan-out topology: one shared dependency failing while several callers are
+still up and still serving errors. **Decided 2026-08-29 to accept this rather than broaden the
+trigger.** Parsing first-round tool output for "unhealthy workloads" is format-dependent, and one
+observation is not enough to design against. Revisit only if a genuine multi-subject group is
+observed and delegation still does not fire.
+
+- **Two independent gates; only the second is missing.** Gate 1 (`offersDelegation()` — is the tool
+  registered) opened on every deploy: `tools=50` vs 49, +722 tokens = the 342-token prompt section
+  plus the tool definition. Gate 2 (`delegationHint()` — is the model told to use it) never opened.
+- **The hint has exactly one call site, the webhook** (`app/index.ts`). A mention that
+  `wantsInvestigation()` recognises gets `Infinity` and therefore the tool, but carries no alert
+  labels to read — so that path rests entirely on the model's own initiative, which is the thing
+  measured at zero across three incidents.
+- **`SUBJECT_LABELS` is first-match-wins.** One alert carrying `service` fixes the key for the whole
+  group and `deployment`/`workload`/`app` are never consulted, so a mixed group where only some
+  alerts carry `service` yields a partial list.
+
 ### Sub-agent delegation (`agent/subagent/`, `SUBAGENT_ENABLED`, opt-in)
 The lead investigation can hand ONE hypothesis to a delegate that runs the same loop in its own
 context and returns findings as a `tool_result`. Built for multi-hypothesis incidents, where the
@@ -309,6 +342,19 @@ got a blank-response fallback. Chain of defenses:
 - Agent's empty-response fallback names the fix (`LLM_MAX_TOKENS` / `LLM_REASONING_EFFORT`).
 - Tuning (worker env): raise `LLM_MAX_TOKENS` (16384 recommended), optionally `LLM_REASONING_EFFORT=low` (only sent when set; remove if the backend rejects it).
 - **Timeout coherence:** `SQS_LLM_TIMEOUT_SECONDS` default is **240** (was 120). A reasoning compose can take 60–90s, and the worker's 2× retry doubles that — 120s lost the race by 23s in testing (worker delivered a good answer 10:06:55; agent had timed out 10:06:32). The agent-side timeout must cover attempt + retry.
+- **Measured, 2026-08-29 dev:** the retry is not a cheap safety net — it is a second full
+  inference. Leaving `LLM_MAX_TOKENS` at the 8096 default, LLM #1 took **63458ms for out=9133**
+  (out > the ceiling is the tell: only the 2x retry can produce it). Raised, the same first call
+  became **24253ms for out=3435** and the whole investigation went 118792ms → **83294ms**. The
+  recommendation above was already written here and simply had not been applied to the cluster.
+- **After that, latency is output-token-bound and nothing else.** Same run: LLM #1 3435 tokens in
+  24.3s, LLM #2 9386 in 56.5s — both ≈150 tok/s, and total out=12821 ÷ 150 ≈ the 83s measured.
+  Prefill, tools (4 in parallel, 2.4s) and network are noise. Two consequences worth writing down
+  before someone re-derives them: `cache_read=0 cache_write=0` on every SQS call is real but
+  **fixing prompt caching would buy almost nothing**, and the 722 tokens `SUBAGENT_ENABLED` adds
+  cannot show up in wall-clock at this ratio. The remaining cost is hidden reasoning — LLM #2 spent
+  ~8200 of its 9386 output tokens thinking to emit ~1100 tokens of RCA — so `LLM_REASONING_EFFORT`
+  is the lever, not caching, and not trimming context.
 - **Tool-result truncation keeps head AND tail** (`truncateToolResult`, 4k+4k): logs are chronological — head-only truncation silently dropped the recent lines that "show me the logs" needs.
 
 ### System Prompt from Markdown
