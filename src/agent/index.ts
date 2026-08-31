@@ -20,6 +20,7 @@ import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
 import { groundingGaps } from "./grounding/index.js";
+import { flagInjection } from "./injection/index.js";
 import {
   DELEGATE_TOOL,
   DELEGATE_MARKER,
@@ -95,6 +96,32 @@ export const ITERATION_CEILING_NOTICE =
   "you are producing an RCA set Confidence to Low and name the one check that would confirm it.]";
 
 /**
+ * A delegate's ceiling. Neither notice above can serve it: the budget one carries conversation
+ * mode's format rule and tells the model to "offer to investigate", the ceiling one says nothing
+ * about format at all and leaves the shape to the system prompt, which describes an RCA.
+ *
+ * The observed failure, 2026-08-31: `SUBAGENT_TOOL_ROUNDS` is 2, so a delegate that spends both
+ * rounds lands on TOOL_BUDGET_NOTICE and does exactly what it says — one sub-investigation came
+ * back with "Hey — here's what the data you provided shows, in plain Slack-friendly terms" and
+ * markdown bullets, addressed to a human who was never going to read it, at 4796 chars against
+ * its sibling's 2220. Its actual reader is the lead investigation, which wanted a verdict.
+ *
+ * DELEGATE_MARKER already says all of this, but it sits in `history[0]` while the notice is the
+ * last thing in the context — the same losing position the mention marker was in, and the reason
+ * that one is restated every turn.
+ *
+ * One notice for BOTH ceilings, because a delegate's reader never changes: there is no budget-vs-
+ * iteration distinction to draw when neither outcome is ever addressed to a human.
+ */
+export const DELEGATE_BUDGET_NOTICE =
+  "[BUDGET REACHED — this is your final turn and tool calls are disabled. Report now to the lead " +
+  "investigation that asked for this, NOT to a human in Slack: open with SUPPORTED, CONTRADICTED " +
+  "or UNPROVEN, then the evidence behind that verdict, each claim naming the tool it came from. " +
+  "Do not use the RCA incident format, do not address a reader, and do not offer to investigate " +
+  "further — there is no one to offer it to. Running out of budget is not a reason to withhold a " +
+  "verdict: answer UNPROVEN and name what you could not check.]";
+
+/**
  * Both ceilings end a run the same way — one more LLM call with no tools — but they are reached
  * by different paths and say different things. Returns the notice to inject, or null to keep going.
  *
@@ -105,14 +132,20 @@ export const ITERATION_CEILING_NOTICE =
  * an apology — in an on-call thread that had never been shown a single finding.
  *
  * The tool budget wins when both apply: conversation mode has a format rule the ceiling must not
- * overwrite. Exported with its notices so the loop's exit contract is testable without the class.
+ * overwrite. `depth` outranks both — see DELEGATE_BUDGET_NOTICE. Exported with its notices so the
+ * loop's exit contract is testable without the class.
  */
 export function forcedFinalAnswer(state: {
   toolRounds: number;
   maxToolRounds: number;
   iterations: number;
   maxIterations: number;
+  /** 0 = the lead investigation, 1 = a delegate. Defaults to lead. */
+  depth?: number;
 }): string | null {
+  const reached =
+    state.toolRounds >= state.maxToolRounds || state.iterations >= state.maxIterations - 1;
+  if ((state.depth ?? 0) > 0) return reached ? DELEGATE_BUDGET_NOTICE : null;
   if (state.toolRounds >= state.maxToolRounds) return TOOL_BUDGET_NOTICE;
   if (state.iterations >= state.maxIterations - 1) return ITERATION_CEILING_NOTICE;
   return null;
@@ -617,7 +650,7 @@ export class DevOpsAgent {
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);
 
         toolRounds++;
-        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations });
+        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth });
         if (notice) {
           toolsDisabled = true;
           trimmedResults.push({ type: "text", text: notice });
@@ -718,13 +751,29 @@ export class DevOpsAgent {
 
   private async executeToolCalls(threadId: string, content: ContentBlock[]): Promise<ContentBlock[]> {
     const toolUses = content.filter((c) => c.type === "tool_use");
+    const defs = this.mcp.getTools();
+    // The MCP server's own tool names, which is what makes `run k8s_scale` distinguishable from
+    // any other sentence in a log line — see agent/injection/.
+    const toolNames = defs.map((t) => t.name);
+
+    // This is the trust boundary: every string below was written by something in the cluster,
+    // not by the operator. It is the ONLY place raw tool output enters the conversation (a
+    // delegate's results come back through its own call to this method), so the injection frame
+    // goes on here and nowhere else — refusals and delegate summaries are our own text.
+    const guard = (raw: string, name: string | undefined): string => {
+      const { content: framed, hits } = flagInjection(raw, toolNames);
+      if (hits.length > 0) {
+        logger.warn(`[${threadId}] possible prompt injection in ${name} result [${hits.join(", ")}] — framed as data, not blocked`);
+      }
+      return framed;
+    };
 
     // run all tool calls in parallel — k8s/prometheus/loki calls are independent
     return Promise.all(
       toolUses.map(async (toolUse) => {
         const { id, name, input } = toolUse;
         // second layer of the write-tool exclusion (first: filtered from the tools list)
-        const def = this.mcp.getTools().find((t) => t.name === name);
+        const def = defs.find((t) => t.name === name);
         if (def?.description.startsWith("[WRITE]")) {
           logger.warn(`[${threadId}] blocked direct write-tool call: ${name}`);
           return {
@@ -738,11 +787,13 @@ export class DevOpsAgent {
         try {
           const result = await this.mcp.callTool(name!, input as Record<string, unknown>);
           logger.info(`[${threadId}] ← tool: ${name} ok (${Date.now() - start}ms, ${result.length} chars)`);
-          return { type: "tool_result" as const, tool_use_id: id, content: result };
+          return { type: "tool_result" as const, tool_use_id: id, content: guard(result, name) };
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           logger.error(`[${threadId}] ← tool: ${name} failed (${Date.now() - start}ms): ${errMsg}`);
-          return { type: "tool_result" as const, tool_use_id: id, content: `Error: ${errMsg}` };
+          // Guarded too: an upstream error quotes what it choked on, so an annotation or a
+          // container name can reach us inside a message we only appear to have written.
+          return { type: "tool_result" as const, tool_use_id: id, content: guard(`Error: ${errMsg}`, name) };
         }
       })
     );

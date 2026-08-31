@@ -1326,10 +1326,38 @@ The investigation prompt already HAS the observability playbooks — Failure Mod
 nuance — and the tool names in the prompt MATCH the registered MCP tools (verified). BUT the
 Loki/Jaeger backends aren't set up in the target env yet, so these paths are **untested against
 real data**. Two concrete risks to resolve when the env is ready:
-1. **LogQL label schema** — `prompts/system.md` assumes `{namespace="X", app="Y"}`; real Loki
-   may key on `pod`/`container`/`job`/`compose_service`/etc. A mismatch returns empty → the
-   agent concludes "no logs" while logs exist. Verify the actual label schema and tune the
-   LogQL patterns in the prompt.
+1. ~~**LogQL label schema**~~ ✅ **resolved 2026-09-01, on both sides** — the risk was real and the
+   prompt was wrong. fluentbit shipped `job=fluentbit, namespace, pod, container, stream` and nothing
+   else (`Auto_kubernetes_labels off`), so the prompt's `{namespace="X", app="Y"}` matched **nothing**
+   — exactly the "returns empty → the agent concludes 'no logs' while logs exist" failure predicted
+   here. Fixed in two places rather than one:
+   - **Shipper** (`gitops-devops-ai-manifest/apps/base/systems/fluentbit/`): an `identity.lua` filter
+     now derives one `app` per line from `app.kubernetes.io/name` → `app` → `k8s-app` →
+     `app.kubernetes.io/instance` → `container_name`, so every stream carries a workload identity
+     whatever convention its author used, and `job` became `<namespace>/<app>` instead of the
+     constant `fluentbit`. `Annotations Off` on the kubernetes filter: they were fetched, carried and
+     then dropped whole by `Remove_keys`. `test/run.sh` unit-tests the Lua against the shipped
+     release.yaml (docker + a Lua image; 11 cases incl. the priority order and the non-k8s passthrough).
+   - **Prompt**: patterns rewritten to `{namespace, app}` as the default shape, `pod` demoted to
+     "isolating one instance", `service` documented as a JSON field. `skills/real.test.ts` holds the
+     cross-repo contract as an allowlist.
+   Two caveats on the tick: the schema was resolved from the shipper **config**, not from a live
+   query — the patterns still have not been run against real Loki data; and Loki streams are
+   immutable, so lines written before the fluentbit rollout keep the old label set and are not
+   reachable by `{app=...}` until they age out at `retention_period: 168h`.
+1b. **PromQL metric names** ✅ **resolved 2026-09-01** — the sibling of the LogQL bug above, found
+   in a live investigation log rather than by reading config. `prompts/system.md` and the
+   high-error-rate / high-latency skills named `http_requests_total` and
+   `http_request_duration_seconds_bucket`; the apps expose `http_server_requests_total` and
+   `http_server_request_duration_seconds_bucket` (`devops-sample-app/packages/platform/src/metrics.ts`).
+   PromQL returns empty for an unknown metric, so on 2026-08-31 a `HighErrorRate` investigation got
+   `prometheus_query ok (1004ms, 35 chars)` and produced its RCA from Loki alone — it could not read
+   the metric that fired its own alert. The latency pattern was doubly broken: `histogram_quantile(
+   rate(...)) by (service)` is not valid PromQL, `le` must be inside the sum. Fixed in the prompt and
+   both skills, plus `http_client_requests_total{service,peer,status}` added — `status` carries
+   `timeout`/`error` literally, which is the downstream-blame signal the RCA needed. `real.test.ts`
+   pins the metric allowlist and the prose contract list together.
+
 2. **Tracing** — only triggers on the latency playbook; `tracing_search` (Jaeger) needs the
    exact `service` (the prompt tells it to `tracing_list_services` first). Verify vs the real
    Jaeger/Tempo backend.

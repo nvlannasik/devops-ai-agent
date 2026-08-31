@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DELEGATE_BUDGET_NOTICE,
   forcedFinalAnswer,
   ITERATION_CEILING_NOTICE,
   MAX_ITERATIONS,
   TOOL_BUDGET_NOTICE,
 } from "./index.js";
+import { DELEGATE_MARKER } from "./subagent/index.js";
 
 // The alert path calls investigate() with no options, so maxToolRounds is Infinity and the
 // tool-budget clause can never fire. The iteration ceiling is its ONLY stop.
@@ -59,10 +61,55 @@ test("the tool budget wins when both ceilings are reached together", () => {
   assert.equal(notice, TOOL_BUDGET_NOTICE);
 });
 
+// A delegate runs with SUBAGENT_TOOL_ROUNDS (2) and SUBAGENT_MAX_ITERATIONS (3), so it reaches a
+// ceiling routinely rather than exceptionally — and until 2026-08-31 it reached TOOL_BUDGET_NOTICE,
+// written for a human in Slack. Observed live: sub-2 of a two-service delegation answered "Hey —
+// here's what the data you provided shows, in plain Slack-friendly terms" with markdown bullets,
+// 4796 chars, while its sibling — which finished inside its budget and so never saw the notice —
+// returned "CONTRADICTED — ..." in 2220. The reader of both was the lead investigation.
+const delegate = (toolRounds: number, iterations: number, maxToolRounds = 2, maxIterations = 3) =>
+  forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth: 1 });
+
+test("a delegate out of tool budget is told to report a verdict, not to chat", () => {
+  // sub-2's exact position: both rounds spent, one iteration in.
+  assert.equal(delegate(2, 1), DELEGATE_BUDGET_NOTICE);
+});
+
+test("a delegate at its iteration ceiling gets the same notice, not the RCA-shaped one", () => {
+  // The other way in. A delegate's reader never changes, so neither should the instruction.
+  assert.equal(delegate(0, 2), DELEGATE_BUDGET_NOTICE);
+});
+
+test("a delegate with budget left is not forced", () => {
+  assert.equal(delegate(1, 0), null);
+});
+
+test("depth 0 is unchanged — the lead investigation keeps both original notices", () => {
+  assert.equal(forcedFinalAnswer({ toolRounds: 2, maxToolRounds: 2, iterations: 2, maxIterations: MAX_ITERATIONS, depth: 0 }), TOOL_BUDGET_NOTICE);
+  assert.equal(alert(MAX_ITERATIONS - 1), ITERATION_CEILING_NOTICE, "omitting depth must still mean lead");
+});
+
+// The notice exists because DELEGATE_MARKER loses: it is history[0] while this is the last thing
+// in the context. So it has to carry the marker's contract itself, not point at it.
+test("the delegate notice restates the verdict contract the marker set", () => {
+  for (const verdict of ["SUPPORTED", "CONTRADICTED", "UNPROVEN"]) {
+    assert.ok(DELEGATE_MARKER.includes(verdict), `the marker no longer names ${verdict}`);
+    assert.ok(DELEGATE_BUDGET_NOTICE.includes(verdict), `the notice does not restate ${verdict}`);
+  }
+  assert.match(DELEGATE_BUDGET_NOTICE, /tool calls are disabled/i);
+  assert.match(DELEGATE_BUDGET_NOTICE, /do not use the RCA/i);
+  // The two clauses that produced the observed regression, negated.
+  assert.doesNotMatch(DELEGATE_BUDGET_NOTICE, /Slack mrkdwn/i, "a delegate is not writing to Slack");
+  assert.match(DELEGATE_BUDGET_NOTICE, /not to a human/i);
+  assert.match(DELEGATE_BUDGET_NOTICE, /do not offer to investigate/i, "the clause sub-2 obeyed");
+  // Every ceiling ends in an answer, never an apology — UNPROVEN is the delegate's version.
+  assert.match(DELEGATE_BUDGET_NOTICE, /answer UNPROVEN/);
+});
+
 test("the notices say the two things the loop depends on", () => {
-  for (const notice of [TOOL_BUDGET_NOTICE, ITERATION_CEILING_NOTICE]) {
+  for (const notice of [TOOL_BUDGET_NOTICE, ITERATION_CEILING_NOTICE, DELEGATE_BUDGET_NOTICE]) {
     assert.match(notice, /tool calls are disabled/i, "the model is not told its tools are gone");
-    assert.match(notice, /answer now|answer now from|final answer/i, "the model is not told to answer");
+    assert.match(notice, /answer now|final answer|report now/i, "the model is not told to answer");
   }
   // The alert path's answer IS the RCA. A format rule here would suppress it.
   assert.doesNotMatch(ITERATION_CEILING_NOTICE, /do NOT use the RCA/i);

@@ -8,7 +8,7 @@ import { buildStaticSystemPrompt } from "../prompts/system.js";
 // fail-fast is safe to choose.
 test("every shipped skill file loads", () => {
   const skills = loadSkills(resolveSkillsDir()).all();
-  assert.ok(skills.length >= 13, `expected at least 13 skills, got ${skills.length}`);
+  assert.ok(skills.length >= 14, `expected at least 14 skills, got ${skills.length}`);
   for (const s of skills) {
     assert.ok(s.chars <= SKILL_MAX_CHARS, `${s.name} is ${s.chars} chars`);
     assert.ok(s.description.length > 0 && !s.description.includes("\n"), `${s.name} needs a one-line description`);
@@ -38,6 +38,11 @@ test("each playbook is reachable from a realistic alert line", () => {
     ["pvc-pending", "PersistentVolumeClaim data-0 is Pending"],
     ["forbidden", "Error: pods is forbidden — RBAC denied"],
     ["gitops-drift", "the running image does not match what the HelmRelease declares"],
+    // Verbatim from the Loki Ruler rules in gitops-devops-ai-manifest
+    // (apps/base/systems/loki/rules.yaml), rendered the way buildGroupAlertText renders them.
+    // Both alertnames are log vocabulary, not metric vocabulary: before log-alert existed they
+    // matched NO playbook at all and arrived with only the always-on rca-format.
+    ["log-alert", ":alert: *AppErrorLogSpike*\n*Summary:* Error log spike in `settlement-worker`\n*Labels:* `source=loki`"],
   ];
   for (const [name, alert] of cases) {
     const { selected } = r.select(alert, new Set());
@@ -77,4 +82,133 @@ test("the moved sections are gone from the system prompt and live only in skills
 // coming, and a wrong guess removes the query patterns exactly when they are needed.
 test("the tool usage reference stays in the core prompt", () => {
   assert.match(buildStaticSystemPrompt(), /## Tool Usage Reference/);
+});
+
+// `source=loki` is set by the rules themselves and reaches the model on buildGroupAlertText's
+// *Labels:* line (it is not in OWN_FIELD_LABELS), which makes it an exact, author-controlled
+// trigger — no guessing at whatever a future rule gets named. If a rule ever drops the label the
+// vocabulary alternatives in `when` are the fallback, but this is the one that should fire.
+test("the source=loki label alone selects the log-alert playbook", () => {
+  const names = loadSkills(resolveSkillsDir())
+    .select(":alert: *SomethingNobodyNamedYet*\n*Labels:* `source=loki`", new Set())
+    .selected.map((s) => s.name);
+  assert.ok(names.includes("log-alert"), `selected: ${names.join(", ")}`);
+});
+
+// A log alert must not drag the metric playbooks in with it, and the metric alerts must not pull
+// log-alert: they are different first tool calls, and the matched-skill cap means a wrong match
+// can evict a right one.
+test("log-alert and the metric playbooks do not cross-trigger", () => {
+  const r = loadSkills(resolveSkillsDir());
+  const logNames = r.select(":alert: *AppUnhandledRouteError*\n*Labels:* `source=loki`", new Set())
+    .selected.map((s) => s.name);
+  assert.ok(!logNames.includes("high-error-rate"), `log alert pulled a metric playbook: ${logNames.join(", ")}`);
+
+  for (const metric of [
+    "HighErrorRate: 5xx rate is 12% for checkout",
+    "HighLatency: p99 latency is 2.3s",
+    "KubePodOOMKilled: container api exceeded its memory limit",
+  ]) {
+    const names = r.select(metric, new Set()).selected.map((s) => s.name);
+    assert.ok(!names.includes("log-alert"), `"${metric}" pulled log-alert: ${names.join(", ")}`);
+  }
+});
+
+// This prompt and gitops-devops-ai-manifest/apps/base/systems/fluentbit/release.yaml are two
+// halves of one contract, in different repos, with nothing but this test between them. fluentbit's
+// `Labels` line plus identity.lua decide which labels exist; the prompt decides what the model asks
+// for. A selector naming a label the shipper does not set is the worst failure shape available
+// here — it does not error, it returns empty, and an empty Loki result is indistinguishable from
+// "no logs exist", so the model states evidence of absence and nothing in any log says the query
+// was wrong. The prompt shipped `{namespace="X", app="Y"}` for months while `app` did not exist.
+// It exists now (identity.lua: app.kubernetes.io/name -> app -> k8s-app -> instance ->
+// container_name); `service` still does not — the apps log it as a JSON field, so it belongs
+// after a `| json` stage and matches nothing inside `{...}`.
+const STREAM_LABELS = ["namespace", "app", "pod", "container", "job", "stream"];
+
+test("the Loki patterns only select on labels fluentbit actually sets", () => {
+  const prompt = buildStaticSystemPrompt();
+  assert.match(
+    prompt,
+    /`namespace`, `app`, `pod`, `container`, `job`, `stream`/,
+    "the stream label list must stay stated in the prompt"
+  );
+
+  // Scoped to the Loki section: `service="X"` is a perfectly valid PromQL matcher, so checking
+  // every fenced block in the prompt would fail the day someone writes a correct Prometheus query.
+  const loki = prompt.slice(prompt.indexOf("### Loki"));
+  const section = loki.slice(0, loki.indexOf("\n### ", 1));
+  assert.ok(section.length > 0 && section.length < loki.length, "the Loki section lost its boundaries");
+  const queries = [...section.matchAll(/```[\s\S]*?```/g)].map((m) => m[0]).join("\n");
+  const selectors = [...queries.matchAll(/\{[^{}\n]*\}/g)].map((m) => m[0]);
+  assert.ok(selectors.length > 0, "no stream selectors found — did the Loki section move?");
+
+  for (const sel of selectors) {
+    for (const [, key] of sel.matchAll(/([a-zA-Z_][a-zA-Z0-9_.\/-]*)\s*=~?\s*"/g)) {
+      assert.ok(
+        STREAM_LABELS.includes(key!),
+        `selector filters on \`${key}\`, which fluentbit does not set as a stream label — it ` +
+          `matches nothing and reads back as "no logs": ${sel}`
+      );
+    }
+  }
+});
+
+// The same contract as STREAM_LABELS, one repo further out: these names are defined in
+// devops-sample-app/packages/platform/src/metrics.ts (and pinned by its own metrics.test.ts),
+// scraped into Prometheus, and then referenced from this prompt by hand. Nothing but this test
+// connects the two — and PromQL, exactly like LogQL, answers an unknown metric with an EMPTY
+// RESULT rather than an error. The prompt shipped `http_requests_total` while the apps expose
+// `http_server_requests_total`, so the agent investigating a HighErrorRate alert could not read
+// the very metric that fired it: observed live on 2026-08-31 as
+// `← tool: prometheus_query ok (1004ms, 35 chars)` — a successful call returning nothing, and an
+// RCA written from Loki alone.
+const APP_METRICS = [
+  "http_server_requests_total", "http_server_request_duration_seconds",
+  "http_client_requests_total", "http_client_request_duration_seconds",
+  "db_pool_connections", "db_query_duration_seconds", "cache_requests_total",
+  "queue_depth", "queue_oldest_job_age_seconds",
+  "settlement_jobs_total", "settlement_batch_size", "build_info",
+];
+// cAdvisor + kube-state-metrics: not ours, but equally real and equally silent when misspelled.
+const INFRA_METRICS = [
+  "container_memory_working_set_bytes", "container_spec_memory_limit_bytes",
+  "container_cpu_usage_seconds_total", "container_spec_cpu_quota", "container_spec_cpu_period",
+  "kube_pod_container_status_restarts_total",
+];
+const HISTOGRAM_SUFFIXES = ["", "_bucket", "_count", "_sum"];
+
+test("the PromQL patterns only name metrics that exist in this cluster", () => {
+  const prompt = buildStaticSystemPrompt();
+  const known = new Set([
+    ...INFRA_METRICS,
+    ...APP_METRICS.flatMap((m) => HISTOGRAM_SUFFIXES.map((s) => m + s)),
+  ]);
+
+  // The prose above the fence restates this list for the model. Only the fenced queries are
+  // parsed below, so without this the two could drift and the model would be told a wrong name
+  // in the sentence that exists precisely to stop it inventing one. (Found by a negative control
+  // that broke the prose and stayed green.)
+  for (const m of APP_METRICS) {
+    assert.ok(prompt.includes(m), `the prompt's metric contract no longer names \`${m}\``);
+  }
+
+  const prom = prompt.slice(prompt.indexOf("### Prometheus"));
+  const section = prom.slice(0, prom.indexOf("\n### ", 1));
+  assert.ok(section.length > 0 && section.length < prom.length, "the Prometheus section lost its boundaries");
+  const queries = [...section.matchAll(/```[\s\S]*?```/g)].map((m) => m[0]).join("\n");
+
+  // A metric is an identifier immediately followed by a selector. PromQL functions are followed
+  // by `(`, never `{`, so this needs no keyword list. ponytail: it does not see a bare metric
+  // written without a selector (`up`); every pattern here uses one, and a keyword denylist would
+  // rot faster than it would catch anything.
+  const named = [...queries.matchAll(/([a-z_][a-z0-9_]*)\{/g)].map((m) => m[1]!);
+  assert.ok(named.length > 0, "no metric selectors found — did the Prometheus section move?");
+  for (const metric of named) {
+    assert.ok(
+      known.has(metric),
+      `PromQL names \`${metric}\`, which nothing in this cluster exposes — it returns empty, ` +
+        `not an error, and reads back as "no data"`
+    );
+  }
 });

@@ -364,6 +364,28 @@ The prompt is read once on first use and cached in memory. Key sections you may 
 - **RCA Output Format** — Slack Block Kit formatting rules
 - **Severity / Confidence thresholds**
 
+#### The query sections are a contract, not examples
+
+The **Loki** and **Prometheus** sections name real labels and real metrics, and they are the one
+part of this prompt that can be wrong without anything failing. LogQL answers an unknown *label*
+and PromQL answers an unknown *metric* with an **empty result, never an error** — so a wrong name
+comes back looking exactly like "there is nothing there", and the agent reports evidence of absence
+it never actually gathered. Both have happened here: the prompt shipped `{namespace="X", app="Y"}`
+while the log shipper set no `app` label, and `http_requests_total` while the apps expose
+`http_server_requests_total`.
+
+So the two lists are pinned by `src/agent/skills/real.test.ts`, as allowlists:
+
+| The prompt may name | Defined by | Kept honest by |
+|---|---|---|
+| Loki stream labels `namespace`, `app`, `pod`, `container`, `job`, `stream` | fluentbit's `Labels` line + `identity.lua` (GitOps repo) | `the Loki patterns only select on labels fluentbit actually sets` |
+| App metrics `http_server_*`, `http_client_*`, `db_*`, `queue_*`, `cache_*`, `build_info` | `packages/platform/src/metrics.ts` in the sample-app repo | `the PromQL patterns only name metrics that exist in this cluster` |
+
+Anything the application logs as a **JSON field** (`service`, `level`, `msg`) is not a label: it
+belongs after a `| json` stage and matches nothing inside `{...}`. If you change the log shipper or
+re-instrument a service, update the prompt and those allowlists in the same change — nothing else
+connects the three repos.
+
 ### Skills (`prompts/skills/`)
 
 The system prompt carries what applies to *every* investigation. Anything that applies to
@@ -374,7 +396,12 @@ either `always` or a case-insensitive regex — `crashloop|restarting|restart co
 the repo; drop in another file and restart — no rebuild, no code change.
 
 At most `MAX_MATCHED_SKILLS` (3) skills are injected per turn, each capped at
-`SKILL_MAX_CHARS` (8000), ranked by match count. Loading is **fail-fast**: a malformed
+`SKILL_MAX_CHARS` (8000), ranked by match count. Selection runs again on every tool round —
+against the tool *evidence*, not just the alert text, so a generically-named alert picks up the
+playbook its first round of output earns (`KubernetesPodNotHealthy` → `imagepullbackoff`) — and a
+thread accumulates up to `MAX_THREAD_SKILLS` (5) across rounds, earliest match winning. Under
+context-budget pressure skills are dropped before history: history is evidence already gathered,
+a skill is advice. Loading is **fail-fast**: a malformed
 frontmatter, a duplicate `name`, or an empty skills directory throws at startup rather than
 letting the agent run without an RCA output format. The `/context` dashboard page shows what
 loaded.
@@ -398,6 +425,8 @@ prompt cache.
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Assembly | Every request is assembled, not accumulated: tool results compacted to 8000 chars, conversation history trimmed to 50 messages, then the whole thing fitted to a per-backend token budget (`fitToBudget()`) that drops oldest-first rather than letting the provider reject the call |
 | Skills | Per-symptom playbooks in `prompts/skills/*.md`, selected by a `when` regex and injected as a separate message — top 3 per turn, system prompt stays byte-identical so the prompt cache holds |
+| Prompt-injection framing | Every string an MCP tool returns is written by something in the cluster — a log line, an event, an annotation — and lands in the conversation beside the operator's question. Text shaped like an instruction to the agent (`ignore previous instructions`, or an imperative naming one of our own tool names) is logged and gets a `[agent guard]` line appended marking the whole result as data. It is never blocked or dropped: the injected string stays quotable as evidence. Not the security boundary — that is still the write-tool filter, the mandatory dry-run and the human approval click |
+| Sub-agent delegation | Off by default (`SUBAGENT_ENABLED`), and off means *unregistered* — the tool never reaches the model. When on, an Alertmanager group whose alerts name **two or more different services** is a deterministic trigger: the loop appends a hint asking for one `delegate_investigation` per service, up to `SUBAGENT_MAX_FANOUT` (3) in parallel. A delegate is the same investigation loop with a smaller budget, a deadline inside its parent's, and no delegate tool of its own — it reports a SUPPORTED / CONTRADICTED / UNPROVEN verdict to the lead, never an RCA |
 | Confidence Threshold | Low → auto-mention `SLACK_ONCALL_USERS` |
 | Follow-up Mode | `markRcaSent` flag prevents RCA format on follow-ups |
 | Response-Mode Markers | Every entry point stamps a per-message marker (`[SOURCE: Alertmanager ...]` / `[USER MESSAGE ...]` / `[FOLLOW-UP ...]`) — alerts always investigate, plain mentions stay conversational |
