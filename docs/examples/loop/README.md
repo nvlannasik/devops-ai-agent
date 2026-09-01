@@ -21,7 +21,7 @@ gets in return is the ability to drive the investigation.
 ### The round trip
 
 ```
-round N:  llm-worker  ──POST /api/run/<flow>──> flow   input_value = protocol + catalog + transcript
+round N:  llm-worker  ──POST /api/v1/run/<flow>──> flow   input_value = protocol + catalog + transcript
                       <──────────────────────         {"tool_calls":[...]}  or  prose RCA
 ```
 
@@ -104,7 +104,7 @@ Here's what I need:" in front of the JSON on round 1 will do worse things on rou
 ## Part 3 — Running the probes
 
 ```bash
-export AB_URL='https://agent.builder.agus.run/api/run/<flow-id>'
+export AB_URL='https://<agent-builder-host>/api/v1/run/<flow-id>'
 export AB_KEY='<x-api-key>'
 
 cd docs/examples/a2a/loop

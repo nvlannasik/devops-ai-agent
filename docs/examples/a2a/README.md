@@ -10,7 +10,7 @@ RCA string back. The MCP server is never exposed to the agent builder platform.
 ## Running a probe
 
 ```bash
-export AB_URL='https://agent.builder.agus.run/api/run/<flow-id>'
+export AB_URL='https://<agent-builder-host>/api/v1/run/<flow-id>'
 export AB_KEY='<x-api-key>'
 
 ./run.sh p1-smoke.txt
@@ -22,6 +22,41 @@ platform adds that the sample response omits.
 
 Save each response next to its payload as `<probe>-response.json` so the answers are
 reviewable later.
+
+## Status, and the gaps — `run-gaps.sh`
+
+The probes below have been run once against the real flow, and the code they justified is
+in `llm-worker` (`LLM_API_FORMAT=agent-builder`, `src/agent-builder.ts`). **P2, P3 and P5
+passed; P1 and P4 did not fail — they were never finished.** P1 only ever sent 6 KB, and
+P4 was not attempted at all.
+
+`run-gaps.sh` closes exactly those gaps. Unlike `run.sh` it parses the answers and prints a
+verdict per check, because each one decides whether this backend is safe to point at real
+incidents:
+
+```bash
+export AB_URL='https://<agent-builder-host>/api/v1/run/<flow-id>'
+export AB_KEY='<x-api-key>'
+
+./run-gaps.sh size      # P1 — payload ceiling. RUN THIS FIRST; it is the only blocker left.
+./run-gaps.sh session   # P3 — is the flow's memory actually off?
+./run-gaps.sh failure   # P4 — is a failure distinguishable from an answer?
+./run-gaps.sh load      # P4 — latency spread and concurrency
+./run-gaps.sh           # all four
+```
+
+**Why `size` matters most.** A platform that quietly drops the tail of an oversized payload
+returns a confident RCA built on half the evidence, and nothing in the response says so —
+response length cannot reveal it. So `run-gaps.sh size` walks a 4 → 32 KB ladder of
+realistic evidence (PromQL braces, JSON, backticks, quotes) and ends every payload with a
+token the model can only echo back if it received the final byte. A missing token is proof
+of truncation, and the byte count where it disappears is the ceiling.
+
+A ceiling that returns an **error** is the safe outcome and the script says so. Silence is
+the dangerous one.
+
+Raw bodies and generated payloads land in `gap-responses/` (gitignored). Copy anything
+worth keeping out of there, the way the earlier responses were kept.
 
 ---
 
