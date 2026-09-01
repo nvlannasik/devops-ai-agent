@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the loop-mode probes in order and save each raw response.
 #
-#   AB_URL=https://agent.builder.agus.run/api/run/<flow-id> \
+#   AB_URL=https://<agent-builder-host>/api/v1/run/<flow-id> \
 #   AB_KEY=<x-api-key> \
 #     ./run-loop.sh            # L1 L2 L3
 #     ./run-loop.sh l4 l5      # named subset
@@ -13,7 +13,7 @@
 # differs from the sample and THAT is a finding worth recording.
 set -euo pipefail
 
-: "${AB_URL:?set AB_URL to the full /api/run/<flow-id> URL}"
+: "${AB_URL:?set AB_URL to the full /api/v1/run/<flow-id> URL}"
 : "${AB_KEY:?set AB_KEY to the x-api-key value}"
 command -v jq >/dev/null || { echo "jq required" >&2; exit 1; }
 

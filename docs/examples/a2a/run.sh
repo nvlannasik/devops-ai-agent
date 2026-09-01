@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fire one A2A probe at the agent builder and print the raw response.
 #
-#   AB_URL=https://agent.builder.agus.run/api/run/<flow-id> \
+#   AB_URL=https://<agent-builder-host>/api/v1/run/<flow-id> \
 #   AB_KEY=<x-api-key> \
 #     ./run.sh p1-smoke.txt [session-id]
 #
@@ -10,7 +10,7 @@
 # envelope, including whatever the platform adds that the sample response omits.
 set -euo pipefail
 
-: "${AB_URL:?set AB_URL to the full /api/run/<flow-id> URL}"
+: "${AB_URL:?set AB_URL to the full /api/v1/run/<flow-id> URL}"
 : "${AB_KEY:?set AB_KEY to the x-api-key value}"
 
 payload_file="${1:?usage: run.sh <payload-file.txt> [session-id]}"

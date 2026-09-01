@@ -149,3 +149,5 @@ vite.config.ts.timestamp-*
 graphify-out/
 
 .claude/
+# agent builder gap-probe output (generated payloads + raw responses)
+docs/examples/a2a/gap-responses/
