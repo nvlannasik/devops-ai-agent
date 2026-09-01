@@ -7,6 +7,7 @@ import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
 import type { IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
+import { buildGraph } from "./topology-graph.js";
 import type { ContextView } from "./context.js";
 
 // The shape queries.list() hands the page. The defaults are the ordinary case — one short
@@ -19,6 +20,15 @@ const page = (rows: IncidentRow[], over: Partial<IncidentPage> = {}): IncidentPa
 // Stands in for the per-response value server.ts mints. Fixed here so a test can assert the
 // nonce reached the markup; the real one is 16 random bytes and never repeats.
 const NONCE = "test-nonce";
+// The built client bundle, as the server would have loaded it. Hashed names on purpose: the
+// hash is what lets the asset be cached forever, and a test that used bare names would not
+// notice if the hashing were dropped. `null` is exercised separately — it is the state a
+// dev server or a broken build is in, and the page has to render in it.
+const ASSETS = {
+  js: { path: "/assets/topology.abc12345.js", body: "//js", type: "text/javascript; charset=utf-8" },
+  css: { path: "/assets/topology.def67890.css", body: "/*css*/", type: "text/css; charset=utf-8" },
+  byPath: new Map<string, { path: string; body: string; type: string }>(),
+};
 
 const row: IncidentRow = {
   id: 1, created_at: new Date("2026-07-28T23:48:00Z"), resolved_at: null,
@@ -196,7 +206,7 @@ test("nodeRows escapes label, detail, and meta on the topology page", () => {
     ...baseTopology,
     inbound: [{ label: HOSTILE, detail: HOSTILE, meta: HOSTILE, configured: true }],
   };
-  const html = topologyPage(t, NONCE);
+  const html = topologyPage(t, NONCE, ASSETS);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
 });
@@ -207,7 +217,7 @@ test("nodeRows escapes the non-router activeClient row too", () => {
     provider: "claude",
     activeClient: { label: HOSTILE, detail: HOSTILE, meta: HOSTILE, configured: true },
   };
-  const html = topologyPage(t, NONCE);
+  const html = topologyPage(t, NONCE, ASSETS);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
 });
@@ -235,18 +245,23 @@ const wiredTopology: Topology = {
   ],
 };
 
-// The contract between topology-svg.ts (which draws the links) and views.ts (which renders the
-// rows they point at). Both derive the anchor from the same array position through rowId(), and
-// nothing else on the page would break if they drifted — the links would just silently stop
-// going anywhere. Asserted over the whole document, in both directions the reader can travel.
-test("every link in the diagram lands on a row that exists on the page", () => {
-  const html = topologyPage(wiredTopology, NONCE);
+// The contract between the map and the rows it links to. The map is built in the browser now,
+// so this half of it is what the SERVER still owns: buildGraph() mints a node id per array
+// position through rowId(), views.ts stamps the same value on the <tr>, and the two would drift
+// into links that silently go nowhere with nothing else on the page breaking.
+//
+// Asserted by running the real graph builder over the same topology the page was rendered from
+// — not by re-deriving the ids here, which would only prove rowId() is deterministic.
+test("every link the map will draw lands on a row that exists on the page", () => {
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
   // not anchored to `<tr `: a row that opts into a narrow layout carries role="row" first.
   const targets = new Set([...html.matchAll(/<tr[^>]* id="([\w-]+)"/g)].map((m) => m[1]));
-  // the diagram's own links, not every anchor on the page — the skip link points at <main>
-  const hrefs = [...html.matchAll(/<a href="#([\w-]+)" class="topo-link"/g)].map((m) => m[1]);
+  const hrefs = buildGraph(wiredTopology)
+    .nodes.map((n) => n.data.href)
+    .filter((h): h is string => !!h)
+    .map((h) => h.slice(1));
 
-  assert.ok(hrefs.length >= 8, "each box in the diagram should link to its row");
+  assert.ok(hrefs.length >= 8, "each card in the map should link to its row");
   for (const h of hrefs) assert.ok(targets.has(h), `#${h} is linked but no row carries that id`);
   // and the numbering is per group, not per rendered cluster
   assert.ok(targets.has("backend-1"), "the second backend should keep its own row id");
@@ -256,7 +271,7 @@ test("every link in the diagram lands on a row that exists on the page", () => {
 // The count answers "how much can this agent see"; the names answer "what, exactly". Both are
 // on the page — the names behind a <details> so a thirty-tool family cannot bury the counts.
 test("each family lists its own tools, and marks the ones that can change the cluster", () => {
-  const html = topologyPage(wiredTopology, NONCE);
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
   assert.match(html, /<details><summary><span class="mono" translate="no">k8s<\/span><\/summary>/);
   assert.match(html, />k8s_list_pods</);
   assert.match(html, />loki_query</);
@@ -271,7 +286,7 @@ test("each family lists its own tools, and marks the ones that can change the cl
 // are two words that fit any screen and take neither. Getting this wrong is invisible on a
 // desktop — the page only comes apart at 390px, where nothing here runs.
 test("each topology table takes the narrow layout its own cells call for", () => {
-  const html = topologyPage(wiredTopology, NONCE);
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
 
   assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 2, "inbound and outbound");
   const pairs = [...html.matchAll(/<table role="table" data-stack data-pairs>([\s\S]*?)<\/table>/g)];
@@ -294,52 +309,86 @@ test("each topology table takes the narrow layout its own cells call for", () =>
   }
 });
 
-// The floor the interactive layer stands on. topology-script.ts removes these radios at run
-// time, so nothing on the rendered page proves they still work — this test is the only thing
-// that keeps them from being quietly deleted along the way. Scripting off, or the nonce'd
-// block blocked, and this is the whole zoom control.
-test("the diagram scales and expands without a line of JavaScript", () => {
-  const html = topologyPage(wiredTopology, NONCE);
-  // Inline handlers and javascript: URLs stay forbidden even now that a script is allowed:
-  // a nonce covers a <script> block and nothing else, so either would be dead markup that
-  // only looks like it works. The one permitted script is asserted on its own below.
+// The map is script-only since the React Flow rewrite, which makes what happens WITHOUT the
+// script a decision rather than a leftover. The frame ships a sentence, the client clears it on
+// a successful parse, and the four tables — which carry every fact the map draws — are
+// untouched. A frame that shipped empty would look like a broken page instead of a page that
+// needs JavaScript.
+test("the map says it needs JavaScript, and the rest of the page does not", () => {
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
+  // Inline handlers and javascript: URLs stay forbidden even though a script is allowed:
+  // a nonce covers the tags it is on and nothing else, so either would be dead markup that
+  // only looks like it works.
   assert.doesNotMatch(html, /onclick=|javascript:/i);
-  // the radios must PRECEDE the view: the scale rules are `:checked ~ .topo-view`
-  const firstRadio = html.indexOf(`<input type="radio" name="topo-zoom"`);
-  assert.ok(firstRadio > 0, "the zoom control should render");
-  assert.ok(firstRadio < html.indexOf(`class="topo-view"`), "the radios must be siblings before the view");
-  assert.match(html, /id="topo-z1"[^>]*checked/, "fit is the state the page opens in");
-  assert.equal([...html.matchAll(/<label for="topo-z\d"/g)].length, 3);
-  // progressive disclosure is still script-free: <details> is the only widget that works
-  // under a policy with no script-src at all, which is what every other page here has
+  assert.match(html, /<div id="topo-root" class="topo-view" data-fallback>/);
+  assert.match(html, /needs JavaScript/);
+  // progressive disclosure in the TABLES is still script-free: <details> is the only widget
+  // that works under a policy with no script-src at all, which is what every other page has.
   assert.match(html, /<details><summary>/);
 });
 
-// The interactive layer, and the exactness the nonce demands: one block, carrying the value
-// the response's own header named. A second <script> would be one the header does not cover.
-test("the topology page carries exactly one script, and it is the nonce'd one", () => {
-  const html = topologyPage(wiredTopology, NONCE);
-  const scripts = [...html.matchAll(/<script\b[^>]*>/g)];
-  assert.equal(scripts.length, 1, "one script, no more");
-  assert.equal(scripts[0][0], `<script nonce="${NONCE}">`, "no src, no type, just the nonce");
-  // after the frame it enhances: it runs at parse time, so the toolbar replaces the radio bar
-  // before either is painted rather than flashing one and then the other
-  assert.ok(html.indexOf("<script") > html.indexOf(`class="topo-view"`), "the script follows its markup");
-  assert.doesNotMatch(html, /<script[^>]*src=/, "nothing is fetched: the page stays self-contained");
+// A dev server never bundles (npm run dev is tsx against the source), so this is a state the
+// page has to render — and it must not be a blank frame nobody can diagnose from the page.
+test("with no bundle built, the map is a note and the tables are untouched", () => {
+  const html = topologyPage(wiredTopology, NONCE, null);
+  assert.doesNotMatch(html, /<script/, "nothing to load, so nothing is asked for");
+  assert.doesNotMatch(html, /<link rel="stylesheet"/, "and no stylesheet either");
+  assert.match(html, /not built/);
+  // the record is unaffected — this is the whole reason the map may degrade to a sentence
+  assert.match(html, /<tr[^>]* id="backend-1"/);
+  assert.match(html, />k8s_list_pods</);
 });
 
-test("the live toolbar ships hidden, labelled, and complete", () => {
-  const html = topologyPage(wiredTopology, NONCE);
-  // Rendered server-side but display:none until the script sets data-live — so it is markup a
-  // reader without JavaScript never sees, rather than three buttons that do nothing.
-  assert.match(html, /<div class="topo-tools">/);
-  assert.match(html, /<button type="button" data-zoom="out" aria-label="Zoom out">/);
-  assert.match(html, /<button type="button" data-zoom="in" aria-label="Zoom in">/);
-  assert.match(html, /<button type="button" data-zoom="reset">Reset<\/button>/);
-  // the readout starts where the map does; the script rewrites it on every change
-  assert.match(html, /<span class="topo-level"[^>]*>100%<\/span>/);
-  // the glyphs carry no meaning to a screen reader, which is what the aria-labels are for
-  assert.doesNotMatch(html, /aria-label="[+−]"/);
+// Two <script> tags now, and the exactness the nonce demands is unchanged: EVERY one of them
+// carries the value the response's own header named. A tag the header does not cover is a tag
+// the browser refuses, which on this page is an interactive map that silently is not one.
+test("every script on the topology page carries the response's nonce", () => {
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
+  const scripts = [...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
+  assert.equal(scripts.length, 2, "the data block and the bundle, and nothing else");
+  for (const tag of scripts) assert.match(tag, new RegExp(`nonce="${NONCE}"`), tag);
+
+  // The data block is INERT: application/json is never executed, so the topology — which
+  // carries operator-supplied strings — cannot become script however it is escaped.
+  assert.match(html, /<script type="application\/json" id="topo-data" nonce="[^"]+">/);
+  // The bundle is the only thing fetched, and it is the hashed path the server minted.
+  assert.match(html, /<script src="\/assets\/topology\.abc12345\.js" nonce="[^"]+" defer><\/script>/);
+  // both sit after the mount they operate on
+  assert.ok(html.indexOf("<script") > html.indexOf(`id="topo-root"`), "the scripts follow their markup");
+});
+
+// The one place operator-supplied text crosses into a <script> element. It is inert by type,
+// but a raw </script> inside any string would still close the element early and drop the rest
+// of the topology into the document AS MARKUP.
+test("the data block escapes its way out of a script-closing string", () => {
+  const nasty: Topology = {
+    ...wiredTopology,
+    inbound: [{ label: `</script><img src=x onerror=alert(1)>`, detail: "d", meta: "m", configured: true }],
+  };
+  const html = topologyPage(nasty, NONCE, ASSETS);
+  assert.doesNotMatch(html, /<\/script><img/, "the element must not be closed by its own payload");
+  // `onerror=` is deliberately NOT what is asserted: the tables below render the same label,
+  // escaped, so the string is legitimately present as text. What must never appear is the tag.
+  assert.doesNotMatch(html, /<img/, "the payload must not reach the document as markup");
+  assert.match(html, /&lt;img/, "...but it should still be READABLE as the text it is");
+
+  // ...and what is left is still JSON, parsed the way the client parses it.
+  const block = /<script type="application\/json" id="topo-data"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(block, "the data block should render");
+  const parsed = JSON.parse(block![1]!) as Topology;
+  assert.equal(parsed.inbound[0]!.label, nasty.inbound[0]!.label, "escaping is reversible, not lossy");
+});
+
+// The zoom toolbar is React Flow's <Controls> and is mounted by the client, so the server must
+// ship NO controls of its own. It used to render a hidden one for the script to reveal; leaving
+// that behind would be three buttons that never gain a listener.
+test("the server ships no map controls of its own", () => {
+  const html = topologyPage(wiredTopology, NONCE, ASSETS);
+  assert.doesNotMatch(html, /data-zoom=/, "the old toolbar is gone, not merely hidden");
+  assert.doesNotMatch(html, /name="topo-zoom"/, "and so is the radio scale control");
+  // The frame is a mount point and a key. Anything else in it is markup React will discard.
+  assert.match(html, /<div class="card flush topo-frame">/);
+  assert.match(html, /<ul class="topo-legend">/);
 });
 
 // The rest of the dashboard gets no script-src at all (see csp() in server.ts). A script that
@@ -661,7 +710,7 @@ test("backendRows escapes name, kind, model, route, and endpoint", () => {
       },
     ],
   };
-  const html = topologyPage(t, NONCE);
+  const html = topologyPage(t, NONCE, ASSETS);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
 });
@@ -706,7 +755,7 @@ test("every icon is decorative and every label stays in the markup", () => {
 const everyPage = (): [string, string][] => [
   ["overview", overviewPage({ ...emptyOverview, tokens }, [row])],
   ["detail", detailPage({ incident: { ...row, rca: "x", channel: "C1", thread_ts: "1.0" }, remediations: [], feedback: [] })],
-  ["topology", topologyPage(baseTopology, NONCE)],
+  ["topology", topologyPage(baseTopology, NONCE, ASSETS)],
   ["context", contextPage(CTX)],
   ["skill", skillPage(CTX.skills[1]!)],
 ];
@@ -1384,7 +1433,7 @@ test("the incident list refreshes only while it is a watch view", () => {
 test("no other page refreshes itself", () => {
   const others = [
     detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] }),
-    topologyPage(baseTopology, NONCE),
+    topologyPage(baseTopology, NONCE, ASSETS),
     contextPage(CTX),
     loginPage(),
     errorPage("Not found", "No incident with id 9."),
@@ -1608,12 +1657,22 @@ test("marks and type draw from different ramps", () => {
 
 // ---------- one segmented control ----------
 
-// The topology page's scale control and the overview's time range are the same component doing
-// the same job. The markup differs because the mechanism does (radios cannot be links); the
-// look must not.
-test("the topology scale control is the shared segmented control", () => {
-  assert.match(topologyPage(baseTopology, NONCE), /<div class="topo-bar"><div class="seg">/);
-  assert.match(STYLES, /\.seg a, \.seg label, \.seg button \{/);
+// This component used to exist to prove a point: the topology page's scale control and the
+// overview's time range were the same thing doing the same job, so the markup could differ
+// (radios cannot be links) while the look did not. React Flow took the scale control, and the
+// time range is what is left.
+test("the segmented control is links only, now that the scale control is gone", () => {
+  // .seg used to be one look over three mechanisms — the time range's links, the topology
+  // scale control's radio labels, the live toolbar's buttons. React Flow replaced the last two,
+  // so the rule dropped the selectors that matched nothing. This asserts the cleanup rather
+  // than the old breadth: dead CSS naming an abandoned construction invites it back.
+  // Anchored to the SELECTOR form — followed by a comma or a brace — because the rule's own
+  // comment names both of them while explaining why they went.
+  assert.doesNotMatch(STYLES, /\.seg (label|button)\s*[,{]/);
+  assert.match(STYLES, /\.seg a \{/);
+  assert.doesNotMatch(topologyPage(baseTopology, NONCE, ASSETS), /class="seg"/);
+  // The overview still uses it, which is what keeps the component alive at all.
+  assert.match(overviewPage(emptyOverview, [row]), /<nav class="seg" aria-label="Time range">/);
 });
 
 // ---------- empty states ----------
@@ -1914,7 +1973,7 @@ test("every page renders the badge, not just the ones with a database", () => {
     ["overview", overviewPage({ ...emptyOverview, tokens }, [], new Date(), 17)],
     ["list", listPage(page([row]), parseFilters(new URLSearchParams("")), new Date(), 17)],
     ["detail", detailPage({ incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] }, new Date(), 17)],
-    ["topology", topologyPage(baseTopology, NONCE, 17)],
+    ["topology", topologyPage(baseTopology, NONCE, ASSETS, 17)],
     ["context", contextPage(CTX, 17)],
     ["skill", skillPage(CTX.skills[0], 17)],
   ];
@@ -2035,12 +2094,14 @@ test("the drawer slides, behind the reduced-motion guard", () => {
 
 // ---------- the dependency map ----------
 
-// An arrow is nothing but its stroke, and in the light scheme a node box is nothing but its
-// outline (--surface and --surface-raised are the same white, so the box has no fill contrast
-// at all). Both were drawn in --border-strong — a BORDER token — at 1.65:1, against the 3:1 a
-// load-bearing graphic needs. Every mark on that map carrying STATE already cleared it.
+// An arrow is nothing but its stroke, and in the light scheme a node card is nothing but its
+// outline (--surface and --surface-raised are the same white, so the card has no fill contrast
+// at all). Both were once drawn in --border-strong — a BORDER token — at 1.65:1, against the
+// 3:1 a load-bearing graphic needs. Every mark carrying STATE already cleared it, so the
+// discipline had been applied to state and skipped for structure. It survived the move to
+// React Flow, whose own default is a light grey of its own.
 test("the map's structural strokes come off the mark ramp, not a border token", () => {
-  for (const sel of ["\\.topo-box", "\\.topo-edge", "\\.topo-edge-soft", "\\.topo-arrow"]) {
+  for (const sel of ["\\.topo-node", "\\.react-flow__edge-path", "\\.react-flow__arrowhead \\*"]) {
     const rule = STYLES.match(new RegExp(`^${sel} \\{[^}]*\\}`, "m"))?.[0] ?? "";
     assert.ok(rule, `no ${sel} rule`);
     assert.match(rule, /var\(--mark-line\)/, `${sel} still draws in a border token`);
@@ -2049,26 +2110,39 @@ test("the map's structural strokes come off the mark ramp, not a border token", 
   assert.match(STYLES, /--mark-line: #7d8797/);
 });
 
-// The cluster outline and the dot grid stay where they are, and that is a decision rather than
-// an oversight: a cluster groups boxes that position and a band label already group, and a dot
-// grid is a texture. Neither carries information, so neither has a contrast bar to clear.
+// The dot grid stays where it is, and that is a decision rather than an oversight: it is a
+// texture, it carries nothing, and so it has no contrast bar to clear. React Flow draws it as
+// <circle> inside a <pattern>, which is why the selector changed and the reasoning did not.
 test("the map's decorative lines are left alone", () => {
-  assert.match(STYLES, /\.topo-cluster \{[^}]*stroke: var\(--border\)/);
-  assert.match(STYLES, /\.topo-dot \{ fill: var\(--border\); \}/);
+  assert.match(STYLES, /\.react-flow__background pattern circle \{ fill: var\(--border\); \}/);
 });
 
-// The text lives inside the SVG, so shrinking the drawing shrinks the type: at 390px the
-// 11.5-unit labels rendered near 4.9px. The floor comes from the drawing itself so it cannot
-// drift from the layout that produced it.
-test("the map never draws smaller than it was laid out for", () => {
-  const html = topologyPage(baseTopology, NONCE);
-  assert.match(html, /class="topo" style="--topo-w:\d+px"/);
-  assert.match(STYLES, /\.topo-view \.topo \{ width: 100%; min-width: var\(--topo-w, \d+px\); \}/);
-  assert.match(STYLES, /\.topo-view \{[^}]*overflow-x: auto/, "the floor is only safe if it scrolls");
+// State is the only thing that earns a colour on this map, and it is the same two facts it has
+// always been. Never colour ALONE: not-configured is dashed as well as amber, and the SQS edge
+// is animated as well as accented.
+test("the map spends colour on state and nothing else", () => {
+  const off = STYLES.match(/^\.topo-off \{[^}]*\}/m)?.[0] ?? "";
+  assert.match(off, /var\(--warning\)/);
+  assert.match(off, /border-style: dashed/, "state never rests on colour alone");
+
+  const worker = STYLES.match(/^\.topo-backend-worker \{[^}]*\}/m)?.[0] ?? "";
+  assert.match(worker, /var\(--accent\)/);
+
+  // The structural hooks carry no colour of their own — a tool family especially, since the
+  // agent knows the server ADVERTISED it, not that calling it works.
+  for (const sel of [".topo-in", ".topo-out", ".topo-capability"]) {
+    assert.doesNotMatch(STYLES, new RegExp(`^\\${sel} \\{`, "m"), `${sel} should carry no rule of its own`);
+  }
 });
 
-// The vocabulary was never stated: an amber dashed box meant "not configured" and a teal edge
-// meant "over SQS via llm-worker" — the one fact the diagram exists to make obvious — and a
+// React Flow renders nothing at all if its container collapses, and this container's height is
+// not implied by anything — the canvas is absolutely positioned inside it.
+test("the map's frame states a height", () => {
+  assert.match(STYLES, /\.topo-view \{ height: clamp\([^)]*\); width: 100%; \}/);
+});
+
+// The vocabulary was never stated: an amber dashed card means "not configured" and an accented
+// one means "over SQS via llm-worker" — the one fact this map exists to make obvious — and a
 // reader had to already know.
 test("the map carries a key, drawn with the same classes as the map", () => {
   const t: Topology = {
@@ -2076,18 +2150,21 @@ test("the map carries a key, drawn with the same classes as the map", () => {
     outbound: [{ label: "SQS", detail: "q", meta: "", configured: false }],
     backends: [{ name: "b", kind: "private-llm", model: "m", route: "light", endpoint: "sqs://x", viaWorker: true }],
   };
-  const html = topologyPage(t, NONCE);
+  const html = topologyPage(t, NONCE, ASSETS);
   assert.match(html, /<ul class="topo-legend">/);
-  // the swatches ARE fragments of the drawing, so a restyle cannot leave the key behind
-  assert.match(html, /class="topo-box topo-self"/);
-  // A <rect>, not a line — the diagram marks a worker-reached backend by the stroke of its
-  // chip, and a line carrying .topo-edge as well came out grey at equal specificity. The
-  // swatch has to be the same ELEMENT as the thing it stands for, not merely the same classes.
-  assert.match(html, /<rect[^>]*class="topo-box topo-backend topo-backend-worker"/);
-  assert.doesNotMatch(html, /<path[^>]*topo-backend-worker/);
-  assert.match(html, /class="topo-box topo-off"/);
+  // The swatches ARE fragments of the drawing — same classes AND the same element. The classes
+  // alone were not enough once before: the worker mark is the border of a CARD, and a swatch
+  // drawn as something else picks up a different rule at equal specificity. The map's nodes are
+  // <div class="topo-node …">, so these are too.
+  assert.match(html, /<div class="topo-node topo-self topo-swatch"/);
+  assert.match(html, /<div class="topo-node topo-backend topo-backend-worker topo-swatch"/);
+  assert.match(html, /<div class="topo-node topo-off topo-swatch"/);
+  assert.doesNotMatch(html, /<span[^>]*topo-backend-worker/, "not a different element from the map's");
   assert.match(html, /reached over SQS via llm-worker/);
   assert.match(html, /not configured/);
+  // ...and .topo-swatch may only resize. Anything else and the key stops being a key.
+  const swatch = STYLES.match(/^\.topo-swatch \{[^}]*\}/m)?.[0] ?? "";
+  assert.doesNotMatch(swatch, /border-color|background/, "the swatch must inherit what it explains");
 });
 
 // A key that explains a colour which is not on screen is a key that has to be read past.
@@ -2097,32 +2174,47 @@ test("the key only explains what was actually drawn", () => {
     inbound: [{ label: "Slack", detail: "socket", meta: "", configured: true }],
     backends: [{ name: "b", kind: "claude", model: "m", route: "heavy", endpoint: "api", viaWorker: false }],
   };
-  const html = topologyPage(clean, NONCE);
+  const html = topologyPage(clean, NONCE, ASSETS);
   const legend = html.slice(html.indexOf(`<ul class="topo-legend">`), html.indexOf("</ul>", html.indexOf(`<ul class="topo-legend">`)));
   assert.doesNotMatch(legend, /topo-off/, "nothing is unconfigured");
   assert.doesNotMatch(legend, /topo-backend-worker/, "no backend takes the worker");
   // the agent is always drawn, and the affordance always applies
   assert.match(legend, /topo-self/);
-  assert.match(legend, /Every box links to its row below/);
+  assert.match(legend, /every card links to its row below/);
 });
 
-// The live toolbar carries a "Drag to pan" hint and is hidden until the script runs, so
-// without one nothing announced that the boxes go anywhere.
-test("the script-free page states the affordance the toolbar would have", () => {
-  const html = topologyPage(baseTopology, NONCE);
-  assert.match(html, /<li class="topo-legend-note">Every box links to its row below\.<\/li>/);
+// React Flow's <Controls> gives buttons but names no gestures, and the two that matter here are
+// both non-obvious: a card can be moved, and the wheel is deliberately not captured.
+test("the legend states the affordances the controls do not", () => {
+  const html = topologyPage(baseTopology, NONCE, ASSETS);
+  assert.match(html, /<li class="topo-legend-note">Drag a card to move it · Ctrl \+ scroll to zoom · every card links to its row below\.<\/li>/);
 });
 
-// The floor that keeps the type legible is also what makes the frame clip, and on a platform
-// with overlay scrollbars nothing on screen says the rest is one drag away. Revealed by CSS
-// rather than decided in the renderer: whether it overflows is a question about the CONTENT
-// COLUMN's width, and at the same viewport that column is 13.5rem narrower with a rail beside
-// it than without — only a container query knows.
-test("a clipped map says it can be dragged", () => {
-  const html = topologyPage(baseTopology, NONCE);
-  assert.match(html, /<li class="topo-scroll-hint">Drag the map sideways to see the rest\.<\/li>/);
-  assert.match(STYLES, /\.topo-scroll-hint \{ display: none; \}/);
-  assert.match(STYLES, /@container page \(max-width: 53rem\) \{[\s\S]*?\.topo-scroll-hint \{ display: flex; \}/);
+// Two thirds of that note are untrue on a phone: there is no cursor to drag with and no ctrl
+// key to hold. The clause that survives is the one about the rows, so the note is REWRITTEN
+// there rather than hidden — hiding it would take away the only thing still true.
+test("the affordance note is rewritten on a phone, not dropped", () => {
+  const block = STYLES.match(/@media \(max-width: 46rem\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(block, /\.topo-legend-note \{ font-size: 0; font-style: normal; \}/);
+  assert.match(block, /content: "Every card links to its row below\."/);
+});
+
+// A marquee is exactly what a reader who asked for less motion asked to be rid of. The edge
+// keeps its accent stroke, so the fact it carries survives without the movement carrying it.
+test("the animated edge stops for reduced motion but keeps its colour", () => {
+  assert.match(
+    STYLES,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.react-flow__edge\.animated \.react-flow__edge-path \{ animation: none; \}/
+  );
+  assert.match(STYLES, /\.topo-edge-sqs \.react-flow__edge-path \{ stroke: var\(--accent\)/);
+});
+
+// @xyflow/react is MIT and free, and its authors ask that the attribution stay unless you hold
+// a Pro licence. It stays — dimmed to the weight of a caption, not removed with proOptions.
+test("React Flow keeps its attribution", async () => {
+  const src = await readFile(new URL("./client/topology.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /hideAttribution/);
+  assert.match(STYLES, /\.react-flow__attribution \{/);
 });
 
 // Expanding a family used to move the count column sideways under the reader's pointer, on the
@@ -2136,7 +2228,7 @@ test("opening a tool family cannot move the count column", () => {
       { name: "loki", tools: [{ name: "loki_query", write: false }] },
     ],
   };
-  const html = topologyPage(t, NONCE);
+  const html = topologyPage(t, NONCE, ASSETS);
   // the hook the rule hangs off — the only table on the dashboard that carries a class
   assert.match(html, /<table class="caps">/);
   assert.match(STYLES, /table\.caps \{ table-layout: fixed; \}/);
@@ -2160,7 +2252,7 @@ test("the MCP tools table is the only table with a disclosure in a cell", () => 
   // and the one that does have it is the one that carries the class. baseTopology has no
   // capabilities at all — it renders the empty state, not a table — so this needs its own.
   const t: Topology = { ...baseTopology, capabilities: [{ name: "loki", tools: [{ name: "loki_query", write: false }] }] };
-  const caps = bodyOf(topologyPage(t, NONCE));
+  const caps = bodyOf(topologyPage(t, NONCE, ASSETS));
   assert.match(caps, /<table class="caps">[\s\S]*<details>/);
   assert.equal([...caps.matchAll(/<table class="caps">/g)].length, 1, "one table carries the class");
   assert.equal([...caps.matchAll(/<details>/g)].length, 1, "one disclosure, in that table");

@@ -5,12 +5,13 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch index.ts",
     "migrate": "node --import tsx src/db/migrate-cli.ts",
     "migrate:prod": "node dist/src/db/migrate-cli.js",
-    "test": "node --import tsx --test 'src/**/*.test.ts'"
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "build:client": "node scripts/build-client.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
@@ -25,8 +26,15 @@
     "zod": "3.25.28"
   },
   "devDependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "@types/node": "25.9.1",
     "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@xyflow/react": "^12.11.6",
+    "esbuild": "^0.28.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "tsx": "4.22.3",
     "typescript": "6.0.3"
   }

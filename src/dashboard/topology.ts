@@ -1,72 +1,20 @@
 import { config } from "../config/index.js";
-import { parseRegistry, type BackendKind, type BackendSpec } from "../agent/llm/registry.js";
+import { parseRegistry, type BackendSpec } from "../agent/llm/registry.js";
+import { rowId } from "./topology-types.js";
+import type { BackendNode, Capability, McpTool, Node, Tool, Topology } from "./topology-types.js";
 
-export interface Node {
-  label: string;
-  detail: string;   // already redacted — safe to render
-  meta: string;     // secret presence and other flags, never a secret value
-  configured: boolean;
-  // Stable handle for the diagram, which has to anchor an edge to ONE specific node: the
-  // private-llm backends hang off llm-worker, not off the agent. Matching on `label` would
-  // work until someone rewords it, and would fail silently by drawing the edge from the
-  // wrong place. Optional because only the nodes the diagram references need one.
-  id?: string;
-}
-
-export interface BackendNode {
-  name: string;
-  kind: BackendKind;
-  model: string;
-  endpoint: string;
-  route: "heavy" | "light" | "unrouted";
-  viaWorker: boolean;
-}
-
-export interface Tool {
-  name: string;
-  // The agent's OWN predicate for "this can change the cluster", read back rather than
-  // re-derived: agent/index.ts gates the write path on description.startsWith("[WRITE]").
-  // Reading the same test means the page cannot disagree with the thing it describes — a
-  // server that sends no description is non-write to the agent, and non-write here too.
-  write: boolean;
-}
-
-// A family of tools the MCP server told us it exposes, e.g. { name: "k8s", tools: [...] }.
-// NOT a connection: the agent has no idea what the MCP server's own Prometheus URL is —
-// that lives in another pod's config. What it does know, for free, is the tool list it
-// received on connect. The name is the tool-name prefix, verbatim, so a family the server
-// adds tomorrow appears here without anyone editing a mapping table.
-export interface Capability {
-  name: string;
-  tools: Tool[];
-}
-
-export interface Topology {
-  inbound: Node[];
-  outbound: Node[];
-  provider: string;
-  backends: BackendNode[];
-  capabilities: Capability[];
-  registryError: string | null;
-  // populated only when the provider is NOT "router" — the router's answer to "what LLM is
-  // reachable" is the `backends` list instead. See activeClientNode().
-  activeClient?: Node;
-}
+// The shape of this page's data, and the rowId() anchor helper, live in `topology-types.ts` —
+// a module with no config import, because the browser bundle needs them (see the note there).
+// Re-exported here so `from "./topology.js"` keeps resolving for every existing caller and no
+// type in this page ends up with two names.
+export { rowId };
+export type { BackendNode, Capability, McpTool, Node, Tool, Topology };
 
 const NOT_CONFIGURED = "not configured";
 
 // devops-mcp-server marks every mutating tool by prefixing its description. The agent reads
 // this to decide what needs approval; the dashboard reads it to say so out loud.
 const WRITE_PREFIX = "[WRITE]";
-
-// Structural, not the agent's ToolDefinition: this is the whole dependency the dashboard has
-// on the MCP client, and keeping it to the two fields actually read means neither module has
-// to import the other's types. `description` is optional because a page that renders on a
-// half-built input is the requirement here (see buildTopology's default below).
-export interface McpTool {
-  name: string;
-  description?: string;
-}
 
 // A base URL may legitimately carry credentials (https://user:pass@host/v1), and a query string
 // may carry a token. Host, port and path are what identify a dependency; nothing else is needed
@@ -126,18 +74,6 @@ export function toolFamilies(tools: readonly McpTool[]): Capability[] {
     .map(([name, list]) => ({ name, tools: list.sort((a, b) => a.name.localeCompare(b.name)) }))
     .sort((a, b) => b.tools.length - a.tools.length || a.name.localeCompare(b.name));
 }
-
-/**
- * The anchor the diagram uses to link a box to its own row in the tables below. Both sides
- * derive it from the same array position, so this is a contract between topology-svg.ts and
- * views.ts — one definition, imported by both, rather than two string templates that can
- * drift apart into links that quietly point at nothing.
- *
- * Positional, never label-derived: a node label is rendered text that may contain anything
- * (topology-svg.test.ts feeds it a <script> tag), and slugging one would need escaping and
- * could still collide. This is [a-z0-9-] by construction.
- */
-export const rowId = (group: "in" | "out" | "backend" | "cap", i: number): string => `${group}-${i}`;
 
 // Number(garbage) is NaN, and NaN reaches a template string as the literal text "NaN" without
 // ever throwing — nothing catches it, it just looks wrong on the page. Every config number that

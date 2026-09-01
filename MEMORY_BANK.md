@@ -502,9 +502,10 @@ Rotating the password invalidates every session; that is the revocation mechanis
 - CSP gained `form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. `form-action` does
   **not** inherit from `default-src`, so the login form worked without it; it is there to pin
   where the password may be posted now that there is a session to steal. The policy is built by
-  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce and so gets a `script-src`
-  at all. Everywhere else there is no exemption, which is what keeps a missed `esc()` inert on
-  the pages that render an RCA.
+  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce, and it is the only route
+  with a `script-src` **or** a `style-src 'self'` at all. Everywhere else there is no exemption,
+  which is what keeps a missed `esc()` inert on the pages that render an RCA and gives an
+  injected `<link>` nowhere to point.
 
 **Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
 one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
@@ -764,32 +765,58 @@ render as "set"/"not set"; endpoints go through `redactUrl()` (userinfo and quer
 either the data structure or the rendered HTML — that test is what keeps the allowlist honest
 as the config grows.
 
-**Interactive map (`src/dashboard/topology-script.ts`).** Drag to pan, ctrl/cmd + wheel or the
-toolbar to zoom; one inline `<script>` carrying a **per-response nonce** (`randomBytes(16)`,
-base64url), never `'unsafe-inline'` — see `docs/DESIGN_dashboard_auth.md`. It is progressive
-enhancement: the page still ships the script-free three-radio scale control, and the script
-removes it, flips `data-live="on"`, and drives the **`viewBox`** instead (not a CSS transform —
-the SVG keeps its own box, so a pointer position converts to user units by one ratio and pan
-needs no scroll container). With scripting off the map still renders, scales, and links.
-Non-obvious, and each one is load-bearing:
-- Pointer capture is taken **after 4px of movement**, not on `pointerdown` — capturing early
-  retargets the following `click`, and every box in the map is a link to its own table row. A
-  `dragged` flag (cleared by the click it swallows) stops a drag that ends on a box from also
-  opening it.
-- `aria-disabled`, not `disabled`, on the zoom buttons: a disabled button drops focus the moment
-  the keyboard reaches the limit, and the next Tab restarts from the top of the document.
-- **Ctrl/cmd + wheel only.** A bare wheel keeps scrolling the page — the map sits mid-document,
-  and a figure that swallowed the wheel would trap the reader every time the pointer crossed it.
-  `touch-action: pan-y` does the same job for one-finger drags on a phone.
-- A `focusin` handler pans a focused box back inside the viewBox. Nothing else can: the viewBox
-  clips it, so there is no scroll for the browser to do.
-- The script-free controls are removed **last**, after every listener is wired, so a throw on any
-  line leaves the page with a zoom control that still works.
-- `topology-script.test.ts` guards the cross-file couplings nothing else would catch: the script
-  can't close its own `<script>`; it builds no markup and evaluates no strings (the nonce buys
-  one trusted block, not a licence for that block to reopen the injection surface); every
-  selector it queries is derived from its own source and asserted against the rendered page; and
-  the `data-live`/`data-drag` attributes it sets are the ones `styles.ts` reacts to.
+**Interactive map (React Flow, `src/dashboard/client/`).** Replaced a hand-laid SVG plus a
+~175-line inline pan/zoom script (`topology-svg.ts` / `topology-script.ts`, both deleted).
+Drag a card to move it, drag the canvas to pan, ctrl/cmd + wheel to zoom, plus React Flow's own
+`<MiniMap>` and `<Controls>`.
+
+The split across files is the design, and it is about what is a **claim** versus what is a
+drawing:
+- `topology.ts` — config → `Topology` (the allowlist above).
+- `topology-types.ts` — the shape and `rowId()`, with **no config import**. It exists because
+  `topology-graph.ts` is compiled into the browser bundle: importing the types from
+  `topology.ts` would drag `config/index.js` — dotenv and every env var this agent reads —
+  into a file served to a browser. `scripts/build-client.mjs` fails the build if a handful of
+  config-only strings appear in the output, because that separation is one edit from untrue.
+- `topology-graph.ts` — `Topology` → nodes and edges. A plain `.ts` module with no React
+  import, so its rules run under `npm test`: a `private-llm` backend hangs off `llm-worker`
+  (edge kind `sqs`), everything else off the agent; tool families hang off the MCP server.
+  A `.tsx` in the bundle is typechecked but never executed by `node:test`.
+- `client/layout.ts` — dagre, `rankdir: LR`. Replaces the old coordinate table. The old note
+  said a layout engine "would solve a problem this page does not have", which was true while
+  every position was a constant and stopped being true when cards became draggable.
+- `client/nodes.tsx`, `client/topology.tsx` — the drawing and the mount.
+
+Load-bearing, and each cost something to get right:
+- **Anchoring is by `Node.id`, never by label.** Matching the display string works until
+  someone rewords it and then fails SILENTLY, drawing a plausible arrow from the wrong node.
+  A missing anchor falls back to the agent — wrong-but-visible beats a dropped edge.
+- **A node's id IS its row's id**, both from `rowId()`, so a card's link is `#${node.id}`.
+  Backend chips are mapped over the whole list *before* the `viaWorker` split, or the two
+  groups would number independently and half the links would point at the wrong row.
+- **The topology reaches the browser as `<script type="application/json">`** — inert by type,
+  not gated by `script-src`, so operator-supplied strings cannot become script. `<`/`>`/`&` are
+  still escaped to `\uXXXX`: a raw `</script>` would close the element early and drop the rest
+  into the document as markup. Both that block and the bundle `<script src>` carry the
+  per-response nonce; `style-src` gains `'self'` on this route only, for React Flow's stylesheet.
+- **The two assets are content-addressed** (`assets.ts`, hashed at boot) and are the only
+  responses on this dashboard that are not `no-store`. The path is a key into a two-entry `Map`,
+  never a filesystem lookup.
+- **The wheel is not captured** (`zoomOnScroll={false}`, `preventScrolling={false}`) — the map
+  sits mid-document and a figure that swallowed the wheel would trap a reader trying to reach
+  the tables. `zoomActivationKeyCode` names **both** `Meta` and `Control`; React Flow's default
+  is `Meta` alone, which is nothing on Linux, and the legend promises Ctrl.
+- **A drag must not follow the card's link.** `client/drag-state.ts` records the drag's end and
+  the anchor suppresses a click within 200ms — React Flow's `nodeDragThreshold` decides whether
+  a drag happened, not whether the click after it should count.
+- **The map is script-only now, and that is the trade.** The SVG drew with no script at all. The
+  mount ships one sentence saying it needs JavaScript, cleared on a successful parse; the four
+  tables below carry every fact it draws, which is the only reason that degradation is
+  acceptable. `assets: null` (a dev server, or a build that never bundled) renders a note.
+- **Not covered by `npm test`:** React Flow's rendering, the drag behaviour, the minimap, the
+  CSS. `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
+  (finite positions, left-to-right order, non-overlap, which edge animates). Everything else
+  needs a browser.
 
 **RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
 `prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are

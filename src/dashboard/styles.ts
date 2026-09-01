@@ -225,8 +225,10 @@ a, button, select, input, summary { touch-action: manipulation; }
 .skip:focus-visible { transform: none; }
 
 /* ---------- the mobile drawer ---------- */
-/* Checkbox, label, scrim — the only disclosure a page with no script-src can toggle, and the
-   same mechanism the topology page's zoom control already runs on.
+/* Checkbox, label, scrim — the only disclosure a page with no script-src can toggle. It used
+   to share this mechanism with the topology page's script-free zoom control; that control is
+   gone (React Flow drives the map now), so this is the last of them and the pattern is worth
+   restating here rather than pointing at a neighbour that no longer exists.
    The objection that killed a COLLAPSE toggle does not apply here, and the difference is worth
    writing down: a collapse toggle is a preference and has to survive navigation, which this
    cannot do — every page is a fresh server render. A drawer is transient, and closing when you
@@ -309,18 +311,21 @@ a, button, select, input, summary { touch-action: manipulation; }
   padding: 3px; border-radius: var(--r-pill);
   background: var(--surface-2); border: 1px solid var(--border);
 }
-/* label as well as a: the topology page's scale control is three radios driven by their
-   labels, so its items cannot be links — but it is the same control doing the same job, and
-   before this it had a bespoke set of rules that looked like nothing else on the site. The
-   markup differs because the mechanism differs; the component does not. */
-.seg a, .seg label, .seg button {
+/* Links only, now. This used to carry .seg label and .seg button as well: the topology
+   page had a script-free scale control built from radio labels and a live toolbar built from
+   buttons, and the point of the shared rule was that three different MECHANISMS could look
+   like one component. React Flow's own <Controls> replaced both, so the time range is the last
+   user and the other two selectors matched nothing. Removed rather than kept for symmetry —
+   dead CSS naming a construction the page has abandoned is a suggestion to bring it back. Put
+   them back the moment a second mechanism needs this look; that was a good rule. */
+.seg a {
   display: flex; align-items: center; padding: 0 var(--sp-3); height: 1.75rem;
   border-radius: var(--r-pill); text-decoration: none;
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   letter-spacing: .06em; color: var(--text-dim); white-space: nowrap;
   background: none; border: 0; cursor: pointer; line-height: 1;
 }
-.seg a[aria-current="true"], .seg label[data-current], .seg button[aria-current="true"] {
+.seg a[aria-current="true"] {
   background: var(--surface-raised); color: var(--text);
   box-shadow: var(--shadow-sm);
 }
@@ -1697,64 +1702,128 @@ form.signout button {
   color: var(--text-dim); font-size: var(--fs-sm);
 }
 
-/* ---------- topology ---------- */
-/* Every box is drawn on the SAME fill, so there is exactly one text-on-background pair in the
-   whole figure (--text on --surface: 17.82:1 light, 14.58:1 dark) and no group's colour can
-   break label legibility.
+/* ---------- topology: the dependency map ---------- */
+/* The map is React Flow now (src/dashboard/client/), so every node is an HTML element rather
+   than an SVG <rect> + <text> pair. The COLOUR DISCIPLINE is unchanged and is the part worth
+   restating, because it is the part that was reasoned about rather than drawn:
 
-   An earlier revision coloured the boxes by ROLE — blue inbound, green outbound, red backends.
-   It was pretty and it lied. Red means "critical" on every other page of this dashboard, so a
-   perfectly healthy backend read as a broken one; green implied a health check this page never
-   performs (design 4.3: nothing here is probed, it is config read back). Role is already
-   carried by position — three labelled columns and two labelled clusters — which leaves the
-   stroke free for the only two things in this figure that are actually STATE. Each clears the
-   3:1 that a non-text graphic needs against that one fill:
-     --warning  not configured                                    3.85 light / 5.79 dark
-     --accent   reached over SQS via llm-worker (design 4.2, the
-                one fact the diagram exists to make obvious)      6.17 / 8.49
-   Everything else is --border-strong. The agent's own box is --text at 2.5px: the subject of
-   the map earns weight, not hue. (.topo-in / .topo-out / .topo-backend / .topo-capability carry
-   no rule of their own by design — they are structural hooks, and giving them a colour is the
-   mistake above. A tool family especially: the agent knows the server ADVERTISED it, not that
-   calling it works, so any colour there would be a health claim the page cannot make.) */
-/* The diagram carries its own sizing. It used to borrow .chart for this, back when the incident
-   chart was one plain <svg>; .chart is now the flex wrapper around a figure whose SVG is only the
-   line, and inheriting it here meant an SVG getting display:flex, a gap, and container-type:inline-size — the last of
-   which contains the element's own contents out of its intrinsic sizing, so the viewBox's aspect
-   ratio stopped driving the height and the whole map collapsed to the replaced-element default.
-   height:auto is what lets the viewBox set the proportion; overflow:visible keeps the arrowheads
-   and the outermost stroke from being clipped at the edges of the box. */
-.topo { display: block; width: 100%; height: auto; overflow: visible; }
-/* 1.30:1, and correct at that: a dot grid is a texture. It carries nothing, so no contrast
-   requirement applies to it — this note exists so it is not "fixed" later by someone reading
-   the numbers above and matching them. */
-.topo-dot { fill: var(--border); }
-/* The cluster outlines stay on --border, and deliberately: they group boxes that are already
-   grouped by position and by a band label, so nothing is lost if they are barely there. They
-   are the one structural line on this map that carries no information of its own. */
-.topo-cluster { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 5 5; }
-.topo-box { fill: var(--surface); stroke: var(--mark-line); stroke-width: 1.5; }
-.topo-label { fill: var(--text); font-family: var(--font-ui); font-size: 11.5px; font-weight: 550; }
-.topo-sub { fill: var(--text-dim); font-family: var(--font-data); font-size: 9.5px; }
-.topo-backend-worker { stroke: var(--accent); stroke-width: 2; }
-.topo-self { stroke: var(--text); stroke-width: 2.5; }
-/* A dependency the agent cannot actually reach. Dashed as well as coloured, so the state
-   survives a greyscale print and does not rest on hue alone. */
-.topo-off { stroke: var(--warning); stroke-dasharray: 4 3; }
-.topo-off + .topo-label { fill: var(--text-dim); }
-/* Immediate-sibling only. topologyDiagram() emits every <rect>/<text> as flat siblings of
-   <svg> (no per-row <g>), so the general-sibling combinator (~) would match every later
-   .topo-label in the document, not just this box's own — that once made most of the
-   diagram's text unreadable. box() always emits a label as the very next sibling of its own
-   rect, so "+" alone is correct and sufficient. */
-.topo-self + .topo-label { font-weight: 650; letter-spacing: -.01em; }
-.topo-edge { stroke: var(--mark-line); stroke-width: 1.5; fill: none; }
-.topo-edge-soft { stroke: var(--mark-line); stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; }
-.topo-arrow { fill: var(--mark-line); }
-.topo-band {
-  fill: var(--text-dim); font-family: var(--font-data); font-size: 9.5px;
-  font-weight: 600; letter-spacing: .12em;
+   Every card is on the SAME fill, so there is exactly one text-on-background pair in the whole
+   figure (--text on --surface: 17.82:1 light, 14.58:1 dark) and no group's colour can break
+   label legibility. An earlier revision coloured cards by ROLE — blue inbound, green outbound,
+   red backends. It was pretty and it lied: red means "critical" on every other page here, so a
+   healthy backend read as a broken one, and green implied a health check this page never
+   performs (nothing is probed; it is config read back). Role is carried by POSITION — dagre
+   ranks the columns from the edges — which leaves the border free for the only two things in
+   this figure that are actually STATE. Each clears the 3:1 a non-text graphic needs:
+     --warning  not configured                                  3.85 light / 5.79 dark
+     --accent   reached over SQS via llm-worker (the one fact
+                this map exists to make obvious)                6.17 / 8.49
+   Everything structural is --mark-line (3.63 / 4.39), NOT --border-strong (1.65 / 1.69): in the
+   light scheme --surface and --surface-raised are the same white, so a card is nothing but its
+   outline and there is no fill contrast to fall back on. The agent's own card is --text at 2px:
+   the subject of the map earns weight, not hue. .topo-in / .topo-out / .topo-capability carry
+   no colour by design — a tool family especially, since the agent knows the server ADVERTISED
+   it, not that calling it works, and any colour there would be a health claim. */
+
+/* React Flow measures its own canvas from this element and renders nothing if it collapses, so
+   the height is stated rather than derived. clamp() rather than a fixed number for the same
+   reason the rest of the dashboard uses one: the frame is 13.5rem narrower with a rail beside
+   it, and a map that is a letterbox on a laptop is not worth the pixels it saves on a phone. */
+.topo-view { height: clamp(26rem, 58vh, 42rem); width: 100%; }
+/* Replaced by the mount as its first act; visible only if the bundle never ran. Centred rather
+   than parked at the top-left, because at that point it is the entire contents of the frame. */
+.topo-view[data-fallback] { display: grid; place-items: center; padding: var(--sp-6); }
+.topo-fallback { margin: 0; color: var(--text-dim); font-size: var(--fs-sm); text-align: center; }
+
+/* ---------- topology: the node ---------- */
+/* One rule for all five kinds; the class the component adds decides the border and nothing
+   else. Sizes come from NODE_SIZE in client/layout.ts and are applied by React Flow as inline
+   width/height — do NOT restate them here, or dagre would be laying out one box and the
+   browser painting another. */
+.topo-node {
+  box-sizing: border-box; width: 100%; height: 100%;
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface); border: 1.5px solid var(--mark-line); border-radius: 10px;
+  overflow: hidden;
 }
+/* The subject of the map. Weight, not hue — see the note above. */
+.topo-self { border-color: var(--text); border-width: 2px; }
+/* The stroke of the CHIP is what marks a worker-reached backend, which is why the legend's
+   swatch is a card and not a line. */
+.topo-backend-worker { border-color: var(--accent); border-width: 2px; }
+/* The only other state on this map. Dashed as well as amber: state never rests on colour
+   alone anywhere on this dashboard. */
+.topo-off { border-color: var(--warning); border-style: dashed; }
+.topo-off .topo-node-title { color: var(--text-dim); }
+
+/* An SVG had no ellipsis and clipped by character count. HTML does have one, so the label is
+   truncated by the browser at whatever the card's real width turns out to be — and the
+   untruncated value survives in the <a>'s aria-label and the card's title attribute. */
+.topo-node-title,
+.topo-node-sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topo-node-title { font-size: var(--fs-sm); font-weight: 550; color: var(--text); }
+.topo-node-sub { font-family: var(--font-data); font-size: var(--fs-2xs); color: var(--text-dim); }
+.topo-self .topo-node-title { font-weight: 650; letter-spacing: -.01em; }
+/* heavy / light / unrouted. A backend the registry lists but no chain will ever pick is worth
+   seeing, so "unrouted" is the one that gets the warning ink — the other two are neutral
+   because which chain a backend is on is structure, not health. */
+.topo-node-route {
+  align-self: flex-start; margin-top: 2px;
+  font-family: var(--font-data); font-size: var(--fs-3xs, .625rem); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.topo-node-route[data-route="unrouted"] { color: var(--mark-warning, var(--warning)); }
+
+/* Every card is a link to its own row in the tables below. No colour and no underline: the
+   cards already read as objects, and decorating a hundred of them would undo the restraint the
+   rest of the figure is built on. Focus needs no rule — the global :focus-visible outline sits
+   OUTSIDE the card instead of overwriting the border, which is where the two state signals
+   live. Hover moves the FILL, never the border, for that same reason: a hover that repainted
+   the border would erase "not configured" for as long as the pointer sat there. */
+.topo-node-link {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  height: 100%; min-width: 0;
+  color: inherit; text-decoration: none; cursor: pointer;
+}
+.react-flow__node:hover .topo-node { background: var(--surface-2); }
+
+/* ---------- topology: React Flow's own furniture ---------- */
+/* The library ships a light-grey visual language of its own. These rules are the whole of the
+   theming: everything else it draws is either invisible (handles) or already neutral. */
+.react-flow__node { font-family: var(--font-ui); cursor: default; }
+/* The map does not connect anything (nodesConnectable={false}), so a handle is a dot that
+   promises an interaction which does not exist. */
+.react-flow__handle { opacity: 0; pointer-events: none; }
+/* Structure, on the same ramp as a node's outline — an arrow is nothing but its stroke. */
+.react-flow__edge-path { stroke: var(--mark-line); stroke-width: 1.5; }
+.react-flow__arrowhead * { fill: var(--mark-line); stroke: none; }
+/* The SQS edge is the one moving thing on the page. It is also the one edge with a colour,
+   and both are spent on the same fact. */
+.topo-edge-sqs .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent); }
+/* A dot grid is a texture: it carries nothing, so no contrast requirement applies. This note
+   exists so 1.30:1 is not "fixed" later by someone matching the numbers above. */
+.react-flow__background pattern circle { fill: var(--border); }
+.react-flow__controls {
+  box-shadow: none; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  fill: var(--text-dim); width: 26px; height: 26px;
+}
+.react-flow__controls-button:hover { background: var(--surface-2); fill: var(--text); }
+.react-flow__controls-button:last-child { border-bottom: none; }
+.react-flow__minimap {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+}
+.react-flow__minimap-mask { fill: var(--surface-2); fill-opacity: .6; }
+/* Kept, not hidden. @xyflow/react is MIT and free, and its authors ask that the attribution
+   stay unless you hold a Pro licence — so it stays, dimmed to the weight of a caption rather
+   than removed with the proOptions flag. */
+.react-flow__attribution { background: transparent; font-size: var(--fs-3xs, .625rem); }
+.react-flow__attribution a { color: var(--text-dim); text-decoration: none; }
 
 /* ---------- topology: the key ---------- */
 /* At the foot of the frame, under a hairline — it belongs to the drawing, so it sits inside
@@ -1766,117 +1835,25 @@ form.signout button {
   font-size: var(--fs-sm); color: var(--text-dim);
 }
 .topo-legend li { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-/* The swatch is a real fragment of the drawing — same classes, same strokes — so it is sized
-   like a glyph and given no colour of its own. overflow: visible because a 1.5px stroke on the
-   edge of a 22x14 box is half outside it. */
-.topo-key { width: 22px; height: 14px; flex: 0 0 auto; overflow: visible; }
+/* The swatch is a real fragment of the drawing — same element, same classes, same borders — so
+   it overrides SIZE AND PADDING ONLY. Give it a colour of its own and the key stops being a
+   key. The fixed size is why width/height are safe to state here and nowhere else on
+   .topo-node: a swatch is never laid out by dagre. */
+.topo-swatch { width: 22px; height: 14px; flex: 0 0 auto; padding: 0; border-radius: 3px; }
 /* The affordance note is not a key, so it takes no swatch slot and sits at the far end. */
 .topo-legend-note { margin-left: auto; font-style: italic; }
-/* Hidden until the map stops fitting. 53rem is --topo-w (848px) expressed against the content
-   column, which is the frame's own width — .card.flush has no padding to subtract. Below it
-   the min-width floor bites, the frame clips, and on a platform with overlay scrollbars
-   nothing on screen says the rest is one drag away.
-   Not a media query: what decides whether the map overflows is the CONTENT COLUMN's width, and
-   at the same viewport that column is 13.5rem narrower with a rail beside it than without. */
-.topo-scroll-hint { display: none; }
-@container page (max-width: 53rem) {
-  .topo-scroll-hint { display: flex; }
-  /* With the hint present the note stops being the only thing at the far end, and pushing them
-     apart would strand the hint in the middle of the row. */
-  .topo-legend-note { margin-left: 0; }
-}
-@container page (max-width: 34rem) {
-  /* Nothing to push it to at one item per line. */
+@container page (max-width: 46rem) {
+  /* Nothing to push it to once the row wraps. */
   .topo-legend-note { margin-left: 0; }
 }
 
-/* ---------- topology: scale and navigation ---------- */
-/* Zoom without script. The radios are visually hidden but still focusable and still hit by
-   their <label>, and :checked drives the SVG's width — vector, so every step stays sharp
-   instead of resampling a bitmap. Pan is the container's own scrollbar: horizontal here,
-   with the page taking the vertical, which needs no magic max-height to guess at. */
-.topo-z { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-/* The row the control sits in. The control itself is .seg — see the note there — so this rule
-   only places it; everything about how it looks lives with the component. */
-.topo-bar {
-  display: flex; justify-content: flex-end;
-  padding: var(--sp-3) var(--sp-4) 0;
+/* The animated edge is a marquee, and a marquee is exactly what a reader who asked for less
+   motion asked to be rid of. The edge keeps its accent stroke, so the fact it carries survives
+   without the movement carrying it. */
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge.animated .react-flow__edge-path { animation: none; }
 }
-.topo-bar label { user-select: none; }
-#topo-z1:checked ~ .topo-bar label[for="topo-z1"],
-#topo-z2:checked ~ .topo-bar label[for="topo-z2"],
-#topo-z3:checked ~ .topo-bar label[for="topo-z3"] {
-  background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow-sm);
-}
-/* The radio is off-screen, so its focus ring would be too. Painting it on the label instead
-   is what keeps the control keyboard-visible rather than merely keyboard-reachable. */
-#topo-z1:focus-visible ~ .topo-bar label[for="topo-z1"],
-#topo-z2:focus-visible ~ .topo-bar label[for="topo-z2"],
-#topo-z3:focus-visible ~ .topo-bar label[for="topo-z3"] {
-  outline: 2px solid var(--accent); outline-offset: 2px;
-}
-.topo-view { overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
-/* Never narrower than the width it was laid out for. --topo-w comes from the drawing itself
-   (see topologyDiagram), so the floor cannot drift from the layout. Above it the map fills the
-   frame and scales up, which costs nothing — type getting larger is not a legibility problem.
-   Below it the map stops scaling and .topo-view scrolls. */
-.topo-view .topo { width: 100%; min-width: var(--topo-w, 848px); }
-#topo-z2:checked ~ .topo-view .topo { width: 160%; }
-#topo-z3:checked ~ .topo-view .topo { width: 240%; }
 
-/* ---------- topology: live pan and zoom ---------- */
-/* Every rule here hangs off [data-live], which only topology-script.ts sets — and it sets it
-   after removing the radios above, so the two control sets can never both be on screen. With
-   the script blocked by the CSP or scripting off, none of this applies and the three-step
-   scale is still exactly what the page has. */
-.topo-tools { display: none; }
-.topo-frame[data-live="on"] .topo-tools {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4) 0;
-}
-/* auto on the right margin, so the controls stay pinned where the radio bar had them and the
-   hint fills the space they left rather than pushing them around. */
-.topo-hint {
-  margin: 0 auto 0 0; color: var(--text-dim);
-  font-size: var(--fs-2xs); letter-spacing: .01em;
-}
-/* The live toolbar takes the same pill as the scale control it replaces: one of the two is on
-   screen at a time (topology-script.ts removes the radios before it shows this), and a reader
-   who has the script should not get a different-looking control from one who does not. */
-.topo-tools button {
-  display: flex; align-items: center; justify-content: center;
-  min-width: 1.9rem; height: 1.75rem; padding: 0 var(--sp-3);
-  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
-  letter-spacing: .06em; color: var(--text-dim);
-  background: none; border: 0; border-radius: var(--r-pill);
-  cursor: pointer; line-height: 1;
-}
-.topo-tools button[data-zoom="reset"] { margin-left: var(--sp-2); }
-/* tabular-nums and a floor on the width: without both, the toolbar shifts sideways on every
-   wheel notch as the readout goes 100% -> 137% -> 800%. */
-.topo-level {
-  font-family: var(--font-data); font-size: var(--fs-2xs); color: var(--text-dim);
-  min-width: 3.6em; text-align: center; font-variant-numeric: tabular-nums;
-}
-.topo-tools button[aria-disabled="true"] { opacity: .4; }
-/* touch-action: pan-y hands one-finger vertical drags back to the browser. Without it the map
-   is a hole in the page on a phone: the reader's thumb pans the diagram and the article it
-   sits in never scrolls again. Horizontal is ours — it is the axis the map overflows on. */
-.topo-frame[data-live="on"] .topo-view { overflow: hidden; cursor: grab; touch-action: pan-y; }
-.topo-frame[data-drag="on"] .topo-view { cursor: grabbing; }
-
-/* Every box in the map is a link to its own row in the tables below. No colour and no
-   underline: the boxes already read as objects, and decorating a hundred of them would undo
-   the restraint the rest of the figure is built on. Hover moves the FILL, never the stroke —
-   the stroke is where this figure keeps its two state signals, and a hover that repainted it
-   would erase "not configured" for as long as the pointer sat there. Focus needs no rule at
-   all: the global :focus-visible outline renders on an SVG <a> like any other element, and
-   an outline sits outside the box instead of overwriting anything inside it. */
-/* No underline. Every box in the diagram is a link to its own row below, and the base rule
-   underlines every link on the page — which inside an SVG puts a rule under thirteen labels
-   that already sit inside a bordered box with a hover fill. The box IS the affordance here;
-   the underline was only ever competing with the diagram's own strokes. */
-.topo-link { cursor: pointer; text-decoration: none; }
 /* :target on the far end is what confirms the trip landed. An outline again, for the same
    reason: --spine already carries the row's severity, and borrowing it here would swap a
    permanent signal for a transient one. */
@@ -1909,9 +1886,6 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 /* Pointer-only, all of it. See the note beside the base link rule: a touch device latches
    :hover on the last thing tapped, so these are states a phone can enter but never leave. */
 @media (hover: hover) {
-  .topo-bar label:hover { color: var(--text); border-color: var(--border); }
-  .topo-tools button:not([aria-disabled="true"]):hover { color: var(--text); border-color: var(--border); }
-  .topo-link:hover .topo-box { fill: var(--surface-2); }
   a:hover { text-decoration-color: var(--accent); }
   h2 a:hover { text-decoration: underline; }
   a.standalone:hover { text-decoration: underline; }
@@ -2022,9 +1996,14 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
   .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
-  /* Neither half of the hint is true here: there is no cursor to drag with and no ctrl key to
-     hold. The gesture a phone does have — one finger across the map — needs no instructions. */
-  .topo-hint { display: none; }
+  /* Two thirds of the legend's affordance note are untrue here: there is no cursor to drag
+     with and no ctrl key to hold. The gestures a phone does have — one finger to pan, two to
+     zoom — need no instructions, and the third clause (every card links to its row) is the
+     only one worth the line, so the note is rewritten rather than hidden. */
+  .topo-legend-note { font-size: 0; font-style: normal; }
+  .topo-legend-note::after {
+    content: "Every card links to its row below."; font-size: var(--fs-sm); font-style: italic;
+  }
 }
 /* ---------- the rail, as a drawer ---------- */
 /* NOTE: this is the SECOND @media block at 46rem — the other one, down in "responsive & motion",
@@ -2089,7 +2068,7 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 }
 @media (prefers-reduced-motion: no-preference) {
   a, .pages a, .rail nav a, .seg a, form.filters button, .signin-form button,
-  form.signout button, .topo-tools button, .chart-dot, .chart-value, tbody tr {
+  form.signout button, .chart-dot, .chart-value, tbody tr, .topo-node {
     transition: color .12s ease, background-color .12s ease, border-color .12s ease,
                 fill .12s ease, text-decoration-color .12s ease, transform .12s ease;
   }

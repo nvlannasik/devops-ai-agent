@@ -53,6 +53,17 @@ process.env.LLM_ROUTE_LIGHT = "qwen";
 const { buildTopology, redactUrl, toolFamilies } = await import("./topology.js");
 const { topologyPage } = await import("./views.js");
 
+// A built bundle, so the page renders its <script type="application/json"> data block. Passing
+// null (or, as this file briefly did, nothing at all) makes topologyPage render the
+// "not built" note INSTEAD of that block — which would quietly take the largest surface the
+// topology now lands on out of the scan below. Test files are not typechecked in this repo
+// (tsconfig excludes them and tsx strips types without checking), so nothing else catches it.
+const ASSETS = {
+  js: { path: "/assets/topology.aaaaaaaa.js", body: "", type: "text/javascript; charset=utf-8" },
+  css: { path: "/assets/topology.bbbbbbbb.css", body: "", type: "text/css; charset=utf-8" },
+  byPath: new Map<string, { path: string; body: string; type: string }>(),
+};
+
 // THE test this page exists to pass. A session gates the port now, but this page's job is to
 // enumerate configuration — one shared password between a leak and every credential the agent
 // holds is not a margin worth spending. An allowlist is only trustworthy if something fails
@@ -60,11 +71,17 @@ const { topologyPage } = await import("./views.js");
 test("no configured secret reaches the topology data or the rendered page", () => {
   const t = buildTopology();
   const serialised = JSON.stringify(t);
-  const html = topologyPage(t, "test-nonce");
+  const html = topologyPage(t, "test-nonce", ASSETS);
   for (const [key, sentinel] of Object.entries(SECRETS)) {
     assert.ok(!serialised.includes(sentinel), `${key} leaked into the topology data`);
     assert.ok(!html.includes(sentinel), `${key} leaked into the rendered page`);
   }
+  // The scan is only worth what it covers. Since the React Flow rewrite the whole Topology is
+  // serialised into the page for the client to read, so this asserts the block is actually
+  // there — a page rendered without it would pass the loop above by rendering less.
+  const block = /<script type="application\/json" id="topo-data"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(block, "the data block should render, or this test scans the wrong document");
+  assert.deepEqual(JSON.parse(block![1]!), JSON.parse(serialised), "the page ships exactly this topology");
 });
 
 test("secrets are reported as presence, never as value", () => {

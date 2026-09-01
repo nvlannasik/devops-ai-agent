@@ -216,9 +216,13 @@ test("responses carry a no-JS CSP and nosniff", async () => {
 });
 
 // The one exemption, and the two things that keep it narrow: the nonce is fresh per response,
-// and it is the ONLY thing script-src names. 'unsafe-inline' anywhere in this header would
-// hand the exemption to an injected <script> as well.
-test("/topology allows exactly one script, by nonce, minted per response", async () => {
+// and it is the ONLY thing script-src names. 'unsafe-inline' anywhere in this header would hand
+// the exemption to an injected <script> as well.
+//
+// Two tags now rather than one — the JSON data block and the React Flow bundle — and the
+// assertion is over ALL of them: a tag the header does not cover is a tag the browser refuses,
+// which on this page is an interactive map that silently is not one.
+test("/topology allows scripts only by nonce, minted per response", async () => {
   await withServer(async (port) => {
     const res = await raw(port, "GET /topology HTTP/1.1", authed);
     const csp = header(res, "content-security-policy") ?? "";
@@ -226,13 +230,59 @@ test("/topology allows exactly one script, by nonce, minted per response", async
     assert.ok(nonce, `no nonce in the policy: ${csp}`);
     assert.ok(nonce.length >= 20, "a guessable nonce is 'unsafe-inline' with extra steps");
     assert.doesNotMatch(csp, /unsafe-inline'[^;]*script|script-src[^;]*unsafe-inline/i);
-    // the header and the markup have to name the same value or the block never runs
-    assert.ok(res.includes(`<script nonce="${nonce}">`), "the script does not carry the nonce");
-    assert.equal([...res.matchAll(/<script\b/g)].length, 1);
+
+    // Every script tag, not just the first: the header and the markup have to name the same
+    // value or the tag never runs.
+    const tags = [...res.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
+    assert.ok(tags.length > 0, "the topology page should ship its map");
+    for (const tag of tags) assert.ok(tag.includes(`nonce="${nonce}"`), `unnonced script: ${tag}`);
 
     const again = await raw(port, "GET /topology HTTP/1.1", authed);
     const nonce2 = /script-src 'nonce-([\w-]+)'/.exec(header(again, "content-security-policy") ?? "")?.[1];
     assert.notEqual(nonce2, nonce, "a reused nonce is a nonce an attacker can wait for");
+  });
+});
+
+// style-src gains 'self' on this page and NOWHERE else. The map links React Flow's stylesheet,
+// and widening the policy for every other page would give an injected <link> somewhere to
+// point — on the pages that render LLM output, which is the whole reason those pages have no
+// script-src either.
+test("only /topology may load an external stylesheet", async () => {
+  await withServer(async (port) => {
+    const map = header(await raw(port, "GET /topology HTTP/1.1", authed), "content-security-policy") ?? "";
+    assert.match(map, /style-src 'self' 'unsafe-inline'/);
+
+    for (const path of ["/", "/incidents", "/context"]) {
+      const csp = header(await raw(port, `GET ${path} HTTP/1.1`, authed), "content-security-policy") ?? "";
+      assert.match(csp, /style-src 'unsafe-inline';/, `${path} should not widen style-src`);
+      assert.doesNotMatch(csp, /style-src[^;]*'self'/, `${path} needs no external stylesheet`);
+    }
+  });
+});
+
+// The dashboard's only static assets. Content-addressed, so this is the one response here that
+// is cacheable at all — and the one place `no-store` is deliberately overridden.
+test("the client bundle is served, immutable, and only at the hash it was built with", async () => {
+  await withServer(async (port) => {
+    const page = await raw(port, "GET /topology HTTP/1.1", authed);
+    const src = /<script src="([^"]+)"/.exec(page)?.[1];
+    // Skipped rather than failed when the bundle is absent: `npm test` does not build it, and a
+    // suite that fails on a missing artifact would be reporting on the build, not on this code.
+    if (!src) return;
+
+    const asset = await raw(port, `GET ${src} HTTP/1.1`, authed);
+    assert.match(asset, /^HTTP\/1\.1 200/);
+    assert.match(header(asset, "content-type") ?? "", /text\/javascript/);
+    assert.match(header(asset, "cache-control") ?? "", /immutable/);
+    assert.match(header(asset, "x-content-type-options") ?? "", /nosniff/);
+
+    // The path is a key into a Map of two files read at boot, never a filesystem lookup — so
+    // there is no traversal to defend against and an unknown key is an ordinary 404.
+    assert.match(await raw(port, "GET /assets/nope.js HTTP/1.1", authed), /^HTTP\/1\.1 404/);
+    assert.match(
+      await raw(port, "GET /assets/../../package.json HTTP/1.1", authed),
+      /^HTTP\/1\.1 (404|400)/
+    );
   });
 });
 
