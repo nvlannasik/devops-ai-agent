@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadSkills, resolveSkillsDir, SKILL_MAX_CHARS } from "./index.js";
 import { buildStaticSystemPrompt } from "../prompts/system.js";
+import { parseSeverity } from "../incidents/index.js";
+import { parseConfidence } from "../confidence/index.js";
 
 // The shipped directory, not a fixture. loadSkills throws at boot on any malformation, so this
 // test is what turns "the pod refuses to start" into "npm test fails" — the whole reason
@@ -19,6 +21,30 @@ test("every shipped skill file loads", () => {
 test("exactly one skill is always-on, and it is the RCA format", () => {
   const always = loadSkills(resolveSkillsDir()).all().filter((s) => s.when === "always");
   assert.deepEqual(always.map((s) => s.name), ["rca-format"]);
+});
+
+// The template is the one prompt every RCA is generated against, and it is read literally:
+// it says "Output EXACTLY this structure". It used to print `*🔴 Severity:* \`Critical\`` and
+// `*📈 Confidence:* \`High\`` as finished values while every other field was a [bracketed]
+// placeholder, so models copied them straight through — a `warning` alert was recorded, and
+// recalled, as `critical`. parseSeverity/parseConfidence are the exact readers that ran on
+// that output, so pointing them at the shipped template is the check: a template that still
+// parses as a real level is a template a model can copy into a real incident row.
+test("the RCA template offers no severity or confidence value that can be copied through", () => {
+  const body = loadSkills(resolveSkillsDir()).all().find((s) => s.name === "rca-format")!.body;
+  // Only the block the model is told to reproduce. The prose above it is free to name the
+  // levels — it has to — and running the parsers over the whole file lets a match up there
+  // mask the template line, which is the one thing this test exists to check.
+  const marker = "Output EXACTLY this structure";
+  const idx = body.indexOf(marker);
+  assert.notEqual(idx, -1, "rca-format no longer says 'Output EXACTLY this structure'");
+  const template = body.slice(idx);
+
+  assert.equal(parseSeverity(template), null, "rca-format still names a literal severity level");
+  assert.equal(parseConfidence(template), "unknown", "rca-format still names a literal confidence level");
+  // and the labels the renderer keys on survive — buildRcaBlocks/isRcaResponse need both
+  assert.match(template, /\*[^*]*Severity[^*]*\*/);
+  assert.match(template, /\*[^*]*Confidence[^*]*\*/);
 });
 
 // One representative alert per playbook. A trigger that selects nothing is a playbook that

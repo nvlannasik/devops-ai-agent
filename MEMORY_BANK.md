@@ -473,6 +473,42 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 - The similarity tier is **skipped entirely without query text** (recall then issues exactly 2 queries, never touching `root_cause_tsv`), rendered **last**, labelled as the weakest evidence, and wrapped so a failure there can never break recall.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
 
+### `severity` was two columns wearing one name (`migrations/008`) — fixed 2026-09-02
+Reported as "the alert is `warning` in Slack but `critical` in the DB". Two defects stacked:
+- **`prompts/skills/rca-format.md` shipped a value, not a placeholder.** Under the line
+  *"Output EXACTLY this structure"* it printed `*🔴 Severity:* \`Critical\`` and
+  `*📈 Confidence:* \`High\`` as finished text while every other field was a `[bracketed]`
+  placeholder. Models read `Critical` as part of the required structure and copied it through.
+  Both are now `[level]`, with the allowed values moved into prose **above** the structure block
+  so nothing inside it is copyable. Naming the values inline (`[Critical|High|Medium|Low]`) was
+  tried and rejected: `parseConfidence`'s pattern matches `(high|medium|low)` *inside* the
+  string, so that placeholder still parsed as `high`.
+- **`store()` preferred the RCA text over the alert's label**, and the two use incompatible
+  vocabularies — Alertmanager emits `critical`/`warning`/`info`, the agent's Severity Guidelines
+  say Critical/High/Medium/Low. One column held both, so it could not be filtered or aggregated;
+  the dashboard's filter (`views.ts`, offering exactly critical/warning/info) silently could not
+  reach rows written in the agent's vocabulary, and `recall()` fed the wrong level back into the
+  next investigation of the same alert.
+
+Now: **`severity` is the fact** (the Alertmanager label, exactly what the Slack card rendered)
+and **`assessed_severity` is the judgement** (the RCA's impact call). Disagreement between them
+is signal worth keeping — `warning` assessed `critical` is an under-graded alert, `critical`
+assessed `low` is a noisy rule — so `recall()` prints both, labelled.
+
+Two things worth not re-deriving:
+- **The resolved label is passed to `store()` as an argument, never merged into the label map.**
+  Slack resolves it as `groupLabels.severity ?? firing[0].labels.severity`, but
+  `AlertDeduplicator.fingerprint()` hashes *every* key in that map — writing the resolution back
+  would change the fingerprint and orphan the dedup claim the group was already claimed under.
+- **`parseSeverity` now returns null outside `{critical,high,medium,low}`.** An unreplaced
+  placeholder or an Alertmanager word is the model failing to fill the template in; null reads
+  honestly as "not assessed", where a stray string reads as a judgement.
+
+The regression test is a **prompt contract**: `skills/real.test.ts` runs `parseSeverity` /
+`parseConfidence` over the shipped template — scoped to the text after *"Output EXACTLY this
+structure"*, because a match in the explanatory prose above it masks the template line and the
+test passes while checking nothing (it did, on the first attempt).
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:

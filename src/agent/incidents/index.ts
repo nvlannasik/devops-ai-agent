@@ -94,7 +94,7 @@ export class IncidentMemory {
 
     const [hypo, confirmed] = await Promise.all([
       this.pool.query(
-        `SELECT created_at, severity, confidence, root_cause
+        `SELECT created_at, severity, assessed_severity, confidence, root_cause
            FROM incidents
           WHERE alertname = $1 AND ($2::text IS NULL OR namespace = $2)
           ORDER BY created_at DESC
@@ -138,7 +138,12 @@ export class IncidentMemory {
       const lines = hypo.rows.map((r: any) => {
         const date = new Date(r.created_at).toISOString().slice(0, 10);
         const cause = (r.root_cause || "").slice(0, 300) || "(no root cause recorded)";
-        return `- ${date} (severity ${r.severity || "?"}, confidence ${r.confidence || "?"}): ${cause}`;
+        // both levels, labelled: "alert critical / assessed low" is a recurring false alarm
+        // and "alert warning / assessed critical" is an under-graded alert. Collapsing them
+        // into one number is what let a copied template overwrite the real label.
+        const alerted = r.severity ? `alert ${r.severity}` : "alert severity unknown";
+        const assessed = r.assessed_severity ? `assessed ${r.assessed_severity}` : "not assessed";
+        return `- ${date} (${alerted}, ${assessed}, confidence ${r.confidence || "?"}): ${cause}`;
       });
       sections.push(
         [
@@ -300,23 +305,33 @@ export class IncidentMemory {
   async store(
     labels: Record<string, string>,
     rca: string,
-    slack?: { channel: string; threadTs: string }
+    slack?: { channel: string; threadTs: string },
+    /** The Alertmanager severity the Slack card rendered. Passed in rather than read off
+     *  `labels` because the caller resolves it across the group (commonLabels, then the
+     *  first firing alert) and that resolution must not be written back into the label map —
+     *  AlertDeduplicator fingerprints every key, so an added one orphans the claim. */
+    alertSeverity?: string | null
   ): Promise<number | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
     if (!alertname) return null;
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, confidence, root_cause, rca, channel, thread_ts, group_labels)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
          RETURNING id`,
         [
           alertname,
           labels.namespace ?? null,
-          // conversational recurrence replies have no RCA labels — fall back to the
-          // alert's own severity and the reply's opening as the recallable root cause
-          parseSeverity(rca) ?? labels.severity?.toLowerCase() ?? null,
+          // The fact: what Alertmanager labelled it, the same value the Slack alert card
+          // renders. Null for an ad-hoc mention, which has no alert behind it to label.
+          (alertSeverity ?? labels.severity)?.toLowerCase() ?? null,
+          // The judgement: what the RCA argued the impact was. Null when there is no RCA to
+          // read it from — conversational recurrence replies skip the template.
+          parseSeverity(rca),
           parseConfidence(rca),
+          // recurrence replies have no RCA sections either — the reply's opening is what
+          // stays recallable
           extractRootCause(rca) ?? (rca.replace(/\s+/g, " ").trim().slice(0, 300) || null),
           rca,
           slack?.channel ?? null,
@@ -460,10 +475,19 @@ export class IncidentMemory {
   }
 }
 
+// The agent's own impact scale, from prompts/system.md "Severity Guidelines". Deliberately
+// NOT Alertmanager's critical/warning/info — see migration 008 for why the two are separate
+// columns. Anything outside this set is the model failing to fill the template in (an
+// unreplaced `[Critical|High|Medium|Low]` placeholder, prose, an Alertmanager word), and a
+// null reads honestly as "not assessed" where a stray string would read as a judgement.
+const ASSESSED_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+
 // matches the RCA format: "*🔴 Severity:* `critical`" style label
 export function parseSeverity(rca: string): string | null {
   const m = rca.match(/\*[^*]*Severity[^*]*\*[^`]*`\[?([^\]`]+)\]?`/i);
-  return m ? m[1].trim().toLowerCase() : null;
+  if (!m) return null;
+  const value = m[1].trim().toLowerCase();
+  return ASSESSED_SEVERITIES.has(value) ? value : null;
 }
 
 // pull the "📍 Root Cause" section up to the next emoji section header

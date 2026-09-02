@@ -26,9 +26,19 @@ multi-line content
 - Stack traces
 - Multi-line error output
 
+**Every `[bracketed]` value below is a placeholder to replace — including the two `[level]`
+values. Never emit a bracket in your output.**
+
+- Severity `[level]` is one of *Critical*, *High*, *Medium*, *Low*, chosen from the Severity
+  Guidelines by the impact you actually found. It is YOUR judgement, not a copy of the alert's
+  own `severity` label: Alertmanager says `critical`/`warning`/`info`, and a `warning` alert
+  can still be Critical, just as a `critical` one can turn out to be Low.
+- Severity `[emoji]` must match the level you chose: 🔴 Critical, 🟠 High, 🟡 Medium, 🟢 Low.
+- Confidence `[level]` is one of *High*, *Medium*, *Low*, from the Confidence Scoring rules.
+
 Output EXACTLY this structure (labels must match precisely for rendering):
 
-*🔴 Severity:* `Critical`
+*[emoji] Severity:* `[level]`
 
 *📍 Root Cause*
 [One paragraph: what failed, why it failed, what triggered it — evidence-based only]
@@ -48,4 +58,4 @@ Output EXACTLY this structure (labels must match precisely for rendering):
 *⚠️ Impact if Unresolved*
 [Who is affected NOW and what breaks next — named from the blast-radius calls, not assumed. Lead with the dependants you found (`namespace/service`, `n/m ready`, the exposed host), then what fails next if nobody acts. If the checks showed nothing depends on this workload, say the impact is contained to it and why.]
 
-*📈 Confidence:* `High` — [one sentence: which evidence supports this and what would raise it]
+*📈 Confidence:* `[level]` — [one sentence: which evidence supports this and what would raise it]
