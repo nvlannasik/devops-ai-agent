@@ -3,6 +3,7 @@ import type { NodeProps } from "@xyflow/react";
 import type { TopoNodeData, TopoNodeKind } from "../topology-graph.js";
 import type { TopoFlowNode } from "./layout.js";
 import { justDragged } from "./drag-state.js";
+import { Icon } from "./icons.js";
 
 // The class vocabulary is deliberately the one the SVG map already used — .topo-self,
 // .topo-backend-worker, .topo-off and the rest. Not nostalgia: topoLegend() in views.ts states
@@ -17,6 +18,7 @@ const KIND_CLASS: Record<TopoNodeKind, string> = {
   backend: "topo-backend",
   capability: "topo-capability",
   tool: "topo-tool",
+  store: "topo-store",
 };
 
 function classesFor(d: TopoNodeData): string {
@@ -51,6 +53,9 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
 
   const body = (
     <>
+      {/* Before the title, inside whatever wraps it, so it travels with the text rather than
+          floating in the card's corner — and so a truncating title pushes against it. */}
+      {d.icon ? <Icon name={d.icon} /> : null}
       <span className="topo-node-title">{d.title}</span>
       {d.sub ? <span className="topo-node-sub">{d.sub}</span> : null}
       {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing:
@@ -71,16 +76,20 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
           edge the long way around the card. */}
       <Handle type="target" position={Position.Left} isConnectable={false} />
 
-      {d.kind === "capability" ? (
-        // A family is the one card with two things to offer, so it carries two controls rather
-        // than one that has to guess. They are SIBLINGS, not nested: a <button> inside an <a>
-        // is invalid, and either nested order makes one of them unreachable by keyboard.
+      {d.expanded !== undefined ? (
+        // A card with children has two things to offer, so it carries two controls rather than
+        // one that has to guess. They are SIBLINGS, not nested: a <button> inside an <a> is
+        // invalid, and either nested order makes one of them unreachable by keyboard.
+        //
+        // Keyed on `expanded` being SET rather than on the kind: a capability always has tools,
+        // but Postgres has tables only because stores.ts found the migrations, and a card that
+        // rendered a disclosure over an empty list would be a control that does nothing.
         <>
           <button
             type="button"
             className="topo-node-toggle"
             aria-expanded={!!d.expanded}
-            aria-label={`${full} — ${d.expanded ? "hide" : "show"} its tools`}
+            aria-label={`${full} — ${d.expanded ? "hide" : "show"} what it holds`}
           >
             {body}
             <span className="topo-node-chevron" aria-hidden="true">

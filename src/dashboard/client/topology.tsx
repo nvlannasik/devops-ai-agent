@@ -78,7 +78,9 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
   // serialized node data — React Flow re-creates its node cache whenever that object's
   // identity changes, and a function in it would change on every render.
   const onNodeClick = useCallback((_: unknown, node: TopoFlowNode) => {
-    if (node.data.kind !== "capability") return;
+    // Any card with children, not just a tool family: Postgres and Redis expand into what they
+    // hold. `expanded` is set by buildGraph only where there is something to open.
+    if (node.data.expanded === undefined) return;
     // The row link inside the card stops its own propagation, so reaching here means the
     // toggle (or the card around it) was clicked. A drag that ends on a card is not a click.
     if (justDragged()) return;

@@ -1832,6 +1832,34 @@ form.signout button {
 /* The word, never a colour — --accent is the SQS hop and --warning is not-configured, and a
    third meaning on either would make both ambiguous. Weight and case carry it instead, which is
    the same trick stateBadge() uses on the incident list. */
+/* Sized to the type beside it and given no colour of its own: currentColor means it dims with
+   the title on a not-configured card and brightens with it everywhere else, which is one fewer
+   rule than stating both. flex-shrink 0 or a long title squeezes it to nothing. */
+.topo-node-icon {
+  width: 14px; height: 14px; flex: 0 0 auto; color: var(--text-dim);
+  position: absolute; left: var(--sp-3); top: var(--sp-2);
+}
+.topo-self .topo-node-icon { color: var(--text); }
+/* The icon sits in the card's own padding, so the text has to step aside for it rather than
+   flow under it. Scoped to the cards that HAVE one — nothing else pays the indent. */
+.topo-in .topo-node-title,
+.topo-in .topo-node-sub,
+.topo-out .topo-node-title,
+.topo-out .topo-node-sub { padding-left: 1.25rem; }
+
+/* One thing a dependency holds: a table, a key namespace. Two lines, and the second is a
+   phrase rather than an identifier — which is why this is the widest leaf and the tool is the
+   narrowest. Solid outline where a tool is dashed: a table is something this agent WRITES,
+   a tool is something another process said it exposes. */
+.topo-store {
+  flex-direction: column; justify-content: center; gap: 1px;
+  padding: 0 var(--sp-3); border-width: 1px; border-radius: 6px;
+}
+.topo-store .topo-node-title {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600; color: var(--text);
+}
+.topo-store .topo-node-sub { font-family: var(--font-ui); font-size: var(--fs-3xs, .625rem); }
+
 .topo-node-write {
   margin-left: auto; flex: 0 0 auto;
   font-family: var(--font-data); font-size: var(--fs-3xs, .625rem); letter-spacing: .08em;
@@ -2067,7 +2095,7 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
      rewritten rather than hidden. */
   .topo-legend-note { font-size: 0; font-style: normal; }
   .topo-legend-note::after {
-    content: "Tap a tool family to list its tools · ↓ jumps to a card’s row below.";
+    content: "Tap + to open a card · ↓ jumps to its row below.";
     font-size: var(--fs-sm); font-style: italic;
   }
 }

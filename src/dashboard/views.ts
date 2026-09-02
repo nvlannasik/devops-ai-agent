@@ -1230,7 +1230,7 @@ function topoLegend(t: Topology): string {
     // "every card links to its row" was retired here rather than reworded: it stopped being
     // true when tools became nodes, and a tool has no row of its own — the tables list it
     // inside its family's <details>. The arrow names the affordance that IS still on the card.
-    `<li class="topo-legend-note">Drag to move · Ctrl + scroll to zoom · click a tool family to list its tools · ↓ jumps to a card's row below.</li>` +
+    `<li class="topo-legend-note">Drag to move · Ctrl + scroll to zoom · <b>+</b> opens a card · ↓ jumps to its row below.</li>` +
     `</ul>`
   );
 }

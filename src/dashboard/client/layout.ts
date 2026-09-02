@@ -21,9 +21,12 @@ import type { TopoGraph, TopoNode, TopoNodeData, TopoNodeKind } from "../topolog
 // be exactly one of them. `nodes.tsx` imports these; do not restate them in CSS.
 export const NODE_SIZE: Record<TopoNodeKind, { width: number; height: number }> = {
   // The three structural boxes carry a full endpoint as their caption, so they get the width.
-  inbound: { width: 216, height: 64 },
-  agent: { width: 216, height: 64 },
-  outbound: { width: 216, height: 64 },
+  // 240 rather than 216 because the glyph takes 1.25rem out of the title's line: at 216 the
+  // longest label this map actually has, "Redis (conversation memory)", came back truncated the
+  // moment icons landed. The card pays for the icon; the label does not.
+  inbound: { width: 240, height: 64 },
+  agent: { width: 240, height: 64 },
+  outbound: { width: 240, height: 64 },
   // A backend carries a THIRD line — name, model, and the route chip — so it is the one card
   // that needs the extra height; a capability carries one word and a count. Same reasoning as
   // the old CHIP_MIN_W / CAP_MIN_W split, which is why these are still two numbers and not one.
@@ -38,7 +41,15 @@ export const NODE_SIZE: Record<TopoNodeKind, { width: number; height: number }> 
   // useful zoom; narrower and every name ellipses to uselessness. `--font-data` at --fs-2xs
   // fits ~26 characters at 200px, which covers all but a handful.
   tool: { width: 200, height: 34 },
+  // A store carries two lines — the table or namespace, and what it holds / which migration
+  // introduced it — so it is taller than a tool and wider, because "conversation history, per
+  // Slack thread" is a phrase rather than an identifier.
+  store: { width: 230, height: 46 },
 };
+
+/** The leaf kinds: reached by expanding the card above them, and laid out as a block rather
+ *  than a rank for the reason in the note over layoutGraph(). */
+const isLeaf = (kind: TopoNodeKind): boolean => kind === "tool" || kind === "store";
 
 export type TopoFlowNode = Node<TopoNodeData, "topo">;
 export type TopoFlowEdge = Edge;
@@ -50,7 +61,7 @@ export type TopoFlowEdge = Edge;
  * in the component means nothing downstream has to remember which convention it is holding —
  * an off-by-half-a-box is the kind of bug that looks like a layout opinion.
  */
-// Tools are laid out as a BLOCK, not as a rank. dagre would stack a family's tools in one
+// Leaves — a family's tools, a store's tables — are laid out as a BLOCK, not as a rank. dagre would stack a family's tools in one
 // column — 34 of them under k8s is ~1400px of vertical, which pushed the rest of the map off
 // screen the first time it was tried. So each open family is handed to dagre as ONE synthetic
 // node sized to the whole block: dagre reserves the space and keeps everything else clear of
@@ -60,15 +71,15 @@ const GRID_GAP = 6;
 // Columns for a roughly square block. A tool card is wide and short (200x34), so a square
 // block is not a square count: solving cols*W == (n/cols)*H for cols gives sqrt(n*H/W).
 // 34 tools -> 3 columns of 12, which is 612x474 rather than 200x1400.
-function gridCols(n: number): number {
-  const { width: w, height: h } = NODE_SIZE.tool;
+function gridCols(n: number, kind: TopoNodeKind): number {
+  const { width: w, height: h } = NODE_SIZE[kind];
   return Math.max(1, Math.round(Math.sqrt((n * (h + GRID_GAP)) / (w + GRID_GAP))));
 }
 
-function gridSize(n: number): { width: number; height: number; cols: number; rows: number } {
-  const cols = gridCols(n);
+function gridSize(n: number, kind: TopoNodeKind): { width: number; height: number; cols: number; rows: number } {
+  const cols = gridCols(n, kind);
   const rows = Math.ceil(n / cols);
-  const { width: w, height: h } = NODE_SIZE.tool;
+  const { width: w, height: h } = NODE_SIZE[kind];
   return {
     cols,
     rows,
@@ -84,11 +95,11 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
   const parentOfTool = new Map<string, string>();
   for (const e of graph.edges) {
     const target = graph.nodes.find((n) => n.id === e.target);
-    if (target?.data.kind === "tool") parentOfTool.set(e.target, e.source);
+    if (target !== undefined && isLeaf(target.data.kind)) parentOfTool.set(e.target, e.source);
   }
   const toolsByParent = new Map<string, TopoNode[]>();
   for (const n of graph.nodes) {
-    if (n.data.kind !== "tool") continue;
+    if (!isLeaf(n.data.kind)) continue;
     const parent = parentOfTool.get(n.id);
     if (!parent) continue;
     const list = toolsByParent.get(parent) ?? [];
@@ -103,13 +114,13 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
   g.setDefaultEdgeLabel(() => ({}));
 
   for (const n of graph.nodes) {
-    if (n.data.kind === "tool") continue;
+    if (isLeaf(n.data.kind)) continue;
     g.setNode(n.id, { ...NODE_SIZE[n.data.kind] });
   }
   // One reservation per open family, edged from it so dagre ranks it just past its parent.
   const blockId = (parent: string): string => `__tools__${parent}`;
   for (const [parent, tools] of toolsByParent) {
-    const { width, height } = gridSize(tools.length);
+    const { width, height } = gridSize(tools.length, tools[0]!.data.kind);
     g.setNode(blockId(parent), { width, height });
     g.setEdge(parent, blockId(parent));
   }
@@ -122,7 +133,7 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
 
   const nodes: TopoFlowNode[] = [];
   for (const n of graph.nodes) {
-    if (n.data.kind === "tool") continue;
+    if (isLeaf(n.data.kind)) continue;
     const size = NODE_SIZE[n.data.kind];
     const pos = g.node(n.id);
     nodes.push({
@@ -139,8 +150,9 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
   // Deal each family's tools into its reservation, reading order: left to right, then down.
   for (const [parent, tools] of toolsByParent) {
     const block = g.node(blockId(parent));
-    const { cols, width, height } = gridSize(tools.length);
-    const { width: w, height: h } = NODE_SIZE.tool;
+    const kind = tools[0]!.data.kind;
+    const { cols, width, height } = gridSize(tools.length, kind);
+    const { width: w, height: h } = NODE_SIZE[kind];
     const left = block.x - width / 2;
     const top = block.y - height / 2;
     tools.forEach((n, i) => {

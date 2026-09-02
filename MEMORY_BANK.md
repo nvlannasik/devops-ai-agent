@@ -819,6 +819,16 @@ Load-bearing, and each cost something to get right:
   uniform now and says the map is live. The SQS distinction rests on what did not move — the
   accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
   and the legend row. Four signals became three; none of the survivors is spare.
+- **Postgres and Redis expand into what they hold (2026-09-02), and both lists are derived**
+  (`src/dashboard/stores.ts`). Postgres is parsed out of the shipped `migrations/*.sql`; Redis
+  is composed from `REDIS_KEYS` constants owned by `agent/memory` and `agent/dedup`, guarded by
+  a test that greps those modules and fails if a literal prefix reaches a redis call without
+  being declared. A transcribed list of five tables is correct until migration 008 and then
+  quietly wrong, which is the one thing this page must not be. Nothing probes. Both render even
+  when the dependency is not configured — the schema is what this agent *would* write. Cards
+  also carry a glyph now (`IconName`, a closed union, drawn by `client/icons.tsx`), which cost
+  the three structural kinds 24px of width: at 216 "Redis (conversation memory)" truncated the
+  moment the icon took its indent.
 - **Tool families expand into child nodes (2026-09-02).** Clicking a capability card toggles
   it; the open set is a PARAMETER to `buildGraph`, not client-private state, so the claim
   ("a tool hangs off the family that exposes it") stays testable. Three things had to be got

@@ -13,6 +13,17 @@ import type { BackendKind } from "../agent/llm/registry.js";
 // topology.ts re-exports all of it, so every existing `from "./topology.js"` import still
 // resolves and there is no second name for any of these.
 
+/** One thing a dependency HOLDS: a Postgres table, a Redis key namespace. Derived, never
+ *  transcribed — see `stores.ts` for why that distinction is the whole point. */
+export interface Store {
+  label: string;
+  detail: string;
+}
+
+/** Named rather than free-form so the client can only draw glyphs it actually has, and so
+ *  `buildTopology` naming one is the same kind of explicit act as naming a field. */
+export type IconName = "chat" | "bell" | "db" | "cache" | "queue" | "plug" | "chip";
+
 export interface Node {
   label: string;
   detail: string;   // already redacted — safe to render
@@ -23,6 +34,10 @@ export interface Node {
   // work until someone rewords it, and would fail silently by drawing the edge from the
   // wrong place. Optional because only the nodes the diagram references need one.
   id?: string;
+  /** What this dependency holds, if it is the kind that holds anything. A card with children
+   *  becomes expandable on the map; one without stays a leaf. */
+  children?: Store[];
+  icon?: IconName;
 }
 
 export interface BackendNode {

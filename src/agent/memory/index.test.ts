@@ -1,4 +1,7 @@
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
+import { REDIS_KEYS } from "./index.js";
+import { REDIS_KEYS as DEDUP_KEYS } from "../dedup/index.js";
 import assert from "node:assert/strict";
 import { ConversationMemory } from "./index.js";
 import type { Message } from "../llm/types.js";
@@ -140,4 +143,33 @@ test("clear() drops the playbooks with the conversation on both backends", async
   await redisMemory.clear("t1");
   assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1"]);
   assert.deepEqual(await redisMemory.getSkills("t1"), []);
+});
+
+// The topology page lists REDIS_KEYS as "what this agent keeps in Redis". A second copy of that
+// list would drift the first time someone added a key; this is what stops the FIRST copy from
+// drifting from the code it describes. Same trick as skills/real.test.ts: read the shipped
+// source, not a fixture, so the assertion is about what actually ships.
+test("every Redis key this agent writes is named in REDIS_KEYS", async () => {
+  const files = [
+    new URL("./index.ts", import.meta.url),
+    new URL("../dedup/index.ts", import.meta.url),
+  ];
+  const declared = new Set([
+    ...Object.values(REDIS_KEYS).map((k) => k.prefix),
+    ...Object.values(DEDUP_KEYS).map((k) => k.prefix),
+  ]);
+
+  for (const file of files) {
+    const src = await readFile(file, "utf8");
+    // A literal prefix reaching a redis call — `redis.get("conv:...")` rather than through the
+    // constant. The constant form interpolates and so never matches this.
+    for (const m of src.matchAll(/redis\.\w+\(\s*`([a-z_]+):/g)) {
+      assert.ok(
+        declared.has(m[1]!),
+        `${m[1]}: is written to Redis but is not in REDIS_KEYS — the topology page will not list it`
+      );
+    }
+  }
+  // A negative control: without this, a regex that matched nothing would pass silently.
+  assert.ok(declared.size >= 4, "the four known prefixes should be declared");
 });

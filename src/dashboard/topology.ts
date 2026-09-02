@@ -1,14 +1,15 @@
 import { config } from "../config/index.js";
 import { parseRegistry, type BackendSpec } from "../agent/llm/registry.js";
 import { rowId } from "./topology-types.js";
-import type { BackendNode, Capability, McpTool, Node, Tool, Topology } from "./topology-types.js";
+import { postgresTables, redisNamespaces } from "./stores.js";
+import type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Topology } from "./topology-types.js";
 
 // The shape of this page's data, and the rowId() anchor helper, live in `topology-types.ts` —
 // a module with no config import, because the browser bundle needs them (see the note there).
 // Re-exported here so `from "./topology.js"` keeps resolving for every existing caller and no
 // type in this page ends up with two names.
 export { rowId };
-export type { BackendNode, Capability, McpTool, Node, Tool, Topology };
+export type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Topology };
 
 const NOT_CONFIGURED = "not configured";
 
@@ -97,12 +98,14 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       detail: config.slack.alertChannel ? `channel ${config.slack.alertChannel}` : NOT_CONFIGURED,
       meta: `bot token ${present(config.slack.botToken)}, socket mode ${present(config.slack.appToken)}`,
       configured: !!config.slack.alertChannel,
+      icon: "chat",
     },
     {
       label: "Alertmanager",
       detail: `POST /alert on :${num(config.port)}`,
       meta: `webhook token ${present(config.alertWebhook.token)}`,
       configured: true,
+      icon: "bell",
     },
   ];
 
@@ -122,6 +125,12 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
         : NOT_CONFIGURED,
       meta: `ssl ${config.incidents.db.sslMode}`,
       configured: config.incidents.enabled,
+      icon: "db",
+      // What the incident memory is MADE of, parsed out of the shipped migrations rather than
+      // listed here — see stores.ts. Present even when the database is NOT configured: the
+      // schema is what this agent would write, and a reader asking "where does an incident go"
+      // deserves the answer either way.
+      children: postgresTables(),
     },
     {
       label: "Redis (conversation memory)",
@@ -131,6 +140,11 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
           : "in-memory (no Redis)",
       meta: `tls ${config.memory.redis.tls ? "on" : "off"}`,
       configured: config.memory.backend === "redis",
+      icon: "cache",
+      // Composed from the constants the writing modules own, so this is a view of the code
+      // rather than a copy of it. Shown on the in-memory fallback too, for the same reason the
+      // tables are: these are the namespaces this agent uses, Redis configured or not.
+      children: redisNamespaces(),
     },
     {
       id: "llm-worker",
@@ -138,12 +152,14 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       detail: `${config.llm.sqs.requestQueueName} -> ${config.llm.sqs.responseQueueName}`,
       meta: `region ${config.llm.sqs.region}, timeout ${num(config.llm.sqs.timeoutMs / 1000)}s`,
       configured: true,
+      icon: "queue",
     },
     {
       label: "GitOps remediation (SQS)",
       detail: config.gitops.enabled ? config.gitops.requestQueueName : NOT_CONFIGURED,
       meta: `timeout ${num(config.gitops.timeoutMs / 1000)}s`,
       configured: config.gitops.enabled,
+      icon: "queue",
     },
     // Last on purpose, and the diagram is why: its tool families hang off it in a cluster of
     // their own, and only the bottom node of this column has a clear run downward — an edge
@@ -158,6 +174,7 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
           ? `http, auth token ${present(config.mcp.http.authToken)}`
           : "stdio",
       configured: true,
+      icon: "plug",
     },
   ];
 

@@ -1,5 +1,5 @@
 import { rowId } from "./topology-types.js";
-import type { BackendNode, Capability, Node, Tool, Topology } from "./topology-types.js";
+import type { BackendNode, Capability, IconName, Node, Store, Tool, Topology } from "./topology-types.js";
 
 // The graph model the React Flow map is built from. It lives HERE, in a plain .ts module with
 // no React import, rather than inside src/dashboard/client/ — because what it encodes is a
@@ -13,7 +13,18 @@ import type { BackendNode, Capability, Node, Tool, Topology } from "./topology-t
 // Positions are deliberately absent. dagre assigns them in the browser (client/layout.ts) —
 // see the note there for why the hand-laid coordinates this replaced are not reproduced.
 
-export type TopoNodeKind = "inbound" | "agent" | "outbound" | "backend" | "capability" | "tool";
+export type TopoNodeKind =
+  | "inbound"
+  | "agent"
+  | "outbound"
+  | "backend"
+  | "capability"
+  // The two leaf kinds, both reached by expanding the card above them. They are separate kinds
+  // rather than one "child", because they are different claims: a tool is something the MCP
+  // server said it exposes, a store is something this agent WRITES. The map draws them alike
+  // and says so in two different words.
+  | "tool"
+  | "store";
 
 // A `type` alias, not an `interface`, and that is a constraint rather than a preference:
 // React Flow's Node<T> requires `T extends Record<string, unknown>`, which an interface does
@@ -36,8 +47,10 @@ export type TopoNodeData = {
   viaWorker?: boolean;
   route?: BackendNode["route"];
   tools?: number;
-  /** Set on a capability, so its card can say whether clicking it will open or close. */
+  /** Set on any card that has children, so it can say whether clicking will open or close.
+   *  Absent means the card is a leaf and its click does what it always did. */
   expanded?: boolean;
+  icon?: IconName;
   /**
    * Set on a tool. The agent's OWN predicate for "this can change the cluster" (`Tool.write`),
    * carried through rather than re-derived. Shown as the word, never as a colour: this map
@@ -77,6 +90,11 @@ export const AGENT_ID = "agent";
 /** Node id for one tool under a capability. Not a row id: a tool has no row of its own — the
  * tables list it inside its family's `<details>` — so these nodes carry no `href`. */
 export const toolId = (capIndex: number, toolIndex: number): string => `tool-${capIndex}-${toolIndex}`;
+
+/** Node id for one thing a dependency holds — a Postgres table, a Redis namespace. Keyed on the
+ *  PARENT'S id rather than an index of its own, so it survives the outbound list being
+ *  reordered; nothing about a store is positional the way a backend chip is. */
+export const storeId = (parentId: string, i: number): string => `store-${parentId}-${i}`;
 
 /**
  * A node's id IS the id of its row in the tables below, for every node that has one — so the
@@ -125,8 +143,26 @@ export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set(
   // (llm-worker, devops-mcp-server) — that is resolved after the loop, by id, never by label.
   const outIds = t.outbound.map((n: Node, i: number) => {
     const id = rowId("out", i);
-    push(id, nodeData("outbound", n, id));
+    const isOpen = expanded.has(id);
+    push(id, { ...nodeData("outbound", n, id), ...(n.children?.length ? { expanded: isOpen } : {}) });
     link(agent, id, "call");
+
+    // What this dependency HOLDS — the tables of the incident memory, the key namespaces of the
+    // conversation cache. Both lists are derived rather than transcribed (see stores.ts), which
+    // is what makes them safe to state on a page that claims to report the process.
+    if (isOpen && n.children) {
+      n.children.forEach((c: Store, j: number) => {
+        const childId = storeId(id, j);
+        push(childId, {
+          kind: "store",
+          title: c.label,
+          sub: c.detail,
+          meta: `${n.label} — ${c.detail}`,
+          configured: true,
+        });
+        link(id, childId, "call");
+      });
+    }
     return id;
   });
 
@@ -213,5 +249,6 @@ function nodeData(kind: "inbound" | "outbound", n: Node, id: string): TopoNodeDa
     meta: n.meta,
     configured: n.configured,
     href: `#${id}`,
+    ...(n.icon ? { icon: n.icon } : {}),
   };
 }
