@@ -320,7 +320,7 @@ test("the map says it needs JavaScript, and the rest of the page does not", () =
   // a nonce covers the tags it is on and nothing else, so either would be dead markup that
   // only looks like it works.
   assert.doesNotMatch(html, /onclick=|javascript:/i);
-  assert.match(html, /<div id="topo-root" class="topo-view" data-fallback>/);
+  assert.match(html, /<div id="topo-root" data-fallback>/);
   assert.match(html, /needs JavaScript/);
   // progressive disclosure in the TABLES is still script-free: <details> is the only widget
   // that works under a policy with no script-src at all, which is what every other page has.
@@ -386,9 +386,12 @@ test("the server ships no map controls of its own", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
   assert.doesNotMatch(html, /data-zoom=/, "the old toolbar is gone, not merely hidden");
   assert.doesNotMatch(html, /name="topo-zoom"/, "and so is the radio scale control");
-  // The frame is a mount point and a key. Anything else in it is markup React will discard.
+  // The frame is a mount point and NOTHING else. The legend moved into the bundle with the
+  // card styling (client/legend.tsx) — it has to call the same cardClass() the cards do, or its
+  // swatches become a hand-copied set of Tailwind strings, which is the drift the swatch rule
+  // exists to prevent. Anything the server rendered inside the mount, React discards.
   assert.match(html, /<div class="card flush topo-frame">/);
-  assert.match(html, /<ul class="topo-legend">/);
+  assert.doesNotMatch(html, /topo-legend|topo-swatch/, "the key is the client's now");
 });
 
 // The rest of the dashboard gets no script-src at all (see csp() in server.ts). A script that
@@ -2094,20 +2097,27 @@ test("the drawer slides, behind the reduced-motion guard", () => {
 
 // ---------- the dependency map ----------
 
-// An arrow is nothing but its stroke, and in the light scheme a node card is nothing but its
+// An arrow is nothing but its stroke, and in the light scheme a card is nothing but its
 // outline (--surface and --surface-raised are the same white, so the card has no fill contrast
 // at all). Both were once drawn in --border-strong — a BORDER token — at 1.65:1, against the
-// 3:1 a load-bearing graphic needs. Every mark carrying STATE already cleared it, so the
-// discipline had been applied to state and skipped for structure. It survived the move to
-// React Flow, whose own default is a light grey of its own.
-test("the map's structural strokes come off the mark ramp, not a border token", () => {
-  for (const sel of ["\\.topo-node", "\\.react-flow__edge-path", "\\.react-flow__arrowhead \\*"]) {
+// 3:1 a load-bearing graphic needs.
+//
+// The CARDS moved to Tailwind, so their half of this now lives in client/card-variants.test.ts.
+// What is left here is the library's own furniture, which stays plain CSS, plus the ALIAS that
+// carries the decision across: `border-border` must point at --mark-line and not at --border,
+// or every card silently drops onto a hairline token.
+test("the map's structural strokes come off the mark ramp, not a border token", async () => {
+  for (const sel of ["\\.react-flow__edge-path", "\\.react-flow__arrowhead \\*"]) {
     const rule = STYLES.match(new RegExp(`^${sel} \\{[^}]*\\}`, "m"))?.[0] ?? "";
     assert.ok(rule, `no ${sel} rule`);
     assert.match(rule, /var\(--mark-line\)/, `${sel} still draws in a border token`);
     assert.doesNotMatch(rule, /var\(--border-strong\)/);
   }
   assert.match(STYLES, /--mark-line: #7d8797/);
+
+  const tw = await readFile(new URL("./client/tailwind.css", import.meta.url), "utf8");
+  assert.match(tw, /--color-border: var\(--mark-line\)/, "the alias is the decision, not a mapping");
+  assert.doesNotMatch(tw, /--color-border: var\(--border\)/);
 });
 
 // The dot grid stays where it is, and that is a decision rather than an oversight: it is a
@@ -2117,26 +2127,16 @@ test("the map's decorative lines are left alone", () => {
   assert.match(STYLES, /\.react-flow__background pattern circle \{ fill: var\(--border\); \}/);
 });
 
-// State is the only thing that earns a colour on this map, and it is the same two facts it has
-// always been. Never colour ALONE: not-configured is dashed as well as amber, and the SQS edge
-// is animated as well as accented.
-test("the map spends colour on state and nothing else", () => {
-  const off = STYLES.match(/^\.topo-off \{[^}]*\}/m)?.[0] ?? "";
-  assert.match(off, /var\(--warning\)/);
-  assert.match(off, /border-style: dashed/, "state never rests on colour alone");
-
-  const worker = STYLES.match(/^\.topo-backend-worker \{[^}]*\}/m)?.[0] ?? "";
-  assert.match(worker, /var\(--accent\)/);
-
-  // The structural hooks carry no colour of their own — a tool family especially, since the
-  // agent knows the server ADVERTISED it, not that calling it works.
-  for (const sel of [".topo-in", ".topo-out", ".topo-capability"]) {
-    assert.doesNotMatch(STYLES, new RegExp(`^\\${sel} \\{`, "m"), `${sel} should carry no rule of its own`);
-  }
+// The cards are Tailwind now, so styles.ts must not still be styling them: it is the inline
+// <style>, which comes LAST in the head, so a leftover rule would beat every shadcn variant and
+// the two systems would fight on a page nobody would think to check.
+test("styles.ts no longer styles the map's cards", () => {
+  assert.doesNotMatch(STYLES, /^\.topo-node|^\.topo-self|^\.topo-legend|^\.topo-swatch/m);
+  // What it keeps is the frame and the library's furniture.
+  assert.match(STYLES, /^\.topo-view \{/m);
+  assert.match(STYLES, /^\.react-flow__controls \{/m);
 });
 
-// React Flow renders nothing at all if its container collapses, and this container's height is
-// not implied by anything — the canvas is absolutely positioned inside it.
 test("the map's frame states a height", () => {
   assert.match(STYLES, /\.topo-view \{ height: clamp\([^)]*\); width: 100%; \}/);
 });
@@ -2144,59 +2144,30 @@ test("the map's frame states a height", () => {
 // The vocabulary was never stated: an amber dashed card means "not configured" and an accented
 // one means "over SQS via llm-worker" — the one fact this map exists to make obvious — and a
 // reader had to already know.
-test("the map carries a key, drawn with the same classes as the map", () => {
-  const t: Topology = {
-    ...baseTopology,
-    outbound: [{ label: "SQS", detail: "q", meta: "", configured: false }],
-    backends: [{ name: "b", kind: "private-llm", model: "m", route: "light", endpoint: "sqs://x", viaWorker: true }],
-  };
-  const html = topologyPage(t, NONCE, ASSETS);
-  assert.match(html, /<ul class="topo-legend">/);
-  // The swatches ARE fragments of the drawing — same classes AND the same element. The classes
-  // alone were not enough once before: the worker mark is the border of a CARD, and a swatch
-  // drawn as something else picks up a different rule at equal specificity. The map's nodes are
-  // <div class="topo-node …">, so these are too.
-  assert.match(html, /<div class="topo-node topo-self topo-swatch"/);
-  assert.match(html, /<div class="topo-node topo-backend topo-backend-worker topo-swatch"/);
-  assert.match(html, /<div class="topo-node topo-off topo-swatch"/);
-  assert.doesNotMatch(html, /<span[^>]*topo-backend-worker/, "not a different element from the map's");
-  assert.match(html, /reached over SQS via llm-worker/);
-  assert.match(html, /not configured/);
-  // ...and .topo-swatch may only resize. Anything else and the key stops being a key.
-  const swatch = STYLES.match(/^\.topo-swatch \{[^}]*\}/m)?.[0] ?? "";
-  assert.doesNotMatch(swatch, /border-color|background/, "the swatch must inherit what it explains");
+//
+// The key is rendered by the client now, so what the server can be held to is that it does NOT
+// render one. The rule the key exists for — same element, same classes as the drawing — is
+// asserted where it now lives: legend.tsx calls the same cardClass() the cards do, and
+// card-variants.test.ts pins that a caller's size override merges instead of stacking.
+test("the key is built from the same composition as the cards, not a copy of it", async () => {
+  const legend = await readFile(new URL("./client/legend.tsx", import.meta.url), "utf8");
+  assert.match(legend, /cardClass\(/, "the swatch must be a real card");
+  assert.doesNotMatch(legend, /border-warning|border-primary|bg-card/,
+    "a hand-copied class here is exactly the drift the swatch rule exists to stop");
+  // Conditional on what was drawn: a key explaining a mark that is not on screen is a key that
+  // has to be read past.
+  assert.match(legend, /viaWorker \?/);
+  assert.match(legend, /unconfigured \?/);
 });
 
-// A key that explains a colour which is not on screen is a key that has to be read past.
-test("the key only explains what was actually drawn", () => {
-  const clean: Topology = {
-    ...baseTopology,
-    inbound: [{ label: "Slack", detail: "socket", meta: "", configured: true }],
-    backends: [{ name: "b", kind: "claude", model: "m", route: "heavy", endpoint: "api", viaWorker: false }],
-  };
-  const html = topologyPage(clean, NONCE, ASSETS);
-  const legend = html.slice(html.indexOf(`<ul class="topo-legend">`), html.indexOf("</ul>", html.indexOf(`<ul class="topo-legend">`)));
-  assert.doesNotMatch(legend, /topo-off/, "nothing is unconfigured");
-  assert.doesNotMatch(legend, /topo-backend-worker/, "no backend takes the worker");
-  // the agent is always drawn, and the affordance always applies
-  assert.match(legend, /topo-self/);
+// The affordance note names three gestures, none of them discoverable from React Flow's own
+// controls. It lives in the component now; on a phone the row wraps and it stops being pushed
+// to the far end, which is a Tailwind variant on the element rather than a rewrite in CSS.
+test("the legend states the affordances the controls do not", async () => {
+  const legend = await readFile(new URL("./client/legend.tsx", import.meta.url), "utf8");
+  assert.match(legend, /opens a card/);
   assert.match(legend, /jumps to its row below/);
-});
-
-// React Flow's <Controls> gives buttons but names no gestures, and the two that matter here are
-// both non-obvious: a card can be moved, and the wheel is deliberately not captured.
-test("the legend states the affordances the controls do not", () => {
-  const html = topologyPage(baseTopology, NONCE, ASSETS);
-  assert.match(html, /<li class="topo-legend-note">Drag to move · Ctrl \+ scroll to zoom · <b>\+<\/b> opens a card · ↓ jumps to its row below\.<\/li>/);
-});
-
-// Two thirds of that note are untrue on a phone: there is no cursor to drag with and no ctrl
-// key to hold. The clause that survives is the one about the rows, so the note is REWRITTEN
-// there rather than hidden — hiding it would take away the only thing still true.
-test("the affordance note is rewritten on a phone, not dropped", () => {
-  const block = STYLES.match(/@media \(max-width: 46rem\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(block, /\.topo-legend-note \{ font-size: 0; font-style: normal; \}/);
-  assert.match(block, /content: "Tap \+ to open a card/);
+  assert.match(legend, /max-\[46rem\]:ml-0/, "nothing to push it to once the row wraps");
 });
 
 // A marquee is exactly what a reader who asked for less motion asked to be rid of. The edge
@@ -2209,19 +2180,18 @@ test("the animated edge stops for reduced motion but keeps its colour", () => {
   assert.match(STYLES, /\.topo-edge-sqs \.react-flow__edge-path \{ stroke: var\(--accent\)/);
 });
 
-// The disclosure was generalised from tool families to any card with children, and this rule
-// was left scoped to .topo-capability — so Postgres, Redis and both SQS cards fell back to a
-// browser <button> with its default padding and shrink-to-fit, and their titles sat 7px further
-// in than every other card's. Invisible to every other test; found by measuring the rendered
-// gap. The selector must stay unscoped.
-test("the disclosure button is styled for every card that has one, not just tool families", () => {
-  assert.match(STYLES, /^\.topo-node-toggle \{/m);
-  assert.doesNotMatch(STYLES, /\.topo-capability \.topo-node-toggle/);
-  // width:100% and padding:0 are the two that matter — without them the button is narrower
-  // than the card and inset by its own default padding.
-  const rule = STYLES.match(/^\.topo-node-toggle \{[^}]*\}/m)?.[0] ?? "";
-  assert.match(rule, /width: 100%/);
-  assert.match(rule, /padding: 0/);
+// The disclosure fills its card, and that is a size variant on the shared Button now rather
+// than a CSS rule that once got left scoped to .topo-capability while the component around it
+// was generalised — which put Postgres, Redis and both SQS cards on a browser button's default
+// padding, 7px out of line with everything else, invisible to every test.
+test("the disclosure fills its card, for every card that has one", async () => {
+  const button = await readFile(new URL("./client/ui/button.tsx", import.meta.url), "utf8");
+  assert.match(button, /fill:\s*"w-full h-full p-0/, "it must take the whole card surface");
+  const nodes = await readFile(new URL("./client/nodes.tsx", import.meta.url), "utf8");
+  // Keyed on having children, not on being a tool family. That generalisation is the bug's
+  // other half and the reason the CSS scoping mattered.
+  assert.match(nodes, /d\.expanded !== undefined/);
+  assert.match(nodes, /size="fill"/);
 });
 
 // Icons come from lucide-react — the set shadcn/ui itself uses. shadcn ships no icons of its

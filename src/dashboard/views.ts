@@ -1190,51 +1190,6 @@ const capabilityRows = (caps: Capability[]): string =>
         "caps"
       );
 
-// The map's visual vocabulary, stated on the page that uses it.
-//
-// It was not stated anywhere: an amber dashed box meant "not configured", a teal edge meant
-// "reached over SQS via llm-worker" — which CLAUDE.md calls the one fact the diagram exists to
-// make obvious — and a reader had to already know. The "not configured" case was at least
-// recoverable from the Notes column of the tables below; the teal edge was explained in a
-// paragraph under LLM backends that never mentions the colour.
-//
-// Each swatch is drawn with the SAME classes the diagram draws with, so the key cannot come to
-// disagree with the drawing — restyle a stroke and the legend restyles with it.
-//
-// Conditional on what was actually drawn. A legend that explains a colour which is not on
-// screen is a legend that has to be read past: `not configured` only appears when something
-// is, and the worker edge only when a backend takes it.
-function topoLegend(t: Topology): string {
-  const key = (mark: string, text: string): string => `<li>${mark}${esc(text)}</li>`;
-  // Same classes AND the SAME ELEMENT — the rule survived the move from SVG to React Flow, and
-  // it is the reason this is a <div> rather than the <span> that would read better here: the
-  // map's nodes are `<div class="topo-node …">` (client/nodes.tsx), so a swatch that is
-  // anything else takes its border from a different rule and is one restyle away from telling
-  // the reader something the map does not. `.topo-swatch` overrides size and padding ONLY;
-  // every property the key is actually explaining is inherited from the map's own selectors.
-  const boxKey = (cls: string): string =>
-    `<div class="topo-node ${cls} topo-swatch" aria-hidden="true"></div>`;
-
-  const unconfigured = [...t.inbound, ...t.outbound].some((n) => !n.configured);
-  const viaWorker = t.backends.some((b) => b.viaWorker);
-
-  return (
-    `<ul class="topo-legend">` +
-    key(boxKey("topo-self"), "this agent") +
-    (viaWorker ? key(boxKey("topo-backend topo-backend-worker"), "reached over SQS via llm-worker") : "") +
-    (unconfigured ? key(boxKey("topo-off"), "not configured") : "") +
-    // React Flow's <Controls> gives zoom and fit buttons but says nothing about the gestures,
-    // and none of these is discoverable: the wheel is deliberately NOT captured (see
-    // zoomOnScroll in client/topology.tsx — a map that swallows the scroll traps a reader
-    // trying to reach the tables below it), a card can be moved, and a tool family opens.
-    // "every card links to its row" was retired here rather than reworded: it stopped being
-    // true when tools became nodes, and a tool has no row of its own — the tables list it
-    // inside its family's <details>. The arrow names the affordance that IS still on the card.
-    `<li class="topo-legend-note">Drag to move · Ctrl + scroll to zoom · <b>+</b> opens a card · ↓ jumps to its row below.</li>` +
-    `</ul>`
-  );
-}
-
 /**
  * The topology, handed to the browser as an inert data block.
  *
@@ -1284,11 +1239,10 @@ function topoFrame(t: Topology, nonce: string, assets: Assets | null): string {
   }
   return (
     `<div class="card flush topo-frame">` +
-    `<div id="topo-root" class="topo-view" data-fallback>` +
+    `<div id="topo-root" data-fallback>` +
     `<p class="topo-fallback">The dependency map needs JavaScript. ` +
     `The tables below carry the same facts.</p>` +
     `</div>` +
-    topoLegend(t) +
     `</div>` +
     jsonBlock("topo-data", nonce, t) +
     `<script src="${esc(assets.js.path)}" nonce="${esc(nonce)}" defer></script>`

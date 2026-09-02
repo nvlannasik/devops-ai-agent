@@ -1727,9 +1727,13 @@ form.signout button {
    Everything structural is --mark-line (3.63 / 4.39), NOT --border-strong (1.65 / 1.69): in the
    light scheme --surface and --surface-raised are the same white, so a card is nothing but its
    outline and there is no fill contrast to fall back on. The agent's own card is --text at 2px:
-   the subject of the map earns weight, not hue. .topo-in / .topo-out / .topo-capability carry
-   no colour by design — a tool family especially, since the agent knows the server ADVERTISED
-   it, not that calling it works, and any colour there would be a health claim. */
+   the subject of the map earns weight, not hue. The structural kinds carry no colour by design
+   — a tool family especially, since the agent knows the server ADVERTISED it, not that calling
+   it works, and any colour there would be a health claim.
+   THE CARDS THEMSELVES ARE NO LONGER STYLED HERE. They moved to Tailwind + shadcn in
+   client/nodes.tsx when the map adopted them; the reasoning above travelled with them and is
+   restated at the nodeCard cva. What is left in this file is React Flow's own furniture —
+   edges, controls, the dot grid — which are library-generated classes and stay plain CSS. */
 
 /* React Flow measures its own canvas from this element and renders nothing if it collapses, so
    the height is stated rather than derived. clamp() rather than a fixed number for the same
@@ -1737,140 +1741,11 @@ form.signout button {
    it, and a map that is a letterbox on a laptop is not worth the pixels it saves on a phone. */
 .topo-view { height: clamp(26rem, 58vh, 42rem); width: 100%; }
 /* Replaced by the mount as its first act; visible only if the bundle never ran. Centred rather
-   than parked at the top-left, because at that point it is the entire contents of the frame. */
-.topo-view[data-fallback] { display: grid; place-items: center; padding: var(--sp-6); }
+   than parked at the top-left, because at that point it is the entire contents of the frame.
+   On #topo-root, not .topo-view: the client renders .topo-view INSIDE the mount, so the note
+   and the canvas are never the same element. */
+#topo-root[data-fallback] { display: grid; place-items: center; padding: var(--sp-6); }
 .topo-fallback { margin: 0; color: var(--text-dim); font-size: var(--fs-sm); text-align: center; }
-
-/* ---------- topology: the node ---------- */
-/* One rule for all five kinds; the class the component adds decides the border and nothing
-   else. Sizes come from NODE_SIZE in client/layout.ts and are applied by React Flow as inline
-   width/height — do NOT restate them here, or dagre would be laying out one box and the
-   browser painting another. */
-.topo-node {
-  box-sizing: border-box; width: 100%; height: 100%;
-  display: flex; flex-direction: column; justify-content: center; gap: 2px;
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--surface); border: 1.5px solid var(--mark-line); border-radius: 10px;
-  overflow: hidden;
-}
-/* The subject of the map. Weight, not hue — see the note above. */
-.topo-self { border-color: var(--text); border-width: 2px; }
-/* The stroke of the CHIP is what marks a worker-reached backend, which is why the legend's
-   swatch is a card and not a line. */
-.topo-backend-worker { border-color: var(--accent); border-width: 2px; }
-/* The only other state on this map. Dashed as well as amber: state never rests on colour
-   alone anywhere on this dashboard. */
-.topo-off { border-color: var(--warning); border-style: dashed; }
-.topo-off .topo-node-title { color: var(--text-dim); }
-
-/* An SVG had no ellipsis and clipped by character count. HTML does have one, so the label is
-   truncated by the browser at whatever the card's real width turns out to be — and the
-   untruncated value survives in the <a>'s aria-label and the card's title attribute. */
-.topo-node-title,
-.topo-node-sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.topo-node-title { font-size: var(--fs-sm); font-weight: 550; color: var(--text); }
-.topo-node-sub { font-family: var(--font-data); font-size: var(--fs-2xs); color: var(--text-dim); }
-.topo-self .topo-node-title { font-weight: 650; letter-spacing: -.01em; }
-/* heavy / light / unrouted. A backend the registry lists but no chain will ever pick is worth
-   seeing, so "unrouted" is the one that gets the warning ink — the other two are neutral
-   because which chain a backend is on is structure, not health. */
-.topo-node-route {
-  align-self: flex-start; margin-top: 2px;
-  font-family: var(--font-data); font-size: var(--fs-3xs, .625rem); letter-spacing: .08em;
-  text-transform: uppercase; color: var(--text-dim);
-}
-.topo-node-route[data-route="unrouted"] { color: var(--mark-warning, var(--warning)); }
-
-/* Every card is a link to its own row in the tables below. No colour and no underline: the
-   cards already read as objects, and decorating a hundred of them would undo the restraint the
-   rest of the figure is built on. Focus needs no rule — the global :focus-visible outline sits
-   OUTSIDE the card instead of overwriting the border, which is where the two state signals
-   live. Hover moves the FILL, never the border, for that same reason: a hover that repainted
-   the border would erase "not configured" for as long as the pointer sat there. */
-.topo-node-link {
-  display: flex; flex-direction: column; justify-content: center; gap: 2px;
-  height: 100%; min-width: 0;
-  color: inherit; text-decoration: none; cursor: pointer;
-}
-.react-flow__node:hover .topo-node { background: var(--surface-2); }
-
-/* ---------- topology: a tool family, opened ---------- */
-/* A card with children carries two controls, because it has two things to offer: open what it
-   holds, or go to its row. They are siblings — a <button> inside an <a> is invalid, and either
-   nesting makes one unreachable by keyboard. The button takes the card; the link is a corner
-   affordance.
-   NOT scoped to .topo-capability, and that scoping was a real bug: the disclosure was
-   generalised to any card with children while this rule was left behind, so Postgres, Redis and
-   both SQS cards fell back to a browser button — default padding, shrink-to-fit — and their
-   titles sat 7px further in than every other card's. Caught by MEASURING the gap between each
-   card's left edge and its title's, not by reading the CSS. */
-.topo-node-toggle {
-  display: flex; flex-direction: column; justify-content: center; gap: 2px;
-  width: 100%; height: 100%; min-width: 0;
-  padding: 0; background: none; border: 0; cursor: pointer; text-align: left;
-  font: inherit; color: inherit;
-}
-/* + / − rather than a rotating chevron: the map draws no other glyph, and a character costs no
-   markup, no icon font (blocked by default-src) and no rotation to keep in step with state. */
-.topo-node-chevron {
-  position: absolute; right: var(--sp-2); top: 50%; transform: translateY(-50%);
-  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1; color: var(--text-dim);
-}
-.react-flow__node:hover .topo-node-chevron { color: var(--text); }
-/* Bottom-right, out of the chevron's way. It is the only place on this map where the "every
-   card links to its row" contract needs its own affordance, because the card's own click was
-   taken by the disclosure. */
-.topo-node-rowlink {
-  position: absolute; right: var(--sp-2); bottom: 2px;
-  font-size: var(--fs-2xs); line-height: 1; color: var(--text-dim); text-decoration: none;
-}
-.topo-node-rowlink:hover { color: var(--accent); }
-
-/* A tool is one identifier. No fill of its own, a lighter outline than a structural card, and
-   mono type — it is a name the server reported, not a dependency this agent declared. */
-.topo-tool {
-  flex-direction: row; align-items: center; gap: var(--sp-2);
-  padding: 0 var(--sp-2); border-style: dashed; border-width: 1px; border-radius: 6px;
-}
-.topo-tool .topo-node-title {
-  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 500; color: var(--text-dim);
-}
-/* The word, never a colour — --accent is the SQS hop and --warning is not-configured, and a
-   third meaning on either would make both ambiguous. Weight and case carry it instead, which is
-   the same trick stateBadge() uses on the incident list. */
-/* Sized to the type beside it and given no colour of its own: currentColor means it dims with
-   the title on a not-configured card and brightens with it everywhere else, which is one fewer
-   rule than stating both. flex-shrink 0 or a long title squeezes it to nothing. */
-.topo-node-icon {
-  width: 14px; height: 14px; flex: 0 0 auto; color: var(--text-dim);
-  position: absolute; left: var(--sp-3); top: var(--sp-2);
-}
-.topo-self .topo-node-icon { color: var(--text); }
-/* The icon sits in the card's own padding, so the text has to step aside for it rather than
-   flow under it. Scoped to the cards that HAVE one — nothing else pays the indent. */
-.topo-in .topo-node-title,
-.topo-in .topo-node-sub,
-.topo-out .topo-node-title,
-.topo-out .topo-node-sub { padding-left: 1.25rem; }
-
-/* One thing a dependency holds: a table, a key namespace. Two lines, and the second is a
-   phrase rather than an identifier — which is why this is the widest leaf and the tool is the
-   narrowest. Solid outline where a tool is dashed: a table is something this agent WRITES,
-   a tool is something another process said it exposes. */
-.topo-store {
-  flex-direction: column; justify-content: center; gap: 1px;
-  padding: 0 var(--sp-3); border-width: 1px; border-radius: 6px;
-}
-.topo-store .topo-node-title {
-  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600; color: var(--text);
-}
-.topo-store .topo-node-sub { font-family: var(--font-ui); font-size: var(--fs-3xs, .625rem); }
-
-.topo-node-write {
-  margin-left: auto; flex: 0 0 auto;
-  font-family: var(--font-data); font-size: var(--fs-3xs, .625rem); letter-spacing: .08em;
-  text-transform: uppercase; font-weight: 700; color: var(--text);
-}
 
 /* ---------- topology: React Flow's own furniture ---------- */
 /* The library ships a light-grey visual language of its own. These rules are the whole of the
@@ -1918,28 +1793,6 @@ form.signout button {
    where it is unsupported the node simply appears, which is the old behaviour. */
 @starting-style {
   .react-flow__node { opacity: 0; }
-}
-
-/* ---------- topology: the key ---------- */
-/* At the foot of the frame, under a hairline — it belongs to the drawing, so it sits inside
-   the same card rather than under it as a caption for the whole section. */
-.topo-legend {
-  list-style: none; margin: 0; padding: var(--sp-3) var(--sp-4) var(--sp-4);
-  border-top: 1px solid var(--border);
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-5);
-  font-size: var(--fs-sm); color: var(--text-dim);
-}
-.topo-legend li { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-/* The swatch is a real fragment of the drawing — same element, same classes, same borders — so
-   it overrides SIZE AND PADDING ONLY. Give it a colour of its own and the key stops being a
-   key. The fixed size is why width/height are safe to state here and nowhere else on
-   .topo-node: a swatch is never laid out by dagre. */
-.topo-swatch { width: 22px; height: 14px; flex: 0 0 auto; padding: 0; border-radius: 3px; }
-/* The affordance note is not a key, so it takes no swatch slot and sits at the far end. */
-.topo-legend-note { margin-left: auto; font-style: italic; }
-@container page (max-width: 46rem) {
-  /* Nothing to push it to once the row wraps. */
-  .topo-legend-note { margin-left: 0; }
 }
 
 /* Marching dashes are a marquee, and a marquee is exactly what a reader who asked for less
@@ -2095,15 +1948,6 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
   .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
-  /* Half the legend's affordance note is untrue here: there is no cursor to drag with and no
-     ctrl key to hold. The gestures a phone does have — one finger to pan, two to zoom — need
-     no instructions. The two clauses that survive are the ones a tap can reach, so the note is
-     rewritten rather than hidden. */
-  .topo-legend-note { font-size: 0; font-style: normal; }
-  .topo-legend-note::after {
-    content: "Tap + to open a card · ↓ jumps to its row below.";
-    font-size: var(--fs-sm); font-style: italic;
-  }
 }
 /* ---------- the rail, as a drawer ---------- */
 /* NOTE: this is the SECOND @media block at 46rem — the other one, down in "responsive & motion",
@@ -2168,7 +2012,7 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 }
 @media (prefers-reduced-motion: no-preference) {
   a, .pages a, .rail nav a, .seg a, form.filters button, .signin-form button,
-  form.signout button, .chart-dot, .chart-value, tbody tr, .topo-node {
+  form.signout button, .chart-dot, .chart-value, tbody tr {
     transition: color .12s ease, background-color .12s ease, border-color .12s ease,
                 fill .12s ease, text-decoration-color .12s ease, transform .12s ease;
   }

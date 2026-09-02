@@ -19,6 +19,7 @@ import type { Topology } from "../topology-types.js";
 import { layoutGraph } from "./layout.js";
 import type { TopoFlowNode } from "./layout.js";
 import { nodeTypes } from "./nodes.js";
+import { Legend } from "./legend.js";
 import { justDragged, markDragEnd } from "./drag-state.js";
 
 // The interactive dependency map. The server renders the mount point and the topology as a
@@ -92,6 +93,12 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
   }, []);
 
   return (
+    <>
+      {/* The canvas is wrapped rather than mounted directly, because React Flow measures its
+          own size from its container and the LEGEND is a sibling of that container, not of the
+          map. It moved into React with the card styling — see legend.tsx for why that is what
+          preserves the swatch rule rather than breaking it. */}
+      <div className="topo-view">
     <ReactFlow
       nodes={nodes}
       edges={edges}
@@ -135,6 +142,9 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
       <Background variant={BackgroundVariant.Dots} gap={18} size={1} className="topo-bg" />
       <Controls showInteractive={false} className="topo-controls" />
     </ReactFlow>
+      </div>
+      <Legend graph={graph} />
+    </>
   );
 }
 

@@ -819,6 +819,16 @@ Load-bearing, and each cost something to get right:
   uniform now and says the map is live. The SQS distinction rests on what did not move — the
   accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
   and the legend row. Four signals became three; none of the survivors is spare.
+- **The map adopted Tailwind + shadcn (2026-09-02), scoped to the client bundle.** shadcn is a
+  component collection on Radix + Tailwind and ships no icons; the icons came separately from
+  lucide. The dashboard's other seven pages stay server-rendered HTML on `styles.ts` — putting
+  them on React would ship script to the pages that render LLM output, which is the one thing
+  the CSP posture exists to prevent. Four seam rules, all in `src/dashboard/CLAUDE.md`: no
+  preflight (and therefore a local reset for UA button styling), shadcn tokens as ALIASES of the
+  dashboard's variables (so dark mode needs no `.dark` class), `styles.ts` must not style a card
+  (it is the inline `<style>` and would win), and overrides must go through `cn` plain and last
+  (neither important form merges under Tailwind v4 — measured). The legend moved into the bundle
+  so its swatches call the same `cardClass()` the cards do.
 - **Both SQS cards expand into their queues, and the response queue is one shared node
   (2026-09-02).** The LLM path and the GitOps path use a second *request* queue but the same
   *response* queue, routed by `requestId` — `agent/gitops/sqs.ts` takes `responseQueueName`

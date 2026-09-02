@@ -9,10 +9,13 @@
 // already runs `npm run build` and its runtime stage already copies dist/.
 
 import { build } from "esbuild";
-import { readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { appendFile, readFile, rm } from "node:fs/promises";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+const run = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = path.join(root, "dist", "public");
 
@@ -64,5 +67,24 @@ for (const needle of FORBIDDEN) {
   }
 }
 
+// Tailwind runs AFTER esbuild and its output is APPENDED to the stylesheet esbuild produced.
+// Both halves of that are deliberate:
+//   - after, because appending puts the utilities last in the file, so they win over React
+//     Flow's own defaults at equal specificity without anyone writing !important;
+//   - appended rather than emitted as a third asset, because the page links one stylesheet and
+//     a second <link> would be another round trip and another path to hash and to serve.
+// The CLI is a separate process rather than a PostCSS plugin because esbuild does not run
+// PostCSS, and building a plugin to make it would be more machinery than one exec.
+const css = path.join(outdir, "topology.css");
+const tw = await run(
+  "npx",
+  ["@tailwindcss/cli", "-i", path.join(root, "src/dashboard/client/tailwind.css"), "-o", "-"],
+  { cwd: root, maxBuffer: 32 * 1024 * 1024 }
+);
+await appendFile(css, `\n${tw.stdout}`);
+
 const bytes = Object.values(result.metafile.outputs).reduce((n, o) => n + o.bytes, 0);
-console.log(`[build:client] dist/public — ${(bytes / 1024).toFixed(0)} KB across ${Object.keys(result.metafile.outputs).length} files`);
+const cssBytes = (await readFile(css)).length;
+console.log(
+  `[build:client] dist/public — js ${(bytes / 1024).toFixed(0)} KB, css ${(cssBytes / 1024).toFixed(0)} KB (Tailwind appended)`
+);

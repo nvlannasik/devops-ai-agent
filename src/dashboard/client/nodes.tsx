@@ -1,118 +1,127 @@
 import { Handle, Position } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
-import type { TopoNodeData, TopoNodeKind } from "../topology-graph.js";
 import type { TopoFlowNode } from "./layout.js";
 import { justDragged } from "./drag-state.js";
 import { Icon } from "./icons.js";
-
-// The class vocabulary is deliberately the one the SVG map already used — .topo-self,
-// .topo-backend-worker, .topo-off and the rest. Not nostalgia: topoLegend() in views.ts states
-// this vocabulary on the page and its swatches must use "the same classes AND the same
-// element" as the drawing. That rule drifted once when the two were only nearly the same, so
-// keeping the names means the legend needed one change (its swatches became divs) rather than
-// a new parallel set of names that could disagree.
-const KIND_CLASS: Record<TopoNodeKind, string> = {
-  inbound: "topo-in",
-  agent: "topo-self",
-  outbound: "topo-out",
-  backend: "topo-backend",
-  capability: "topo-capability",
-  tool: "topo-tool",
-  store: "topo-store",
-};
-
-function classesFor(d: TopoNodeData): string {
-  const out = ["topo-node", KIND_CLASS[d.kind]];
-  // The stroke of the CHIP is what marks a worker-reached backend — not the edge, which is
-  // grey. The legend's swatch carries the same two classes for the same reason.
-  if (d.viaWorker) out.push("topo-backend-worker");
-  if (!d.configured) out.push("topo-off");
-  return out.join(" ");
-}
+import { Badge } from "./ui/badge.js";
+import { Button } from "./ui/button.js";
+import { cn } from "./lib/utils.js";
+import { cardClass } from "./card-variants.js";
 
 /**
- * One component for all six kinds. They differ in class, in whether they carry a route chip,
- * and in what the click does — not in structure, and a structure stated once cannot drift
- * between the kind that is five nodes and the kind that is one.
+ * One component for all seven kinds. They differ in variant, in whether they carry a badge, and
+ * in what the click does — not in structure, and a structure stated once cannot drift between
+ * the kind that is five nodes and the kind that is one.
  *
- * Three click behaviours, and which one applies is decided by the DATA, never by the caller:
- * a capability toggles its tools (the parent's `onNodeClick` does the toggling — see
- * topology.tsx — so no callback has to live in serialized node data), a tool does nothing
- * because it has no row to go to, and everything else follows its link.
+ * Three click behaviours, decided by the DATA and never by the caller: a card with children
+ * toggles them (the parent's `onNodeClick` does the toggling — see topology.tsx — so no
+ * callback has to live in serialized node data), a leaf does nothing because it has no row to
+ * go to, and everything else follows its link.
  */
 export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Element {
   const d = data;
   // The accessible name carries the UNTRUNCATED value: CSS clips the visible text to the card,
-  // exactly as the SVG's clip() did, so this is the only place the full string survives for a
-  // screen reader. The route and the write marker ride in here for the same reason —
-  // `aria-label` REPLACES the element's contents for assistive tech, so a chip that is not in
-  // it is a chip no AT user ever reaches.
+  // so this is the only place the full string survives for a screen reader. The badges ride in
+  // here for the same reason — `aria-label` REPLACES the element's contents for assistive tech,
+  // so a badge that is not in it is a badge no AT user ever reaches.
   const full = [d.title, d.sub, d.route, d.write ? "can change the cluster" : ""]
     .filter(Boolean)
     .join(" — ");
 
   const body = (
     <>
-      {/* Before the title, inside whatever wraps it, so it travels with the text rather than
-          floating in the card's corner — and so a truncating title pushes against it. */}
       {d.icon ? <Icon name={d.icon} /> : null}
-      <span className="topo-node-title">{d.title}</span>
-      {d.sub ? <span className="topo-node-sub">{d.sub}</span> : null}
-      {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing:
-          it means the registry lists the backend but no chain will ever pick it. */}
-      {d.route ? <span className="topo-node-route" data-route={d.route}>{d.route}</span> : null}
-      {/* The word, never a colour. This map has spent --accent on the SQS hop and --warning on
-          not-configured; a third meaning on either would make both ambiguous, and "this tool
-          can change the cluster" is too important to say ambiguously. */}
-      {d.write ? <span className="topo-node-write">write</span> : null}
+      <span
+        className={cn(
+          "block truncate",
+          d.kind === "tool"
+            ? "font-mono text-2xs font-medium text-muted-foreground"
+            : "text-sm font-medium text-foreground",
+          d.kind === "store" && "font-mono text-2xs font-semibold text-foreground",
+          // The glyph sits in the card's padding, so the text steps aside for it rather than
+          // flowing under. Only the kinds that HAVE one pay the indent.
+          d.icon && "pl-5",
+          !d.configured && "text-muted-foreground"
+        )}
+      >
+        {d.title}
+      </span>
+      {d.sub ? (
+        <span
+          className={cn(
+            "block truncate text-muted-foreground",
+            d.kind === "store" ? "text-2xs" : "font-mono text-2xs",
+            d.icon && "pl-5"
+          )}
+        >
+          {d.sub}
+        </span>
+      ) : null}
+      {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing: the
+          registry lists the backend but no chain will ever pick it. */}
+      {d.route ? (
+        <Badge variant={d.route === "unrouted" ? "warning" : "muted"} className="self-start mt-0.5">
+          {d.route}
+        </Badge>
+      ) : null}
+      {d.write ? (
+        <Badge variant="strong" className="ml-auto">
+          write
+        </Badge>
+      ) : null}
     </>
   );
 
   return (
-    <div className={classesFor(d)} title={d.meta || undefined}>
-      {/* Both handles on every node, and both hidden in CSS. React Flow needs a handle to
-          anchor an edge; this map has no interactive connecting, so they carry no affordance.
-          Left/right because the layout is rankdir LR — a handle on the wrong side routes the
-          edge the long way around the card. */}
+    <div
+      className={cardClass({ kind: d.kind, off: !d.configured, viaWorker: !!d.viaWorker })}
+      title={d.meta || undefined}
+    >
+      {/* Both handles on every node, and both hidden. React Flow needs one to anchor an edge;
+          this map connects nothing, so they carry no affordance. Left/right because the layout
+          is rankdir LR — a handle on the wrong side routes the edge around the card. */}
       <Handle type="target" position={Position.Left} isConnectable={false} />
 
       {d.expanded !== undefined ? (
         // A card with children has two things to offer, so it carries two controls rather than
-        // one that has to guess. They are SIBLINGS, not nested: a <button> inside an <a> is
-        // invalid, and either nested order makes one of them unreachable by keyboard.
+        // one that has to guess. Siblings, not nested: a <button> inside an <a> is invalid, and
+        // either nesting makes one unreachable by keyboard.
         //
         // Keyed on `expanded` being SET rather than on the kind: a capability always has tools,
         // but Postgres has tables only because stores.ts found the migrations, and a card that
         // rendered a disclosure over an empty list would be a control that does nothing.
         <>
-          <button
-            type="button"
-            className="topo-node-toggle"
+          <Button
+            size="fill"
             aria-expanded={!!d.expanded}
             aria-label={`${full} — ${d.expanded ? "hide" : "show"} what it holds`}
           >
             {body}
-            <span className="topo-node-chevron" aria-hidden="true">
+            <span className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-sm leading-none">
               {d.expanded ? "−" : "+"}
             </span>
-          </button>
-          <a
-            className="topo-node-rowlink"
-            href={d.href}
+          </Button>
+          <Button
+            asChild
+            className="absolute right-1.5 bottom-0.5 hover:text-primary"
             aria-label={`Go to the ${d.title} row in the table below`}
-            // Without this the click reaches React Flow's onNodeClick as well and the family
-            // toggles on its way to the row it was asked to go to.
-            onClick={(e) => {
-              e.stopPropagation();
-              if (justDragged()) e.preventDefault();
-            }}
           >
-            ↓
-          </a>
+            <a
+              href={d.href}
+              // Without this the click reaches React Flow's onNodeClick too, and the card
+              // toggles on its way to the row it was asked to open.
+              onClick={(e) => {
+                e.stopPropagation();
+                if (justDragged()) e.preventDefault();
+              }}
+            >
+              ↓
+            </a>
+          </Button>
         </>
       ) : d.href ? (
         <a
-          className="topo-node-link"
+          className="flex flex-col justify-center gap-0.5 h-full min-w-0 no-underline text-inherit cursor-pointer"
           href={d.href}
           aria-label={full}
           // See drag-state.ts: without this, dragging a card to see behind it navigates.
@@ -123,8 +132,8 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
           {body}
         </a>
       ) : (
-        // The agent (it IS what the tables are about) and every tool (the tables list it inside
-        // its family's <details>, which has no id of its own). Neither has a row to go to.
+        // The agent (it IS what the tables are about) and every leaf (the tables list a tool
+        // inside its family's <details>, which has no id). Neither has a row to go to.
         body
       )}
 
