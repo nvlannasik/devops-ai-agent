@@ -23,37 +23,42 @@ platform adds that the sample response omits.
 Save each response next to its payload as `<probe>-response.json` so the answers are
 reviewable later.
 
-## Status, and the gaps — `run-gaps.sh`
+## Status — all six probes have now been run
 
-The probes below have been run once against the real flow, and the code they justified is
-in `llm-worker` (`LLM_API_FORMAT=agent-builder`, `src/agent-builder.ts`). **P2, P3 and P5
-passed; P1 and P4 did not fail — they were never finished.** P1 only ever sent 6 KB, and
-P4 was not attempted at all.
+Every probe below has been run against the real flow, and the code they justified is in
+`llm-worker` (`LLM_API_FORMAT=agent-builder`, `src/agent-builder.ts`). **P2, P3, P5 and P6
+passed on the first pass; P1 and P4 were finished on 2026-09-02 with `run-gaps.sh` and also
+passed.** No blocker from the table at the bottom of this file survives.
 
-`run-gaps.sh` closes exactly those gaps. Unlike `run.sh` it parses the answers and prints a
-verdict per check, because each one decides whether this backend is safe to point at real
-incidents:
+| Probe | Result |
+|---|---|
+| P1 — payload ceiling | **No truncation through 32 KB.** A tail canary came back verbatim at 4, 8, 16, 24 and 32 KB |
+| P3 — session isolation | **No memory.** Same `session_id`, token stored then asked for, answered `NONE`; `session_id` echoes what we send |
+| P4 — failure shape | **Non-2xx with `{"detail": ...}`.** Bad key and unknown flow id both; no error ever dressed as an answer |
+| P4 — concurrency | 3 parallel full-size RCAs: **22 s / 24 s / 76 s**, all 200, format intact, no throttling |
+
+The one number still worth respecting is **latency spread**: a single earlier RCA took 104 s,
+and the concurrent runs ranged 22–76 s. Budget for the slow end and multiply by the agent's
+tool rounds before promising anyone a fast RCA. That is a product constraint, not a bug.
+
+`run-gaps.sh` stays as a regression harness — re-run it after any flow change, because every
+result above is a property of the flow's configuration, not of the platform:
 
 ```bash
 export AB_URL='https://<agent-builder-host>/api/v1/run/<flow-id>'
 export AB_KEY='<x-api-key>'
 
-./run-gaps.sh size      # P1 — payload ceiling. RUN THIS FIRST; it is the only blocker left.
-./run-gaps.sh session   # P3 — is the flow's memory actually off?
-./run-gaps.sh failure   # P4 — is a failure distinguishable from an answer?
+./run-gaps.sh size      # P1 — payload ceiling; a tail canary per rung
+./run-gaps.sh session   # P3 — is the flow's memory still off?
+./run-gaps.sh failure   # P4 — is a failure still distinguishable from an answer?
 ./run-gaps.sh load      # P4 — latency spread and concurrency
 ./run-gaps.sh           # all four
 ```
 
-**Why `size` matters most.** A platform that quietly drops the tail of an oversized payload
-returns a confident RCA built on half the evidence, and nothing in the response says so —
-response length cannot reveal it. So `run-gaps.sh size` walks a 4 → 32 KB ladder of
-realistic evidence (PromQL braces, JSON, backticks, quotes) and ends every payload with a
-token the model can only echo back if it received the final byte. A missing token is proof
-of truncation, and the byte count where it disappears is the ceiling.
-
-A ceiling that returns an **error** is the safe outcome and the script says so. Silence is
-the dangerous one.
+**Why `size` still matters most.** A platform that quietly drops the tail of an oversized
+payload returns a confident RCA built on half the evidence, and nothing in the response says
+so — response length cannot reveal it. The canary is the only detector, and adding a memory
+or prompt component to the flow could reintroduce a ceiling that this run did not find.
 
 Raw bodies and generated payloads land in `gap-responses/` (gitignored). Copy anything
 worth keeping out of there, the way the earlier responses were kept.
@@ -197,6 +202,10 @@ Confirm:
 ---
 
 ## Blockers vs. friction
+
+This table was written before the probes ran. **None of the three blockers occurred** — see the
+status section at the top. It is kept as the criteria to re-judge against whenever the flow is
+reconfigured, since every one of them is a property of the flow, not of the platform.
 
 | Finding | Verdict |
 |---|---|
