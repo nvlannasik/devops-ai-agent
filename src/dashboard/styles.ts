@@ -1815,10 +1815,6 @@ form.signout button {
 }
 .react-flow__controls-button:hover { background: var(--surface-2); fill: var(--text); }
 .react-flow__controls-button:last-child { border-bottom: none; }
-.react-flow__minimap {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
-}
-.react-flow__minimap-mask { fill: var(--surface-2); fill-opacity: .6; }
 /* Kept, not hidden. @xyflow/react is MIT and free, and its authors ask that the attribution
    stay unless you hold a Pro licence — so it stays, dimmed to the weight of a caption rather
    than removed with the proOptions flag. */
@@ -1847,9 +1843,10 @@ form.signout button {
   .topo-legend-note { margin-left: 0; }
 }
 
-/* The animated edge is a marquee, and a marquee is exactly what a reader who asked for less
-   motion asked to be rid of. The edge keeps its accent stroke, so the fact it carries survives
-   without the movement carrying it. */
+/* Marching dashes are a marquee, and a marquee is exactly what a reader who asked for less
+   motion asked to be rid of — more so now that every edge has them rather than one. Nothing is
+   lost by stopping: motion here says the map is live, and the SQS edge's meaning was moved onto
+   its accent stroke, which does not move. */
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge.animated .react-flow__edge-path { animation: none; }
 }

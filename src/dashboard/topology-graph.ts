@@ -43,9 +43,10 @@ export interface TopoNode {
   data: TopoNodeData;
 }
 
-// "sqs" is not decoration. It is what the animated edge in the client renders, and the only
-// visual difference between a backend the agent dials itself and one that costs a round trip
-// through a queue and another pod.
+// "sqs" is not decoration. It is the only visual difference between a backend the agent dials
+// itself and one that costs a round trip through a queue and another pod — the client draws it
+// as an accent stroke at extra weight (client/layout.ts). It used to drive an animation too;
+// every edge animates now, so this kind is the whole of the distinction.
 export type TopoEdgeKind = "call" | "sqs";
 
 export interface TopoEdge {

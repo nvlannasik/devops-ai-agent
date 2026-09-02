@@ -9,8 +9,8 @@ import { layoutGraph, NODE_SIZE } from "./layout.js";
 // is imported here for TYPES only (erased at compile time), so this file loads with no DOM.
 //
 // What is NOT covered, and is stated so nobody reads a green suite as more than it is: React
-// Flow's rendering, the drag behaviour, the minimap and the CSS all need a browser. This pins
-// the positions and the structure they encode.
+// Flow's rendering, the drag behaviour and the CSS all need a browser. This pins the positions
+// and the structure they encode.
 
 const base: Topology = {
   inbound: [
@@ -95,17 +95,20 @@ test("no two cards overlap", () => {
   }
 });
 
-// The animation is spent on exactly one fact. If every edge animated, none of them would say
-// anything — and the class is what the reduced-motion rule and the accent stroke both key on.
-test("only the SQS edge animates, and it carries the class the stylesheet keys on", () => {
+// Every edge animates, so motion says the map is live and says nothing about a particular
+// edge. That makes the CLASS the whole of the SQS distinction — it is what the accent stroke
+// and the extra weight key on — so it has to land on exactly the one edge that crosses a
+// queue, and on no other. This test is what is left holding that after the animation stopped
+// carrying it.
+test("motion is uniform, and the SQS class marks exactly the edge that crosses a queue", () => {
   const { edges } = layoutGraph(buildGraph(base));
-  const animated = edges.filter((e) => e.animated);
-  assert.equal(animated.length, 1, "one moving thing on the page");
-  assert.equal(animated[0]!.source, "out-1", "and it leaves llm-worker");
-  assert.match(animated[0]!.className!, /topo-edge-sqs/);
-  for (const e of edges.filter((x) => !x.animated)) {
-    assert.doesNotMatch(e.className!, /topo-edge-sqs/);
-  }
+  assert.ok(edges.length > 1, "there should be edges to compare");
+  assert.ok(edges.every((e) => e.animated), "every edge animates");
+
+  const sqs = edges.filter((e) => /topo-edge-sqs/.test(e.className!));
+  assert.equal(sqs.length, 1, "exactly one edge is the SQS hop");
+  assert.equal(sqs[0]!.source, "out-1", "and it leaves llm-worker");
+  assert.equal(sqs[0]!.target, "backend-1", "landing on the private-llm backend");
 });
 
 // A fresh agent is a normal state, not an edge case: dagre is handed one node and no edges.

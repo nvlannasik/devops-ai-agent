@@ -768,7 +768,8 @@ as the config grows.
 **Interactive map (React Flow, `src/dashboard/client/`).** Replaced a hand-laid SVG plus a
 ~175-line inline pan/zoom script (`topology-svg.ts` / `topology-script.ts`, both deleted).
 Drag a card to move it, drag the canvas to pan, ctrl/cmd + wheel to zoom, plus React Flow's own
-`<MiniMap>` and `<Controls>`.
+`<Controls>`. **The minimap was removed on 2026-09-02** — the map is bounded and fits its frame,
+so an overview of an overview was furniture.
 
 The split across files is the design, and it is about what is a **claim** versus what is a
 drawing:
@@ -813,10 +814,15 @@ Load-bearing, and each cost something to get right:
   mount ships one sentence saying it needs JavaScript, cleared on a successful parse; the four
   tables below carry every fact it draws, which is the only reason that degradation is
   acceptable. `assets: null` (a dev server, or a build that never bundled) renders a note.
-- **Not covered by `npm test`:** React Flow's rendering, the drag behaviour, the minimap, the
-  CSS. `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
-  (finite positions, left-to-right order, non-overlap, which edge animates). Everything else
-  needs a browser.
+- **Every edge animates (2026-09-02, by request).** It was the SQS hop alone, so that motion
+  meant "this call crosses a queue and another pod". That reading is gone by decision: motion is
+  uniform now and says the map is live. The SQS distinction rests on what did not move — the
+  accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
+  and the legend row. Four signals became three; none of the survivors is spare.
+- **Not covered by `npm test`:** React Flow's rendering, the drag behaviour, the CSS.
+  `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
+  (finite positions, left-to-right order, non-overlap, and that the SQS class marks exactly one
+  edge). Everything else needs a browser.
 
 **RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
 `prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are

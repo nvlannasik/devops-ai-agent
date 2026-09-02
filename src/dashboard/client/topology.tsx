@@ -1,20 +1,18 @@
-import { StrictMode, useCallback, useMemo } from "react";
+import { StrictMode, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Background,
   BackgroundVariant,
   Controls,
-  MiniMap,
   ReactFlow,
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import type { Node } from "@xyflow/react";
 // React Flow's own stylesheet. esbuild emits it as dist/public/topology.css, which the page
 // links BEFORE its inline <style> block so the dashboard's rules win on equal specificity.
 import "@xyflow/react/dist/style.css";
 import { buildGraph } from "../topology-graph.js";
-import type { TopoGraph, TopoNodeData } from "../topology-graph.js";
+import type { TopoGraph } from "../topology-graph.js";
 import type { Topology } from "../topology-types.js";
 import { layoutGraph } from "./layout.js";
 import type { TopoFlowNode } from "./layout.js";
@@ -33,20 +31,6 @@ import { markDragEnd } from "./drag-state.js";
 const MOUNT_ID = "topo-root";
 const DATA_ID = "topo-data";
 
-// MiniMap needs a colour per node and cannot read a CSS class, so this is the one place the
-// palette is restated in JS. Kept to the four marks the legend already names; anything not
-// listed falls through to the structural line colour, which is what an unclassified box would
-// have been drawn in anyway.
-const MINIMAP_VAR: Record<string, string> = {
-  agent: "--text",
-  backendWorker: "--accent",
-  off: "--warning",
-};
-
-function readVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
-}
-
 function TopoMap({ graph }: { graph: TopoGraph }): React.JSX.Element {
   // Laid out once. useNodesState then owns the positions, so a drag survives every re-render —
   // recomputing the layout on render would snap a dragged card back the moment anything else
@@ -54,14 +38,6 @@ function TopoMap({ graph }: { graph: TopoGraph }): React.JSX.Element {
   const initial = useMemo(() => layoutGraph(graph), [graph]);
   const [nodes, , onNodesChange] = useNodesState<TopoFlowNode>(initial.nodes);
   const [edges, , onEdgesChange] = useEdgesState(initial.edges);
-
-  const minimapColor = useCallback((n: Node): string => {
-    const d = n.data as TopoNodeData;
-    if (!d.configured) return readVar(MINIMAP_VAR.off!);
-    if (d.viaWorker) return readVar(MINIMAP_VAR.backendWorker!);
-    if (d.kind === "agent") return readVar(MINIMAP_VAR.agent!);
-    return readVar("--mark-line");
-  }, []);
 
   return (
     <ReactFlow
@@ -104,13 +80,6 @@ function TopoMap({ graph }: { graph: TopoGraph }): React.JSX.Element {
       aria-label="Dependency map"
     >
       <Background variant={BackgroundVariant.Dots} gap={18} size={1} className="topo-bg" />
-      <MiniMap
-        pannable
-        zoomable
-        nodeColor={minimapColor}
-        className="topo-minimap"
-        ariaLabel="Dependency map overview"
-      />
       <Controls showInteractive={false} className="topo-controls" />
     </ReactFlow>
   );

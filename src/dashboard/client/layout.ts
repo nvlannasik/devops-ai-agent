@@ -74,10 +74,17 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
     source: e.source,
     target: e.target,
     type: "smoothstep",
-    // The one moving thing on the page, and it is spent on the single fact this map exists to
-    // state: an animated edge is a hop through SQS and another pod. Everything else is a
-    // direct call and stays still. If every edge animated, none of them would say anything.
-    animated: e.kind === "sqs",
+    // Every edge animates. This was once the SQS hop alone — the animation carrying the fact
+    // that the call crosses a queue and another pod — and that reading is gone by decision, not
+    // by accident: motion is now uniform, so it says the map is live rather than saying
+    // anything about a particular edge.
+    //
+    // Which means the SQS edge's DISTINCTION now rests entirely on the things that did not
+    // move: the accent stroke and the extra weight (styles.ts, .topo-edge-sqs), the accent
+    // border on the backend card it reaches, and the legend row that names it. Do not drop any
+    // of those three — before this change there were four signals and the animation was one of
+    // them; there are three left and none is redundant.
+    animated: true,
     className: e.kind === "sqs" ? "topo-edge topo-edge-sqs" : "topo-edge",
   }));
 
