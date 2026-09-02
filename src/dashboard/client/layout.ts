@@ -24,9 +24,14 @@ export const NODE_SIZE: Record<TopoNodeKind, { width: number; height: number }> 
   // 240 rather than 216 because the glyph takes 1.25rem out of the title's line: at 216 the
   // longest label this map actually has, "Redis (conversation memory)", came back truncated the
   // moment icons landed. The card pays for the icon; the label does not.
-  inbound: { width: 240, height: 64 },
-  agent: { width: 240, height: 64 },
-  outbound: { width: 240, height: 64 },
+  // 248, and the extra 8 over 240 is measured rather than picked: once the glyph moved into a
+  // real column beside the title and the corner controls got their own lane, the longest TITLE
+  // on this map — "Redis (conversation memory)" — wanted 3px more than it had. The long
+  // CAPTIONS (an endpoint, a queue pair) still truncate and that is correct: the map is the
+  // glance, the row below is the record, and the full value is in the tooltip either way.
+  inbound: { width: 248, height: 64 },
+  agent: { width: 248, height: 64 },
+  outbound: { width: 248, height: 64 },
   // A backend carries a THIRD line — name, model, and the route chip — so it is the one card
   // that needs the extra height; a capability carries one word and a count. Same reasoning as
   // the old CHIP_MIN_W / CAP_MIN_W split, which is why these are still two numbers and not one.

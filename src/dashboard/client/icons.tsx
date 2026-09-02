@@ -42,7 +42,11 @@ export function Icon({ name }: { name: IconName }): React.JSX.Element {
   const Glyph = ICONS[name];
   return (
     <Glyph
-      className="topo-node-icon"
+      // `.topo-node-icon` used to carry this and had no CSS left after the Tailwind move: the
+      // glyph became a bare inline SVG on its own line, with the title indented underneath it
+      // by a pl-5 that had nothing beside it. Sizing lives on the component now, and the card
+      // puts it in a real column (nodes.tsx).
+      className="shrink-0 mt-px text-muted-foreground"
       size={14}
       strokeWidth={1.6}
       absoluteStrokeWidth

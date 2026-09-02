@@ -46,7 +46,7 @@ const buttonVariants = cva(
         // 16x16, which is a mis-click hazard beside a target ten times its area.
         // ponytail: 24px, not the 44px touch figure — a 56px card cannot spare 44 and this
         // canvas is pointer-driven. Revisit if the map is ever used on a touch screen.
-        icon: "size-6 rounded-sm text-xs",
+        icon: "size-6 rounded-sm text-xs hover:bg-muted",
       },
     },
     defaultVariants: { variant: "ghost", size: "icon" },

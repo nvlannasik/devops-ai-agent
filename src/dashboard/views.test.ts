@@ -2413,3 +2413,16 @@ test("the map uses the product's own smallest size, not one below it", async () 
   assert.match(tw, /--text-2xs: var\(--fs-2xs\)/);
   assert.doesNotMatch(tw, /--text-2xs: var\(--fs-3xs/);
 });
+
+// The seam was losing EVERY contest and it took an underlined card caption to notice. An
+// unlayered declaration beats any layered one whatever the specificity, so with utilities in
+// `@layer utilities`, `a { text-decoration: underline }` in styles.ts (0,0,1) beat
+// `.no-underline` (0,1,0) — and so did every other plain rule in that file, on every card.
+// Not a source-order problem; no specificity fixes it. The theme stays layered because it is
+// only variable declarations and SHOULD lose to anything the page states itself.
+test("Tailwind's utilities are unlayered, or styles.ts wins every contest on the map", async () => {
+  const tw = await readFile(new URL("./client/tailwind.css", import.meta.url), "utf8");
+  assert.match(tw, /@import "tailwindcss\/utilities\.css";/, "utilities must not be in a layer");
+  assert.doesNotMatch(tw, /utilities\.css" layer\(/);
+  assert.match(tw, /@import "tailwindcss\/theme\.css" layer\(theme\)/, "the theme still is");
+});

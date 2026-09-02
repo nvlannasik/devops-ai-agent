@@ -23,7 +23,7 @@ import { cn } from "./lib/utils.js";
 // Structure is `border-border`, which `tailwind.css` aliases to --mark-line (3.63) and NOT to
 // --border (1.65) — see the note there, that alias is a decision rather than a mapping.
 export const nodeCard = cva(
-  "box-border w-full h-full flex overflow-hidden bg-card border-border transition-colors hover:bg-muted",
+  "box-border w-full h-full flex overflow-hidden bg-card border-border shadow-[var(--shadow-sm)] transition-colors hover:bg-muted",
   {
     variants: {
       kind: {

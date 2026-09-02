@@ -28,48 +28,48 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
     .filter(Boolean)
     .join(" — ");
 
+  // Card anatomy: a glyph column beside a text column, which is what every SaaS card of this
+  // shape does and what the absolute-positioned icon plus a pl-5 indent was imitating badly.
+  // One row, so the icon aligns to the TITLE rather than floating above it, and `min-w-0` on
+  // the text column is what lets `truncate` actually truncate inside a flex parent.
   const body = (
-    <>
+    <div className="flex w-full min-w-0 items-start gap-2">
       {d.icon ? <Icon name={d.icon} /> : null}
-      <span
-        className={cn(
-          "block truncate",
-          d.kind === "tool"
-            ? "font-mono text-2xs font-medium text-muted-foreground"
-            : "text-sm font-medium text-foreground",
-          d.kind === "store" && "font-mono text-2xs font-semibold text-foreground",
-          // The glyph sits in the card's padding, so the text steps aside for it rather than
-          // flowing under. Only the kinds that HAVE one pay the indent.
-          d.icon && "pl-5",
-          !d.configured && "text-muted-foreground"
-        )}
-      >
-        {d.title}
-      </span>
-      {d.sub ? (
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span
           className={cn(
-            "block truncate text-muted-foreground",
-            d.kind === "store" ? "text-2xs" : "font-mono text-2xs",
-            d.icon && "pl-5"
+            "block truncate",
+            d.kind === "tool"
+              ? "font-mono text-2xs font-medium text-muted-foreground"
+              : "text-sm font-medium text-foreground",
+            d.kind === "store" && "font-mono text-2xs font-semibold text-foreground",
+            !d.configured && "text-muted-foreground"
           )}
         >
-          {d.sub}
+          {d.title}
         </span>
-      ) : null}
-      {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing: the
-          registry lists the backend but no chain will ever pick it. */}
-      {d.route ? (
-        <Badge variant={d.route === "unrouted" ? "warning" : "muted"} className="self-start mt-0.5">
-          {d.route}
-        </Badge>
-      ) : null}
-      {d.write ? (
-        <Badge variant="strong" className="ml-auto">
-          write
-        </Badge>
-      ) : null}
-    </>
+        {d.sub ? (
+          <span
+            className={cn(
+              "block truncate text-muted-foreground",
+              d.kind === "store" ? "text-2xs" : "font-mono text-2xs"
+            )}
+          >
+            {d.sub}
+          </span>
+        ) : null}
+        {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing: the
+            registry lists the backend but no chain will ever pick it. */}
+        {d.route ? (
+          <Badge variant={d.route === "unrouted" ? "warning" : "muted"} className="self-start">
+            {d.route}
+          </Badge>
+        ) : null}
+      </div>
+      {/* Outside the text column, so a long tool name truncates against it instead of pushing
+          it off the card. */}
+      {d.write ? <Badge variant="strong" className="mt-px">write</Badge> : null}
+    </div>
   );
 
   return (
@@ -97,7 +97,7 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
             aria-label={`${full} — ${d.expanded ? "hide" : "show"} what it holds`}
           >
             {body}
-            <span className="absolute right-2 top-1/2 -translate-y-1/2 font-mono text-sm leading-none">
+            <span className="absolute right-1.5 top-1/2 -translate-y-1/2 grid size-5 place-items-center rounded-sm font-mono text-sm leading-none text-muted-foreground">
               {d.expanded ? "−" : "+"}
             </span>
           </Button>
