@@ -509,6 +509,38 @@ The regression test is a **prompt contract**: `skills/real.test.ts` runs `parseS
 structure"*, because a match in the explanatory prose above it masks the template line and the
 test passes while checking nothing (it did, on the first attempt).
 
+### RCA reads top-down for on-call, and Root Cause is a causal chain — 2026-09-02
+Two changes to `prompts/skills/rca-format.md`, plus `## Causal Chain` in `prompts/system.md`.
+
+**Depth.** There was no 5-Why anywhere: `Investigation Discipline` is a *breadth* rule (don't
+re-query what you know) and `Root Cause` was specified as "One paragraph", so investigations
+stopped at the proximate cause — "the gateway can't parse the response" rather than "orders-api
+ships v2 while the gateway parses v1". `*📍 Root Cause*` is now a numbered causal chain. **Not
+literal 5-Why, deliberately:** a fixed quota makes the model invent links 4 and 5 when evidence
+supports 3, which collides head-on with the anti-fabrication rule in `Safety Guidelines`, and an
+invented causal chain is the worst thing this agent can emit — it reads as the most authoritative
+output it produces. So the chain is bounded by evidence instead: every link cites the tool result
+behind it, and the chain **stops explicitly (⛔) at the first unsupported link**, naming what
+would extend it. That stopping line doubles as an Escalation Trigger.
+
+**Order.** The card is read by someone who was just paged, so it now goes
+`⚡ TL;DR → ⚠️ Impact → 🔧 Recommended Actions → 📍 Root Cause → 📊 Evidence → 🚫 Ruled Out → 📈 Confidence`.
+Impact used to sit *below* the actions, which is backwards — impact is what decides whether the
+actions are worth waking up for. `⚡ TL;DR` is the only new label; everything else was reordered,
+not renamed, because the labels are a contract read by four places: `blocks.ts`
+(`extractSection`/`isRcaResponse`), `app/index.ts` (the "is this an RCA" gate), `dashboard/rca.ts`,
+and `remediation/proposal.ts` (which looks for "Recommended Actions"). `buildRcaBlocks` extracts by
+label rather than position, so **RCAs already in Postgres render in the new order too**, and one
+missing its TL;DR just opens on Impact.
+
+**The trap in `extractSection`.** Its lookahead ends a section on a *hardcoded emoji set*. A label
+whose emoji is missing there is invisible as a boundary and the section above it silently absorbs
+the rest of the RCA — no throw, no empty section, just one giant block. Note the direction: a
+section's emoji ends the section **above** it, so the first heading in the template is the one a
+naive test never exercises. `skills/real.test.ts` derives the headings from the shipped template
+and checks each against a `*🔴 SENTINEL*` section placed in front for exactly that reason (the
+first version of that test passed with ⚡ removed from the set).
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
