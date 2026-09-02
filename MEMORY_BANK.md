@@ -541,6 +541,17 @@ naive test never exercises. `skills/real.test.ts` derives the headings from the 
 and checks each against a `*🔴 SENTINEL*` section placed in front for exactly that reason (the
 first version of that test passed with ⚡ removed from the set).
 
+**Dashboard fallout, found by rendering it.** The chain put Root Cause down `classify()`'s
+`ordered` branch for the first time. That branch assumed the Recommended Actions shape
+(`1. *Immediate:* …`) and fell to an empty left cell for anything else, so the chain rendered as
+a table blank in every first cell, headed "Step | Action" — the "table with a dead column"
+`rca.ts` warns about in its own comment, and the guard only checked the RIGHT column. Fixed by
+falling back to `splitOnce` when the step label is absent (the chain is `claim — source`, the
+same two halves as Evidence), adding `"root cause": ["Step", "Evidence"]` to `COLUMNS`, and
+making the dead-column guard check both sides. **The agent-builder / private-llm path needed
+nothing** — the flow is a bare transport with no `system` field, so the whole contract travels
+in `input_value` from this repo; that is exactly what keeping the flow empty bought.
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
