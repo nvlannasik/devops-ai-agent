@@ -3,6 +3,12 @@
 // one the operating system already has. Components read only from the tokens at the top —
 // never hard-code a colour below :root.
 //
+// THIS IS A TEMPLATE LITERAL, so three characters belong to JavaScript before they belong to
+// CSS: a backtick, a dollar-brace, and a BACKSLASH. The last one is the quiet one — a CSS
+// escape like \2193 for an arrow reads as a legacy octal escape and fails the whole build with
+// "Legacy octal escape sequences cannot be used in template literals", nowhere near the line
+// that caused it. Write the character itself (↓, ’, ·); the file is UTF-8 and so is the page.
+//
 // The direction: COLOUR IS RESERVED FOR SIGNAL. The chrome is graphite end to end, and the
 // only saturated ink on a page is severity and state. On a console whose job is to make one
 // critical row unmissable at 3am, a decorative accent on every link and every heading is
@@ -1788,6 +1794,50 @@ form.signout button {
 }
 .react-flow__node:hover .topo-node { background: var(--surface-2); }
 
+/* ---------- topology: a tool family, opened ---------- */
+/* A family card carries two controls, because it has two things to offer: open its tools, or go
+   to its row. They are siblings — a <button> inside an <a> is invalid, and either nesting makes
+   one unreachable by keyboard. The button takes the card; the link is a corner affordance. */
+.topo-capability .topo-node-toggle {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  width: 100%; height: 100%; min-width: 0;
+  padding: 0; background: none; border: 0; cursor: pointer; text-align: left;
+  font: inherit; color: inherit;
+}
+/* + / − rather than a rotating chevron: the map draws no other glyph, and a character costs no
+   markup, no icon font (blocked by default-src) and no rotation to keep in step with state. */
+.topo-node-chevron {
+  position: absolute; right: var(--sp-2); top: 50%; transform: translateY(-50%);
+  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1; color: var(--text-dim);
+}
+.topo-capability:hover .topo-node-chevron { color: var(--text); }
+/* Bottom-right, out of the chevron's way. It is the only place on this map where the "every
+   card links to its row" contract needs its own affordance, because the card's own click was
+   taken by the disclosure. */
+.topo-node-rowlink {
+  position: absolute; right: var(--sp-2); bottom: 2px;
+  font-size: var(--fs-2xs); line-height: 1; color: var(--text-dim); text-decoration: none;
+}
+.topo-node-rowlink:hover { color: var(--accent); }
+
+/* A tool is one identifier. No fill of its own, a lighter outline than a structural card, and
+   mono type — it is a name the server reported, not a dependency this agent declared. */
+.topo-tool {
+  flex-direction: row; align-items: center; gap: var(--sp-2);
+  padding: 0 var(--sp-2); border-style: dashed; border-width: 1px; border-radius: 6px;
+}
+.topo-tool .topo-node-title {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 500; color: var(--text-dim);
+}
+/* The word, never a colour — --accent is the SQS hop and --warning is not-configured, and a
+   third meaning on either would make both ambiguous. Weight and case carry it instead, which is
+   the same trick stateBadge() uses on the incident list. */
+.topo-node-write {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--font-data); font-size: var(--fs-3xs, .625rem); letter-spacing: .08em;
+  text-transform: uppercase; font-weight: 700; color: var(--text);
+}
+
 /* ---------- topology: React Flow's own furniture ---------- */
 /* The library ships a light-grey visual language of its own. These rules are the whole of the
    theming: everything else it draws is either invisible (handles) or already neutral. */
@@ -1821,6 +1871,21 @@ form.signout button {
 .react-flow__attribution { background: transparent; font-size: var(--fs-3xs, .625rem); }
 .react-flow__attribution a { color: var(--text-dim); text-decoration: none; }
 
+/* ---------- topology: the expand animation ---------- */
+/* Opening a family re-runs dagre over the whole graph, so every card moves. React Flow writes
+   position as a transform, which means one transition on the wrapper animates the entire
+   re-layout — no per-node bookkeeping, no interpolation loop, nothing to keep in step.
+   .dragging is React Flow's own class and the exemption is not optional: a transition on the
+   node under the pointer makes a drag lag behind the cursor by exactly this duration. */
+.react-flow__node { transition: transform .28s ease; }
+.react-flow__node.dragging { transition: none; }
+/* The tools themselves are new elements rather than moved ones, so they fade rather than
+   slide. @starting-style is what gives a just-inserted element something to animate FROM;
+   where it is unsupported the node simply appears, which is the old behaviour. */
+@starting-style {
+  .react-flow__node { opacity: 0; }
+}
+
 /* ---------- topology: the key ---------- */
 /* At the foot of the frame, under a hairline — it belongs to the drawing, so it sits inside
    the same card rather than under it as a caption for the whole section. */
@@ -1849,6 +1914,9 @@ form.signout button {
    its accent stroke, which does not move. */
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge.animated .react-flow__edge-path { animation: none; }
+  /* The re-layout still happens — it has to, the tools need the room — it just arrives rather
+     than travels. */
+  .react-flow__node { transition: none; }
 }
 
 /* :target on the far end is what confirms the trip landed. An outline again, for the same
@@ -1993,13 +2061,14 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
   .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
-  /* Two thirds of the legend's affordance note are untrue here: there is no cursor to drag
-     with and no ctrl key to hold. The gestures a phone does have — one finger to pan, two to
-     zoom — need no instructions, and the third clause (every card links to its row) is the
-     only one worth the line, so the note is rewritten rather than hidden. */
+  /* Half the legend's affordance note is untrue here: there is no cursor to drag with and no
+     ctrl key to hold. The gestures a phone does have — one finger to pan, two to zoom — need
+     no instructions. The two clauses that survive are the ones a tap can reach, so the note is
+     rewritten rather than hidden. */
   .topo-legend-note { font-size: 0; font-style: normal; }
   .topo-legend-note::after {
-    content: "Every card links to its row below."; font-size: var(--fs-sm); font-style: italic;
+    content: "Tap a tool family to list its tools · ↓ jumps to a card’s row below.";
+    font-size: var(--fs-sm); font-style: italic;
   }
 }
 /* ---------- the rail, as a drawer ---------- */

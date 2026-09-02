@@ -1,12 +1,14 @@
-import { StrictMode, useMemo } from "react";
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Background,
   BackgroundVariant,
   Controls,
   ReactFlow,
+  ReactFlowProvider,
   useEdgesState,
   useNodesState,
+  useReactFlow,
 } from "@xyflow/react";
 // React Flow's own stylesheet. esbuild emits it as dist/public/topology.css, which the page
 // links BEFORE its inline <style> block so the dashboard's rules win on equal specificity.
@@ -17,7 +19,7 @@ import type { Topology } from "../topology-types.js";
 import { layoutGraph } from "./layout.js";
 import type { TopoFlowNode } from "./layout.js";
 import { nodeTypes } from "./nodes.js";
-import { markDragEnd } from "./drag-state.js";
+import { justDragged, markDragEnd } from "./drag-state.js";
 
 // The interactive dependency map. The server renders the mount point and the topology as a
 // JSON data block; everything visible here is built in the browser.
@@ -31,13 +33,61 @@ import { markDragEnd } from "./drag-state.js";
 const MOUNT_ID = "topo-root";
 const DATA_ID = "topo-data";
 
-function TopoMap({ graph }: { graph: TopoGraph }): React.JSX.Element {
-  // Laid out once. useNodesState then owns the positions, so a drag survives every re-render —
-  // recomputing the layout on render would snap a dragged card back the moment anything else
-  // in the tree changed.
-  const initial = useMemo(() => layoutGraph(graph), [graph]);
-  const [nodes, , onNodesChange] = useNodesState<TopoFlowNode>(initial.nodes);
-  const [edges, , onEdgesChange] = useEdgesState(initial.edges);
+function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
+  // Which tool families are open. The set is the ONLY state this component owns; the graph and
+  // the layout are both derived from it, so there is no second place expansion can be recorded
+  // and no way for the two to disagree.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+
+  // Re-laid out on every change to that set, and this DOES discard a reader's drags. That is
+  // the correct trade rather than a limitation worth working around: opening a family with 34
+  // tools has to make room for them, and preserving hand-placed cards would either overlap the
+  // new nodes or leave a hole where they should be. Collapsing restores the same layout the
+  // map loaded with, which is the thing a reader who has lost their place actually wants.
+  const graph: TopoGraph = useMemo(() => buildGraph(topology, expanded), [topology, expanded]);
+  const laid = useMemo(() => layoutGraph(graph), [graph]);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState<TopoFlowNode>(laid.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(laid.edges);
+  const { fitView } = useReactFlow();
+  const first = useRef(true);
+
+  useEffect(() => {
+    setNodes(laid.nodes);
+    setEdges(laid.edges);
+    // Re-fit AFTER an expand or collapse, never on the first render — the <ReactFlow fitView>
+    // prop already handles the mount, and running both fights over the viewport.
+    //
+    // This is not polish. Without it, opening k8s adds a block roughly 600x480 and the viewport
+    // stays exactly where it was: the tools land off the right edge and the agent, Slack and
+    // Alertmanager go off the left. Measured — the first build of this feature did precisely
+    // that, and a reader who clicked "expand" lost the entire map.
+    //
+    // maxZoom 1 so a small family cannot magnify the map past its own type scale; the animation
+    // is the viewport's, and it is what makes the expansion read as the map opening up rather
+    // than as a different map being swapped in.
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const id = requestAnimationFrame(() => fitView({ padding: 0.15, duration: 400, maxZoom: 1 }));
+    return () => cancelAnimationFrame(id);
+  }, [laid, setNodes, setEdges, fitView]);
+
+  // The toggle lives here rather than in the card, so no callback has to be stored in
+  // serialized node data — React Flow re-creates its node cache whenever that object's
+  // identity changes, and a function in it would change on every render.
+  const onNodeClick = useCallback((_: unknown, node: TopoFlowNode) => {
+    if (node.data.kind !== "capability") return;
+    // The row link inside the card stops its own propagation, so reaching here means the
+    // toggle (or the card around it) was clicked. A drag that ends on a card is not a click.
+    if (justDragged()) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(node.id)) next.add(node.id);
+      return next;
+    });
+  }, []);
 
   return (
     <ReactFlow
@@ -46,6 +96,7 @@ function TopoMap({ graph }: { graph: TopoGraph }): React.JSX.Element {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onNodeDragStop={markDragEnd}
+      onNodeClick={onNodeClick}
       nodeTypes={nodeTypes}
       // Read-only map: nothing here connects, deletes or re-wires. Every one of these is a
       // capability React Flow ships ON by default, and this dashboard is read-only by contract
@@ -107,7 +158,11 @@ function main(): void {
   mount.removeAttribute("data-fallback");
   createRoot(mount).render(
     <StrictMode>
-      <TopoMap graph={buildGraph(topology)} />
+      {/* useReactFlow() reads the store from context, and <ReactFlow> does not provide it to
+          its own parent — so the provider has to sit above TopoMap rather than inside it. */}
+      <ReactFlowProvider>
+        <TopoMap topology={topology} />
+      </ReactFlowProvider>
     </StrictMode>
   );
 }

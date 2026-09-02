@@ -1,5 +1,5 @@
 import { rowId } from "./topology-types.js";
-import type { BackendNode, Capability, Node, Topology } from "./topology-types.js";
+import type { BackendNode, Capability, Node, Tool, Topology } from "./topology-types.js";
 
 // The graph model the React Flow map is built from. It lives HERE, in a plain .ts module with
 // no React import, rather than inside src/dashboard/client/ — because what it encodes is a
@@ -13,7 +13,7 @@ import type { BackendNode, Capability, Node, Topology } from "./topology-types.j
 // Positions are deliberately absent. dagre assigns them in the browser (client/layout.ts) —
 // see the note there for why the hand-laid coordinates this replaced are not reproduced.
 
-export type TopoNodeKind = "inbound" | "agent" | "outbound" | "backend" | "capability";
+export type TopoNodeKind = "inbound" | "agent" | "outbound" | "backend" | "capability" | "tool";
 
 // A `type` alias, not an `interface`, and that is a constraint rather than a preference:
 // React Flow's Node<T> requires `T extends Record<string, unknown>`, which an interface does
@@ -36,6 +36,15 @@ export type TopoNodeData = {
   viaWorker?: boolean;
   route?: BackendNode["route"];
   tools?: number;
+  /** Set on a capability, so its card can say whether clicking it will open or close. */
+  expanded?: boolean;
+  /**
+   * Set on a tool. The agent's OWN predicate for "this can change the cluster" (`Tool.write`),
+   * carried through rather than re-derived. Shown as the word, never as a colour: this map
+   * spends `--accent` on the SQS hop and `--warning` on not-configured, and a third meaning on
+   * either would make both ambiguous.
+   */
+  write?: boolean;
 };
 
 export interface TopoNode {
@@ -65,17 +74,26 @@ export interface TopoGraph {
 // rowId(). Exported because the client's layout ranks from it and the tests assert on it.
 export const AGENT_ID = "agent";
 
+/** Node id for one tool under a capability. Not a row id: a tool has no row of its own — the
+ * tables list it inside its family's `<details>` — so these nodes carry no `href`. */
+export const toolId = (capIndex: number, toolIndex: number): string => `tool-${capIndex}-${toolIndex}`;
+
 /**
  * A node's id IS the id of its row in the tables below, for every node that has one — so the
  * map's link target is `#${node.id}` and no second mapping exists to drift. rowId() is the
  * single definition both sides derive from; views.ts stamps the same value on the `<tr>`.
+ *
+ * `expanded` names the capabilities whose tools should appear as child nodes. It is a parameter
+ * rather than state inside the client because the expansion is a claim about the graph — a tool
+ * hangs off the family that exposes it, which hangs off the MCP server — and claims belong in
+ * the module `npm test` can reach. Empty (the default) is the map as it loads.
  *
  * The one place this is load-bearing rather than tidy: backend chips are mapped over the WHOLE
  * backends list before being split by viaWorker. Filtering first and mapping after would
  * number the two groups 0,1,2… independently and send half the links to the wrong row — the
  * same trap the old SVG renderer documented, preserved here because the split still happens.
  */
-export function buildGraph(t: Topology): TopoGraph {
+export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set()): TopoGraph {
   const nodes: TopoNode[] = [];
   const edges: TopoEdge[] = [];
 
@@ -147,16 +165,35 @@ export function buildGraph(t: Topology): TopoGraph {
   // exposes when the client connected. They hang off the MCP server for that reason: an edge
   // from the agent would claim the agent exposes them itself.
   t.capabilities.forEach((c: Capability, i: number) => {
-    const id = push(rowId("cap", i), {
+    const capId = rowId("cap", i);
+    const isOpen = expanded.has(capId);
+    push(capId, {
       kind: "capability",
       title: c.name,
       sub: `${c.tools.length} tool${c.tools.length === 1 ? "" : "s"}`,
       meta: `${c.tools.filter((tool) => tool.write).length} of ${c.tools.length} can change the cluster`,
       configured: true,
-      href: `#${rowId("cap", i)}`,
+      href: `#${capId}`,
       tools: c.tools.length,
+      expanded: isOpen,
     });
-    link(mcpAnchor, id, "call");
+    link(mcpAnchor, capId, "call");
+
+    if (!isOpen) return;
+    // One node per tool, hanging off its own family. Sorted upstream by toolFamilies() (name
+    // within a family), so the order a reader sees here is the order of the table below.
+    c.tools.forEach((tool: Tool, j: number) => {
+      const id = toolId(i, j);
+      push(id, {
+        kind: "tool",
+        title: tool.name,
+        sub: "",
+        meta: tool.write ? "can change the cluster — needs approval" : "read-only",
+        configured: true,
+        write: tool.write,
+      });
+      link(capId, id, "call");
+    });
   });
 
   return { nodes, edges };

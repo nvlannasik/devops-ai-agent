@@ -1224,10 +1224,13 @@ function topoLegend(t: Topology): string {
     (viaWorker ? key(boxKey("topo-backend topo-backend-worker"), "reached over SQS via llm-worker") : "") +
     (unconfigured ? key(boxKey("topo-off"), "not configured") : "") +
     // React Flow's <Controls> gives zoom and fit buttons but says nothing about the gestures,
-    // and the two that matter here are both non-obvious: a card can be moved, and the wheel is
-    // deliberately NOT captured (see zoomOnScroll in client/topology.tsx — a map that swallows
-    // the scroll traps a reader trying to reach the tables below it).
-    `<li class="topo-legend-note">Drag a card to move it · Ctrl + scroll to zoom · every card links to its row below.</li>` +
+    // and none of these is discoverable: the wheel is deliberately NOT captured (see
+    // zoomOnScroll in client/topology.tsx — a map that swallows the scroll traps a reader
+    // trying to reach the tables below it), a card can be moved, and a tool family opens.
+    // "every card links to its row" was retired here rather than reworded: it stopped being
+    // true when tools became nodes, and a tool has no row of its own — the tables list it
+    // inside its family's <details>. The arrow names the affordance that IS still on the card.
+    `<li class="topo-legend-note">Drag to move · Ctrl + scroll to zoom · click a tool family to list its tools · ↓ jumps to a card's row below.</li>` +
     `</ul>`
   );
 }

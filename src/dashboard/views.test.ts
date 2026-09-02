@@ -2180,14 +2180,14 @@ test("the key only explains what was actually drawn", () => {
   assert.doesNotMatch(legend, /topo-backend-worker/, "no backend takes the worker");
   // the agent is always drawn, and the affordance always applies
   assert.match(legend, /topo-self/);
-  assert.match(legend, /every card links to its row below/);
+  assert.match(legend, /jumps to a card's row below/);
 });
 
 // React Flow's <Controls> gives buttons but names no gestures, and the two that matter here are
 // both non-obvious: a card can be moved, and the wheel is deliberately not captured.
 test("the legend states the affordances the controls do not", () => {
   const html = topologyPage(baseTopology, NONCE, ASSETS);
-  assert.match(html, /<li class="topo-legend-note">Drag a card to move it · Ctrl \+ scroll to zoom · every card links to its row below\.<\/li>/);
+  assert.match(html, /<li class="topo-legend-note">Drag to move · Ctrl \+ scroll to zoom · click a tool family to list its tools · ↓ jumps to a card's row below\.<\/li>/);
 });
 
 // Two thirds of that note are untrue on a phone: there is no cursor to drag with and no ctrl
@@ -2196,7 +2196,7 @@ test("the legend states the affordances the controls do not", () => {
 test("the affordance note is rewritten on a phone, not dropped", () => {
   const block = STYLES.match(/@media \(max-width: 46rem\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(block, /\.topo-legend-note \{ font-size: 0; font-style: normal; \}/);
-  assert.match(block, /content: "Every card links to its row below\."/);
+  assert.match(block, /content: "Tap a tool family to list its tools/);
 });
 
 // A marquee is exactly what a reader who asked for less motion asked to be rid of. The edge

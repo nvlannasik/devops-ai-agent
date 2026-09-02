@@ -182,3 +182,74 @@ test("an unconfigured dependency stays unconfigured in the graph", () => {
   });
   assert.equal(g.nodes.find((n) => n.id === "out-0")!.data.configured, false);
 });
+
+// ---------- expanding a tool family ----------
+
+const withTools: Topology = {
+  ...base,
+  outbound: [{ id: "devops-mcp-server", label: "devops-mcp-server", detail: "stdio", meta: "", configured: true }],
+  capabilities: [
+    { name: "k8s", tools: [{ name: "k8s_list_pods", write: false }, { name: "k8s_scale", write: true }] },
+    { name: "loki", tools: [{ name: "loki_query", write: false }] },
+  ],
+};
+
+// The default is the map as it loads. A closed family is a count, not a promise of nodes —
+// 34 tools under k8s would otherwise be on screen before anyone asked for them.
+test("no tools are drawn until a family is expanded", () => {
+  const g = buildGraph(withTools);
+  assert.equal(g.nodes.filter((n) => n.data.kind === "tool").length, 0);
+  assert.equal(g.nodes.find((n) => n.id === "cap-0")!.data.expanded, false);
+});
+
+// A tool hangs off the family that exposes it, which hangs off the MCP server. Two hops, and
+// the second is what makes the claim: this family, not the agent and not another family.
+test("an expanded family gets one child node per tool, hanging off itself", () => {
+  const g = buildGraph(withTools, new Set(["cap-0"]));
+  const tools = g.nodes.filter((n) => n.data.kind === "tool");
+  assert.deepEqual(tools.map((n) => n.data.title), ["k8s_list_pods", "k8s_scale"]);
+  for (const t of tools) {
+    assert.deepEqual(into(g, t.id).map((e) => e.source), ["cap-0"], `${t.id} should hang off its family`);
+  }
+  assert.equal(g.nodes.find((n) => n.id === "cap-0")!.data.expanded, true);
+  // ...and only the family that was named. loki stays closed.
+  assert.equal(g.nodes.find((n) => n.id === "cap-1")!.data.expanded, false);
+  assert.ok(!tools.some((t) => t.data.title.startsWith("loki")));
+});
+
+// The agent's OWN predicate for "this can change the cluster", carried through rather than
+// re-derived — same rule as the tools table below the map.
+test("a tool carries whether it can change the cluster, and has no row to link to", () => {
+  const g = buildGraph(withTools, new Set(["cap-0"]));
+  const [read, write] = g.nodes.filter((n) => n.data.kind === "tool");
+  assert.equal(read!.data.write, false);
+  assert.equal(write!.data.write, true);
+  // The tables list a tool inside its family's <details>, which has no id of its own, so there
+  // is nothing for these to anchor. A wrong href would be a link that silently goes nowhere.
+  assert.equal(read!.data.href, undefined);
+  assert.equal(write!.data.href, undefined);
+});
+
+test("two families can be open at once without their tools mixing", () => {
+  const g = buildGraph(withTools, new Set(["cap-0", "cap-1"]));
+  assert.equal(g.nodes.filter((n) => n.data.kind === "tool").length, 3);
+  const loki = g.nodes.find((n) => n.data.title === "loki_query")!;
+  assert.deepEqual(into(g, loki.id).map((e) => e.source), ["cap-1"]);
+});
+
+// Expansion must not disturb the ids everything else is anchored on.
+test("expanding changes nothing about the rest of the graph", () => {
+  const closed = buildGraph(withTools);
+  const open = buildGraph(withTools, new Set(["cap-0"]));
+  const nonTool = open.nodes.filter((n) => n.data.kind !== "tool").map((n) => n.id);
+  assert.deepEqual(nonTool, closed.nodes.map((n) => n.id));
+  for (const e of closed.edges) {
+    assert.ok(open.edges.some((o) => o.id === e.id), `${e.id} should survive expansion`);
+  }
+});
+
+// An id nobody minted must not open anything, and must not throw.
+test("an unknown id in the expanded set is ignored", () => {
+  const g = buildGraph(withTools, new Set(["cap-99", "backend-0", ""]));
+  assert.equal(g.nodes.filter((n) => n.data.kind === "tool").length, 0);
+});

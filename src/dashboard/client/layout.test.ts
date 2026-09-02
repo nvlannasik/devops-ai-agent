@@ -120,3 +120,67 @@ test("an empty topology lays out without throwing", () => {
   assert.equal(edges.length, 0);
   assert.ok(Number.isFinite(nodes[0]!.position.x));
 });
+
+// ---------- an open tool family ----------
+
+const withTools: Topology = {
+  ...base,
+  capabilities: [
+    // 34 is not an arbitrary number: it is how many k8s tools devops-mcp-server actually
+    // registers, and it is the density this layout exists to survive.
+    { name: "k8s", tools: Array.from({ length: 34 }, (_, i) => ({ name: `k8s_tool_${i}`, write: i === 33 })) },
+    { name: "loki", tools: [{ name: "loki_query", write: false }] },
+  ],
+};
+const open = (...ids: string[]) => layoutGraph(buildGraph(withTools, new Set(ids)));
+
+// The bug this replaced: dagre stacks a family's tools in ONE column, so 34 of them was
+// ~1400px of vertical. The map scrolled off screen the moment anyone expanded k8s. They are
+// dealt into a block instead — roughly square, so the aspect stays usable at any count.
+test("an open family's tools are packed into a block, not a column", () => {
+  const { nodes } = open("cap-0");
+  const tools = nodes.filter((n) => n.data.kind === "tool");
+  assert.equal(tools.length, 34);
+
+  const xs = new Set(tools.map((t) => t.position.x));
+  assert.ok(xs.size > 1, "a single column is the failure this exists to prevent");
+
+  const w = Math.max(...tools.map((t) => t.position.x + t.width!)) - Math.min(...tools.map((t) => t.position.x));
+  const h = Math.max(...tools.map((t) => t.position.y + t.height!)) - Math.min(...tools.map((t) => t.position.y));
+  // Not a strict square — the aspect target is what keeps this honest without pinning the
+  // exact column count, which is free to change with the type scale.
+  assert.ok(h < w * 2, `the block should not be a tower (${Math.round(w)}x${Math.round(h)})`);
+  assert.ok(w < h * 3, `nor a ribbon (${Math.round(w)}x${Math.round(h)})`);
+});
+
+// dagre never sees the tools — it is handed one synthetic node sized to the whole block. If
+// that reservation were wrong, the tools would land on top of the cards beside them, which is
+// exactly the failure a reader cannot diagnose.
+test("nothing overlaps once a family is open", () => {
+  const { nodes } = open("cap-0", "cap-1");
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i]!, b = nodes[j]!;
+      const apart =
+        a.position.x + a.width! <= b.position.x || b.position.x + b.width! <= a.position.x ||
+        a.position.y + a.height! <= b.position.y || b.position.y + b.height! <= a.position.y;
+      assert.ok(apart, `${a.id} and ${b.id} overlap`);
+    }
+  }
+});
+
+// The tools belong to the right of the family that exposes them: the reading order is the
+// claim here as much as anywhere else on this map.
+test("a family's tools rank past the family itself", () => {
+  const { nodes } = open("cap-0");
+  const cap = at(nodes, "cap-0");
+  for (const t of nodes.filter((n) => n.data.kind === "tool")) {
+    assert.ok(t.position.x > cap.position.x, `${t.id} should sit right of its family`);
+  }
+});
+
+test("collapsing returns the layout the map loaded with", () => {
+  const before = layoutGraph(buildGraph(withTools));
+  const after = layoutGraph(buildGraph(withTools, new Set()));
+  assert.deepEqual(after.nodes.map((n) => n.position), before.nodes.map((n) => n.position));
+});

@@ -819,6 +819,17 @@ Load-bearing, and each cost something to get right:
   uniform now and says the map is live. The SQS distinction rests on what did not move — the
   accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
   and the legend row. Four signals became three; none of the survivors is spare.
+- **Tool families expand into child nodes (2026-09-02).** Clicking a capability card toggles
+  it; the open set is a PARAMETER to `buildGraph`, not client-private state, so the claim
+  ("a tool hangs off the family that exposes it") stays testable. Three things had to be got
+  right and each was found by looking at the rendered page: dagre stacks a rank in one column
+  and `k8s` has 34 tools (~1400px — the map went off screen), so each open family is one
+  synthetic node sized to the whole block and the tools are dealt into a roughly-square grid
+  inside it; `fitView` runs after every toggle but never on mount, or the tools land off one
+  edge and the agent off the other; and the family card needed a second control (`↓`, with
+  `stopPropagation`) because the disclosure took its click. Re-layout discards drags — opening
+  34 tools has to make room. A tool node carries no `href`: the tables list it inside a
+  `<details>` with no id of its own.
 - **Not covered by `npm test`:** React Flow's rendering, the drag behaviour, the CSS.
   `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
   (finite positions, left-to-right order, non-overlap, and that the SQS class marks exactly one

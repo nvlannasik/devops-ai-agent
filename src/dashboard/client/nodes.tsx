@@ -16,6 +16,7 @@ const KIND_CLASS: Record<TopoNodeKind, string> = {
   outbound: "topo-out",
   backend: "topo-backend",
   capability: "topo-capability",
+  tool: "topo-tool",
 };
 
 function classesFor(d: TopoNodeData): string {
@@ -28,18 +29,25 @@ function classesFor(d: TopoNodeData): string {
 }
 
 /**
- * One component for all five kinds. They differ in class and in whether they carry a route
- * chip, not in structure — and a structure stated once cannot drift between the kind that is
- * five nodes and the kind that is one.
+ * One component for all six kinds. They differ in class, in whether they carry a route chip,
+ * and in what the click does — not in structure, and a structure stated once cannot drift
+ * between the kind that is five nodes and the kind that is one.
+ *
+ * Three click behaviours, and which one applies is decided by the DATA, never by the caller:
+ * a capability toggles its tools (the parent's `onNodeClick` does the toggling — see
+ * topology.tsx — so no callback has to live in serialized node data), a tool does nothing
+ * because it has no row to go to, and everything else follows its link.
  */
 export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Element {
   const d = data;
   // The accessible name carries the UNTRUNCATED value: CSS clips the visible text to the card,
   // exactly as the SVG's clip() did, so this is the only place the full string survives for a
-  // screen reader. Same reasoning as the old card()'s aria-label on the <a>.
-  // The route rides in here because `aria-label` REPLACES the element's contents for assistive
-  // tech: the chip below is visible text that a screen reader would otherwise never reach.
-  const full = [d.title, d.sub, d.route].filter(Boolean).join(" — ");
+  // screen reader. The route and the write marker ride in here for the same reason —
+  // `aria-label` REPLACES the element's contents for assistive tech, so a chip that is not in
+  // it is a chip no AT user ever reaches.
+  const full = [d.title, d.sub, d.route, d.write ? "can change the cluster" : ""]
+    .filter(Boolean)
+    .join(" — ");
 
   const body = (
     <>
@@ -48,6 +56,10 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
       {/* heavy / light / unrouted. Only backends have one, and "unrouted" is worth seeing:
           it means the registry lists the backend but no chain will ever pick it. */}
       {d.route ? <span className="topo-node-route" data-route={d.route}>{d.route}</span> : null}
+      {/* The word, never a colour. This map has spent --accent on the SQS hop and --warning on
+          not-configured; a third meaning on either would make both ambiguous, and "this tool
+          can change the cluster" is too important to say ambiguously. */}
+      {d.write ? <span className="topo-node-write">write</span> : null}
     </>
   );
 
@@ -58,7 +70,38 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
           Left/right because the layout is rankdir LR — a handle on the wrong side routes the
           edge the long way around the card. */}
       <Handle type="target" position={Position.Left} isConnectable={false} />
-      {d.href ? (
+
+      {d.kind === "capability" ? (
+        // A family is the one card with two things to offer, so it carries two controls rather
+        // than one that has to guess. They are SIBLINGS, not nested: a <button> inside an <a>
+        // is invalid, and either nested order makes one of them unreachable by keyboard.
+        <>
+          <button
+            type="button"
+            className="topo-node-toggle"
+            aria-expanded={!!d.expanded}
+            aria-label={`${full} — ${d.expanded ? "hide" : "show"} its tools`}
+          >
+            {body}
+            <span className="topo-node-chevron" aria-hidden="true">
+              {d.expanded ? "−" : "+"}
+            </span>
+          </button>
+          <a
+            className="topo-node-rowlink"
+            href={d.href}
+            aria-label={`Go to the ${d.title} row in the table below`}
+            // Without this the click reaches React Flow's onNodeClick as well and the family
+            // toggles on its way to the row it was asked to go to.
+            onClick={(e) => {
+              e.stopPropagation();
+              if (justDragged()) e.preventDefault();
+            }}
+          >
+            ↓
+          </a>
+        </>
+      ) : d.href ? (
         <a
           className="topo-node-link"
           href={d.href}
@@ -71,8 +114,11 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
           {body}
         </a>
       ) : (
+        // The agent (it IS what the tables are about) and every tool (the tables list it inside
+        // its family's <details>, which has no id of its own). Neither has a row to go to.
         body
       )}
+
       <Handle type="source" position={Position.Right} isConnectable={false} />
     </div>
   );

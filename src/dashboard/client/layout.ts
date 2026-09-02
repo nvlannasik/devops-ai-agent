@@ -1,6 +1,6 @@
 import dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "@xyflow/react";
-import type { TopoGraph, TopoNodeData, TopoNodeKind } from "../topology-graph.js";
+import type { TopoGraph, TopoNode, TopoNodeData, TopoNodeKind } from "../topology-graph.js";
 
 // Auto-layout, replacing the hand-laid coordinate table the SVG map used to carry. The old
 // note said a layout engine "would solve a problem this page does not have", and that was true
@@ -12,6 +12,8 @@ import type { TopoGraph, TopoNodeData, TopoNodeKind } from "../topology-graph.js
 // the middle, its dependencies fan OUT on the right, and the two shelves hang off whichever
 // dependency actually reaches them. dagre ranks by edge direction, so that shape falls out of
 // buildGraph()'s edges rather than being asserted here a second time.
+//
+// One thing is NOT left to dagre: an open tool family. See the note above layoutGraph().
 
 // One size table, read by BOTH the layout and the node components. dagre needs the box before
 // React has rendered anything, so the number cannot come from measurement — which means the
@@ -30,6 +32,12 @@ export const NODE_SIZE: Record<TopoNodeKind, { width: number; height: number }> 
   // content. Measured against the shipped type scale, not guessed.
   backend: { width: 190, height: 76 },
   capability: { width: 150, height: 56 },
+  // A tool is one identifier and nothing else, so it is the narrow one — but the identifiers
+  // are long (`prometheus_list_metric_names`) and there can be 34 of them under one family, so
+  // this is where the map's density is decided. Wider and k8s alone pushes the frame past any
+  // useful zoom; narrower and every name ellipses to uselessness. `--font-data` at --fs-2xs
+  // fits ~26 characters at 200px, which covers all but a handful.
+  tool: { width: 200, height: 34 },
 };
 
 export type TopoFlowNode = Node<TopoNodeData, "topo">;
@@ -42,22 +50,82 @@ export type TopoFlowEdge = Edge;
  * in the component means nothing downstream has to remember which convention it is holding —
  * an off-by-half-a-box is the kind of bug that looks like a layout opinion.
  */
+// Tools are laid out as a BLOCK, not as a rank. dagre would stack a family's tools in one
+// column — 34 of them under k8s is ~1400px of vertical, which pushed the rest of the map off
+// screen the first time it was tried. So each open family is handed to dagre as ONE synthetic
+// node sized to the whole block: dagre reserves the space and keeps everything else clear of
+// it, and the tools are dealt into a grid inside that reservation afterwards.
+const GRID_GAP = 6;
+
+// Columns for a roughly square block. A tool card is wide and short (200x34), so a square
+// block is not a square count: solving cols*W == (n/cols)*H for cols gives sqrt(n*H/W).
+// 34 tools -> 3 columns of 12, which is 612x474 rather than 200x1400.
+function gridCols(n: number): number {
+  const { width: w, height: h } = NODE_SIZE.tool;
+  return Math.max(1, Math.round(Math.sqrt((n * (h + GRID_GAP)) / (w + GRID_GAP))));
+}
+
+function gridSize(n: number): { width: number; height: number; cols: number; rows: number } {
+  const cols = gridCols(n);
+  const rows = Math.ceil(n / cols);
+  const { width: w, height: h } = NODE_SIZE.tool;
+  return {
+    cols,
+    rows,
+    width: cols * w + (cols - 1) * GRID_GAP,
+    height: rows * h + (rows - 1) * GRID_GAP,
+  };
+}
+
 export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: TopoFlowEdge[] } {
+  // A tool's family comes from the EDGE that reaches it, never from parsing its id: the id
+  // format is an implementation detail of buildGraph and this would be the second place that
+  // knew it.
+  const parentOfTool = new Map<string, string>();
+  for (const e of graph.edges) {
+    const target = graph.nodes.find((n) => n.id === e.target);
+    if (target?.data.kind === "tool") parentOfTool.set(e.target, e.source);
+  }
+  const toolsByParent = new Map<string, TopoNode[]>();
+  for (const n of graph.nodes) {
+    if (n.data.kind !== "tool") continue;
+    const parent = parentOfTool.get(n.id);
+    if (!parent) continue;
+    const list = toolsByParent.get(parent) ?? [];
+    list.push(n);
+    toolsByParent.set(parent, list);
+  }
+
   const g = new dagre.graphlib.Graph();
   // ranksep is generous and nodesep is not: the columns are the argument this map makes, so
   // the gap BETWEEN ranks has to read as a step while the gap within one stays a list.
   g.setGraph({ rankdir: "LR", ranksep: 96, nodesep: 20, marginx: 24, marginy: 24 });
   g.setDefaultEdgeLabel(() => ({}));
 
-  for (const n of graph.nodes) g.setNode(n.id, { ...NODE_SIZE[n.data.kind] });
-  for (const e of graph.edges) g.setEdge(e.source, e.target);
+  for (const n of graph.nodes) {
+    if (n.data.kind === "tool") continue;
+    g.setNode(n.id, { ...NODE_SIZE[n.data.kind] });
+  }
+  // One reservation per open family, edged from it so dagre ranks it just past its parent.
+  const blockId = (parent: string): string => `__tools__${parent}`;
+  for (const [parent, tools] of toolsByParent) {
+    const { width, height } = gridSize(tools.length);
+    g.setNode(blockId(parent), { width, height });
+    g.setEdge(parent, blockId(parent));
+  }
+  for (const e of graph.edges) {
+    if (parentOfTool.has(e.target)) continue; // represented by the block above
+    g.setEdge(e.source, e.target);
+  }
 
   dagre.layout(g);
 
-  const nodes: TopoFlowNode[] = graph.nodes.map((n) => {
+  const nodes: TopoFlowNode[] = [];
+  for (const n of graph.nodes) {
+    if (n.data.kind === "tool") continue;
     const size = NODE_SIZE[n.data.kind];
     const pos = g.node(n.id);
-    return {
+    nodes.push({
       id: n.id,
       type: "topo",
       data: n.data,
@@ -66,8 +134,29 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
       // measures on first paint, and a fitView that runs before that lands on the wrong box.
       width: size.width,
       height: size.height,
-    };
-  });
+    });
+  }
+  // Deal each family's tools into its reservation, reading order: left to right, then down.
+  for (const [parent, tools] of toolsByParent) {
+    const block = g.node(blockId(parent));
+    const { cols, width, height } = gridSize(tools.length);
+    const { width: w, height: h } = NODE_SIZE.tool;
+    const left = block.x - width / 2;
+    const top = block.y - height / 2;
+    tools.forEach((n, i) => {
+      nodes.push({
+        id: n.id,
+        type: "topo",
+        data: n.data,
+        position: {
+          x: left + (i % cols) * (w + GRID_GAP),
+          y: top + Math.floor(i / cols) * (h + GRID_GAP),
+        },
+        width: w,
+        height: h,
+      });
+    });
+  }
 
   const edges: TopoFlowEdge[] = graph.edges.map((e) => ({
     id: e.id,
