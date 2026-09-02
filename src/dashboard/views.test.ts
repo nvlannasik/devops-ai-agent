@@ -2209,6 +2209,39 @@ test("the animated edge stops for reduced motion but keeps its colour", () => {
   assert.match(STYLES, /\.topo-edge-sqs \.react-flow__edge-path \{ stroke: var\(--accent\)/);
 });
 
+// The disclosure was generalised from tool families to any card with children, and this rule
+// was left scoped to .topo-capability — so Postgres, Redis and both SQS cards fell back to a
+// browser <button> with its default padding and shrink-to-fit, and their titles sat 7px further
+// in than every other card's. Invisible to every other test; found by measuring the rendered
+// gap. The selector must stay unscoped.
+test("the disclosure button is styled for every card that has one, not just tool families", () => {
+  assert.match(STYLES, /^\.topo-node-toggle \{/m);
+  assert.doesNotMatch(STYLES, /\.topo-capability \.topo-node-toggle/);
+  // width:100% and padding:0 are the two that matter — without them the button is narrower
+  // than the card and inset by its own default padding.
+  const rule = STYLES.match(/^\.topo-node-toggle \{[^}]*\}/m)?.[0] ?? "";
+  assert.match(rule, /width: 100%/);
+  assert.match(rule, /padding: 0/);
+});
+
+// Icons come from lucide-react — the set shadcn/ui itself uses. shadcn ships no icons of its
+// own, so taking lucide alone gets the drawing without bringing Tailwind alongside a stylesheet
+// that has its contrast ratios computed and written down.
+test("icons are lucide, imported by name so esbuild can drop the rest", async () => {
+  const src = await readFile(new URL("./client/icons.tsx", import.meta.url), "utf8");
+  assert.match(src, /from "lucide-react"/, "imported from the package root");
+  // Anchored to an import STATEMENT, not any occurrence: the comment above the imports
+  // explains why a deep path is wrong, and so contains the string it forbids.
+  assert.doesNotMatch(src, /from "lucide-react\/dist/, "a deep import would pin an internal path");
+  // Every IconName must map to a component, or a card renders nothing where its glyph goes.
+  // The Record type enforces it at compile time; this is the guard for the union growing.
+  const types = await readFile(new URL("./topology-types.ts", import.meta.url), "utf8");
+  const union = /export type IconName =\s*([^;]+);/.exec(types)?.[1] ?? "";
+  for (const name of union.match(/"([a-z]+)"/g) ?? []) {
+    assert.match(src, new RegExp(`\\b${name.replace(/"/g, "")}:`), `${name} has no glyph`);
+  }
+});
+
 // @xyflow/react is MIT and free, and its authors ask that the attribution stay unless you hold
 // a Pro licence. It stays — dimmed to the weight of a caption, not removed with proOptions.
 test("React Flow keeps its attribution", async () => {

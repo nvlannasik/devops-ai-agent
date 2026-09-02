@@ -1795,10 +1795,16 @@ form.signout button {
 .react-flow__node:hover .topo-node { background: var(--surface-2); }
 
 /* ---------- topology: a tool family, opened ---------- */
-/* A family card carries two controls, because it has two things to offer: open its tools, or go
-   to its row. They are siblings — a <button> inside an <a> is invalid, and either nesting makes
-   one unreachable by keyboard. The button takes the card; the link is a corner affordance. */
-.topo-capability .topo-node-toggle {
+/* A card with children carries two controls, because it has two things to offer: open what it
+   holds, or go to its row. They are siblings — a <button> inside an <a> is invalid, and either
+   nesting makes one unreachable by keyboard. The button takes the card; the link is a corner
+   affordance.
+   NOT scoped to .topo-capability, and that scoping was a real bug: the disclosure was
+   generalised to any card with children while this rule was left behind, so Postgres, Redis and
+   both SQS cards fell back to a browser button — default padding, shrink-to-fit — and their
+   titles sat 7px further in than every other card's. Caught by MEASURING the gap between each
+   card's left edge and its title's, not by reading the CSS. */
+.topo-node-toggle {
   display: flex; flex-direction: column; justify-content: center; gap: 2px;
   width: 100%; height: 100%; min-width: 0;
   padding: 0; background: none; border: 0; cursor: pointer; text-align: left;
@@ -1810,7 +1816,7 @@ form.signout button {
   position: absolute; right: var(--sp-2); top: 50%; transform: translateY(-50%);
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1; color: var(--text-dim);
 }
-.topo-capability:hover .topo-node-chevron { color: var(--text); }
+.react-flow__node:hover .topo-node-chevron { color: var(--text); }
 /* Bottom-right, out of the chevron's way. It is the only place on this map where the "every
    card links to its row" contract needs its own affordance, because the card's own click was
    taken by the disclosure. */
