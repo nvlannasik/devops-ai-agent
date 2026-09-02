@@ -253,3 +253,58 @@ test("an unknown id in the expanded set is ignored", () => {
   const g = buildGraph(withTools, new Set(["cap-99", "backend-0", ""]));
   assert.equal(g.nodes.filter((n) => n.data.kind === "tool").length, 0);
 });
+
+// ---------- a store two cards share ----------
+
+const sharedQueue: Topology = {
+  ...base,
+  outbound: [
+    {
+      id: "llm-worker", label: "llm-worker (SQS)", detail: "q", meta: "", configured: true,
+      children: [
+        { label: "llm-request.fifo", detail: "requests out" },
+        { id: "sqs-response", label: "llm-response.fifo", detail: "responses in — shared" },
+      ],
+    },
+    {
+      label: "GitOps remediation (SQS)", detail: "q", meta: "", configured: true,
+      children: [
+        { label: "gitops-request.fifo", detail: "PR requests out" },
+        { id: "sqs-response", label: "llm-response.fifo", detail: "responses in — the same queue" },
+      ],
+    },
+  ],
+};
+
+// The contract this draws: both SQS paths read replies off ONE response queue, routed by
+// requestId. Two nodes would state the opposite, and it is the most common wrong assumption
+// about this path — the same class of error as thinking every backend goes through the worker.
+test("two cards naming the same store id share one node, with an edge from each", () => {
+  const g = buildGraph(sharedQueue, new Set(["out-0", "out-1"]));
+  const shared = g.nodes.filter((n) => n.id === "sqs-response");
+  assert.equal(shared.length, 1, "one queue, one node");
+  assert.deepEqual(into(g, "sqs-response").map((e) => e.source).sort(), ["out-0", "out-1"]);
+  // ...and the request queues stay separate: they really are two.
+  assert.equal(g.nodes.filter((n) => n.data.kind === "store").length, 3);
+});
+
+// Opening one side alone must still be true — one edge, not a node that implies the other.
+test("a shared store appears with one edge when only one parent is open", () => {
+  const g = buildGraph(sharedQueue, new Set(["out-1"]));
+  assert.deepEqual(into(g, "sqs-response").map((e) => e.source), ["out-1"]);
+  assert.equal(g.nodes.filter((n) => n.data.kind === "store").length, 2);
+});
+
+// Sharing is DECLARED, never inferred. Two stores spelled alike under different parents are
+// two stores; deduping by label would silently merge dependencies that merely read the same.
+test("stores with the same label but no shared id stay separate", () => {
+  const twins: Topology = {
+    ...base,
+    outbound: [
+      { label: "A", detail: "d", meta: "", configured: true, children: [{ label: "same", detail: "x" }] },
+      { label: "B", detail: "d", meta: "", configured: true, children: [{ label: "same", detail: "x" }] },
+    ],
+  };
+  const g = buildGraph(twins, new Set(["out-0", "out-1"]));
+  assert.equal(g.nodes.filter((n) => n.data.kind === "store").length, 2);
+});

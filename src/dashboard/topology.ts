@@ -13,6 +13,12 @@ export type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Top
 
 const NOT_CONFIGURED = "not configured";
 
+// The one store two cards share. Both SQS paths read replies off a single response queue,
+// routed by requestId (agent/gitops/sqs.ts:51 takes it from config.llm.sqs) — so the map draws
+// one node with two edges into it. A per-parent id would draw two, which is the assumption this
+// page exists to correct.
+const SQS_RESPONSE_ID = "sqs-response";
+
 // devops-mcp-server marks every mutating tool by prefixing its description. The agent reads
 // this to decide what needs approval; the dashboard reads it to say so out loud.
 const WRITE_PREFIX = "[WRITE]";
@@ -153,6 +159,16 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       meta: `region ${config.llm.sqs.region}, timeout ${num(config.llm.sqs.timeoutMs / 1000)}s`,
       configured: true,
       icon: "queue",
+      children: [
+        { label: config.llm.sqs.requestQueueName, detail: "requests out — messages, tools, system prompt" },
+        // Shared, and the id is what makes it ONE node on the map rather than two that look
+        // like two queues. See the note on Store.id.
+        {
+          id: SQS_RESPONSE_ID,
+          label: config.llm.sqs.responseQueueName,
+          detail: "responses in — shared with the GitOps path, routed by requestId",
+        },
+      ],
     },
     {
       label: "GitOps remediation (SQS)",
@@ -160,6 +176,18 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       meta: `timeout ${num(config.gitops.timeoutMs / 1000)}s`,
       configured: config.gitops.enabled,
       icon: "queue",
+      // A SECOND request queue and the SAME response queue — the contract in the root
+      // CLAUDE.md, drawn rather than written. Two dispatchers cooperate on that one queue by
+      // releasing messages they do not own; a reader who assumes two response queues is
+      // reading the most common wrong assumption about this path.
+      children: [
+        { label: config.gitops.requestQueueName, detail: "PR requests out — dry_run, open_pr" },
+        {
+          id: SQS_RESPONSE_ID,
+          label: config.llm.sqs.responseQueueName,
+          detail: "responses in — the same queue the LLM path uses",
+        },
+      ],
     },
     // Last on purpose, and the diagram is why: its tool families hang off it in a cluster of
     // their own, and only the bottom node of this column has a clear run downward — an edge

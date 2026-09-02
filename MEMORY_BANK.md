@@ -819,6 +819,14 @@ Load-bearing, and each cost something to get right:
   uniform now and says the map is live. The SQS distinction rests on what did not move — the
   accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
   and the legend row. Four signals became three; none of the survivors is spare.
+- **Both SQS cards expand into their queues, and the response queue is one shared node
+  (2026-09-02).** The LLM path and the GitOps path use a second *request* queue but the same
+  *response* queue, routed by `requestId` — `agent/gitops/sqs.ts` takes `responseQueueName`
+  from `config.llm.sqs`. Drawing it twice would state the opposite of the contract, so
+  `Store.id` lets both cards name `sqs-response` and get one node with two edges into it.
+  Sharing is declared, never inferred from the label. Verified in the browser by counting the
+  edges that terminate there, not the nodes: React Flow drops an edge whose endpoints it cannot
+  find, so a node count alone proves nothing.
 - **Postgres and Redis expand into what they hold (2026-09-02), and both lists are derived**
   (`src/dashboard/stores.ts`). Postgres is parsed out of the shipped `migrations/*.sql`; Redis
   is composed from `REDIS_KEYS` constants owned by `agent/memory` and `agent/dedup`, guarded by

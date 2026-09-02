@@ -114,8 +114,13 @@ export const storeId = (parentId: string, i: number): string => `store-${parentI
 export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set()): TopoGraph {
   const nodes: TopoNode[] = [];
   const edges: TopoEdge[] = [];
+  // Ids already emitted. Only shared stores can collide — everything else is positional — but
+  // the guard is on every push, because a duplicate node is a React key warning and a silently
+  // dropped card rather than an error anyone would see.
+  const seen = new Set<string>();
 
   const push = (id: string, data: TopoNodeData): string => {
+    seen.add(id);
     nodes.push({ id, data });
     return id;
   };
@@ -152,14 +157,19 @@ export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set(
     // is what makes them safe to state on a page that claims to report the process.
     if (isOpen && n.children) {
       n.children.forEach((c: Store, j: number) => {
-        const childId = storeId(id, j);
-        push(childId, {
-          kind: "store",
-          title: c.label,
-          sub: c.detail,
-          meta: `${n.label} — ${c.detail}`,
-          configured: true,
-        });
+        // A store may declare a shared id (see Store.id). Two parents naming the same one get
+        // ONE node with two incoming edges; everything else is positional as before.
+        const childId = c.id ?? storeId(id, j);
+        if (!seen.has(childId)) {
+          seen.add(childId);
+          push(childId, {
+            kind: "store",
+            title: c.label,
+            sub: c.detail,
+            meta: `${n.label} — ${c.detail}`,
+            configured: true,
+          });
+        }
         link(id, childId, "call");
       });
     }

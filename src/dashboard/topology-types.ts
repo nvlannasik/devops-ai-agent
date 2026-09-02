@@ -18,6 +18,16 @@ import type { BackendKind } from "../agent/llm/registry.js";
 export interface Store {
   label: string;
   detail: string;
+  /**
+   * Opt-in shared identity. Two parents naming the same id get ONE node with two incoming
+   * edges rather than a copy each — which is the whole point for the SQS response queue: the
+   * LLM path and the GitOps path use the same one, routed by `requestId`, and drawing it twice
+   * would state the opposite of the contract this page exists to make obvious.
+   *
+   * Optional because sharing has to be DECLARED. Deduping by label instead would silently
+   * merge two dependencies that happen to be spelled alike.
+   */
+  id?: string;
 }
 
 /** Named rather than free-form so the client can only draw glyphs it actually has, and so
