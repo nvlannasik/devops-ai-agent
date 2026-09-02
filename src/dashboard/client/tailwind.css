@@ -57,7 +57,10 @@
 
   /* The map's type sizes come off the page's scale rather than Tailwind's, or a card would be
      sized in a different system from the table it links to. */
-  --text-2xs: var(--fs-3xs, 0.625rem);
+  /* The product's real floor. The map used to resolve --text-2xs to --fs-3xs (10px), which is
+     a size nothing else on this dashboard uses — the tables directly below it are --fs-2xs.
+     A map whose captions are smaller than the rows they link to reads as a different product. */
+  --text-2xs: var(--fs-2xs);
   --text-xs: var(--fs-2xs);
   --text-sm: var(--fs-sm);
 }

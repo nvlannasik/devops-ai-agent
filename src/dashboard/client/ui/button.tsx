@@ -37,10 +37,16 @@ const buttonVariants = cva(
         // flex-COLUMN is the horizontal axis, so without this override every title on an
         // expandable card shrinks to its content and centres. `text-left` does not help — the
         // span is already narrower than the button by then. Measured at 179px inside 214px.
-        fill: "w-full h-full p-0 flex-col items-start justify-center gap-0.5 text-left",
-        // The corner affordance. 20px is the smallest that still takes a comfortable click at
-        // the zoom fitView settles on with a family open.
-        icon: "size-5 rounded-sm text-2xs",
+        // pr-6 keeps the title and caption clear of the two corner controls that sit ON TOP of this
+        // button — the + at right-centre and the ↓ at bottom-right. Without it the caption
+        // truncates UNDER them: "llm-request.fifo -> llm-response.fifo" ran straight into the
+        // arrow. Padding here rather than on each span, because both lines need the same lane.
+        fill: "w-full h-full p-0 pr-6 flex-col items-start justify-center gap-0.5 text-left",
+        // The corner affordance, and it OVERLAPS the fill button beneath it — measured at
+        // 16x16, which is a mis-click hazard beside a target ten times its area.
+        // ponytail: 24px, not the 44px touch figure — a 56px card cannot spare 44 and this
+        // canvas is pointer-driven. Revisit if the map is ever used on a touch screen.
+        icon: "size-6 rounded-sm text-xs",
       },
     },
     defaultVariants: { variant: "ghost", size: "icon" },

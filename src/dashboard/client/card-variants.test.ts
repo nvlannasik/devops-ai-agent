@@ -82,3 +82,13 @@ test("a caller's override wins over the base, so the legend can resize a real ca
   // ...and the thing being explained survives the resize.
   assert.match(c, /\bborder-foreground\b/);
 });
+
+// A clickable card that does nothing under the pointer reads as decoration. styles.ts had
+// `.react-flow__node:hover .topo-node { background: --surface-2 }`; it went with the rest of the
+// card CSS in the Tailwind move and nothing replaced it, so every card sat inert. Found by
+// measuring the computed background before and after a hover, not by looking.
+test("a card responds to the pointer", () => {
+  const c = cardClass({ kind: "outbound" });
+  assert.match(c, /hover:bg-muted/);
+  assert.match(c, /transition-colors/, "and it has something to animate with");
+});

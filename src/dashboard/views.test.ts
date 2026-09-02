@@ -2394,3 +2394,22 @@ test("the fact shelf drops the card treatment at the width it was built for", ()
   // the spine is the row's severity, not the card's, and survives the loss of the card
   assert.match(q, /\.stats\.facts \.stat\[data-tone\] \{ box-shadow: inset var\(--spine-w\)/);
 });
+
+// Two findings from the UI audit, both invisible to every other test and to reading the source.
+test("the disclosure leaves room for the controls stacked on top of it", async () => {
+  const button = await readFile(new URL("./client/ui/button.tsx", import.meta.url), "utf8");
+  // The + sits at right-centre and the ↓ at bottom-right, both ON TOP of the fill button. The
+  // caption truncated underneath them until the button reserved the lane.
+  assert.match(button, /fill: "[^"]*\bpr-6\b/);
+  // 16x16 measured, beside a target ten times its area. 44 is the touch figure and does not fit
+  // a 56px card; 24 is what it can spare. The ceiling is named in the source.
+  assert.match(button, /icon: "size-6\b/);
+});
+
+// The map was the only place in the product rendering 10px text, while the tables it links to
+// are 11px. A map whose captions are smaller than the rows below reads as a different product.
+test("the map uses the product's own smallest size, not one below it", async () => {
+  const tw = await readFile(new URL("./client/tailwind.css", import.meta.url), "utf8");
+  assert.match(tw, /--text-2xs: var\(--fs-2xs\)/);
+  assert.doesNotMatch(tw, /--text-2xs: var\(--fs-3xs/);
+});
