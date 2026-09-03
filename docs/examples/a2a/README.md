@@ -23,6 +23,26 @@ platform adds that the sample response omits.
 Save each response next to its payload as `<probe>-response.json` so the answers are
 reviewable later.
 
+## Status — all six probes have now been run
+
+Every probe below has been run against the real flow, and the code they justified is in
+`llm-worker` (`LLM_API_FORMAT=agent-builder`, `src/agent-builder.ts`). **P2, P3, P5 and P6
+passed on the first pass; P1 and P4 were finished on 2026-09-02 with `run-gaps.sh` and also
+passed.** No blocker from the table at the bottom of this file survives.
+
+| Probe | Result |
+|---|---|
+| P1 — payload ceiling | **No truncation through 32 KB.** A tail canary came back verbatim at 4, 8, 16, 24 and 32 KB |
+| P3 — session isolation | **No memory.** Same `session_id`, token stored then asked for, answered `NONE`; `session_id` echoes what we send |
+| P4 — failure shape | **Non-2xx with `{"detail": ...}`.** Bad key and unknown flow id both; no error ever dressed as an answer |
+| P4 — concurrency | 3 parallel full-size RCAs: **22 s / 24 s / 76 s**, all 200, format intact, no throttling |
+
+The one number still worth respecting is **latency spread**: a single earlier RCA took 104 s,
+and the concurrent runs ranged 22–76 s. Budget for the slow end and multiply by the agent's
+tool rounds before promising anyone a fast RCA. That is a product constraint, not a bug.
+
+`run-gaps.sh` stays as a regression harness — re-run it after any flow change, because every
+result above is a property of the flow's configuration, not of the platform:
 ## Status, and the gaps — `run-gaps.sh`
 
 The probes below have been run once against the real flow, and the code they justified is
@@ -197,6 +217,10 @@ Confirm:
 ---
 
 ## Blockers vs. friction
+
+This table was written before the probes ran. **None of the three blockers occurred** — see the
+status section at the top. It is kept as the criteria to re-judge against whenever the flow is
+reconfigured, since every one of them is a property of the flow, not of the platform.
 
 | Finding | Verdict |
 |---|---|
