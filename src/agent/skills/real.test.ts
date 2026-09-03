@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadSkills, resolveSkillsDir, SKILL_MAX_CHARS } from "./index.js";
 import { buildStaticSystemPrompt } from "../prompts/system.js";
+import { parseSeverity } from "../incidents/index.js";
+import { parseConfidence } from "../confidence/index.js";
+import { extractSection } from "../../utils/slack/blocks.js";
 
 // The shipped directory, not a fixture. loadSkills throws at boot on any malformation, so this
 // test is what turns "the pod refuses to start" into "npm test fails" — the whole reason
@@ -19,6 +22,67 @@ test("every shipped skill file loads", () => {
 test("exactly one skill is always-on, and it is the RCA format", () => {
   const always = loadSkills(resolveSkillsDir()).all().filter((s) => s.when === "always");
   assert.deepEqual(always.map((s) => s.name), ["rca-format"]);
+});
+
+// The template is the one prompt every RCA is generated against, and it is read literally:
+// it says "Output EXACTLY this structure". It used to print `*🔴 Severity:* \`Critical\`` and
+// `*📈 Confidence:* \`High\`` as finished values while every other field was a [bracketed]
+// placeholder, so models copied them straight through — a `warning` alert was recorded, and
+// recalled, as `critical`. parseSeverity/parseConfidence are the exact readers that ran on
+// that output, so pointing them at the shipped template is the check: a template that still
+// parses as a real level is a template a model can copy into a real incident row.
+// extractSection ends a section on a HARDCODED set of emoji. A template section whose emoji is
+// missing from that set is invisible as a boundary: the section above it silently absorbs the
+// rest of the RCA, Slack renders one giant block, and nothing throws. So derive the sections
+// from the shipped template rather than listing them here — adding one to the template without
+// teaching the renderer about it is exactly the mistake this catches.
+test("every section header in the shipped template is one the renderer can isolate", () => {
+  const body = loadSkills(resolveSkillsDir()).all().find((s) => s.name === "rca-format")!.body;
+  const template = body.slice(body.indexOf("Output EXACTLY this structure"));
+
+  // heading = a line that is entirely one bold run; `*Severity:* value` is a field, not a heading
+  const headings = template
+    .split("\n")
+    .map((l) => l.trim().match(/^\*([^*\n]+)\*$/)?.[1])
+    .filter((h): h is string => !!h && !h.trim().endsWith(":"));
+  assert.ok(headings.length >= 5, `expected the template to declare sections, found ${headings.length}`);
+
+  // One synthetic RCA carrying every heading, each with a body only it should own. The sentinel
+  // in front matters: a heading's emoji is what ends the section ABOVE it, so the FIRST template
+  // heading is only exercised as a boundary if something precedes it. Without this the test
+  // passes while the first section is unknown to the renderer.
+  const doc = [`*\u{1F534} SENTINEL*\nbody-sentinel`, ...headings.map((h, i) => `*${h}*\nbody-${i}`)].join("\n\n");
+  const label = (h: string) => h.replace(/^[^\p{L}]+/u, "").trim(); // drop the leading emoji
+
+  assert.equal(
+    extractSection(doc, "SENTINEL"),
+    "body-sentinel",
+    `"${headings[0]}" does not end the section above it — add its emoji to extractSection's lookahead`
+  );
+  headings.forEach((h, i) => {
+    assert.equal(
+      extractSection(doc, label(h)),
+      `body-${i}`,
+      `"${h}" is not a section boundary the renderer knows — add its emoji to extractSection`
+    );
+  });
+});
+
+test("the RCA template offers no severity or confidence value that can be copied through", () => {
+  const body = loadSkills(resolveSkillsDir()).all().find((s) => s.name === "rca-format")!.body;
+  // Only the block the model is told to reproduce. The prose above it is free to name the
+  // levels — it has to — and running the parsers over the whole file lets a match up there
+  // mask the template line, which is the one thing this test exists to check.
+  const marker = "Output EXACTLY this structure";
+  const idx = body.indexOf(marker);
+  assert.notEqual(idx, -1, "rca-format no longer says 'Output EXACTLY this structure'");
+  const template = body.slice(idx);
+
+  assert.equal(parseSeverity(template), null, "rca-format still names a literal severity level");
+  assert.equal(parseConfidence(template), "unknown", "rca-format still names a literal confidence level");
+  // and the labels the renderer keys on survive — buildRcaBlocks/isRcaResponse need both
+  assert.match(template, /\*[^*]*Severity[^*]*\*/);
+  assert.match(template, /\*[^*]*Confidence[^*]*\*/);
 });
 
 // One representative alert per playbook. A trigger that selects nothing is a playbook that

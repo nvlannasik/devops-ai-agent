@@ -342,3 +342,64 @@ test("a code span escapes what it holds", () => {
     `<code translate="no">&lt;script&gt;alert(1)&lt;/script&gt;</code>`
   );
 });
+
+// --- the causal chain (rca-format.md, 2026-09-02) ---------------------------------------
+//
+// Root Cause stopped being a paragraph and became a numbered chain, which put it down the
+// `ordered` branch for the first time. That branch assumed the Recommended Actions shape
+// (`1. *Immediate:* …`) and fell to an empty left cell for anything else — so the chain
+// rendered as a table whose first column was blank on every row, under a header that called
+// its citations "Action".
+const CHAIN = [
+  "*\u{1F4CD} Root Cause*",
+  "1. Checkout returns 500 at `3.2 req/s` \u2014 _prometheus_query_ `sample-apps/checkout-gateway`",
+  "2. \u2190 gateway cannot parse the body \u2014 _loki_query_ `unexpected field`",
+  "3. \u26D4 why the value changed is in GitOps history \u2014 no tool here reaches the manifest repo",
+  "",
+  "*\u{1F4CA} Evidence*",
+  "\u2022 `0/3` ready \u2014 _k8s_get_endpoints_ `sample-apps/orders-api`",
+].join("\n");
+
+test("the causal chain splits into claim and citation, not into a blank column", () => {
+  const rc = parseRca(CHAIN)!.sections.find((s) => s.title === "Root Cause")!;
+  assert.equal(rc.body.kind, "rows");
+  if (rc.body.kind !== "rows") return;
+  assert.deepEqual(rc.body.columns, ["Step", "Evidence"]);
+  assert.equal(rc.body.rows.length, 3);
+  assert.ok(rc.body.rows.every((r) => r.left !== ""), "every step must carry its claim");
+  assert.match(rc.body.rows[0].left, /Checkout returns 500/);
+  assert.match(rc.body.rows[0].right, /prometheus_query/);
+  // the stop marker is a step like any other — it has a reason, not a citation
+  assert.match(rc.body.rows[2].left, /\u26D4/);
+  assert.match(rc.body.rows[2].right, /no tool here reaches/);
+});
+
+test("a labelled ordered section still reads its labels (Recommended Actions is unchanged)", () => {
+  const raw = [
+    "*\u{1F527} Recommended Actions*",
+    "1. *Immediate:* roll `orders-api` back",
+    "2. *Short-term:* pin the contract in CI",
+    "",
+    "*\u{1F4CA} Evidence*",
+    "\u2022 a \u2014 b",
+  ].join("\n");
+  const acts = parseRca(raw)!.sections.find((s) => s.title === "Recommended Actions")!;
+  assert.equal(acts.body.kind, "rows");
+  if (acts.body.kind !== "rows") return;
+  assert.deepEqual(acts.body.columns, ["Horizon", "Action"]);
+  assert.deepEqual(acts.body.rows.map((r) => r.left), ["Immediate", "Short-term"]);
+});
+
+test("an ordered section with nothing to split by degrades to a list, not a dead column", () => {
+  const raw = [
+    "*\u{1F4CD} Root Cause*",
+    "1. the gateway timed out",
+    "2. the upstream never answered",
+    "",
+    "*\u{1F4CA} Evidence*",
+    "\u2022 a \u2014 b",
+  ].join("\n");
+  const rc = parseRca(raw)!.sections.find((s) => s.title === "Root Cause")!;
+  assert.equal(rc.body.kind, "list");
+});
+

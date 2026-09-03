@@ -19,6 +19,21 @@ test("parseSeverity reads the severity label", () => {
   assert.equal(parseSeverity("no severity here"), null);
 });
 
+// parseSeverity feeds `assessed_severity`, which is the agent's OWN impact scale. A value
+// outside it is the model failing to fill the template in, and null ("not assessed") is the
+// honest reading — a stray string would be stored and recalled as if it were a judgement.
+test("parseSeverity rejects anything outside the agent's own scale", () => {
+  for (const level of ["critical", "High", "MEDIUM", "low"]) {
+    assert.equal(parseSeverity(`*🔴 Severity:* \`${level}\``), level.toLowerCase());
+  }
+  // the template's placeholder, emitted verbatim
+  assert.equal(parseSeverity("*[emoji] Severity:* `[Critical|High|Medium|Low]`"), null);
+  // Alertmanager's vocabulary, which is the other column's job
+  assert.equal(parseSeverity("*🟡 Severity:* `warning`"), null);
+  assert.equal(parseSeverity("*🔵 Severity:* `info`"), null);
+  assert.equal(parseSeverity("*🔴 Severity:* `it depends`"), null);
+});
+
 test("extractRootCause pulls only the Root Cause section", () => {
   const cause = extractRootCause(SAMPLE_RCA);
   assert.equal(cause, "Pod payment-api-xxx OOMKilled — memory leak in connection pool.");
@@ -198,4 +213,77 @@ test("markResolved flips the newest unresolved incident and returns its thread",
   // no matching unresolved incident → null (and rows without a thread → null too)
   const empty = new IncidentMemory({ query: async () => ({ rows: [] }) } as any);
   assert.equal(await empty.markResolved({ alertname: "X" }), null);
+});
+
+// --- severity vs assessed_severity (migration 008) --------------------------------------
+//
+// The bug this pins: rca-format.md used to print `*🔴 Severity:* \`Critical\`` as a literal
+// under "Output EXACTLY this structure", so models copied it through. store() then preferred
+// the parsed RCA value over the alert's label, and an alert that fired as `warning` was
+// recorded as `critical` — contradicting the Slack card, which renders the label.
+const COPIED_TEMPLATE_RCA = [
+  "*🔴 Severity:* `Critical`",
+  "",
+  "*📍 Root Cause*",
+  "checkout-gateway times out at 50ms.",
+].join("\n");
+
+test("a warning alert whose RCA claims Critical stores BOTH, and severity stays the label", async () => {
+  let captured: unknown[] = [];
+  const fakePool = {
+    query: async (_sql: string, params: unknown[]) => {
+      captured = params;
+      return { rows: [{ id: "7" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  await mem.store({ alertname: "HighLatency", namespace: "sample-apps", severity: "warning" }, COPIED_TEMPLATE_RCA);
+  // INSERT (alertname, namespace, severity, assessed_severity, confidence, ...)
+  assert.equal(captured[2], "warning", "severity must be the Alertmanager label Slack rendered");
+  assert.equal(captured[3], "critical", "the RCA's judgement belongs in assessed_severity");
+});
+
+test("the caller's group-resolved severity wins over the label map", async () => {
+  let captured: unknown[] = [];
+  const fakePool = {
+    query: async (_sql: string, params: unknown[]) => ((captured = params), { rows: [{ id: "8" }] }),
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  // groupLabels carried no severity (a mixed-severity group drops it from commonLabels);
+  // app/index.ts resolved it off the first firing alert and passes it in explicitly, because
+  // writing it back into the label map would change the dedup fingerprint.
+  await mem.store({ alertname: "X" }, COPIED_TEMPLATE_RCA, undefined, "Warning");
+  assert.equal(captured[2], "warning");
+});
+
+test("an unassessed RCA leaves assessed_severity null without touching severity", async () => {
+  let captured: unknown[] = [];
+  const fakePool = {
+    query: async (_sql: string, params: unknown[]) => ((captured = params), { rows: [{ id: "9" }] }),
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  // the recurrence shortcut: a conversational reply, no RCA template at all
+  await mem.store({ alertname: "X", severity: "info" }, "Known recurrence \u2014 same connection pool leak as last week.");
+  assert.equal(captured[2], "info");
+  assert.equal(captured[3], null);
+});
+
+test("recall reports the alert level and the assessed level separately", async () => {
+  const fakePool = {
+    query: async (sql: string) =>
+      sql.includes("incident_feedback")
+        ? { rows: [] }
+        : {
+            rows: [
+              { created_at: "2026-08-30", severity: "warning", assessed_severity: "critical", confidence: "High", root_cause: "gateway timeout too low" },
+              { created_at: "2026-08-29", severity: "critical", assessed_severity: null, confidence: null, root_cause: "node pressure" },
+            ],
+          },
+  } as any;
+  const out = await new IncidentMemory(fakePool).recall({ alertname: "HighLatency", namespace: "sample-apps" });
+  assert.match(out, /alert warning, assessed critical, confidence High/);
+  assert.match(out, /alert critical, not assessed, confidence \?/);
 });

@@ -1,0 +1,22 @@
+{
+  // Typechecks the browser bundle. esbuild strips types without checking them, so without this
+  // the one directory in the repo that ships to a browser would be the only unchecked code in
+  // it. `npm run build` runs this between tsc and the bundle; it emits nothing.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // Bundler, not NodeNext: esbuild resolves the imports, and it is what maps the `.js`
+    // specifiers TypeScript's NodeNext output convention requires onto the `.ts`/`.tsx` files
+    // that actually exist. NodeNext here would reject `@xyflow/react`'s export map.
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": false,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/dashboard/client/**/*", "src/dashboard/topology-graph.ts", "src/dashboard/topology-types.ts"]
+}

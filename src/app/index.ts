@@ -379,8 +379,11 @@ export class SlackApp {
       return;
     }
 
-    const severity = groupLabels.severity ?? firing[0].labels.severity ?? "unknown";
-    logger.info(`[slack] processing alert group: ${alertName} severity=${severity} firing=${firing.length}`);
+    // Resolved exactly the way buildGroupAlertText resolves it, so the row the DB stores and
+    // the card Slack renders can never disagree. Kept out of groupLabels on purpose: the dedup
+    // fingerprint is every key in that map, and a key added here orphans the claim.
+    const alertSeverity = groupLabels.severity ?? firing[0].labels.severity ?? null;
+    logger.info(`[slack] processing alert group: ${alertName} severity=${alertSeverity ?? "unknown"} firing=${firing.length}`);
 
     const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
 
@@ -515,7 +518,7 @@ export class SlackApp {
         }
       }
       await this.agent.markRcaSent(threadId);
-      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId).catch((e) => {
+      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId, alertSeverity).catch((e) => {
         logger.error(`[slack] failed to store incident for thread ${threadId}: ${errDetail(e)}`);
         return null;
       });

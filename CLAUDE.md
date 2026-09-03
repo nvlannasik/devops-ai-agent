@@ -9,7 +9,9 @@ Deeper design in `docs/` (e.g. `DESIGN_guarded_remediation.md`). Quality bar for
 stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
 
 ## Commands
-- Build: `npm run build` (tsc → `dist/`)
+- Build: `npm run build` — three steps: `tsc` (server → `dist/`), `tsc -p tsconfig.client.json`
+  (typechecks the dashboard's browser bundle, emits nothing), `node scripts/build-client.mjs`
+  (esbuild → `dist/public/`). `npm run build:client` is the last step alone.
 - Test: `npm test` (`node:test` + tsx, zero extra deps)
 - Dev: `npm run dev`
 - DB migrate: `npm run migrate` (dev) / `npm run migrate:prod` (prod)
@@ -17,6 +19,11 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
 
 ## Conventions
 - TypeScript ESM (NodeNext). Test files `*.test.ts` are excluded from the build.
+- **`src/dashboard/client/` is the one exception**: it is browser code, bundled by esbuild and
+  typechecked by `tsconfig.client.json` (`moduleResolution: bundler`, `jsx: react-jsx`). The main
+  `tsconfig.json` excludes it. React / React Flow / dagre are **devDependencies** — they are
+  build-time inputs baked into `dist/public/`, never `require`d at runtime, so the runtime image
+  (`npm ci --omit=dev`) is unaffected.
 - Match surrounding style. Prefer stdlib / already-installed deps over new dependencies.
 
 ## Gotchas (see MEMORY_BANK.md for the full list)

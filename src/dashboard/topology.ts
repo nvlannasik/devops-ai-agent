@@ -1,72 +1,27 @@
 import { config } from "../config/index.js";
-import { parseRegistry, type BackendKind, type BackendSpec } from "../agent/llm/registry.js";
+import { parseRegistry, type BackendSpec } from "../agent/llm/registry.js";
+import { rowId } from "./topology-types.js";
+import { postgresTables, redisNamespaces } from "./stores.js";
+import type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Topology } from "./topology-types.js";
 
-export interface Node {
-  label: string;
-  detail: string;   // already redacted — safe to render
-  meta: string;     // secret presence and other flags, never a secret value
-  configured: boolean;
-  // Stable handle for the diagram, which has to anchor an edge to ONE specific node: the
-  // private-llm backends hang off llm-worker, not off the agent. Matching on `label` would
-  // work until someone rewords it, and would fail silently by drawing the edge from the
-  // wrong place. Optional because only the nodes the diagram references need one.
-  id?: string;
-}
-
-export interface BackendNode {
-  name: string;
-  kind: BackendKind;
-  model: string;
-  endpoint: string;
-  route: "heavy" | "light" | "unrouted";
-  viaWorker: boolean;
-}
-
-export interface Tool {
-  name: string;
-  // The agent's OWN predicate for "this can change the cluster", read back rather than
-  // re-derived: agent/index.ts gates the write path on description.startsWith("[WRITE]").
-  // Reading the same test means the page cannot disagree with the thing it describes — a
-  // server that sends no description is non-write to the agent, and non-write here too.
-  write: boolean;
-}
-
-// A family of tools the MCP server told us it exposes, e.g. { name: "k8s", tools: [...] }.
-// NOT a connection: the agent has no idea what the MCP server's own Prometheus URL is —
-// that lives in another pod's config. What it does know, for free, is the tool list it
-// received on connect. The name is the tool-name prefix, verbatim, so a family the server
-// adds tomorrow appears here without anyone editing a mapping table.
-export interface Capability {
-  name: string;
-  tools: Tool[];
-}
-
-export interface Topology {
-  inbound: Node[];
-  outbound: Node[];
-  provider: string;
-  backends: BackendNode[];
-  capabilities: Capability[];
-  registryError: string | null;
-  // populated only when the provider is NOT "router" — the router's answer to "what LLM is
-  // reachable" is the `backends` list instead. See activeClientNode().
-  activeClient?: Node;
-}
+// The shape of this page's data, and the rowId() anchor helper, live in `topology-types.ts` —
+// a module with no config import, because the browser bundle needs them (see the note there).
+// Re-exported here so `from "./topology.js"` keeps resolving for every existing caller and no
+// type in this page ends up with two names.
+export { rowId };
+export type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Topology };
 
 const NOT_CONFIGURED = "not configured";
+
+// The one store two cards share. Both SQS paths read replies off a single response queue,
+// routed by requestId (agent/gitops/sqs.ts:51 takes it from config.llm.sqs) — so the map draws
+// one node with two edges into it. A per-parent id would draw two, which is the assumption this
+// page exists to correct.
+const SQS_RESPONSE_ID = "sqs-response";
 
 // devops-mcp-server marks every mutating tool by prefixing its description. The agent reads
 // this to decide what needs approval; the dashboard reads it to say so out loud.
 const WRITE_PREFIX = "[WRITE]";
-
-// Structural, not the agent's ToolDefinition: this is the whole dependency the dashboard has
-// on the MCP client, and keeping it to the two fields actually read means neither module has
-// to import the other's types. `description` is optional because a page that renders on a
-// half-built input is the requirement here (see buildTopology's default below).
-export interface McpTool {
-  name: string;
-  description?: string;
-}
 
 // A base URL may legitimately carry credentials (https://user:pass@host/v1), and a query string
 // may carry a token. Host, port and path are what identify a dependency; nothing else is needed
@@ -127,18 +82,6 @@ export function toolFamilies(tools: readonly McpTool[]): Capability[] {
     .sort((a, b) => b.tools.length - a.tools.length || a.name.localeCompare(b.name));
 }
 
-/**
- * The anchor the diagram uses to link a box to its own row in the tables below. Both sides
- * derive it from the same array position, so this is a contract between topology-svg.ts and
- * views.ts — one definition, imported by both, rather than two string templates that can
- * drift apart into links that quietly point at nothing.
- *
- * Positional, never label-derived: a node label is rendered text that may contain anything
- * (topology-svg.test.ts feeds it a <script> tag), and slugging one would need escaping and
- * could still collide. This is [a-z0-9-] by construction.
- */
-export const rowId = (group: "in" | "out" | "backend" | "cap", i: number): string => `${group}-${i}`;
-
 // Number(garbage) is NaN, and NaN reaches a template string as the literal text "NaN" without
 // ever throwing — nothing catches it, it just looks wrong on the page. Every config number that
 // flows into rendered text goes through here instead.
@@ -161,12 +104,14 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       detail: config.slack.alertChannel ? `channel ${config.slack.alertChannel}` : NOT_CONFIGURED,
       meta: `bot token ${present(config.slack.botToken)}, socket mode ${present(config.slack.appToken)}`,
       configured: !!config.slack.alertChannel,
+      icon: "chat",
     },
     {
       label: "Alertmanager",
       detail: `POST /alert on :${num(config.port)}`,
       meta: `webhook token ${present(config.alertWebhook.token)}`,
       configured: true,
+      icon: "bell",
     },
   ];
 
@@ -186,6 +131,12 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
         : NOT_CONFIGURED,
       meta: `ssl ${config.incidents.db.sslMode}`,
       configured: config.incidents.enabled,
+      icon: "db",
+      // What the incident memory is MADE of, parsed out of the shipped migrations rather than
+      // listed here — see stores.ts. Present even when the database is NOT configured: the
+      // schema is what this agent would write, and a reader asking "where does an incident go"
+      // deserves the answer either way.
+      children: postgresTables(),
     },
     {
       label: "Redis (conversation memory)",
@@ -195,6 +146,11 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
           : "in-memory (no Redis)",
       meta: `tls ${config.memory.redis.tls ? "on" : "off"}`,
       configured: config.memory.backend === "redis",
+      icon: "cache",
+      // Composed from the constants the writing modules own, so this is a view of the code
+      // rather than a copy of it. Shown on the in-memory fallback too, for the same reason the
+      // tables are: these are the namespaces this agent uses, Redis configured or not.
+      children: redisNamespaces(),
     },
     {
       id: "llm-worker",
@@ -202,12 +158,36 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
       detail: `${config.llm.sqs.requestQueueName} -> ${config.llm.sqs.responseQueueName}`,
       meta: `region ${config.llm.sqs.region}, timeout ${num(config.llm.sqs.timeoutMs / 1000)}s`,
       configured: true,
+      icon: "queue",
+      children: [
+        { label: config.llm.sqs.requestQueueName, detail: "requests out — messages, tools, system prompt" },
+        // Shared, and the id is what makes it ONE node on the map rather than two that look
+        // like two queues. See the note on Store.id.
+        {
+          id: SQS_RESPONSE_ID,
+          label: config.llm.sqs.responseQueueName,
+          detail: "responses in — shared with the GitOps path, routed by requestId",
+        },
+      ],
     },
     {
       label: "GitOps remediation (SQS)",
       detail: config.gitops.enabled ? config.gitops.requestQueueName : NOT_CONFIGURED,
       meta: `timeout ${num(config.gitops.timeoutMs / 1000)}s`,
       configured: config.gitops.enabled,
+      icon: "queue",
+      // A SECOND request queue and the SAME response queue — the contract in the root
+      // CLAUDE.md, drawn rather than written. Two dispatchers cooperate on that one queue by
+      // releasing messages they do not own; a reader who assumes two response queues is
+      // reading the most common wrong assumption about this path.
+      children: [
+        { label: config.gitops.requestQueueName, detail: "PR requests out — dry_run, open_pr" },
+        {
+          id: SQS_RESPONSE_ID,
+          label: config.llm.sqs.responseQueueName,
+          detail: "responses in — the same queue the LLM path uses",
+        },
+      ],
     },
     // Last on purpose, and the diagram is why: its tool families hang off it in a cluster of
     // their own, and only the bottom node of this column has a clear run downward — an edge
@@ -222,6 +202,7 @@ export function buildTopology(mcpTools: readonly McpTool[] = []): Topology {
           ? `http, auth token ${present(config.mcp.http.authToken)}`
           : "stdio",
       configured: true,
+      icon: "plug",
     },
   ];
 

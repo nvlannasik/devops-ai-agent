@@ -6,15 +6,21 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY package*.json ./
-# --ignore-scripts: this stage only runs `tsc`, but npm ci also installs tsx (for `npm test`),
-# whose esbuild dependency has a postinstall that EXECS the binary it just wrote. Under QEMU
+# --ignore-scripts: esbuild has a postinstall that EXECS the binary it just wrote. Under QEMU
 # emulation — any cross-arch build, e.g. linux/amd64 on an arm64 host — that exec races the
-# write and dies with ETXTBSY. No dependency here needs its install scripts.
+# write and dies with ETXTBSY. esbuild is here twice over (tsx depends on it, and the dashboard
+# bundle calls it directly), and neither needs the script: the platform binary comes from an
+# optionalDependency package, and `node scripts/build-client.mjs` was verified to run with the
+# postinstall skipped. No dependency in this stage needs its install scripts.
 RUN npm ci --ignore-scripts
 
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.client.json ./
 COPY index.ts ./
 COPY src/ ./src/
+# The dashboard's topology map is a React Flow bundle, built by scripts/build-client.mjs into
+# dist/public/ as the third step of `npm run build`. Nothing else here needs a bundler, and the
+# runtime stage picks the output up for free because it already copies dist/ whole.
+COPY scripts/ ./scripts/
 
 RUN npm run build
 

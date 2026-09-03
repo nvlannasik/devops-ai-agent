@@ -10,7 +10,7 @@ const SEVERITY_COLOR: Record<string, string> = {
 export function extractSection(text: string, label: string): string {
   // matches "*📍 Root Cause*\n..." up to the next "*emoji Label*" or end
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*\\n([\\s\\S]*?)(?=\\n\\*[🔴🟠🟡🟢📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
+  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*\\n([\\s\\S]*?)(?=\\n\\*[🔴🟠🟡🟢⚡📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
   const match = text.match(pattern);
   return match ? match[1].trim() : "";
 }
@@ -61,20 +61,54 @@ export function buildRcaBlocks(rcaText: string): Block[] {
   blocks.push(header(`${severityEmoji} ${severityLabel} Severity Incident`));
   blocks.push(divider());
 
-  // ── Root Cause ────────────────────────────────────────────────────────────
+  // ── Section order ────────────────────────────────────────────────────────
+  // This is the on-call reading order, and it is deliberately NOT the order the sections are
+  // reasoned in: what is broken, why it matters, what to do, and only then the argument behind
+  // it. prompts/skills/rca-format.md emits them in this same order, so nothing is reordered
+  // here — keep the two in step, and keep the emoji set in extractSection's lookahead in step
+  // too, since a label whose emoji is missing there stops ending the section above it.
+
+  // ── TL;DR ────────────────────────────────────────────────────────────────
+  // Optional: an RCA written before this section existed, or by a model that skipped it, still
+  // renders — it just opens on Impact the way it used to.
+  const tldr = extractSection(rcaText, "TL;DR");
+  if (tldr) {
+    blocks.push(section(`*⚡ TL;DR*\n${tldr}`));
+    blocks.push(divider());
+  }
+
+  // ── Impact ───────────────────────────────────────────────────────────────
+  // Above the actions, not below them: impact is what decides whether the actions are worth
+  // waking someone for, and it used to sit second-to-last on the card.
+  const impact = extractSection(rcaText, "Impact");
+  if (impact) {
+    blocks.push(section(`*⚠️ Impact if Unresolved*\n${impact}`));
+  }
+
+  // ── Recommended Actions ──────────────────────────────────────────────────
+  const actions = extractSection(rcaText, "Recommended Actions");
+  if (actions) {
+    blocks.push(section(`*🔧 Recommended Actions*\n${actions}`));
+  }
+
+  if (impact || actions) blocks.push(divider());
+
+  // ── Root Cause ───────────────────────────────────────────────────────────
+  // A numbered causal chain now rather than a paragraph, but the label is unchanged on purpose:
+  // isRcaResponse, dashboard/rca.ts and extractRootCause all key on it.
   const rootCause = extractSection(rcaText, "Root Cause");
   if (rootCause) {
     blocks.push(section(`*📍 Root Cause*\n${rootCause}`));
     blocks.push(divider());
   }
 
-  // ── Evidence ──────────────────────────────────────────────────────────────
+  // ── Evidence ─────────────────────────────────────────────────────────────
   const evidence = extractSection(rcaText, "Evidence");
   if (evidence) {
     blocks.push(section(`*📊 Evidence*\n${evidence}`));
   }
 
-  // ── Ruled Out ─────────────────────────────────────────────────────────────
+  // ── Ruled Out ────────────────────────────────────────────────────────────
   const ruledOut = extractSection(rcaText, "Ruled Out");
   if (ruledOut) {
     blocks.push(section(`*🚫 Ruled Out*\n${ruledOut}`));
@@ -82,18 +116,6 @@ export function buildRcaBlocks(rcaText: string): Block[] {
 
   if (evidence || ruledOut) blocks.push(divider());
 
-  // ── Recommended Actions ───────────────────────────────────────────────────
-  const actions = extractSection(rcaText, "Recommended Actions");
-  if (actions) {
-    blocks.push(section(`*🔧 Recommended Actions*\n${actions}`));
-    blocks.push(divider());
-  }
-
-  // ── Impact ────────────────────────────────────────────────────────────────
-  const impact = extractSection(rcaText, "Impact");
-  if (impact) {
-    blocks.push(section(`*⚠️ Impact if Unresolved*\n${impact}`));
-  }
 
   // ── Confidence ────────────────────────────────────────────────────────────
   const confidenceMatch = rcaText.match(/\*[^*]*Confidence[^*]*\*[^`]*`([^`]+)`[^—–\n]*(—|–)?\s*([^\n]+)?/i);

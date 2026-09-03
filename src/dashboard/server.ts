@@ -6,6 +6,7 @@ import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
+import { loadAssets, type Assets } from "./assets.js";
 import { buildContextView, type ContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
 import {
@@ -22,6 +23,7 @@ import {
 
 export type Route =
   | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "login" | "logout" }
+  | { kind: "asset"; path: string }
   | { kind: "detail"; id: number }
   | { kind: "skill"; name: string };
 
@@ -33,6 +35,10 @@ export function matchRoute(pathname: string): Route {
   if (p === "/logout") return { kind: "logout" };
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
+  // The dashboard's only static assets: the topology map's bundle and stylesheet. The path is
+  // NOT resolved against a directory — it is a key into a Map of the two files read at boot —
+  // so path traversal has nothing to traverse. An unknown key falls through to 404 below.
+  if (p.startsWith("/assets/")) return { kind: "asset", path: p };
   if (p === "/context") return { kind: "context" };
   // Top level, NOT /context/something, and that is structural rather than stylistic: a skill's
   // name is a filename, the skill route below matches one path segment under /context, and so
@@ -89,8 +95,14 @@ type Redirect = (to: string, extra?: Record<string, string>) => void;
 // password may be posted (it does NOT inherit from default-src), and frame-ancestors stops
 // the page being framed and clickjacked into a sign-out.
 const csp = (nonce?: string): string =>
-  "default-src 'none'; style-src 'unsafe-inline'; " +
-  (nonce ? `script-src 'nonce-${nonce}'; ` : "") +
+  "default-src 'none'; " +
+  // `'self'` rides with the nonce, and only with it: /topology is the one page that links an
+  // external stylesheet (React Flow's), and widening style-src for every other page would give
+  // an injected <link> somewhere to point. 'unsafe-inline' stays on both — the whole dashboard
+  // is one inline <style> block, and the chart's per-point `style="--h:…"` depends on it.
+  (nonce
+    ? `style-src 'self' 'unsafe-inline'; script-src 'nonce-${nonce}'; `
+    : "style-src 'unsafe-inline'; ") +
   "form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 // Per response, never reused: a nonce an attacker can predict is 'unsafe-inline' with extra
@@ -103,6 +115,9 @@ export class DashboardServer {
   private readonly mcpTools: () => readonly McpTool[];
   private readonly skills: () => readonly SkillView[];
   private readonly throttle = new LoginThrottle();
+  // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
+  // never built, which the topology page renders as a note rather than an empty frame.
+  private readonly assets: Assets | null = loadAssets();
 
   // A getter, not a snapshot: the dashboard starts before — and outlives — any given MCP
   // connection, so a list captured at construction time would be permanently empty. McpTool is
@@ -365,6 +380,18 @@ export class DashboardServer {
     // layer once a database IS configured) instead of a plain not-found
     if (route.kind === "notfound") return send(404, errorPage("Not found", "No such page."));
 
+    // Content-addressed (assets.ts hashes the body into the name), so this is the one response
+    // on the dashboard that is not `no-store`: a new build is a new URL, and the old URL can
+    // never come to mean something else. `send()`'s own cache-control is overridden here rather
+    // than made conditional, so every HTML page keeps the stricter default by construction.
+    if (route.kind === "asset") {
+      const asset = this.assets?.byPath.get(route.path);
+      if (!asset) return send(404, errorPage("Not found", "No such asset."));
+      return send(200, asset.body, asset.type, {
+        "cache-control": "public, max-age=31536000, immutable",
+      });
+    }
+
     // deliberately before the database gate: this page reads no database, which makes it the
     // one page that still works while Postgres is down — which is when it is most wanted
     if (route.kind === "topology") {
@@ -377,7 +404,7 @@ export class DashboardServer {
       // time, and a failure to read it must not take out a page that does not otherwise depend
       // on Postgres: it falls back to no badge rather than to an error.
       const open = await this.openCount();
-      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce, open), "text/html; charset=utf-8", {
+      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce, this.assets, open), "text/html; charset=utf-8", {
         "content-security-policy": csp(nonce),
       });
     }

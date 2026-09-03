@@ -475,8 +475,15 @@ export class DevOpsAgent {
     ].join("\n");
   }
 
-  storeIncident(labels: Record<string, string>, rca: string, channel?: string, threadTs?: string): Promise<number | null> {
-    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined);
+  storeIncident(
+    labels: Record<string, string>,
+    rca: string,
+    channel?: string,
+    threadTs?: string,
+    /** The group's Alertmanager severity as the Slack card rendered it — see store(). */
+    alertSeverity?: string | null
+  ): Promise<number | null> {
+    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity);
   }
 
   // Everything below runs inside the trace context so outbound SQS requests carry the

@@ -1,8 +1,6 @@
 import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
 import { renderRca } from "./rca.js";
 import { donutChart, lineChart } from "./chart.js";
-import { topologyDiagram } from "./topology-svg.js";
-import { TOPO_SCRIPT } from "./topology-script.js";
 import { STYLES } from "./styles.js";
 import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
@@ -12,6 +10,8 @@ import type {
 } from "./queries.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
+import type { Assets } from "./assets.js";
+import { renderMarkdown } from "./markdown.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
 
@@ -150,10 +150,16 @@ export interface Chrome {
    * know — a page with no database behind it renders no badge rather than a confident zero.
    */
   openIncidents?: number;
+  /**
+   * href of an external stylesheet, linked in <head> BEFORE the inline <style>. Only
+   * /topology uses it (React Flow's own CSS). The order is the point: both files carry
+   * plain class selectors, so the dashboard's overrides win only by coming second.
+   */
+  stylesheet?: string;
 }
 
 export function layout(title: string, body: string, o: Chrome = {}): string {
-  const { current = "", chrome = "full", tools = "", refresh = false, openIncidents } = o;
+  const { current = "", chrome = "full", tools = "", refresh = false, openIncidents, stylesheet } = o;
   const count =
     openIncidents === undefined || openIncidents <= 0
       ? ""
@@ -226,7 +232,7 @@ export function layout(title: string, body: string, o: Chrome = {}): string {
 <meta name="theme-color" content="#f4f6f9" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
 ${refresh ? `<meta http-equiv="refresh" content="${REFRESH_SECONDS}">\n` : ""}<title>${esc(title)} — DevOps AI Agent</title>
-<style>${STYLES}</style>
+${stylesheet ? `<link rel="stylesheet" href="${esc(stylesheet)}">\n` : ""}<style>${STYLES}</style>
 </head><body${chrome === "bare" ? ` class="bare"` : ""}>
 <a class="skip" href="#main">Skip to content</a>
 ${chrome === "full" ? `<input type="checkbox" id="nav-open" class="nav-state" aria-label="Navigation menu">` : ""}
@@ -305,6 +311,18 @@ const TONE: Record<string, string> = {
   // only because they are also severity values; "ok" is not a severity, so it was missing,
   // and toneAttr("ok") silently produced nothing.
   critical: "critical", warning: "warning", info: "info", ok: "ok",
+  // The ASSESSED severities (agent/incidents/parseSeverity: critical | high | medium | low).
+  // Three of the four were missing, so every incident the agent did not call Critical rendered
+  // a GREY badge, a grey row spine and a grey donut slice — on a dashboard whose premise is
+  // that severity carries colour. Severity reaches tone() from three places (severityBadge,
+  // the row's toneAttr, the donut's slice) and they all route through here, so this is one map
+  // rather than three fixes.
+  //
+  // Collapsed at the BOTTOM, not the top: telling Critical from High at a glance is what an
+  // on-call page is for, while Medium and Low can share blue and be told apart by the word the
+  // badge always carries. Nothing maps to `ok` — green would assert a low-severity incident is
+  // good news, and this map is deliberately silent (see `inconclusive`) rather than wrong.
+  high: "warning", medium: "info", low: "info",
   resolved: "ok", succeeded: "ok", confirmed: "ok", approved: "ok",
   failed: "critical", rejected: "critical",
   executing: "warning", proposed: "info",
@@ -1185,114 +1203,81 @@ const capabilityRows = (caps: Capability[]): string =>
         "caps"
       );
 
-// Scale, with no script: three radios whose :checked state drives the SVG's width, inside a
-// container that scrolls. This is the floor, not the ceiling — topology-script.ts removes
-// these radios and takes over with continuous drag-pan and zoom. It stays because the floor
-// has to hold on its own: scripting off, or the nonce'd <script> blocked, and the diagram is
-// still readable, still scalable, and every box still links to its row.
-//
-// aria-label duplicates the visible text with "Zoom" in front. The visible string stays a
-// substring of the accessible name (WCAG 2.5.3), so voice control still works on what a
-// sighted user can read, while a screen-reader user hears what the control is for.
-const ZOOM = [
-  { id: "topo-z1", text: "Fit", label: "Zoom to fit" },
-  { id: "topo-z2", text: "160%", label: "Zoom 160%" },
-  { id: "topo-z3", text: "240%", label: "Zoom 240%" },
-];
+/**
+ * The topology, handed to the browser as an inert data block.
+ *
+ * `type="application/json"` is not decoration: the browser never executes such a block, and
+ * CSP's script-src does not gate it, so the page keeps the property this dashboard is built
+ * around — nothing rendered here can become script execution. The alternative (a nonce'd block
+ * assigning `window.__topo`) would have been an executable script carrying interpolated data,
+ * which is the exact shape the rest of this codebase avoids.
+ *
+ * The escaping is still mandatory. A `</script>` inside any string — a reworded node, a
+ * redacted URL — would close the element early and drop the remainder of the topology into the
+ * document AS MARKUP. `<`, `>` and `&` are all legal as \u escapes inside a JSON string, so the
+ * output stays parseable by JSON.parse with no cooperation from the client.
+ */
+const jsonBlock = (id: string, nonce: string, value: unknown): string =>
+  `<script type="application/json" id="${esc(id)}" nonce="${esc(nonce)}">` +
+  JSON.stringify(value).replace(/[<>&]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) +
+  `</script>`;
 
-// The interactive controls, rendered server-side but hidden until the script sets data-live.
-// Server-side so the strings and their labelling live here with the rest of the page's copy
-// rather than inside a JavaScript string; hidden because a button whose entire behaviour is a
-// listener is a dead control for anyone whose browser never ran the listener.
-//
-// The glyphs are U+2212 and U+002B — read as "minus" and "plus" by neither, which is what the
-// aria-labels are for. The readout is not aria-live: it changes on every wheel notch, and a
-// screen reader announcing "142%, 156%, 171%" over a drag is noise, not information.
-const TOOLS =
-  `<div class="topo-tools">` +
-  `<p class="topo-hint">Drag to pan · Ctrl + scroll to zoom</p>` +
-  `<button type="button" data-zoom="out" aria-label="Zoom out">−</button>` +
-  `<span class="topo-level" translate="no">100%</span>` +
-  `<button type="button" data-zoom="in" aria-label="Zoom in">+</button>` +
-  `<button type="button" data-zoom="reset">Reset</button>` +
-  `</div>`;
-
-// The radios are siblings of, and precede, .topo-view because that is what the :checked ~
-// selector needs — wrapping them in a fieldset would read better and would break the only
-// mechanism that makes this work without script.
-//
-// The <script> sits immediately after the frame rather than at the end of the document: it
-// runs the moment the frame is parsed, so the script-free bar is swapped for the live toolbar
-// before the browser has painted either, instead of flashing one and then the other.
-// The map's visual vocabulary, stated on the page that uses it.
-//
-// It was not stated anywhere: an amber dashed box meant "not configured", a teal edge meant
-// "reached over SQS via llm-worker" — which CLAUDE.md calls the one fact the diagram exists to
-// make obvious — and a reader had to already know. The "not configured" case was at least
-// recoverable from the Notes column of the tables below; the teal edge was explained in a
-// paragraph under LLM backends that never mentions the colour.
-//
-// Each swatch is drawn with the SAME classes the diagram draws with, so the key cannot come to
-// disagree with the drawing — restyle a stroke and the legend restyles with it.
-//
-// Conditional on what was actually drawn. A legend that explains a colour which is not on
-// screen is a legend that has to be read past: `not configured` only appears when something
-// is, and the worker edge only when a backend takes it.
-function topoLegend(t: Topology): string {
-  const key = (mark: string, text: string): string =>
-    `<li><svg class="topo-key" viewBox="0 0 22 14" aria-hidden="true" focusable="false">${mark}</svg>` +
-    `${esc(text)}</li>`;
-  // Same classes AND the same element. Same classes alone is not enough, and this drifted
-  // once already: the worker key was drawn as a line, which is what "a teal edge" sounds like
-  // — but the diagram marks a worker-reached backend by the STROKE OF ITS CHIP
-  // (topology-svg.ts:167), and .topo-edge is declared after .topo-backend-worker, so a line
-  // carrying both classes came out in the edge's grey at equal specificity.
-  const boxKey = (cls: string): string =>
-    `<rect x="1" y="2" width="20" height="10" rx="3" class="topo-box ${cls}"/>`;
-
-  const unconfigured = [...t.inbound, ...t.outbound].some((n) => !n.configured);
-  const viaWorker = t.backends.some((b) => b.viaWorker);
-
+/**
+ * The map itself: a mount point, the data, and the bundle that joins them.
+ *
+ * The mount is NOT empty. It holds the one sentence a reader gets if the bundle never runs —
+ * scripting off, the script blocked, a stale cached asset 404ing — and `client/topology.tsx`
+ * clears it as its first act after a successful parse. This is a smaller promise than the SVG
+ * it replaced, which drew the whole map with no script at all, and it is the trade this rewrite
+ * makes: the map is script-only now, so the page SAYS so rather than showing an empty frame.
+ * The four tables below are unaffected and still carry every fact the map draws.
+ *
+ * `defer` so the DOM the script queries is parsed before it runs — both the mount point and the
+ * data block sit above it today, and defer is what keeps this true if either ever moves.
+ */
+function topoFrame(t: Topology, nonce: string, assets: Assets | null): string {
+  // Not an error state. `npm run dev` runs tsx against the source and never bundles, so this is
+  // what a developer who has not run `npm run build:client` sees — and what a broken image build
+  // shows instead of a blank frame nobody can diagnose from the page itself.
+  if (!assets) {
+    return (
+      `<div class="card topo-frame">` +
+      empty(
+        "The dependency map is not built.",
+        "Run npm run build:client to bundle it. Every fact it draws is in the tables below.",
+        ICON.plug
+      ) +
+      `</div>`
+    );
+  }
   return (
-    `<ul class="topo-legend">` +
-    key(boxKey("topo-self"), "this agent") +
-    (viaWorker ? key(boxKey("topo-backend topo-backend-worker"), "reached over SQS via llm-worker") : "") +
-    (unconfigured ? key(boxKey("topo-off"), "not configured") : "") +
-    // Shown only where the map has stopped fitting — see the container query in styles.ts. The
-    // floor that keeps the type legible is also what makes the frame clip, and on a platform
-    // with overlay scrollbars there is otherwise nothing on screen saying the rest is one drag
-    // away. It is in the markup unconditionally and revealed by CSS, because whether it
-    // overflows is a question about the CONTAINER's width, which only CSS can answer.
-    `<li class="topo-scroll-hint">Drag the map sideways to see the rest.</li>` +
-    // The one affordance the script-free page has no other way to announce: the live toolbar
-    // carries a "Drag to pan" hint, and it is hidden until the script runs.
-    `<li class="topo-legend-note">Every box links to its row below.</li>` +
-    `</ul>`
+    `<div class="card flush topo-frame">` +
+    `<div id="topo-root" data-fallback>` +
+    `<p class="topo-fallback">The dependency map needs JavaScript. ` +
+    `The tables below carry the same facts.</p>` +
+    `</div>` +
+    `</div>` +
+    jsonBlock("topo-data", nonce, t) +
+    `<script src="${esc(assets.js.path)}" nonce="${esc(nonce)}" defer></script>`
   );
 }
 
-const zoom = (svg: string, nonce: string, legend: string): string =>
-  `<div class="card flush topo-frame">` +
-  ZOOM.map(
-    (z, i) => `<input type="radio" name="topo-zoom" id="${z.id}" class="topo-z"` +
-      `${i === 0 ? " checked" : ""} aria-label="${z.label}">`
-  ).join("") +
-  `<div class="topo-bar"><div class="seg">` +
-  ZOOM.map((z) => `<label for="${z.id}">${z.text}</label>`).join("") +
-  `</div></div>` +
-  TOOLS +
-  `<div class="topo-view">${svg}</div>` +
-  legend +
-  `</div>` +
-  `<script nonce="${esc(nonce)}">${TOPO_SCRIPT}</script>`;
-
 /**
- * `nonce` is required, not optional: it is what the response's own
- * `script-src 'nonce-…'` names, and a page built without one would render a <script> that
- * every browser then refuses to run — an interactive map that silently is not one. The only
- * caller mints it per response (see csp() in server.ts).
+ * `nonce` is required, not optional: it is what the response's own `script-src 'nonce-…'`
+ * names, and a page built without one would render a <script> that every browser then refuses
+ * to run — an interactive map that silently is not one. It covers BOTH tags on this page: the
+ * external bundle and the JSON data block. The only caller mints it per response (see csp()
+ * in server.ts).
+ *
+ * `assets` is nullable because the bundle is a build artifact, and its absence is a state this
+ * page renders rather than a crash — see topoFrame().
  */
-export function topologyPage(t: Topology, nonce: string, openIncidents?: number): string {
+export function topologyPage(
+  t: Topology,
+  nonce: string,
+  assets: Assets | null,
+  openIncidents?: number
+): string {
   // The brief's original version rendered only the bare provider name for the three
   // non-router providers ("Provider claude — one client, no routing."). Task 1's review
   // added `activeClient` (populated for claude / openai-compatible / private-llm, undefined
@@ -1317,7 +1302,7 @@ export function topologyPage(t: Topology, nonce: string, openIncidents?: number)
      <p class="meta">Read from this agent's own configuration, plus the tool list
        <code translate="no">devops-mcp-server</code> sent when the agent connected. Nothing here is
        probed — no call leaves the process.</p>
-     ${zoom(topologyDiagram(t), nonce, topoLegend(t))}
+     ${topoFrame(t, nonce, assets)}
      ${section(ICON.inbound, "Inbound")}
      ${nodeRows(t.inbound, "in")}
      ${section(ICON.outbound, "Outbound")}
@@ -1326,7 +1311,9 @@ export function topologyPage(t: Topology, nonce: string, openIncidents?: number)
      ${capabilityRows(t.capabilities)}
      ${section(ICON.chip, "LLM backends")}
      ${router}`,
-    { current: "/topology", openIncidents }
+    // The one page with an external stylesheet. It is linked ahead of the inline <style> so
+    // the dashboard's own rules win over React Flow's at equal specificity.
+    { current: "/topology", openIncidents, stylesheet: assets?.css.path }
   );
 }
 
@@ -1411,7 +1398,7 @@ export function promptPage(v: ContextView, openIncidents?: number): string {
        the model either. That is the question this page exists to answer.</p>
 
      ${section(ICON.context, "Prompt text")}
-     <pre class="skill-body">${esc(v.core.body)}</pre>
+     <div class="card md">${renderMarkdown(v.core.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );
@@ -1449,7 +1436,7 @@ export function skillPage(s: ContextView["skills"][number], openIncidents?: numb
      ${section(ICON.context, "Skill text")}
      <p class="meta">Injected verbatim into the first user message of an investigation — never into
        the system prompt, which is cached whole and would miss on every call if it varied.</p>
-     <pre class="skill-body">${esc(s.body)}</pre>
+     <div class="card md">${renderMarkdown(s.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );

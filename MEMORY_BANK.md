@@ -475,6 +475,85 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 - The similarity tier is **skipped entirely without query text** (recall then issues exactly 2 queries, never touching `root_cause_tsv`), rendered **last**, labelled as the weakest evidence, and wrapped so a failure there can never break recall.
 - `parseConfidence` reused; `parseSeverity` + `extractRootCause` are local, unit-tested in `incidents/index.test.ts`.
 
+### `severity` was two columns wearing one name (`migrations/008`) — fixed 2026-09-02
+Reported as "the alert is `warning` in Slack but `critical` in the DB". Two defects stacked:
+- **`prompts/skills/rca-format.md` shipped a value, not a placeholder.** Under the line
+  *"Output EXACTLY this structure"* it printed `*🔴 Severity:* \`Critical\`` and
+  `*📈 Confidence:* \`High\`` as finished text while every other field was a `[bracketed]`
+  placeholder. Models read `Critical` as part of the required structure and copied it through.
+  Both are now `[level]`, with the allowed values moved into prose **above** the structure block
+  so nothing inside it is copyable. Naming the values inline (`[Critical|High|Medium|Low]`) was
+  tried and rejected: `parseConfidence`'s pattern matches `(high|medium|low)` *inside* the
+  string, so that placeholder still parsed as `high`.
+- **`store()` preferred the RCA text over the alert's label**, and the two use incompatible
+  vocabularies — Alertmanager emits `critical`/`warning`/`info`, the agent's Severity Guidelines
+  say Critical/High/Medium/Low. One column held both, so it could not be filtered or aggregated;
+  the dashboard's filter (`views.ts`, offering exactly critical/warning/info) silently could not
+  reach rows written in the agent's vocabulary, and `recall()` fed the wrong level back into the
+  next investigation of the same alert.
+
+Now: **`severity` is the fact** (the Alertmanager label, exactly what the Slack card rendered)
+and **`assessed_severity` is the judgement** (the RCA's impact call). Disagreement between them
+is signal worth keeping — `warning` assessed `critical` is an under-graded alert, `critical`
+assessed `low` is a noisy rule — so `recall()` prints both, labelled.
+
+Two things worth not re-deriving:
+- **The resolved label is passed to `store()` as an argument, never merged into the label map.**
+  Slack resolves it as `groupLabels.severity ?? firing[0].labels.severity`, but
+  `AlertDeduplicator.fingerprint()` hashes *every* key in that map — writing the resolution back
+  would change the fingerprint and orphan the dedup claim the group was already claimed under.
+- **`parseSeverity` now returns null outside `{critical,high,medium,low}`.** An unreplaced
+  placeholder or an Alertmanager word is the model failing to fill the template in; null reads
+  honestly as "not assessed", where a stray string reads as a judgement.
+
+The regression test is a **prompt contract**: `skills/real.test.ts` runs `parseSeverity` /
+`parseConfidence` over the shipped template — scoped to the text after *"Output EXACTLY this
+structure"*, because a match in the explanatory prose above it masks the template line and the
+test passes while checking nothing (it did, on the first attempt).
+
+### RCA reads top-down for on-call, and Root Cause is a causal chain — 2026-09-02
+Two changes to `prompts/skills/rca-format.md`, plus `## Causal Chain` in `prompts/system.md`.
+
+**Depth.** There was no 5-Why anywhere: `Investigation Discipline` is a *breadth* rule (don't
+re-query what you know) and `Root Cause` was specified as "One paragraph", so investigations
+stopped at the proximate cause — "the gateway can't parse the response" rather than "orders-api
+ships v2 while the gateway parses v1". `*📍 Root Cause*` is now a numbered causal chain. **Not
+literal 5-Why, deliberately:** a fixed quota makes the model invent links 4 and 5 when evidence
+supports 3, which collides head-on with the anti-fabrication rule in `Safety Guidelines`, and an
+invented causal chain is the worst thing this agent can emit — it reads as the most authoritative
+output it produces. So the chain is bounded by evidence instead: every link cites the tool result
+behind it, and the chain **stops explicitly (⛔) at the first unsupported link**, naming what
+would extend it. That stopping line doubles as an Escalation Trigger.
+
+**Order.** The card is read by someone who was just paged, so it now goes
+`⚡ TL;DR → ⚠️ Impact → 🔧 Recommended Actions → 📍 Root Cause → 📊 Evidence → 🚫 Ruled Out → 📈 Confidence`.
+Impact used to sit *below* the actions, which is backwards — impact is what decides whether the
+actions are worth waking up for. `⚡ TL;DR` is the only new label; everything else was reordered,
+not renamed, because the labels are a contract read by four places: `blocks.ts`
+(`extractSection`/`isRcaResponse`), `app/index.ts` (the "is this an RCA" gate), `dashboard/rca.ts`,
+and `remediation/proposal.ts` (which looks for "Recommended Actions"). `buildRcaBlocks` extracts by
+label rather than position, so **RCAs already in Postgres render in the new order too**, and one
+missing its TL;DR just opens on Impact.
+
+**The trap in `extractSection`.** Its lookahead ends a section on a *hardcoded emoji set*. A label
+whose emoji is missing there is invisible as a boundary and the section above it silently absorbs
+the rest of the RCA — no throw, no empty section, just one giant block. Note the direction: a
+section's emoji ends the section **above** it, so the first heading in the template is the one a
+naive test never exercises. `skills/real.test.ts` derives the headings from the shipped template
+and checks each against a `*🔴 SENTINEL*` section placed in front for exactly that reason (the
+first version of that test passed with ⚡ removed from the set).
+
+**Dashboard fallout, found by rendering it.** The chain put Root Cause down `classify()`'s
+`ordered` branch for the first time. That branch assumed the Recommended Actions shape
+(`1. *Immediate:* …`) and fell to an empty left cell for anything else, so the chain rendered as
+a table blank in every first cell, headed "Step | Action" — the "table with a dead column"
+`rca.ts` warns about in its own comment, and the guard only checked the RIGHT column. Fixed by
+falling back to `splitOnce` when the step label is absent (the chain is `claim — source`, the
+same two halves as Evidence), adding `"root cause": ["Step", "Evidence"]` to `COLUMNS`, and
+making the dead-column guard check both sides. **The agent-builder / private-llm path needed
+nothing** — the flow is a bare transport with no `system` field, so the whole contract travels
+in `input_value` from this repo; that is exactly what keeping the flow empty bought.
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:
@@ -504,9 +583,10 @@ Rotating the password invalidates every session; that is the revocation mechanis
 - CSP gained `form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. `form-action` does
   **not** inherit from `default-src`, so the login form worked without it; it is there to pin
   where the password may be posted now that there is a session to steal. The policy is built by
-  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce and so gets a `script-src`
-  at all. Everywhere else there is no exemption, which is what keeps a missed `esc()` inert on
-  the pages that render an RCA.
+  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce, and it is the only route
+  with a `script-src` **or** a `style-src 'self'` at all. Everywhere else there is no exemption,
+  which is what keeps a missed `esc()` inert on the pages that render an RCA and gives an
+  injected `<link>` nowhere to point.
 
 **Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
 one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
@@ -766,32 +846,103 @@ render as "set"/"not set"; endpoints go through `redactUrl()` (userinfo and quer
 either the data structure or the rendered HTML — that test is what keeps the allowlist honest
 as the config grows.
 
-**Interactive map (`src/dashboard/topology-script.ts`).** Drag to pan, ctrl/cmd + wheel or the
-toolbar to zoom; one inline `<script>` carrying a **per-response nonce** (`randomBytes(16)`,
-base64url), never `'unsafe-inline'` — see `docs/DESIGN_dashboard_auth.md`. It is progressive
-enhancement: the page still ships the script-free three-radio scale control, and the script
-removes it, flips `data-live="on"`, and drives the **`viewBox`** instead (not a CSS transform —
-the SVG keeps its own box, so a pointer position converts to user units by one ratio and pan
-needs no scroll container). With scripting off the map still renders, scales, and links.
-Non-obvious, and each one is load-bearing:
-- Pointer capture is taken **after 4px of movement**, not on `pointerdown` — capturing early
-  retargets the following `click`, and every box in the map is a link to its own table row. A
-  `dragged` flag (cleared by the click it swallows) stops a drag that ends on a box from also
-  opening it.
-- `aria-disabled`, not `disabled`, on the zoom buttons: a disabled button drops focus the moment
-  the keyboard reaches the limit, and the next Tab restarts from the top of the document.
-- **Ctrl/cmd + wheel only.** A bare wheel keeps scrolling the page — the map sits mid-document,
-  and a figure that swallowed the wheel would trap the reader every time the pointer crossed it.
-  `touch-action: pan-y` does the same job for one-finger drags on a phone.
-- A `focusin` handler pans a focused box back inside the viewBox. Nothing else can: the viewBox
-  clips it, so there is no scroll for the browser to do.
-- The script-free controls are removed **last**, after every listener is wired, so a throw on any
-  line leaves the page with a zoom control that still works.
-- `topology-script.test.ts` guards the cross-file couplings nothing else would catch: the script
-  can't close its own `<script>`; it builds no markup and evaluates no strings (the nonce buys
-  one trusted block, not a licence for that block to reopen the injection surface); every
-  selector it queries is derived from its own source and asserted against the rendered page; and
-  the `data-live`/`data-drag` attributes it sets are the ones `styles.ts` reacts to.
+**Interactive map (React Flow, `src/dashboard/client/`).** Replaced a hand-laid SVG plus a
+~175-line inline pan/zoom script (`topology-svg.ts` / `topology-script.ts`, both deleted).
+Drag a card to move it, drag the canvas to pan, ctrl/cmd + wheel to zoom, plus React Flow's own
+`<Controls>`. **The minimap was removed on 2026-09-02** — the map is bounded and fits its frame,
+so an overview of an overview was furniture.
+
+The split across files is the design, and it is about what is a **claim** versus what is a
+drawing:
+- `topology.ts` — config → `Topology` (the allowlist above).
+- `topology-types.ts` — the shape and `rowId()`, with **no config import**. It exists because
+  `topology-graph.ts` is compiled into the browser bundle: importing the types from
+  `topology.ts` would drag `config/index.js` — dotenv and every env var this agent reads —
+  into a file served to a browser. `scripts/build-client.mjs` fails the build if a handful of
+  config-only strings appear in the output, because that separation is one edit from untrue.
+- `topology-graph.ts` — `Topology` → nodes and edges. A plain `.ts` module with no React
+  import, so its rules run under `npm test`: a `private-llm` backend hangs off `llm-worker`
+  (edge kind `sqs`), everything else off the agent; tool families hang off the MCP server.
+  A `.tsx` in the bundle is typechecked but never executed by `node:test`.
+- `client/layout.ts` — dagre, `rankdir: LR`. Replaces the old coordinate table. The old note
+  said a layout engine "would solve a problem this page does not have", which was true while
+  every position was a constant and stopped being true when cards became draggable.
+- `client/nodes.tsx`, `client/topology.tsx` — the drawing and the mount.
+
+Load-bearing, and each cost something to get right:
+- **Anchoring is by `Node.id`, never by label.** Matching the display string works until
+  someone rewords it and then fails SILENTLY, drawing a plausible arrow from the wrong node.
+  A missing anchor falls back to the agent — wrong-but-visible beats a dropped edge.
+- **A node's id IS its row's id**, both from `rowId()`, so a card's link is `#${node.id}`.
+  Backend chips are mapped over the whole list *before* the `viaWorker` split, or the two
+  groups would number independently and half the links would point at the wrong row.
+- **The topology reaches the browser as `<script type="application/json">`** — inert by type,
+  not gated by `script-src`, so operator-supplied strings cannot become script. `<`/`>`/`&` are
+  still escaped to `\uXXXX`: a raw `</script>` would close the element early and drop the rest
+  into the document as markup. Both that block and the bundle `<script src>` carry the
+  per-response nonce; `style-src` gains `'self'` on this route only, for React Flow's stylesheet.
+- **The two assets are content-addressed** (`assets.ts`, hashed at boot) and are the only
+  responses on this dashboard that are not `no-store`. The path is a key into a two-entry `Map`,
+  never a filesystem lookup.
+- **The wheel is not captured** (`zoomOnScroll={false}`, `preventScrolling={false}`) — the map
+  sits mid-document and a figure that swallowed the wheel would trap a reader trying to reach
+  the tables. `zoomActivationKeyCode` names **both** `Meta` and `Control`; React Flow's default
+  is `Meta` alone, which is nothing on Linux, and the legend promises Ctrl.
+- **A drag must not follow the card's link.** `client/drag-state.ts` records the drag's end and
+  the anchor suppresses a click within 200ms — React Flow's `nodeDragThreshold` decides whether
+  a drag happened, not whether the click after it should count.
+- **The map is script-only now, and that is the trade.** The SVG drew with no script at all. The
+  mount ships one sentence saying it needs JavaScript, cleared on a successful parse; the four
+  tables below carry every fact it draws, which is the only reason that degradation is
+  acceptable. `assets: null` (a dev server, or a build that never bundled) renders a note.
+- **Every edge animates (2026-09-02, by request).** It was the SQS hop alone, so that motion
+  meant "this call crosses a queue and another pod". That reading is gone by decision: motion is
+  uniform now and says the map is live. The SQS distinction rests on what did not move — the
+  accent stroke at 2px against `--mark-line` at 1.5px, the accent border on the backend card,
+  and the legend row. Four signals became three; none of the survivors is spare.
+- **The map adopted Tailwind + shadcn (2026-09-02), scoped to the client bundle.** shadcn is a
+  component collection on Radix + Tailwind and ships no icons; the icons came separately from
+  lucide. The dashboard's other seven pages stay server-rendered HTML on `styles.ts` — putting
+  them on React would ship script to the pages that render LLM output, which is the one thing
+  the CSP posture exists to prevent. Four seam rules, all in `src/dashboard/CLAUDE.md`: no
+  preflight (and therefore a local reset for UA button styling), shadcn tokens as ALIASES of the
+  dashboard's variables (so dark mode needs no `.dark` class), `styles.ts` must not style a card
+  (it is the inline `<style>` and would win), and overrides must go through `cn` plain and last
+  (neither important form merges under Tailwind v4 — measured). The legend moved into the bundle
+  so its swatches call the same `cardClass()` the cards do.
+- **Both SQS cards expand into their queues, and the response queue is one shared node
+  (2026-09-02).** The LLM path and the GitOps path use a second *request* queue but the same
+  *response* queue, routed by `requestId` — `agent/gitops/sqs.ts` takes `responseQueueName`
+  from `config.llm.sqs`. Drawing it twice would state the opposite of the contract, so
+  `Store.id` lets both cards name `sqs-response` and get one node with two edges into it.
+  Sharing is declared, never inferred from the label. Verified in the browser by counting the
+  edges that terminate there, not the nodes: React Flow drops an edge whose endpoints it cannot
+  find, so a node count alone proves nothing.
+- **Postgres and Redis expand into what they hold (2026-09-02), and both lists are derived**
+  (`src/dashboard/stores.ts`). Postgres is parsed out of the shipped `migrations/*.sql`; Redis
+  is composed from `REDIS_KEYS` constants owned by `agent/memory` and `agent/dedup`, guarded by
+  a test that greps those modules and fails if a literal prefix reaches a redis call without
+  being declared. A transcribed list of five tables is correct until migration 008 and then
+  quietly wrong, which is the one thing this page must not be. Nothing probes. Both render even
+  when the dependency is not configured — the schema is what this agent *would* write. Cards
+  also carry a glyph now (`IconName`, a closed union, drawn by `client/icons.tsx`), which cost
+  the three structural kinds 24px of width: at 216 "Redis (conversation memory)" truncated the
+  moment the icon took its indent.
+- **Tool families expand into child nodes (2026-09-02).** Clicking a capability card toggles
+  it; the open set is a PARAMETER to `buildGraph`, not client-private state, so the claim
+  ("a tool hangs off the family that exposes it") stays testable. Three things had to be got
+  right and each was found by looking at the rendered page: dagre stacks a rank in one column
+  and `k8s` has 34 tools (~1400px — the map went off screen), so each open family is one
+  synthetic node sized to the whole block and the tools are dealt into a roughly-square grid
+  inside it; `fitView` runs after every toggle but never on mount, or the tools land off one
+  edge and the agent off the other; and the family card needed a second control (`↓`, with
+  `stopPropagation`) because the disclosure took its click. Re-layout discards drags — opening
+  34 tools has to make room. A tool node carries no `href`: the tables list it inside a
+  `<details>` with no id of its own.
+- **Not covered by `npm test`:** React Flow's rendering, the drag behaviour, the CSS.
+  `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
+  (finite positions, left-to-right order, non-overlap, and that the SQS class marks exactly one
+  edge). Everything else needs a browser.
 
 **RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
 `prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are

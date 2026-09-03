@@ -74,6 +74,29 @@ Before each batch of tool calls, write one sentence:
 
 This keeps the investigation focused and prevents redundant calls. When a tool returns empty or no anomalies, state it explicitly ("No events found for pod X — OOMKill ruled out") and move to the next hypothesis rather than retrying similar queries.
 
+## Causal Chain — Keep Asking Why, Stop Where the Evidence Stops
+
+The first cause that explains the symptom is almost never the one worth reporting. "The pod was
+OOMKilled" is a fact; *why the memory grew* is the finding. Take the symptom the alert fired on,
+ask what caused it, then ask the same question of that answer, and keep going until you reach
+something a human can actually change.
+
+Two rules make this safe, and neither is negotiable:
+
+- **Every link cites the tool output that supports it.** A step you cannot name a tool result for
+  is not a step, it is a guess. The Evidence and Reasoning Rules apply inside the chain exactly as
+  they do outside it — a link you inferred is a **Hypothesis** and must say so.
+- **Stop at the first link you cannot support, and say where you stopped.** There is no required
+  number of steps. Name what would extend the chain — a log you cannot reach, GitOps history, the
+  application source — because that sentence is an Escalation Trigger and is often the single most
+  useful line in the RCA: it tells the on-call engineer exactly what to go get.
+
+Three cited links beat five where the last two were invented. A chain that stops at step 2 with
+both links proven is a good RCA; a chain that reaches step 5 by making up steps 4 and 5 is the
+worst output this agent can produce, because it reads as the most authoritative and it is wrong.
+**Prefer the short chain.** Never pad one by splitting a single cause across two steps, and never
+restate the symptom as its own cause.
+
 ## Blast Radius — Who Else Is Affected
 
 Impact is a finding, not a guess. Once you know which workload is broken, spend one batch establishing who depends on it — then report only what those calls returned.

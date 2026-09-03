@@ -74,6 +74,10 @@ const COLUMNS: Record<string, [string, string]> = {
   evidence: ["Finding", "Source"],
   "ruled out": ["Hypothesis", "Why it was excluded"],
   "recommended actions": ["Horizon", "Action"],
+  // The causal chain: each step is a claim and the tool output that proves it — the same two
+  // halves as Evidence, read down instead of across. Without an entry here it fell through to
+  // the generic ["Step", "Action"], which named the citation column "Action".
+  "root cause": ["Step", "Evidence"],
 };
 
 // Section titles and field labels arrive with a leading emoji. It is signal in Slack, where
@@ -150,15 +154,22 @@ function classify(key: string, lines: string[]): RcaBody {
   if (items.length === 0) return { kind: "prose", blocks };
 
   const rows = items.map((it) => {
+    // An ordered step may label its halves (`1. *Immediate:* …`) or separate them the way every
+    // other section does (`1. claim — source`). Recommended Actions is the first, the causal
+    // chain is the second, and falling straight to an empty left cell when the label is absent
+    // is what built a table whose first column was blank on every row.
     if (!ordered) return splitOnce(it);
     const m = STEP_LABEL.exec(it);
-    return m ? { left: clean(m[1]), right: m[2].trim() } : { left: "", right: it };
+    return m ? { left: clean(m[1]), right: m[2].trim() } : splitOnce(it);
   });
   const columns = COLUMNS[key] ?? (ordered ? (["Step", "Action"] as [string, string]) : null);
   const leadText = trimBlank(lead).join("\n");
-  // One row with an empty right half is a model being terse; none of them having one means
-  // the split found nothing real, and a table with a dead column is worse than a list.
-  if (columns && rows.some((r) => r.right)) return { kind: "rows", lead: leadText, columns, rows };
+  // One row with an empty half is a model being terse; a column empty on EVERY row means the
+  // split found nothing real, and a table with a dead column is worse than a list.
+  const live = (side: (r: RcaRow) => string): boolean => rows.some((r) => side(r) !== "");
+  if (columns && live((r) => r.left) && live((r) => r.right)) {
+    return { kind: "rows", lead: leadText, columns, rows };
+  }
   return { kind: "list", lead: leadText, items };
 }
 

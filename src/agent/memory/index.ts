@@ -6,6 +6,21 @@ import logger, { errDetail } from "../../utils/logger/index.js";
 const MAX_MESSAGES = 50;
 const REDIS_TTL_SEC = 86400;
 
+/**
+ * Every Redis key prefix this module writes, named once so nothing has to guess them.
+ *
+ * The dashboard's topology page lists these — "what does this agent keep in Redis" is a real
+ * question at 3am — and a second copy of the list over there would drift the first time
+ * someone added a fourth. `index.test.ts` greps this file's own source and fails if a literal
+ * prefix reaches a redis call without appearing here, which is what makes that safe: the list
+ * cannot silently fall behind the code it describes.
+ */
+export const REDIS_KEYS = {
+  conv: { prefix: "conv", holds: "conversation history, per Slack thread" },
+  rca: { prefix: "rca", holds: "whether an RCA has been sent, per thread" },
+  skills: { prefix: "skills", holds: "playbook names selected for a thread" },
+} as const;
+
 export class ConversationMemory {
   private store = new Map<string, Message[]>();
   private rcaThreads = new Set<string>(); // in-memory; Redis uses a separate key
@@ -18,7 +33,7 @@ export class ConversationMemory {
 
   async get(threadId: string): Promise<Message[]> {
     if (this.redis) {
-      const raw = await this.redis.get(`conv:${threadId}`);
+      const raw = await this.redis.get(`${REDIS_KEYS.conv.prefix}:${threadId}`);
       if (!raw) return [];
       try {
         return JSON.parse(raw) as Message[];
@@ -41,7 +56,7 @@ export class ConversationMemory {
     // orphan a tool_result, which every later stage then assumes never happens
     const trimmed = trimToWindow(history, MAX_MESSAGES);
     if (this.redis) {
-      await this.redis.set(`conv:${threadId}`, JSON.stringify(trimmed), "EX", REDIS_TTL_SEC);
+      await this.redis.set(`${REDIS_KEYS.conv.prefix}:${threadId}`, JSON.stringify(trimmed), "EX", REDIS_TTL_SEC);
     } else {
       this.store.set(threadId, trimmed);
     }
@@ -49,7 +64,7 @@ export class ConversationMemory {
 
   async markRcaSent(threadId: string): Promise<void> {
     if (this.redis) {
-      await this.redis.set(`rca:${threadId}`, "1", "EX", REDIS_TTL_SEC);
+      await this.redis.set(`${REDIS_KEYS.rca.prefix}:${threadId}`, "1", "EX", REDIS_TTL_SEC);
     } else {
       this.rcaThreads.add(threadId);
     }
@@ -57,7 +72,7 @@ export class ConversationMemory {
 
   async hasRca(threadId: string): Promise<boolean> {
     if (this.redis) {
-      return (await this.redis.exists(`rca:${threadId}`)) === 1;
+      return (await this.redis.exists(`${REDIS_KEYS.rca.prefix}:${threadId}`)) === 1;
     }
     return this.rcaThreads.has(threadId);
   }
@@ -77,7 +92,7 @@ export class ConversationMemory {
    */
   async getSkills(threadId: string): Promise<string[]> {
     if (!this.redis) return this.skillThreads.get(threadId) ?? [];
-    const raw = await this.redis.get(`skills:${threadId}`);
+    const raw = await this.redis.get(`${REDIS_KEYS.skills.prefix}:${threadId}`);
     if (!raw) return [];
     try {
       const parsed = JSON.parse(raw) as unknown;
@@ -95,12 +110,12 @@ export class ConversationMemory {
       this.skillThreads.set(threadId, names);
       return;
     }
-    await this.redis.set(`skills:${threadId}`, JSON.stringify(names), "EX", REDIS_TTL_SEC);
+    await this.redis.set(`${REDIS_KEYS.skills.prefix}:${threadId}`, JSON.stringify(names), "EX", REDIS_TTL_SEC);
   }
 
   async clear(threadId: string): Promise<void> {
     if (this.redis) {
-      await this.redis.del(`conv:${threadId}`, `rca:${threadId}`, `skills:${threadId}`);
+      await this.redis.del(`${REDIS_KEYS.conv.prefix}:${threadId}`, `${REDIS_KEYS.rca.prefix}:${threadId}`, `${REDIS_KEYS.skills.prefix}:${threadId}`);
     } else {
       this.store.delete(threadId);
       this.rcaThreads.delete(threadId);

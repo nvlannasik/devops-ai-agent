@@ -1,0 +1,74 @@
+/* Tailwind for the topology map, and ONLY for it. Two things here are load-bearing and neither
+   is obvious from a stock shadcn setup.
+
+   1. NO PREFLIGHT. The stock `@import "tailwindcss"` pulls in Tailwind's base reset, and this
+      file is served as `topology.css`, linked in the <head> of /topology — a page whose tables,
+      chrome and rail are server-rendered HTML styled by `styles.ts`. Preflight would strip the
+      margins off every heading, the bullets off every list and the borders off every table on
+      that page. The layer list plus two targeted imports is what leaves the reset out; do not
+      "simplify" it back to the one-line import.
+
+   2. THE TOKENS ARE ALIASES, NOT VALUES. Every shadcn colour name points at the variable the
+      rest of the dashboard already uses, so the map cannot drift into being a grey shadcn
+      island inside a teal-accented page — and dark mode needs no `.dark` class and no variant
+      config at all, because those variables already flip under prefers-color-scheme in
+      styles.ts. One source of truth for colour, two systems reading it. */
+
+/* 3. THE UTILITIES ARE UNLAYERED, AND THAT IS THE WHOLE REASON THEY APPLY.
+      An unlayered declaration beats ANY layered one, whatever the specificity — so with
+      utilities in `@layer utilities`, every plain rule in `styles.ts` (which is unlayered) won
+      over every Tailwind class on this map. It is not a source-order problem and no amount of
+      specificity fixes it. It surfaced as underlined card captions: `a { text-decoration:
+      underline }` at 0,0,1 beating `.no-underline` at 0,1,0. That was one symptom of a seam
+      that was losing every contest. The theme stays layered — it is only variable
+      declarations, and it SHOULD lose to anything the page states itself. */
+@layer theme;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css";
+
+@source "./";
+
+@theme inline {
+  /* `inline` so these RESOLVE to the var() at use time rather than snapshotting its value —
+     which is the whole reason the scheme flip comes for free. */
+  --color-background: var(--surface);
+  --color-foreground: var(--text);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--text);
+  --color-muted: var(--surface-2);
+  --color-muted-foreground: var(--text-dim);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--on-accent);
+  --color-accent: var(--surface-2);
+  --color-accent-foreground: var(--text);
+  --color-ring: var(--accent);
+
+  /* --mark-line, NOT --border. This is the one alias that is a decision rather than a mapping,
+     and styles.ts documents why: an edge is nothing but its stroke, and in the light scheme a
+     card is nothing but its outline because --surface and --surface-raised are the same white.
+     --border is a 1.65:1 hairline for dividing server-rendered tables; a load-bearing graphic
+     needs 3:1, which --mark-line has at 3.63. Mapping this to --border would quietly undo a
+     contrast fix that took a round of measuring to find. */
+  --color-border: var(--mark-line);
+  --color-input: var(--mark-line);
+
+  /* The two state marks, kept as names so a component can ask for them by meaning. */
+  --color-warning: var(--warning);
+  --color-mark-line: var(--mark-line);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-data);
+
+  /* The map's type sizes come off the page's scale rather than Tailwind's, or a card would be
+     sized in a different system from the table it links to. */
+  /* The product's real floor. The map used to resolve --text-2xs to --fs-3xs (10px), which is
+     a size nothing else on this dashboard uses — the tables directly below it are --fs-2xs.
+     A map whose captions are smaller than the rows they link to reads as a different product. */
+  --text-2xs: var(--fs-2xs);
+  --text-xs: var(--fs-2xs);
+  --text-sm: var(--fs-sm);
+}
