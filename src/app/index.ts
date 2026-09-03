@@ -426,7 +426,7 @@ export class SlackApp {
         subjects ? `${subjects.key}=[${subjects.values.join(", ")}]` : `none (labels: ${[...new Set(firing.flatMap((a) => Object.keys(a.labels)))].sort().join(", ")})`
       } — delegation hint ${hint ? "emitted" : "not emitted"}`
     );
-    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, noticeTs);
+    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs);
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
@@ -463,6 +463,13 @@ export class SlackApp {
     labels: Record<string, string>,
     /** "" unless the group spans more than one subject and delegation is enabled. */
     delegation: string,
+    /**
+     * The group's Alertmanager severity, resolved once in handleAlert so the incident row and
+     * the Slack card can never disagree. Required rather than optional: it is read from the
+     * payload, so "not passed" and "the group had no severity" are different facts and only
+     * the second one is `null`.
+     */
+    alertSeverity: string | null,
     /** ts of the "Auto-investigating" notice, updated in place with per-round progress. */
     noticeTs?: string
   ): Promise<void> {
