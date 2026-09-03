@@ -2437,8 +2437,11 @@ test("Tailwind's utilities are unlayered, or styles.ts wins every contest on the
 // be told was one. A heading may match its body's size and rank by weight and space; it may
 // never be smaller than the text it introduces.
 test("a rendered heading is never smaller than its own paragraph", () => {
-  const body = /\.md \{[^}]*font-size: var\(--([\w-]+)\)/.exec(STYLES)?.[1];
-  assert.equal(body, "fs-md", "the block sets its own body size");
+  // The block declares NO size — it inherits the page's --fs-base body, so it cannot drift
+  // into being a different typographic system inside the same card again.
+  const decl = /^\.md \{[^}]*\}/m.exec(STYLES)?.[0] ?? "";
+  assert.ok(decl, "no .md rule");
+  assert.doesNotMatch(decl, /font-size/, "the block must inherit the page's body size");
   for (const h of ["h3", "h4"]) {
     const size = new RegExp(`\\.md ${h} \\{[^}]*font-size: var\\(--([\\w-]+)\\)`).exec(STYLES)?.[1];
     assert.ok(size, `no .md ${h} size`);

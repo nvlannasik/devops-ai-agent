@@ -1389,20 +1389,28 @@ form.signout button {
    reader saw the asterisks and backticks rather than what they mean. markdown.ts renders a
    subset of CommonMark sized to what those files actually contain; this is what it lands in.
 
-   It reuses the page's own scale rather than declaring one: --fs-md over 1.7 is the same
-   measure the RCA's prose takes, because both are long-form text a human reads top to bottom.
-   Headings start at h3 (the page owns h1 and h2), so the sizes step down from there. */
-.md { font-size: var(--fs-md); line-height: 1.7; color: var(--text); }
+   IT DECLARES NO FONT SIZE, and that is the point rather than an omission. It used to set
+   --fs-md (17px), copied from the RCA's prose on the argument that both are long-form text —
+   but the RCA is the whole content of its own page, while this sits in a card among page
+   furniture whose paragraphs are 13px and whose body is 15px. A 17px block inside a 15px page
+   reads as a different typographic system, which is exactly what it looked like. Inheriting
+   means it cannot drift from the page again; the only thing stated here is the LEADING, which
+   a 24,000-character document earns and the page's 1.55 does not give it. */
+.md { line-height: 1.7; color: var(--text); }
 .md > * + * { margin-top: var(--sp-4); }
 .md h3, .md h4, .md h5 { line-height: 1.35; margin-top: var(--sp-6); }
 /* The RCA page already learned this one and this file repeated it: --fs-base is SMALLER than
    the --fs-md body below it, so every ## in the prompt rendered as a heading you had to be
    told was one. A heading may match its body's size and rank by weight and space; it may never
    be smaller. */
+/* Stepping up from the inherited --fs-base, never down: a heading smaller than its own
+   paragraph is the mistake the RCA page already made and wrote down. */
 .md h3 { font-size: var(--fs-lg); font-weight: 650; }
 .md h4 { font-size: var(--fs-md); font-weight: 650; letter-spacing: -.005em; }
 /* The third level stops competing on size and takes case instead — a prompt's ### is a label
-   inside a section, not another section. */
+   inside a section, not another section. Smaller than the body on purpose, and NOT the mistake
+   above: this is the same treatment the page's own h2 takes (11px mono, uppercase, tracked), so
+   it reads as a label because of its case and tracking rather than in spite of its size. */
 .md h5 {
   font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .08em;
   color: var(--text-dim);
