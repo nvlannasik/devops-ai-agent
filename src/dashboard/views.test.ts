@@ -2437,11 +2437,53 @@ test("Tailwind's utilities are unlayered, or styles.ts wins every contest on the
 // be told was one. A heading may match its body's size and rank by weight and space; it may
 // never be smaller than the text it introduces.
 test("a rendered heading is never smaller than its own paragraph", () => {
-  const body = /\.md \{[^}]*font-size: var\(--([\w-]+)\)/.exec(STYLES)?.[1];
-  assert.equal(body, "fs-md", "the block sets its own body size");
+  // The block declares NO size — it inherits the page's --fs-base body, so it cannot drift
+  // into being a different typographic system inside the same card again.
+  const decl = /^\.md \{[^}]*\}/m.exec(STYLES)?.[0] ?? "";
+  assert.ok(decl, "no .md rule");
+  assert.doesNotMatch(decl, /font-size/, "the block must inherit the page's body size");
   for (const h of ["h3", "h4"]) {
     const size = new RegExp(`\\.md ${h} \\{[^}]*font-size: var\\(--([\\w-]+)\\)`).exec(STYLES)?.[1];
     assert.ok(size, `no .md ${h} size`);
     assert.notEqual(size, "fs-base", `${h} is smaller than the body it introduces`);
   }
+});
+
+// Three of the four assessed severities were missing from TONE, so every incident the agent did
+// not call Critical rendered a GREY badge, a grey row spine and a grey donut slice — on a
+// dashboard whose premise is that severity carries colour. The set is imported from the module
+// that WRITES it (parseSeverity's own allowlist) rather than transcribed, so a fifth level added
+// there fails here instead of shipping colourless.
+test("every severity the agent can assess carries a tone", async () => {
+  const { ASSESSED_SEVERITIES } = await import("../agent/incidents/index.js");
+  for (const sev of ASSESSED_SEVERITIES) {
+    const html = detailPage({
+      incident: { ...row, severity: sev, rca: "plain", channel: null, thread_ts: null },
+      remediations: [], feedback: [],
+    });
+    const badge = new RegExp(`<span class="badge"([^>]*)>${sev}</span>`).exec(html);
+    assert.ok(badge, `${sev} should render a badge`);
+    assert.match(badge![1]!, /data-tone="(critical|warning|info)"/, `${sev} renders untoned`);
+  }
+  // Nothing maps to `ok`: green would assert a low-severity incident is good news, and this map
+  // is deliberately silent rather than wrong (the same reason `inconclusive` is absent).
+  for (const sev of ASSESSED_SEVERITIES) {
+    const html = detailPage({
+      incident: { ...row, severity: sev, rca: "plain", channel: null, thread_ts: null },
+      remediations: [], feedback: [],
+    });
+    assert.doesNotMatch(html, new RegExp(`<span class="badge" data-tone="ok">${sev}</span>`));
+  }
+});
+
+// The two fields are a field LIST, not two chips. As flex peers they sized from their own
+// content — Severity is one word (94px measured), Confidence is a word plus the sentence that
+// explains it (647px) — so they sat side by side at wildly different widths with the labels
+// landing nowhere near each other. A grid gives the labels one column and the values another.
+test("the RCA's field strip is a grid, so its labels line up", () => {
+  assert.match(STYLES, /\.rca-fields \{[^}]*display: grid/);
+  assert.match(STYLES, /\.rca-fields \{[^}]*grid-template-columns: max-content minmax\(0, 1fr\)/);
+  // The <div> only groups the pair for the <dl>; its box has to disappear or every pair is one
+  // cell and the columns never align.
+  assert.match(STYLES, /\.rca-fields > div \{ display: contents; \}/);
 });

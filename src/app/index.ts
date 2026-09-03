@@ -393,10 +393,15 @@ export class SlackApp {
     // there for its full 12h TTL and Alertmanager's repeat would be suppressed — a real
     // incident silently never investigated. Release the claim so the next repeat retries.
     let threadId: string;
+    let noticeTs: string | undefined;
     try {
       const posted = await this.app.client.chat.postMessage({ channel, text: issueText, mrkdwn: true });
       threadId = posted.ts!;
-      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+      // The notice's ts is kept so the investigation can report progress into this one
+      // message instead of posting a new one per round. Undefined if Slack does not return
+      // it — progress is then skipped, which is exactly the old behaviour.
+      const notice = await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+      noticeTs = notice.ts;
     } catch (err) {
       await this.dedup.clear(groupLabels).catch(() => {});
       logger.error(
@@ -421,7 +426,7 @@ export class SlackApp {
         subjects ? `${subjects.key}=[${subjects.values.join(", ")}]` : `none (labels: ${[...new Set(firing.flatMap((a) => Object.keys(a.labels)))].sort().join(", ")})`
       } — delegation hint ${hint ? "emitted" : "not emitted"}`
     );
-    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity);
+    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, noticeTs);
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
@@ -458,8 +463,8 @@ export class SlackApp {
     labels: Record<string, string>,
     /** "" unless the group spans more than one subject and delegation is enabled. */
     delegation: string,
-    /** The severity the Slack alert card rendered, stored verbatim on the incident row. */
-    alertSeverity: string | null
+    /** ts of the "Auto-investigating" notice, updated in place with per-round progress. */
+    noticeTs?: string
   ): Promise<void> {
     await this.semaphore.acquire();
     try {
@@ -478,7 +483,27 @@ export class SlackApp {
         `[SOURCE: Alertmanager webhook — automated incident investigation]${delegation}\n\n` +
         (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
 
-      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText }));
+      // One message updated in place, never a post per round: a four-round investigation
+      // would otherwise push the alert itself off the screen with progress chatter, and this
+      // thread has to stay readable once the RCA lands in it. Failures are swallowed at
+      // debug — losing a progress line must not cost an investigation.
+      const onProgress = noticeTs
+        ? (round: number, tools: string[]) => {
+            const list = tools.length > 0 ? ` — ${tools.join(", ")}` : "";
+            void this.app.client.chat
+              .update({ channel, ts: noticeTs, text: `🔍 Investigating, round ${round}${list}` })
+              .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
+          }
+        : undefined;
+
+      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText, onProgress }));
+      // The notice has served its purpose; left alone it would sit above the RCA still
+      // claiming a round is running.
+      if (noticeTs) {
+        await this.app.client.chat
+          .update({ channel, ts: noticeTs, text: "🔍 Investigation complete." })
+          .catch((e) => logger.debug(`[slack] could not close the progress notice for thread ${threadId}: ${errDetail(e)}`));
+      }
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
       // recognized recurrence may be a concise conversational reply (known issue +
       // confirmed fix) — forcing it back into the template via a reformat LLM call

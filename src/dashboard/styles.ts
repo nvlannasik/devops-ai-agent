@@ -1263,14 +1263,27 @@ form.signout button {
    after the confidence level that exists nowhere else — the incidents table has the level and
    not the reasoning. So they are rendered, and rendered small: the badges at the top of the
    page are where those values are read, this is where they are explained. */
+/* A GRID, not a wrapping flex row, and the difference is what a reader sees. As flex peers the
+   two fields sized themselves from their own content: Severity is one word and measured 94px,
+   Confidence is a word plus the sentence explaining it and measured 647px, so they sat side by
+   side at wildly different widths with the labels landing nowhere near each other. They are a
+   field LIST — the same label, different values — so the labels take one column and the values
+   another, and the two rows line up whatever either one holds. */
 .rca-fields {
-  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6);
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4);
   margin: 0 0 var(--sp-5);
 }
-.rca-fields > div { display: flex; gap: var(--sp-3); align-items: baseline; min-width: 0; }
+/* The div exists because a dl wants its pairs grouped; display:contents removes its box so the dt
+   and dd become grid items of the strip itself. Without it every pair is one cell and the
+   columns never align — which is the whole point of the grid. */
+.rca-fields > div { display: contents; }
 .rca-fields dt {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
+  /* The label is small caps against a value at --fs-base, so its box is shorter: without this
+     it hangs above the first line of a value that wraps to three. */
+  line-height: 1.6;
 }
 /* Not --fs-sm: the value beside Confidence is not a value, it is the sentence in which the
    model says why — the one piece of reasoning the incidents table does not carry — and at 13px
@@ -1389,20 +1402,28 @@ form.signout button {
    reader saw the asterisks and backticks rather than what they mean. markdown.ts renders a
    subset of CommonMark sized to what those files actually contain; this is what it lands in.
 
-   It reuses the page's own scale rather than declaring one: --fs-md over 1.7 is the same
-   measure the RCA's prose takes, because both are long-form text a human reads top to bottom.
-   Headings start at h3 (the page owns h1 and h2), so the sizes step down from there. */
-.md { font-size: var(--fs-md); line-height: 1.7; color: var(--text); }
+   IT DECLARES NO FONT SIZE, and that is the point rather than an omission. It used to set
+   --fs-md (17px), copied from the RCA's prose on the argument that both are long-form text —
+   but the RCA is the whole content of its own page, while this sits in a card among page
+   furniture whose paragraphs are 13px and whose body is 15px. A 17px block inside a 15px page
+   reads as a different typographic system, which is exactly what it looked like. Inheriting
+   means it cannot drift from the page again; the only thing stated here is the LEADING, which
+   a 24,000-character document earns and the page's 1.55 does not give it. */
+.md { line-height: 1.7; color: var(--text); }
 .md > * + * { margin-top: var(--sp-4); }
 .md h3, .md h4, .md h5 { line-height: 1.35; margin-top: var(--sp-6); }
 /* The RCA page already learned this one and this file repeated it: --fs-base is SMALLER than
    the --fs-md body below it, so every ## in the prompt rendered as a heading you had to be
    told was one. A heading may match its body's size and rank by weight and space; it may never
    be smaller. */
+/* Stepping up from the inherited --fs-base, never down: a heading smaller than its own
+   paragraph is the mistake the RCA page already made and wrote down. */
 .md h3 { font-size: var(--fs-lg); font-weight: 650; }
 .md h4 { font-size: var(--fs-md); font-weight: 650; letter-spacing: -.005em; }
 /* The third level stops competing on size and takes case instead — a prompt's ### is a label
-   inside a section, not another section. */
+   inside a section, not another section. Smaller than the body on purpose, and NOT the mistake
+   above: this is the same treatment the page's own h2 takes (11px mono, uppercase, tracked), so
+   it reads as a label because of its case and tracking rather than in spite of its size. */
 .md h5 {
   font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .08em;
   color: var(--text-dim);
@@ -2002,7 +2023,11 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
-  .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
+  /* One column on a phone: a max-content label column plus a value is two columns of nothing
+     much at 390px, and the sentence beside Confidence needs the whole width. */
+  .rca-fields { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+  .rca-fields dt { margin-top: var(--sp-3); }
+  .rca-fields > div:first-child dt { margin-top: 0; }
 }
 /* ---------- the rail, as a drawer ---------- */
 /* NOTE: this is the SECOND @media block at 46rem — the other one, down in "responsive & motion",
