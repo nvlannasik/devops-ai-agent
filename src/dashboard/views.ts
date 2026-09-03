@@ -311,6 +311,18 @@ const TONE: Record<string, string> = {
   // only because they are also severity values; "ok" is not a severity, so it was missing,
   // and toneAttr("ok") silently produced nothing.
   critical: "critical", warning: "warning", info: "info", ok: "ok",
+  // The ASSESSED severities (agent/incidents/parseSeverity: critical | high | medium | low).
+  // Three of the four were missing, so every incident the agent did not call Critical rendered
+  // a GREY badge, a grey row spine and a grey donut slice — on a dashboard whose premise is
+  // that severity carries colour. Severity reaches tone() from three places (severityBadge,
+  // the row's toneAttr, the donut's slice) and they all route through here, so this is one map
+  // rather than three fixes.
+  //
+  // Collapsed at the BOTTOM, not the top: telling Critical from High at a glance is what an
+  // on-call page is for, while Medium and Low can share blue and be told apart by the word the
+  // badge always carries. Nothing maps to `ok` — green would assert a low-severity incident is
+  // good news, and this map is deliberately silent (see `inconclusive`) rather than wrong.
+  high: "warning", medium: "info", low: "info",
   resolved: "ok", succeeded: "ok", confirmed: "ok", approved: "ok",
   failed: "critical", rejected: "critical",
   executing: "warning", proposed: "info",

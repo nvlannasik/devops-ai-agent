@@ -1263,14 +1263,27 @@ form.signout button {
    after the confidence level that exists nowhere else — the incidents table has the level and
    not the reasoning. So they are rendered, and rendered small: the badges at the top of the
    page are where those values are read, this is where they are explained. */
+/* A GRID, not a wrapping flex row, and the difference is what a reader sees. As flex peers the
+   two fields sized themselves from their own content: Severity is one word and measured 94px,
+   Confidence is a word plus the sentence explaining it and measured 647px, so they sat side by
+   side at wildly different widths with the labels landing nowhere near each other. They are a
+   field LIST — the same label, different values — so the labels take one column and the values
+   another, and the two rows line up whatever either one holds. */
 .rca-fields {
-  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6);
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4);
   margin: 0 0 var(--sp-5);
 }
-.rca-fields > div { display: flex; gap: var(--sp-3); align-items: baseline; min-width: 0; }
+/* The div exists because a dl wants its pairs grouped; display:contents removes its box so the dt
+   and dd become grid items of the strip itself. Without it every pair is one cell and the
+   columns never align — which is the whole point of the grid. */
+.rca-fields > div { display: contents; }
 .rca-fields dt {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
+  /* The label is small caps against a value at --fs-base, so its box is shorter: without this
+     it hangs above the first line of a value that wraps to three. */
+  line-height: 1.6;
 }
 /* Not --fs-sm: the value beside Confidence is not a value, it is the sentence in which the
    model says why — the one piece of reasoning the incidents table does not carry — and at 13px
@@ -2010,7 +2023,11 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
-  .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
+  /* One column on a phone: a max-content label column plus a value is two columns of nothing
+     much at 390px, and the sentence beside Confidence needs the whole width. */
+  .rca-fields { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+  .rca-fields dt { margin-top: var(--sp-3); }
+  .rca-fields > div:first-child dt { margin-top: 0; }
 }
 /* ---------- the rail, as a drawer ---------- */
 /* NOTE: this is the SECOND @media block at 46rem — the other one, down in "responsive & motion",
