@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { leaksRcaStructure, buildRcaBlocks, extractSection } from "./blocks.js";
+import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse } from "./blocks.js";
 
 test("partial RCA leak (plan + impact + confidence, no Severity) is detected", () => {
   const reply =
@@ -114,4 +114,69 @@ test("an RCA written before TL;DR existed still renders, in the new order", () =
     "*\u{1F4CD} Root Cause*",
     "*\u{1F4CA} Evidence*",
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// The severity line is the one place the model reliably drifts. rca-format.md asks for
+// `*[emoji] Severity:* `[level]`` — the only line in the template where the bold span closes
+// mid-line and a backticked value follows. Every other label is a whole bold line, so the model
+// regularises this one to match its neighbours.
+//
+// The three shapes below are verbatim from three consecutive live investigations. Not one of
+// them is the template, and under the old pattern not one of them was recognised — so a complete
+// RCA was posted to Slack as plain text and incidents.assessed_severity was written NULL.
+// ---------------------------------------------------------------------------
+
+const ROOT_CAUSE = "\n\n*📍 Root Cause*\ncheckout-gateway is failing its readiness probe.";
+
+const OBSERVED: Array<[string, string, string]> = [
+  ["the template, unchanged", "*🔴 Severity:* `Critical`", "critical"],
+  ["no markup at all", "🟠 Severity: High", "high"],
+  ["bold moved onto the value", "🔴 Severity: *Critical*", "critical"],
+  ["one bold span over the whole line", "*🟡 Severity: Medium*", "medium"],
+];
+
+for (const [shape, line, expected] of OBSERVED) {
+  test(`an RCA is recognised when the severity line is written as: ${shape}`, () => {
+    assert.equal(isRcaResponse(line + ROOT_CAUSE), true, `not recognised: ${line}`);
+  });
+
+  test(`the card reads the level when the severity line is written as: ${shape}`, () => {
+    // Recognising it is not enough — a card headed "⚪ Unknown Severity Incident" is the same
+    // failure one step later, so the extractor and the recogniser must read the same line.
+    const blocks = buildRcaBlocks(line + ROOT_CAUSE + "\n\n*📊 Evidence*\nprobe failures in events.");
+    const header = JSON.stringify(blocks[0]);
+    assert.match(header, new RegExp(expected, "i"), `header did not name the level: ${header}`);
+    assert.doesNotMatch(header, /Unknown/, `level lost by the extractor: ${line}`);
+  });
+}
+
+test("prose about severity is not a severity line", () => {
+  // The colon is what separates the label from prose, and it is why the pattern requires one.
+  // Without this the recogniser would fire on any answer that discusses severity at all.
+  for (const prose of [
+    "The severity is high and the blast radius is wide." + ROOT_CAUSE,
+    "Whatever the severity, critical services stayed up." + ROOT_CAUSE,
+    "I could not determine severity." + ROOT_CAUSE,
+  ]) {
+    assert.equal(isRcaResponse(prose), false, `prose matched: ${prose.slice(0, 60)}`);
+  }
+});
+
+test("a severity line alone is not an RCA — the Root Cause section still has to be there", () => {
+  // The pair is the signal. Loosening one half must not turn every mention of a level into a
+  // card, which is what the Root Cause clause is holding.
+  assert.equal(isRcaResponse("*🔴 Severity:* `Critical`\n\nStill looking into it."), false);
+});
+
+test("an unknown level is not a severity line", () => {
+  // The old extractor took anything inside backticks, so `P1` became a header reading
+  // "⚪ P1 Severity Incident". Only the four the template names are levels.
+  assert.equal(isRcaResponse("*🔴 Severity:* `P1`" + ROOT_CAUSE), false);
+});
+
+test("the template's own placeholder is not a chosen level", () => {
+  // A model that copies the template instead of filling it in emits every level at once. A
+  // trailing \b would match "Critical" in front of the pipe and store a judgement nobody made.
+  assert.equal(isRcaResponse("*[emoji] Severity:* `[Critical|High|Medium|Low]`" + ROOT_CAUSE), false);
 });

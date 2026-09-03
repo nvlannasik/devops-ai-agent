@@ -6,6 +6,39 @@ const SEVERITY_COLOR: Record<string, string> = {
   critical: "🔴", high: "🟠", medium: "🟡", low: "🟢",
 };
 
+/**
+ * The severity line, tolerant of the markup the model actually produces.
+ *
+ * rca-format.md asks for `*[emoji] Severity:* \`[level]\`` and that line is the only one in the
+ * template shaped that way — every other label is a whole line wrapped in asterisks. So the model
+ * regularises it to look like its neighbours, and three consecutive live investigations produced
+ * three different shapes, none of them the template's:
+ *
+ *     🟠 Severity: High             (no markup at all)
+ *     🔴 Severity: *Critical*       (bold moved onto the value)
+ *     *🔴 Severity: Critical*       (one bold span over the whole line)
+ *
+ * The old pattern required Severity to sit INSIDE a bold span and the level inside backticks, so
+ * all three failed. That cost more than a rendering nicety: isRcaResponse gates the RCA card, so
+ * an otherwise complete RCA — Root Cause, Evidence, Actions all correctly formatted — was posted
+ * to Slack as plain text, and parseSeverity wrote NULL into incidents.assessed_severity.
+ *
+ * Deliberately shaped after CONFIDENCE_PATTERN in agent/confidence, which was loosened the same
+ * way for the same reason. The colon stays REQUIRED: it is what separates the label line from
+ * prose like "severity is high", which must not match.
+ *
+ * The trailing `(?![|\w])` is load-bearing and a plain `\b` is not enough. A model that emits the
+ * template's placeholder verbatim writes `*[emoji] Severity:* \`[Critical|High|Medium|Low]\``, and
+ * `\b` happily matches "Critical" in front of the pipe — storing a level the model never chose.
+ * parseSeverity feeds assessed_severity, the agent's own judgement column, so a guessed value
+ * there is worse than the null that says "not assessed".
+ *
+ * Exported because three call sites read it — the two here and parseSeverity in agent/incidents —
+ * and three copies of one regex is how the two that were not loosened got missed.
+ */
+export const SEVERITY_PATTERN =
+  /(?:[🔴🟠🟡🟢]\s*)?severity[^a-z\n]{0,10}[:`]\s*[`*]?\s*\[?(critical|high|medium|low)\]?(?![|\w])/i;
+
 // exported: reformatToRca gates on it — isRcaResponse alone passed texts that rendered empty
 export function extractSection(text: string, label: string): string {
   // matches "*📍 Root Cause*\n..." up to the next "*emoji Label*" or end
@@ -45,15 +78,14 @@ export function leaksRcaStructure(text: string): boolean {
 }
 
 export function isRcaResponse(text: string): boolean {
-  return /\*[^*]*Severity[^*]*\*[^`]*`\[?(critical|high|medium|low)\]?`/i.test(text) &&
-    /\*[^*]*Root Cause[^*]*\*/i.test(text);
+  return SEVERITY_PATTERN.test(text) && /\*[^*]*Root Cause[^*]*\*/i.test(text);
 }
 
 export function buildRcaBlocks(rcaText: string): Block[] {
   const blocks: Block[] = [];
 
   // ── Severity ─────────────────────────────────────────────────────────────
-  const severityMatch = rcaText.match(/\*[^*]*Severity[^*]*\*[^`]*`\[?([^\]`]+)\]?`/i);
+  const severityMatch = rcaText.match(SEVERITY_PATTERN);
   const severity = severityMatch ? severityMatch[1].trim().toLowerCase() : "";
   const severityEmoji = SEVERITY_COLOR[severity] ?? "⚪";
   const severityLabel = severity ? severity.charAt(0).toUpperCase() + severity.slice(1) : "Unknown";

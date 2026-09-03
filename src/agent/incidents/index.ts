@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import type { UnresolvedIncident } from "./reconcile.js";
 import { parseConfidence } from "../confidence/index.js";
+import { SEVERITY_PATTERN } from "../../utils/slack/blocks.js";
 import logger from "../../utils/logger/index.js";
 
 // How many distinct stemmed terms an old root cause must share with the current alert
@@ -484,7 +485,9 @@ export const ASSESSED_SEVERITIES = new Set(["critical", "high", "medium", "low"]
 
 // matches the RCA format: "*🔴 Severity:* `critical`" style label
 export function parseSeverity(rca: string): string | null {
-  const m = rca.match(/\*[^*]*Severity[^*]*\*[^`]*`\[?([^\]`]+)\]?`/i);
+  // Shared with the Slack renderer: this column and the RCA card must read the same line the
+  // same way. See SEVERITY_PATTERN for why it tolerates markup the template never asked for.
+  const m = rca.match(SEVERITY_PATTERN);
   if (!m) return null;
   const value = m[1].trim().toLowerCase();
   return ASSESSED_SEVERITIES.has(value) ? value : null;
