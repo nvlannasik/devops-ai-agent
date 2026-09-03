@@ -517,7 +517,25 @@ export class SlackApp {
       // produced garbage twice. Incident store + remediation don't need the template.
       const structured = isRcaResponse(rca) && !!extractSection(rca, "Root Cause");
       if (structured) {
-        await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: buildRcaBlocks(rca) });
+        const rcaBlocks = buildRcaBlocks(rca);
+        // What we actually handed Slack. Added because "the dividers are gone" could not be
+        // answered from here: the card rendered (its header comes from buildRcaBlocks and
+        // nothing else in the repo writes that string), so the blocks were built — but whether
+        // the dividers reached Slack was pure inference. A section over Slack's 3000-char limit
+        // is the one way this call fails outright, so its longest section is worth naming too.
+        const longest = Math.max(
+          0,
+          ...rcaBlocks.map((b) => {
+            const t = "text" in b ? b.text : undefined;
+            return t && typeof t !== "string" ? t.text.length : 0;
+          })
+        );
+        logger.info(
+          `[slack] RCA card: ${rcaBlocks.length} blocks ` +
+          `(${rcaBlocks.filter((b) => b.type === "divider").length} dividers, ` +
+          `${rcaBlocks.filter((b) => b.type === "section").length} sections, longest ${longest} chars)`
+        );
+        await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: rcaBlocks });
       } else {
         logger.info(`[slack] alert response without RCA structure (recurrence shortcut?) — posting as conversation (thread ${threadId})`);
         for (const part of splitForSlack(rca)) {
