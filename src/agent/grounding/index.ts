@@ -31,9 +31,21 @@ const MIN_LENGTH = 4;
  * A bare word is not checkable: `storefront` or `pending` would be flagged on a wording
  * difference rather than an invented resource, and generic words appear in tool output anyway.
  * Requiring a separator keeps this to things shaped like an identifier.
+ *
+ * The three-letter run is what keeps DURATIONS out. K8S_NAME rejects `512Mi` on its capital and
+ * `98%` on its percent, but a lowercase quantity has nothing to trip on: `1.5s` starts with a
+ * digit, contains a dot and a letter, and sails through every rule above it. Observed on
+ * 2026-09-03 — an RCA quoting a p99 of `1.5s` was reported to the on-call thread as naming a
+ * resource no tool had returned. Every workload name in this system carries a word
+ * (`storefront`, `orders-api`, `checkout-gateway`); `30s`, `2m30s`, `100m` and `v1.2.3` do not.
+ *
+ * Deliberately biased towards missing an invention rather than inventing one. This posts an
+ * unsolicited warning into an incident thread that nobody can silence, so a false positive
+ * costs more than a false negative — the write-tool filter and the dry-run are the guards that
+ * actually stop a bad action, not this.
  */
 const looksLikeIdentifier = (name: string): boolean =>
-  name.length >= MIN_LENGTH && /[a-z]/.test(name) && /[-./]/.test(name);
+  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name);
 
 /** Names the answer asserts, namespace-qualified ones split into their parts. */
 export function citedNames(answer: string): string[] {

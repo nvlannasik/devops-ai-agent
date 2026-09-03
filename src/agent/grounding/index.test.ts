@@ -100,3 +100,27 @@ test("a name is reported once however often it is cited", () => {
   const rca = "`orders-api` failed; `orders-api` again; see `sample-apps/orders-api`";
   assert.deepEqual(groundingGaps(rca, [PODS]), ["orders-api"]);
 });
+
+// A quantity written in lowercase is the one shape that passes every filter above
+// looksLikeIdentifier: K8S_NAME stops `512Mi` at the capital and `98%` at the percent, but
+// `1.5s` is digits, a dot and a letter — all legal in a DNS-1123 name. Observed live on
+// 2026-09-03: an RCA quoting a p99 of `1.5s` made the agent warn the on-call thread that the
+// answer named a resource no tool had returned.
+test("a duration or quantity in backticks is not a resource name", () => {
+  for (const quantity of ["1.5s", "30s", "2m30s", "100m", "0.5s", "v1.2.3"]) {
+    assert.deepEqual(
+      citedNames(`p99 latency is \`${quantity}\` on the hot path.`),
+      [],
+      `${quantity} was treated as a resource name`
+    );
+  }
+});
+
+test("real workload names still survive the same filter", () => {
+  // The negative control: tightening this must not stop the check doing its job. Every one of
+  // these carries a word, which is exactly what separates it from a quantity.
+  assert.deepEqual(
+    citedNames("`sample-apps/orders-api` calls `checkout-gateway` behind `storefront-svc`.").sort(),
+    ["checkout-gateway", "orders-api", "sample-apps", "storefront-svc"]
+  );
+});
