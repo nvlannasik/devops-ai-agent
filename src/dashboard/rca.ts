@@ -54,6 +54,20 @@ export interface Rca {
 // heading rather than a field.
 const HEADING = /^\*([^*\n]+)\*$/;
 const FIELD = /^\*([^*\n]+?):\*\s*(.+)$/;
+// FIELD stays strict, because loosening it is what would turn `*Impact: what breaks*` into a
+// field. But the model does not write the two real fields the way the template asks: the
+// Severity line is the only label whose bold closes mid-line, so it gets regularised into the
+// shape of its neighbours, and four live investigations produced four different shapes —
+// `*🔴 Severity:* \`Critical\``, `🔴 Severity: *Critical*`, `🔴 Severity: Critical`, and
+// `*🟡 Severity: Medium*`. Only the first matched, so the verdict strip lost its Severity on
+// every real RCA.
+//
+// Named labels rather than a looser rule: Severity and Confidence are the only two the template
+// defines as fields, so matching them by name costs nothing that HEADING wants to keep. The
+// Slack side reached the same conclusion for the same reason (utils/slack/blocks SEVERITY_PATTERN,
+// agent/confidence CONFIDENCE_PATTERN); this is the third parser of that text and the last one
+// still holding the model to the template exactly.
+const VERDICT_FIELD = /^[*_`]*\s*[^\w\s]*\s*(Severity|Confidence)\s*:?\s*[*_`\s]*([^\n]*?)[*_`\s]*$/i;
 const FENCE = /^\s*```/;
 // Group 1 is a bullet marker, group 2 an ordinal — which one matched decides whether the
 // section is a set of facts or a sequence of steps. `-` and `*` are not mrkdwn bullets but
@@ -196,6 +210,17 @@ export function parseRca(raw: string): Rca | null {
       const f = FIELD.exec(t);
       if (f) {
         fields.push({ label: clean(f[1]), value: f[2].trim() });
+        continue;
+      }
+      // Before HEADING, because one of the observed shapes IS a whole-line bold span
+      // (`*🟡 Severity: Medium*`) and HEADING would claim it as a section titled with its own
+      // verdict. Safe to put here only because the label is matched by name: `*Impact: what
+      // breaks*` and every other bold line stays a heading, which is the distinction the
+      // FIELD comment above exists to protect. A bare `*📈 Confidence*` with its value on the
+      // next line captures nothing in group 2 and falls through to HEADING as before.
+      const v = VERDICT_FIELD.exec(t);
+      if (v && v[2]) {
+        fields.push({ label: v[1], value: v[2].trim() });
         continue;
       }
       const h = HEADING.exec(t);

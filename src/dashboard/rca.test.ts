@@ -403,3 +403,71 @@ test("an ordered section with nothing to split by degrades to a list, not a dead
   assert.equal(rc.body.kind, "list");
 });
 
+
+// ---------------------------------------------------------------------------
+// The model does not write the Severity line the way the template asks. It is the only label
+// whose bold span closes mid-line, so it gets regularised into the shape of its neighbours, and
+// four live investigations produced four different shapes. Only the template's own matched
+// FIELD, so the verdict strip lost its Severity on every real RCA — this page was reading a
+// format nothing actually produces.
+//
+// The Slack side reached the same conclusion twice already (SEVERITY_PATTERN in
+// utils/slack/blocks, CONFIDENCE_PATTERN in agent/confidence). This is the third parser of the
+// same text.
+// ---------------------------------------------------------------------------
+
+const VERDICT_BODY =
+  "\n\n*⚡ TL;DR*\n" +
+  "• `sample-apps/storefront` is returning HTTP 504s.\n\n" +
+  "*📍 Root Cause*\n" +
+  "1. checkout-gateway probes are failing.\n";
+
+const severityOf = (raw: string): string | undefined =>
+  parseRca(raw)?.fields.find((f) => /severity/i.test(f.label))?.value;
+
+for (const [shape, line, expected] of [
+  ["the template, unchanged", "*🔴 Severity:* `Critical`", "`Critical`"],
+  ["bold moved onto the value", "🔴 Severity: *Critical*", "Critical"],
+  ["no markup at all", "🔴 Severity: Critical", "Critical"],
+  ["one bold span over the whole line", "*🟡 Severity: Medium*", "Medium"],
+] as const) {
+  test(`the verdict strip keeps Severity when it is written as: ${shape}`, () => {
+    assert.equal(severityOf(line + VERDICT_BODY), expected);
+  });
+}
+
+test("Confidence drifts the same way and is read the same way", () => {
+  const conf = (line: string) =>
+    parseRca("*🔴 Severity:* `Critical`" + VERDICT_BODY + "\n" + line)
+      ?.fields.find((f) => /confidence/i.test(f.label))?.value;
+  assert.match(conf("*📈 Confidence:* `Low` — thin evidence") ?? "", /Low/);
+  assert.match(conf("📈 Confidence: Low — thin evidence") ?? "", /Low/);
+});
+
+test("a bold line that is not one of the two verdict labels is still a heading", () => {
+  // The distinction the strict FIELD rule exists to protect. Matching the verdicts by NAME is
+  // what makes it safe to look for them before HEADING: nothing else can be stolen.
+  const rca =
+    "*🔴 Severity:* `Critical`" + VERDICT_BODY + "\n*⚠️ Impact: what breaks next*\nOrders stall.\n";
+  const parsed = parseRca(rca);
+  assert.ok(
+    parsed?.sections.some((s) => /Impact/.test(s.title)),
+    "a bold line with a colon stopped being a section heading"
+  );
+  assert.equal(
+    parsed?.fields.some((f) => /Impact/i.test(f.label)),
+    false,
+    "a section heading was promoted into the verdict strip"
+  );
+});
+
+test("a verdict label with no value on its line stays a heading", () => {
+  // "*📈 Confidence*" opening a section, its level on the next line. Capturing nothing must
+  // leave the old behaviour alone rather than inventing an empty field.
+  const parsed = parseRca("*🔴 Severity:* `Critical`" + VERDICT_BODY + "\n*📈 Confidence*\nLow\n");
+  assert.equal(
+    parsed?.fields.some((f) => /confidence/i.test(f.label) && !f.value),
+    false,
+    "an empty Confidence field was pushed into the strip"
+  );
+});
