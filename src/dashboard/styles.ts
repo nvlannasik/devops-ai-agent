@@ -1785,7 +1785,11 @@ form.signout button {
    the height is stated rather than derived. clamp() rather than a fixed number for the same
    reason the rest of the dashboard uses one: the frame is 13.5rem narrower with a rail beside
    it, and a map that is a letterbox on a laptop is not worth the pixels it saves on a phone. */
-.topo-view { height: clamp(26rem, 58vh, 42rem); width: 100%; }
+/* Taller than it was (26/58vh/42), and the reason is fitView: it scales the whole graph into
+   this box, so the frame's height IS the map's opening zoom. At the old height the map loaded
+   at 0.82 — every card rendered at 82% of the type scale it was designed against, which is why
+   it read as too far out. Measured after the change, not guessed. */
+.topo-view { height: clamp(34rem, 74vh, 58rem); width: 100%; }
 /* Replaced by the mount as its first act; visible only if the bundle never ran. Centred rather
    than parked at the top-left, because at that point it is the entire contents of the frame.
    On #topo-root, not .topo-view: the client renders .topo-view INSIDE the mount, so the note
@@ -1799,7 +1803,12 @@ form.signout button {
 .react-flow__node { font-family: var(--font-ui); cursor: default; }
 /* The map does not connect anything (nodesConnectable={false}), so a handle is a dot that
    promises an interaction which does not exist. */
-.react-flow__handle { opacity: 0; pointer-events: none; }
+.react-flow__handle {
+  width: 7px; height: 7px; min-width: 0; min-height: 0;
+  background: var(--surface); border: 1.5px solid var(--mark-line);
+  pointer-events: none;
+}
+.react-flow__node:hover .react-flow__handle { border-color: var(--accent); }
 /* Structure, on the same ramp as a node's outline — an arrow is nothing but its stroke. */
 .react-flow__edge-path { stroke: var(--mark-line); stroke-width: 1.5; }
 .react-flow__arrowhead * { fill: var(--mark-line); stroke: none; }

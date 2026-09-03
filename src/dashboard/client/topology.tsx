@@ -71,7 +71,7 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
       first.current = false;
       return;
     }
-    const id = requestAnimationFrame(() => fitView({ padding: 0.15, duration: 400, maxZoom: 1 }));
+    const id = requestAnimationFrame(() => fitView({ padding: 0.06, duration: 400, maxZoom: 1 }));
     return () => cancelAnimationFrame(id);
   }, [laid, setNodes, setEdges, fitView]);
 
@@ -120,7 +120,7 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
       // against the frame. minZoom below 1 because a 20-backend registry lays out wider than
       // any frame this page gets.
       fitView
-      fitViewOptions={{ padding: 0.15 }}
+      fitViewOptions={{ padding: 0.06 }}
       minZoom={0.2}
       maxZoom={2.5}
       // The dashboard follows prefers-color-scheme and states no toggle; "system" is React

@@ -32,7 +32,7 @@ export interface Store {
 
 /** Named rather than free-form so the client can only draw glyphs it actually has, and so
  *  `buildTopology` naming one is the same kind of explicit act as naming a field. */
-export type IconName = "chat" | "bell" | "db" | "cache" | "queue" | "plug" | "chip";
+export type IconName = "chat" | "bell" | "db" | "cache" | "queue" | "plug" | "chip" | "bolt" | "tools";
 
 export interface Node {
   label: string;

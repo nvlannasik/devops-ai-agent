@@ -29,17 +29,20 @@ export const NODE_SIZE: Record<TopoNodeKind, { width: number; height: number }> 
   // on this map — "Redis (conversation memory)" — wanted 3px more than it had. The long
   // CAPTIONS (an endpoint, a queue pair) still truncate and that is correct: the map is the
   // glance, the row below is the record, and the full value is in the tooltip either way.
-  inbound: { width: 248, height: 64 },
-  agent: { width: 248, height: 64 },
-  outbound: { width: 248, height: 64 },
+  inbound: { width: 260, height: 64 },
+  agent: { width: 260, height: 64 },
+  outbound: { width: 260, height: 64 },
   // A backend carries a THIRD line — name, model, and the route chip — so it is the one card
   // that needs the extra height; a capability carries one word and a count. Same reasoning as
   // the old CHIP_MIN_W / CAP_MIN_W split, which is why these are still two numbers and not one.
   // These are the box `.topo-node` is painted into, and it clips: a height that does not fit
   // its three lines cuts the title in half, top and bottom, because the card centres its
   // content. Measured against the shipped type scale, not guessed.
-  backend: { width: 190, height: 76 },
-  capability: { width: 150, height: 56 },
+  backend: { width: 200, height: 76 },
+  // 172, up from 150, and the 22 is what the glyph chip cost: every card carries one now so the
+  // left edges line up across the map, and at 150 "alertmanager" and "prometheus" came back
+  // truncated the moment it landed. Measured after the chip, like every other width here.
+  capability: { width: 172, height: 56 },
   // A tool is one identifier and nothing else, so it is the narrow one — but the identifiers
   // are long (`prometheus_list_metric_names`) and there can be 34 of them under one family, so
   // this is where the map's density is decided. Wider and k8s alone pushes the frame past any
@@ -115,7 +118,11 @@ export function layoutGraph(graph: TopoGraph): { nodes: TopoFlowNode[]; edges: T
   const g = new dagre.graphlib.Graph();
   // ranksep is generous and nodesep is not: the columns are the argument this map makes, so
   // the gap BETWEEN ranks has to read as a step while the gap within one stays a list.
-  g.setGraph({ rankdir: "LR", ranksep: 96, nodesep: 20, marginx: 24, marginy: 24 });
+  // ranksep 72, down from 96: the columns are still the argument this map makes, but the gap
+  // was costing opening zoom for nothing. fitView takes the smaller axis scale and this graph
+  // is laid out left-to-right, so every pixel BETWEEN ranks is a pixel of width the whole map
+  // is then scaled down to fit. Measured: 0.83 -> 0.93 across this and the padding cut.
+  g.setGraph({ rankdir: "LR", ranksep: 72, nodesep: 20, marginx: 16, marginy: 16 });
   g.setDefaultEdgeLabel(() => ({}));
 
   for (const n of graph.nodes) {
