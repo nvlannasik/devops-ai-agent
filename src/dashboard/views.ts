@@ -11,6 +11,7 @@ import type {
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { Assets } from "./assets.js";
+import { renderMarkdown } from "./markdown.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
 
@@ -310,6 +311,18 @@ const TONE: Record<string, string> = {
   // only because they are also severity values; "ok" is not a severity, so it was missing,
   // and toneAttr("ok") silently produced nothing.
   critical: "critical", warning: "warning", info: "info", ok: "ok",
+  // The ASSESSED severities (agent/incidents/parseSeverity: critical | high | medium | low).
+  // Three of the four were missing, so every incident the agent did not call Critical rendered
+  // a GREY badge, a grey row spine and a grey donut slice — on a dashboard whose premise is
+  // that severity carries colour. Severity reaches tone() from three places (severityBadge,
+  // the row's toneAttr, the donut's slice) and they all route through here, so this is one map
+  // rather than three fixes.
+  //
+  // Collapsed at the BOTTOM, not the top: telling Critical from High at a glance is what an
+  // on-call page is for, while Medium and Low can share blue and be told apart by the word the
+  // badge always carries. Nothing maps to `ok` — green would assert a low-severity incident is
+  // good news, and this map is deliberately silent (see `inconclusive`) rather than wrong.
+  high: "warning", medium: "info", low: "info",
   resolved: "ok", succeeded: "ok", confirmed: "ok", approved: "ok",
   failed: "critical", rejected: "critical",
   executing: "warning", proposed: "info",
@@ -1385,7 +1398,7 @@ export function promptPage(v: ContextView, openIncidents?: number): string {
        the model either. That is the question this page exists to answer.</p>
 
      ${section(ICON.context, "Prompt text")}
-     <pre class="skill-body">${esc(v.core.body)}</pre>
+     <div class="card md">${renderMarkdown(v.core.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );
@@ -1423,7 +1436,7 @@ export function skillPage(s: ContextView["skills"][number], openIncidents?: numb
      ${section(ICON.context, "Skill text")}
      <p class="meta">Injected verbatim into the first user message of an investigation — never into
        the system prompt, which is cached whole and would miss on every call if it varied.</p>
-     <pre class="skill-body">${esc(s.body)}</pre>
+     <div class="card md">${renderMarkdown(s.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );

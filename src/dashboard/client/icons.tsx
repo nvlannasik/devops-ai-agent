@@ -1,4 +1,4 @@
-import { Bell, Cpu, Database, DatabaseZap, Layers, MessageSquare, Plug } from "lucide-react";
+import { Bell, Blocks, Cpu, Database, DatabaseZap, Layers, MessageSquare, Plug, Zap } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { IconName } from "../topology-types.js";
 
@@ -28,6 +28,11 @@ const ICONS: Record<IconName, LucideIcon> = {
   queue: Layers,
   plug: Plug,
   chip: Cpu,
+  // The agent itself. The brand mark in the top bar is a bolt, so this is the same idea one
+  // level down rather than a second symbol for the same thing.
+  bolt: Zap,
+  // A tool family: several things the MCP server groups under one prefix.
+  tools: Blocks,
 };
 
 /**
@@ -46,8 +51,10 @@ export function Icon({ name }: { name: IconName }): React.JSX.Element {
       // glyph became a bare inline SVG on its own line, with the title indented underneath it
       // by a pl-5 that had nothing beside it. Sizing lives on the component now, and the card
       // puts it in a real column (nodes.tsx).
-      className="shrink-0 mt-px text-muted-foreground"
-      size={14}
+      // No colour and no margin of its own: it sits inside the card's tinted chip, which sets
+      // both. 15px is what .stat .kpi-icon puts in the same 1.875rem box.
+      className="shrink-0"
+      size={15}
       strokeWidth={1.6}
       absoluteStrokeWidth
       aria-hidden="true"

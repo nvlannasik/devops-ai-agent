@@ -1263,14 +1263,27 @@ form.signout button {
    after the confidence level that exists nowhere else — the incidents table has the level and
    not the reasoning. So they are rendered, and rendered small: the badges at the top of the
    page are where those values are read, this is where they are explained. */
+/* A GRID, not a wrapping flex row, and the difference is what a reader sees. As flex peers the
+   two fields sized themselves from their own content: Severity is one word and measured 94px,
+   Confidence is a word plus the sentence explaining it and measured 647px, so they sat side by
+   side at wildly different widths with the labels landing nowhere near each other. They are a
+   field LIST — the same label, different values — so the labels take one column and the values
+   another, and the two rows line up whatever either one holds. */
 .rca-fields {
-  display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-6);
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-4);
   margin: 0 0 var(--sp-5);
 }
-.rca-fields > div { display: flex; gap: var(--sp-3); align-items: baseline; min-width: 0; }
+/* The div exists because a dl wants its pairs grouped; display:contents removes its box so the dt
+   and dd become grid items of the strip itself. Without it every pair is one cell and the
+   columns never align — which is the whole point of the grid. */
+.rca-fields > div { display: contents; }
 .rca-fields dt {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim); white-space: nowrap;
+  /* The label is small caps against a value at --fs-base, so its box is shorter: without this
+     it hangs above the first line of a value that wraps to three. */
+  line-height: 1.6;
 }
 /* Not --fs-sm: the value beside Confidence is not a value, it is the sentence in which the
    model says why — the one piece of reasoning the incidents table does not carry — and at 13px
@@ -1384,6 +1397,60 @@ form.signout button {
    playbook are structure, and re-flowing them into a paragraph is a different document.
    The width comes from .doc, which comes from the column — nothing here declares one, so the
    block and the headings above it end on the same right edge at every screen size. */
+/* ---------- rendered markdown (the prompt and skill pages) ---------- */
+/* The prompt and every skill are markdown files, and they used to render inside a pre block — so a
+   reader saw the asterisks and backticks rather than what they mean. markdown.ts renders a
+   subset of CommonMark sized to what those files actually contain; this is what it lands in.
+
+   IT DECLARES NO FONT SIZE, and that is the point rather than an omission. It used to set
+   --fs-md (17px), copied from the RCA's prose on the argument that both are long-form text —
+   but the RCA is the whole content of its own page, while this sits in a card among page
+   furniture whose paragraphs are 13px and whose body is 15px. A 17px block inside a 15px page
+   reads as a different typographic system, which is exactly what it looked like. Inheriting
+   means it cannot drift from the page again; the only thing stated here is the LEADING, which
+   a 24,000-character document earns and the page's 1.55 does not give it. */
+.md { line-height: 1.7; color: var(--text); }
+.md > * + * { margin-top: var(--sp-4); }
+.md h3, .md h4, .md h5 { line-height: 1.35; margin-top: var(--sp-6); }
+/* The RCA page already learned this one and this file repeated it: --fs-base is SMALLER than
+   the --fs-md body below it, so every ## in the prompt rendered as a heading you had to be
+   told was one. A heading may match its body's size and rank by weight and space; it may never
+   be smaller. */
+/* Stepping up from the inherited --fs-base, never down: a heading smaller than its own
+   paragraph is the mistake the RCA page already made and wrote down. */
+.md h3 { font-size: var(--fs-lg); font-weight: 650; }
+.md h4 { font-size: var(--fs-md); font-weight: 650; letter-spacing: -.005em; }
+/* The third level stops competing on size and takes case instead — a prompt's ### is a label
+   inside a section, not another section. Smaller than the body on purpose, and NOT the mistake
+   above: this is the same treatment the page's own h2 takes (11px mono, uppercase, tracked), so
+   it reads as a label because of its case and tracking rather than in spite of its size. */
+.md h5 {
+  font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-dim);
+}
+/* First child never pushes the block away from the heading above the whole document. */
+.md > :first-child { margin-top: 0; }
+.md ul, .md ol { margin: 0; padding-left: 1.35em; display: flex; flex-direction: column; gap: var(--sp-2); }
+/* A nested list is a child of the <li> list, so it needs its own top gap and no bullet reset. */
+.md ul ul, .md ol ol, .md ul ol, .md ol ul { margin-top: var(--sp-2); }
+.md li { overflow-wrap: anywhere; }
+/* Inline code is a tool name, an env var, a selector — data, in the data face, and marked as a
+   run rather than a box: fifty boxed spans in a prompt is a page of confetti. */
+.md code {
+  font-family: var(--font-data); font-size: .9em;
+  background: var(--surface-2); border-radius: 4px; padding: .1em .32em;
+  overflow-wrap: anywhere;
+}
+/* A fenced block is a query an operator retypes, so it scrolls rather than wraps: a LogQL
+   selector broken across lines is a selector that no longer says what it selects. */
+.md pre.md-code {
+  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.55;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);
+  padding: var(--sp-4); margin: 0; overflow-x: auto;
+}
+.md pre.md-code code { background: none; padding: 0; font-size: inherit; }
+.md strong { font-weight: 650; }
+
 .skill-body {
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.6;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);
@@ -1739,7 +1806,11 @@ form.signout button {
    the height is stated rather than derived. clamp() rather than a fixed number for the same
    reason the rest of the dashboard uses one: the frame is 13.5rem narrower with a rail beside
    it, and a map that is a letterbox on a laptop is not worth the pixels it saves on a phone. */
-.topo-view { height: clamp(26rem, 58vh, 42rem); width: 100%; }
+/* Taller than it was (26/58vh/42), and the reason is fitView: it scales the whole graph into
+   this box, so the frame's height IS the map's opening zoom. At the old height the map loaded
+   at 0.82 — every card rendered at 82% of the type scale it was designed against, which is why
+   it read as too far out. Measured after the change, not guessed. */
+.topo-view { height: clamp(34rem, 74vh, 58rem); width: 100%; }
 /* Replaced by the mount as its first act; visible only if the bundle never ran. Centred rather
    than parked at the top-left, because at that point it is the entire contents of the frame.
    On #topo-root, not .topo-view: the client renders .topo-view INSIDE the mount, so the note
@@ -1753,7 +1824,12 @@ form.signout button {
 .react-flow__node { font-family: var(--font-ui); cursor: default; }
 /* The map does not connect anything (nodesConnectable={false}), so a handle is a dot that
    promises an interaction which does not exist. */
-.react-flow__handle { opacity: 0; pointer-events: none; }
+.react-flow__handle {
+  width: 7px; height: 7px; min-width: 0; min-height: 0;
+  background: var(--surface); border: 1.5px solid var(--mark-line);
+  pointer-events: none;
+}
+.react-flow__node:hover .react-flow__handle { border-color: var(--accent); }
 /* Structure, on the same ramp as a node's outline — an arrow is nothing but its stroke. */
 .react-flow__edge-path { stroke: var(--mark-line); stroke-width: 1.5; }
 .react-flow__arrowhead * { fill: var(--mark-line); stroke: none; }
@@ -1947,7 +2023,11 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
-  .rca-fields > div { flex-direction: column; gap: var(--sp-1); }
+  /* One column on a phone: a max-content label column plus a value is two columns of nothing
+     much at 390px, and the sentence beside Confidence needs the whole width. */
+  .rca-fields { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+  .rca-fields dt { margin-top: var(--sp-3); }
+  .rca-fields > div:first-child dt { margin-top: 0; }
 }
 /* ---------- the rail, as a drawer ---------- */
 /* NOTE: this is the SECOND @media block at 46rem — the other one, down in "responsive & motion",

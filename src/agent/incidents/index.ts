@@ -480,7 +480,7 @@ export class IncidentMemory {
 // columns. Anything outside this set is the model failing to fill the template in (an
 // unreplaced `[Critical|High|Medium|Low]` placeholder, prose, an Alertmanager word), and a
 // null reads honestly as "not assessed" where a stray string would read as a judgement.
-const ASSESSED_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+export const ASSESSED_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
 
 // matches the RCA format: "*🔴 Severity:* `critical`" style label
 export function parseSeverity(rca: string): string | null {

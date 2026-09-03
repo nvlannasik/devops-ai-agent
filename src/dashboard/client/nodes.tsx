@@ -34,7 +34,11 @@ export function TopoNodeCard({ data }: NodeProps<TopoFlowNode>): React.JSX.Eleme
   // the text column is what lets `truncate` actually truncate inside a flex parent.
   const body = (
     <div className="flex w-full min-w-0 items-start gap-2">
-      {d.icon ? <Icon name={d.icon} /> : null}
+      {d.icon ? (
+        <span className="grid size-[1.875rem] shrink-0 place-items-center rounded-[var(--r-sm)] bg-[var(--brand-tint)] text-[var(--accent)]">
+          <Icon name={d.icon} />
+        </span>
+      ) : null}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span
           className={cn(

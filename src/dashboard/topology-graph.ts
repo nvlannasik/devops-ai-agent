@@ -134,6 +134,7 @@ export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set(
     sub: `provider ${t.provider}`,
     meta: "this agent",
     configured: true,
+    icon: "bolt",
   });
 
   // Inbound fans IN to one agent. Two nodes today (Slack, Alertmanager); the loop is over
@@ -200,6 +201,7 @@ export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set(
       href: `#${rowId("backend", i)}`,
       viaWorker: b.viaWorker,
       route: b.route,
+      icon: "chip",
     });
     // The single fact this map is for: a private-llm backend hangs off llm-worker, everything
     // else off the agent. The edge kind follows the same predicate, so the animation and the
@@ -222,6 +224,7 @@ export function buildGraph(t: Topology, expanded: ReadonlySet<string> = new Set(
       href: `#${capId}`,
       tools: c.tools.length,
       expanded: isOpen,
+      icon: "tools",
     });
     link(mcpAnchor, capId, "call");
 
