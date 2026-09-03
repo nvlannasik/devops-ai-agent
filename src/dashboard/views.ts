@@ -1386,7 +1386,7 @@ export function promptPage(v: ContextView, openIncidents?: number): string {
        the model either. That is the question this page exists to answer.</p>
 
      ${section(ICON.context, "Prompt text")}
-     <div class="md">${renderMarkdown(v.core.body)}</div>
+     <div class="card md">${renderMarkdown(v.core.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );
@@ -1424,7 +1424,7 @@ export function skillPage(s: ContextView["skills"][number], openIncidents?: numb
      ${section(ICON.context, "Skill text")}
      <p class="meta">Injected verbatim into the first user message of an investigation — never into
        the system prompt, which is cached whole and would miss on every call if it varied.</p>
-     <div class="md">${renderMarkdown(s.body)}</div>
+     <div class="card md">${renderMarkdown(s.body)}</div>
      </div>`,
     { current: "/context", openIncidents }
   );

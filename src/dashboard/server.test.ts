@@ -510,7 +510,7 @@ test("/prompt renders the core prompt and needs no database", async () => {
     const res = await raw(port, "GET /prompt HTTP/1.1", authed);
     assert.match(res, /^HTTP\/1\.1 200/);
     assert.match(res, /prompts\/system\.md/);
-    assert.match(res, /class="md"/);
+    assert.match(res, /class="card md"/);
   });
 });
 

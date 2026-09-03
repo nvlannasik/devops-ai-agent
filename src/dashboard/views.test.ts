@@ -1353,7 +1353,7 @@ test("a skill page carries the whole body, its trigger, and the way back", () =>
   assert.match(html, /<h1 translate="no">oomkilled<\/h1>/);
   // Rendered, not shown as source: the body is a markdown file and a reader should see what
   // the asterisks and backticks MEAN. "1. …" is an ordered item now.
-  assert.match(html, /<div class="md">/);
+  assert.match(html, /<div class="card md">/, "the body keeps the panel the pre block gave it");
   assert.match(html, /<ol><li>k8s_describe_pod<\/li>/);
   // The trigger is NOT markdown — it is a regex an operator reads character by character, and
   // formatting it would be a lie. It stays verbatim in a pre block.
@@ -2281,7 +2281,7 @@ test("the context page leads to the prompt instead of only measuring it", () => 
 // budget table under four screens of prompt.
 test("the prompt page renders the text the process is holding", () => {
   const html = promptPage(CTX);
-  assert.match(html, /<div class="md"><p>You are an expert DevOps AI Agent\./);
+  assert.match(html, /<div class="card md"><p>You are an expert DevOps AI Agent\./);
   assert.match(html, /prompts\/system\.md/);
   assert.match(html, /267 lines · 24,100 chars · about 8,034 tokens/);
   // the rail keeps Context lit, the way a skill page does
