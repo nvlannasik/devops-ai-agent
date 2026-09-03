@@ -1351,7 +1351,12 @@ test("a document page is one block that takes the column's width, capped by noth
 test("a skill page carries the whole body, its trigger, and the way back", () => {
   const html = skillPage(CTX.skills[1]!);
   assert.match(html, /<h1 translate="no">oomkilled<\/h1>/);
-  assert.match(html, /<pre class="skill-body">1\. k8s_describe_pod<\/pre>/);
+  // Rendered, not shown as source: the body is a markdown file and a reader should see what
+  // the asterisks and backticks MEAN. "1. …" is an ordered item now.
+  assert.match(html, /<div class="md">/);
+  assert.match(html, /<ol><li>k8s_describe_pod<\/li>/);
+  // The trigger is NOT markdown — it is a regex an operator reads character by character, and
+  // formatting it would be a lie. It stays verbatim in a pre block.
   assert.match(html, /<pre class="skill-body" translate="no">oomkill\|exit code 137<\/pre>/);
   assert.match(html, /<a class="standalone" href="\/context">/);
   // The rail still marks Context: a skill page is a page of that section, not a fifth destination.
@@ -2276,7 +2281,7 @@ test("the context page leads to the prompt instead of only measuring it", () => 
 // budget table under four screens of prompt.
 test("the prompt page renders the text the process is holding", () => {
   const html = promptPage(CTX);
-  assert.match(html, /<pre class="skill-body">You are an expert DevOps AI Agent\./);
+  assert.match(html, /<div class="md"><p>You are an expert DevOps AI Agent\./);
   assert.match(html, /prompts\/system\.md/);
   assert.match(html, /267 lines · 24,100 chars · about 8,034 tokens/);
   // the rail keeps Context lit, the way a skill page does
@@ -2425,4 +2430,18 @@ test("Tailwind's utilities are unlayered, or styles.ts wins every contest on the
   assert.match(tw, /@import "tailwindcss\/utilities\.css";/, "utilities must not be in a layer");
   assert.doesNotMatch(tw, /utilities\.css" layer\(/);
   assert.match(tw, /@import "tailwindcss\/theme\.css" layer\(theme\)/, "the theme still is");
+});
+
+// The RCA page learned this the hard way and the markdown block repeated it: --fs-base is
+// SMALLER than the --fs-md body, so every ## in a prompt rendered as a heading a reader had to
+// be told was one. A heading may match its body's size and rank by weight and space; it may
+// never be smaller than the text it introduces.
+test("a rendered heading is never smaller than its own paragraph", () => {
+  const body = /\.md \{[^}]*font-size: var\(--([\w-]+)\)/.exec(STYLES)?.[1];
+  assert.equal(body, "fs-md", "the block sets its own body size");
+  for (const h of ["h3", "h4"]) {
+    const size = new RegExp(`\\.md ${h} \\{[^}]*font-size: var\\(--([\\w-]+)\\)`).exec(STYLES)?.[1];
+    assert.ok(size, `no .md ${h} size`);
+    assert.notEqual(size, "fs-base", `${h} is smaller than the body it introduces`);
+  }
 });

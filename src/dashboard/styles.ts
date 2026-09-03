@@ -1384,6 +1384,52 @@ form.signout button {
    playbook are structure, and re-flowing them into a paragraph is a different document.
    The width comes from .doc, which comes from the column — nothing here declares one, so the
    block and the headings above it end on the same right edge at every screen size. */
+/* ---------- rendered markdown (the prompt and skill pages) ---------- */
+/* The prompt and every skill are markdown files, and they used to render inside a pre block — so a
+   reader saw the asterisks and backticks rather than what they mean. markdown.ts renders a
+   subset of CommonMark sized to what those files actually contain; this is what it lands in.
+
+   It reuses the page's own scale rather than declaring one: --fs-md over 1.7 is the same
+   measure the RCA's prose takes, because both are long-form text a human reads top to bottom.
+   Headings start at h3 (the page owns h1 and h2), so the sizes step down from there. */
+.md { font-size: var(--fs-md); line-height: 1.7; color: var(--text); }
+.md > * + * { margin-top: var(--sp-4); }
+.md h3, .md h4, .md h5 { line-height: 1.35; margin-top: var(--sp-6); }
+/* The RCA page already learned this one and this file repeated it: --fs-base is SMALLER than
+   the --fs-md body below it, so every ## in the prompt rendered as a heading you had to be
+   told was one. A heading may match its body's size and rank by weight and space; it may never
+   be smaller. */
+.md h3 { font-size: var(--fs-lg); font-weight: 650; }
+.md h4 { font-size: var(--fs-md); font-weight: 650; letter-spacing: -.005em; }
+/* The third level stops competing on size and takes case instead — a prompt's ### is a label
+   inside a section, not another section. */
+.md h5 {
+  font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-dim);
+}
+/* First child never pushes the block away from the heading above the whole document. */
+.md > :first-child { margin-top: 0; }
+.md ul, .md ol { margin: 0; padding-left: 1.35em; display: flex; flex-direction: column; gap: var(--sp-2); }
+/* A nested list is a child of the <li> list, so it needs its own top gap and no bullet reset. */
+.md ul ul, .md ol ol, .md ul ol, .md ol ul { margin-top: var(--sp-2); }
+.md li { overflow-wrap: anywhere; }
+/* Inline code is a tool name, an env var, a selector — data, in the data face, and marked as a
+   run rather than a box: fifty boxed spans in a prompt is a page of confetti. */
+.md code {
+  font-family: var(--font-data); font-size: .9em;
+  background: var(--surface-2); border-radius: 4px; padding: .1em .32em;
+  overflow-wrap: anywhere;
+}
+/* A fenced block is a query an operator retypes, so it scrolls rather than wraps: a LogQL
+   selector broken across lines is a selector that no longer says what it selects. */
+.md pre.md-code {
+  font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.55;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);
+  padding: var(--sp-4); margin: 0; overflow-x: auto;
+}
+.md pre.md-code code { background: none; padding: 0; font-size: inherit; }
+.md strong { font-weight: 650; }
+
 .skill-body {
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.6;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);

@@ -481,7 +481,8 @@ test("a skill page serves from the loaded skills while the database is down", as
   await withServer(async (port) => {
     const res = await raw(port, "GET /context/oomkilled HTTP/1.1", authed);
     assert.match(status(res), /^HTTP\/1\.1 200\b/);
-    assert.match(res, /1\. k8s_describe_pod/);
+    // Rendered, not raw: the body is markdown and the "1. " marker becomes the list itself.
+    assert.match(res, /<ol><li>k8s_describe_pod<\/li>/);
     assert.doesNotMatch(res, /No database configured/);
 
     const missing = await raw(port, "GET /context/nosuchskill HTTP/1.1", authed);
@@ -509,7 +510,7 @@ test("/prompt renders the core prompt and needs no database", async () => {
     const res = await raw(port, "GET /prompt HTTP/1.1", authed);
     assert.match(res, /^HTTP\/1\.1 200/);
     assert.match(res, /prompts\/system\.md/);
-    assert.match(res, /class="skill-body"/);
+    assert.match(res, /class="md"/);
   });
 });
 
