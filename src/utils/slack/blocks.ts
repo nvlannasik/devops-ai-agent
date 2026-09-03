@@ -41,9 +41,20 @@ export const SEVERITY_PATTERN =
 
 // exported: reformatToRca gates on it — isRcaResponse alone passed texts that rendered empty
 export function extractSection(text: string, label: string): string {
-  // matches "*📍 Root Cause*\n..." up to the next "*emoji Label*" or end
+  // matches "*📍 Root Cause*\n..." up to the next "*emoji Label*" or end.
+  //
+  // `[ \t]*` before the newline is not cosmetic. Two spaces at the end of a line is markdown's
+  // hard line break, and the model writes the heading that way — "*📍 Root Cause*  \n". Requiring
+  // the newline to touch the closing asterisk made every section come back "" for those answers,
+  // and app/index.ts reads `isRcaResponse(rca) && !!extractSection(rca, "Root Cause")`: the
+  // severity half passed, this half did not, so a complete RCA was posted through splitForSlack
+  // as plain mrkdwn. That is what "the dividers disappeared" was — no Block Kit card was built
+  // at all, so there were no dividers to lose. Whether it happened came down to whether the
+  // model felt like adding trailing spaces that run.
+  //
+  // dashboard/rca.ts parses the same text and is not affected: it trims each line first.
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*\\n([\\s\\S]*?)(?=\\n\\*[🔴🟠🟡🟢⚡📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
+  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*[ \\t]*\\n([\\s\\S]*?)(?=\\n[ \\t]*\\*[🔴🟠🟡🟢⚡📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
   const match = text.match(pattern);
   return match ? match[1].trim() : "";
 }

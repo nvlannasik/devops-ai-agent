@@ -180,3 +180,53 @@ test("the template's own placeholder is not a chosen level", () => {
   // trailing \b would match "Critical" in front of the pipe and store a judgement nobody made.
   assert.equal(isRcaResponse("*[emoji] Severity:* `[Critical|High|Medium|Low]`" + ROOT_CAUSE), false);
 });
+
+// ---------------------------------------------------------------------------
+// Two spaces at the end of a line is markdown's hard line break, and the model writes its
+// headings that way — "*📍 Root Cause*  \n". extractSection used to require the newline to touch
+// the closing asterisk, so every section came back "" and app/index.ts fell through to
+// splitForSlack: the RCA was posted as plain mrkdwn with no Block Kit card at all.
+//
+// That is what "the dividers disappeared in Slack" was. Not a Slack rendering question and not
+// the LLM backend — no card was built, so there were no dividers to lose. Whether any given
+// investigation rendered a card came down to whether the model added trailing spaces that run,
+// which is why it looked intermittent.
+// ---------------------------------------------------------------------------
+
+// Verbatim shape from the 2026-09-03 17:39 investigation, trailing spaces included.
+const HARD_BREAKS =
+  "🔴 Severity: *Critical*\n\n" +
+  "*⚡ TL;DR*  \n" +
+  "Service `sample-apps/storefront` is returning HTTP 504s.\n\n" +
+  "*📍 Root Cause*  \n" +
+  "1. [Symptom] — checkout-gateway probes are failing.\n\n" +
+  "*📊 Evidence*  \n" +
+  "• [Fact 1] — connection refused on port 3000.\n";
+
+test("a heading followed by markdown's hard line break still opens a section", () => {
+  assert.equal(extractSection(HARD_BREAKS, "Root Cause"), "1. [Symptom] — checkout-gateway probes are failing.");
+  assert.equal(extractSection(HARD_BREAKS, "TL;DR"), "Service `sample-apps/storefront` is returning HTTP 504s.");
+  assert.equal(extractSection(HARD_BREAKS, "Evidence"), "• [Fact 1] — connection refused on port 3000.");
+});
+
+test("a section still ends at the next heading when that heading has trailing spaces", () => {
+  // The lookahead has to tolerate them too, or Root Cause swallows Evidence and the card shows
+  // one section holding the rest of the RCA.
+  assert.doesNotMatch(extractSection(HARD_BREAKS, "Root Cause"), /Evidence|Fact 1/);
+});
+
+test("the card is built for an RCA written with hard line breaks", () => {
+  // The end of the chain, and the one that decides whether Slack gets blocks at all:
+  // app/index.ts posts the card only when isRcaResponse AND a Root Cause section both hold.
+  assert.equal(isRcaResponse(HARD_BREAKS), true);
+  assert.ok(extractSection(HARD_BREAKS, "Root Cause"), "no Root Cause section — the card path is skipped");
+  const blocks = buildRcaBlocks(HARD_BREAKS);
+  assert.ok(blocks.filter((b) => b.type === "divider").length >= 3, "the card lost its dividers");
+  assert.match(JSON.stringify(blocks[0]), /Critical Severity Incident/);
+});
+
+test("headings with no trailing whitespace are unaffected", () => {
+  const plain = HARD_BREAKS.replace(/\*  \n/g, "*\n");
+  assert.equal(extractSection(plain, "Root Cause"), "1. [Symptom] — checkout-gateway probes are failing.");
+  assert.equal(buildRcaBlocks(plain).length, buildRcaBlocks(HARD_BREAKS).length);
+});
