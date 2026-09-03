@@ -86,14 +86,29 @@ export const TOOL_BUDGET_NOTICE =
   "mention it in one line and offer to investigate.]";
 
 /**
- * The iteration ceiling. Says nothing about output format: the alert path lands here and its
- * answer IS the RCA, so the system prompt and the response-mode marker keep deciding the shape.
+ * Shared by the two hard ceilings below. They are reached differently and say so in their
+ * opening clause, but their reader is the same — the alert path, whose answer IS the RCA — so
+ * the instruction has to be identical and is written once. Neither says anything about output
+ * format: the system prompt and the response-mode marker keep deciding the shape.
  */
-export const ITERATION_CEILING_NOTICE =
-  "[ITERATION LIMIT REACHED — this is your final turn and tool calls are disabled. Write the answer now " +
+const FINAL_TURN_INSTRUCTION =
+  "this is your final turn and tool calls are disabled. Write the answer now " +
   "from the evidence already gathered. Do not ask for more data and do not promise follow-up work. " +
   "Thin evidence is not a reason to withhold a conclusion: give your best root-cause hypothesis, and if " +
-  "you are producing an RCA set Confidence to Low and name the one check that would confirm it.]";
+  "you are producing an RCA set Confidence to Low and name the one check that would confirm it.";
+
+/** The iteration ceiling: ten LLM calls spent. */
+export const ITERATION_CEILING_NOTICE = `[ITERATION LIMIT REACHED — ${FINAL_TURN_INSTRUCTION}]`;
+
+/**
+ * The wall-clock ceiling. Named separately from the iteration one because the reason is a
+ * different thing to be told: a model that is out of TIME has no cheaper question available,
+ * while a model that is out of ITERATIONS might otherwise try to economise its next call.
+ *
+ * This ceiling used to have no notice at all — see the deadline branch in runInvestigation for
+ * what it did instead, and why a slow backend is what turned it from theory into a live bug.
+ */
+export const TIME_BUDGET_NOTICE = `[TIME BUDGET REACHED — ${FINAL_TURN_INSTRUCTION}]`;
 
 /**
  * A delegate's ceiling. Neither notice above can serve it: the budget one carries conversation
@@ -142,12 +157,25 @@ export function forcedFinalAnswer(state: {
   maxIterations: number;
   /** 0 = the lead investigation, 1 = a delegate. Defaults to lead. */
   depth?: number;
+  /**
+   * True once the wall-clock deadline has passed. The THIRD ceiling, and the one that was
+   * never wired: it returned an apology and discarded the evidence, which is exactly the
+   * regression the iteration clause above was added to fix. It stayed invisible while every
+   * backend answered in seconds; a transport that takes 20-100s per call reaches it on an
+   * ordinary investigation.
+   */
+  outOfTime?: boolean;
 }): string | null {
   const reached =
-    state.toolRounds >= state.maxToolRounds || state.iterations >= state.maxIterations - 1;
+    state.toolRounds >= state.maxToolRounds ||
+    state.iterations >= state.maxIterations - 1 ||
+    !!state.outOfTime;
   if ((state.depth ?? 0) > 0) return reached ? DELEGATE_BUDGET_NOTICE : null;
   if (state.toolRounds >= state.maxToolRounds) return TOOL_BUDGET_NOTICE;
   if (state.iterations >= state.maxIterations - 1) return ITERATION_CEILING_NOTICE;
+  // Last of the three: the other two are known before the clock is consulted, and a run that
+  // trips a countable ceiling on the same turn is better told the countable reason.
+  if (state.outOfTime) return TIME_BUDGET_NOTICE;
   return null;
 }
 
@@ -168,6 +196,32 @@ export const MAX_THREAD_SKILLS = 5;
  * log fan-out cap, the forced final answer — live in that loop, and a copy of it is a copy of
  * them that drifts.
  */
+/**
+ * Fires one progress report for a tool round.
+ *
+ * A four-line function with its own name because three things in it are worth pinning and
+ * none of them is reachable from a test otherwise: the round number is off by one from
+ * `toolRounds` (which is incremented after the tools run, not before), the names must be
+ * the ones that will ACTUALLY run rather than the ones the model asked for — the scope
+ * lock and the fan-out guard have already removed some — and a callback that throws must
+ * be swallowed. The last one is the reason this is not inline: a Slack outage must not end
+ * an investigation that is already three rounds deep in evidence.
+ */
+export function reportProgress(
+  onProgress: ((round: number, tools: string[]) => void) | undefined,
+  toolRounds: number,
+  running: Array<{ name?: string }>,
+  onError: (err: unknown) => void
+): void {
+  if (!onProgress) return;
+  const names = [...new Set(running.map((t) => t.name).filter(Boolean))] as string[];
+  try {
+    onProgress(toolRounds + 1, names);
+  } catch (err) {
+    onError(err);
+  }
+}
+
 export interface InvestigateOptions {
   maxToolRounds?: number;
   trigger?: string;
@@ -177,6 +231,18 @@ export interface InvestigateOptions {
   deadline?: number;
   /** 0 = the lead investigation, 1 = a delegate. Only depth 0 is offered the delegate tool. */
   depth?: number;
+  /**
+   * Called once per tool round, before the tools run, with the round number and the tool
+   * names that round will actually execute. Optional and fire-and-forget: the loop ignores
+   * whatever it returns and never awaits it, because a progress update is not worth failing
+   * an investigation over.
+   *
+   * It exists for perceived latency, not real latency. One round against a slow backend is
+   * tens of seconds of nothing, and an alert thread that sits on a single static notice for
+   * minutes is indistinguishable from an agent that has crashed — which is what an on-call
+   * reader assumes. Only the alert path passes it; a delegate has no Slack message to update.
+   */
+  onProgress?: (round: number, tools: string[]) => void;
 }
 
 export type ThreadSkills = Map<string, Skill[]>;
@@ -475,8 +541,37 @@ export class DevOpsAgent {
         // The budget is the deadline, not the configured timeout: a delegate is given what is
         // left of its parent's, so naming config.investigationTimeoutMs here reported 300s at a
         // sub-thread that never had more than a fraction of it.
-        logger.warn(`[${threadId}] Investigation exceeded its ${deadline - investigationStart}ms budget after ${iterations} LLM calls`);
-        return "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.";
+        const overBy = deadline - investigationStart;
+        // The third ceiling, and it obeys the same rule as the other two now: end in an answer,
+        // never an apology. It used to return the apology below immediately, throwing away every
+        // tool result the run had gathered — the identical regression the iteration ceiling was
+        // added to fix, left in place here because no backend was slow enough to reach it. One
+        // that answers in 20-100s reaches it on an ordinary alert, so the evidence at stake is
+        // real and this is where it was being discarded.
+        //
+        // Overrunning the deadline by one tool-free call is already this design's documented
+        // behaviour ("~budget + one in-flight call" in MEMORY_BANK), so the answer turn costs
+        // nothing that was not already promised. `toolsDisabled` doubles as the guard against
+        // taking it twice: on the next pass we are still past the deadline, so a model that
+        // spent its answer turn asking for more tools falls through to the apology, which by
+        // then is the honest reply.
+        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth, outOfTime: true });
+        if (notice && !toolsDisabled && toolRounds > 0) {
+          toolsDisabled = true;
+          await this.memory.append(threadId, { role: "user", content: [{ type: "text", text: notice }] });
+          logger.warn(
+            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
+            `and ${toolRounds} tool rounds — forcing a final answer from the evidence gathered`
+          );
+        } else {
+          // Nothing gathered, or the answer turn is already spent. Either way there is no
+          // finding to salvage and the apology is the truthful reply.
+          logger.warn(
+            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
+            `(tool rounds: ${toolRounds}, answer turn ${toolsDisabled ? "already spent" : "not reachable"})`
+          );
+          return "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.";
+        }
       }
       iterations++;
 
@@ -645,6 +740,13 @@ export class DevOpsAgent {
             executable = executable.filter((t) => t.name !== "k8s_get_pod_logs");
           }
         }
+
+        // Reported here rather than after the LLM call: this is the last point at which we
+        // know what the round will really do — the scope lock, the fan-out guard and the
+        // delegate split have all had their say, so the names below are the ones that run.
+        reportProgress(opts.onProgress, toolRounds, [...executable, ...delegateCalls], (err) =>
+          logger.debug(`[${threadId}] progress callback threw, ignored: ${errDetail(err)}`)
+        );
 
         const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable) : [];
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);

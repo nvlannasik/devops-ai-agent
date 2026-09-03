@@ -5,6 +5,7 @@ import {
   forcedFinalAnswer,
   ITERATION_CEILING_NOTICE,
   MAX_ITERATIONS,
+  TIME_BUDGET_NOTICE,
   TOOL_BUDGET_NOTICE,
 } from "./index.js";
 import { DELEGATE_MARKER } from "./subagent/index.js";
@@ -107,11 +108,78 @@ test("the delegate notice restates the verdict contract the marker set", () => {
 });
 
 test("the notices say the two things the loop depends on", () => {
-  for (const notice of [TOOL_BUDGET_NOTICE, ITERATION_CEILING_NOTICE, DELEGATE_BUDGET_NOTICE]) {
+  for (const notice of [TOOL_BUDGET_NOTICE, ITERATION_CEILING_NOTICE, TIME_BUDGET_NOTICE, DELEGATE_BUDGET_NOTICE]) {
     assert.match(notice, /tool calls are disabled/i, "the model is not told its tools are gone");
     assert.match(notice, /answer now|final answer|report now/i, "the model is not told to answer");
   }
   // The alert path's answer IS the RCA. A format rule here would suppress it.
   assert.doesNotMatch(ITERATION_CEILING_NOTICE, /do NOT use the RCA/i);
   assert.match(TOOL_BUDGET_NOTICE, /do NOT use the RCA/i);
+});
+
+// ---------------------------------------------------------------------------
+// The third ceiling: wall-clock. It existed in the loop from the start and was the only one
+// that still ended in an apology, discarding every tool result the run had gathered — the same
+// regression the iteration clause above was written to fix. Nothing caught it because no
+// backend was slow enough to reach the deadline; one that answers in 20-100s per call reaches
+// it on an ordinary alert investigation, which is how it surfaced.
+// ---------------------------------------------------------------------------
+
+const timedOut = (over: Partial<Parameters<typeof forcedFinalAnswer>[0]> = {}) =>
+  forcedFinalAnswer({
+    toolRounds: 3,
+    maxToolRounds: Infinity,
+    iterations: 3,
+    maxIterations: MAX_ITERATIONS,
+    outOfTime: true,
+    ...over,
+  });
+
+test("a run that is out of time is forced to answer, not abandoned", () => {
+  // The alert path's shape: infinite tool budget, iterations to spare, clock gone. Before this
+  // clause every one of those was null and the loop returned the apology instead.
+  assert.equal(timedOut(), TIME_BUDGET_NOTICE);
+});
+
+test("the time notice tells the model to answer from what it has", () => {
+  assert.match(TIME_BUDGET_NOTICE, /TIME BUDGET REACHED/);
+  assert.match(TIME_BUDGET_NOTICE, /evidence already gathered/i);
+  // Same reader as the iteration ceiling — the alert path, whose answer IS the RCA — so it must
+  // carry no format rule either.
+  assert.doesNotMatch(TIME_BUDGET_NOTICE, /do NOT use the RCA/i);
+  assert.doesNotMatch(TIME_BUDGET_NOTICE, /Slack mrkdwn/i);
+});
+
+test("the two ceilings say the same thing in different words, and stay that way", () => {
+  // They share one instruction constant precisely so a future edit cannot improve one and
+  // leave the other behind. Only the opening reason may differ.
+  const body = (n: string) => n.replace(/^\[[A-Z ]+ REACHED — /, "");
+  assert.equal(body(TIME_BUDGET_NOTICE), body(ITERATION_CEILING_NOTICE));
+  assert.notEqual(TIME_BUDGET_NOTICE, ITERATION_CEILING_NOTICE, "the reason is not being stated");
+});
+
+test("a countable ceiling outranks the clock when both are reached", () => {
+  // A run can trip both on the same turn. The countable reason is the more useful one to be
+  // told, and conversation mode's format rule lives on the tool-budget notice — losing it here
+  // would let a plain mention come back wearing an RCA.
+  assert.equal(timedOut({ toolRounds: 2, maxToolRounds: 2 }), TOOL_BUDGET_NOTICE);
+  assert.equal(timedOut({ iterations: MAX_ITERATIONS - 1 }), ITERATION_CEILING_NOTICE);
+});
+
+test("a delegate that runs out of time reports a verdict like any other delegate", () => {
+  // A delegate's deadline is 60s inside its parent's, so this is its most likely ending. Its
+  // reader is still the lead investigation, so neither of the lead's notices may reach it.
+  assert.equal(timedOut({ depth: 1 }), DELEGATE_BUDGET_NOTICE);
+});
+
+test("time left keeps a run going — the clause must not fire on its own", () => {
+  // The negative control. Without it, `outOfTime` defaulting wrong would force every run to
+  // answer on its first round and no other test here would notice.
+  assert.equal(timedOut({ outOfTime: false }), null);
+  assert.equal(timedOut({ outOfTime: undefined }), null);
+  assert.equal(
+    forcedFinalAnswer({ toolRounds: 1, maxToolRounds: Infinity, iterations: 1, maxIterations: MAX_ITERATIONS }),
+    null,
+    "a fresh alert run was forced to answer"
+  );
 });
