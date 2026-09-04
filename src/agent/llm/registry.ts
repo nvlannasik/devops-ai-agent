@@ -19,6 +19,11 @@ export interface BackendSpec {
   // Context window in tokens. Optional — defaults by kind in resolve-budget.ts. Set it when a
   // self-hosted model's window is not the kind's default (a 128k private LLM, say).
   contextTokens?: number;
+  // private-llm only: the SQS request queue this backend's worker reads. One queue per MODEL,
+  // never per replica — replicas of one model share a queue and SQS load-balances them
+  // (every message is its own MessageGroupId, so FIFO does not serialise consumption).
+  // Unset means the global SQS_REQUEST_QUEUE_NAME, which is only legal with one private-llm.
+  requestQueue?: string;
 }
 
 export interface Registry {
@@ -32,8 +37,9 @@ const KINDS: BackendKind[] = ["claude", "openai-compatible", "private-llm"];
 const splitNames = (v: string | undefined): string[] =>
   (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-// Which fields each kind needs. private-llm takes none: its queues and credentials stay in
-// config.llm.sqs, shared by every replica.
+// Which fields each kind needs. private-llm takes none on its own: credentials stay in
+// config.llm.sqs, and its request queue is only REQUIRED once a second private-llm exists
+// (checked in parseRegistry, where the other backends are visible).
 function assertFields(spec: BackendSpec, i: number): void {
   const missing: string[] = [];
   if (spec.kind === "claude" || spec.kind === "openai-compatible") {
@@ -85,6 +91,7 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
       model: env[`LLM_BACKEND_${i}_MODEL`]?.trim(),
       baseUrl: env[`LLM_BACKEND_${i}_BASE_URL`]?.trim(),
       apiKey: env[`LLM_BACKEND_${i}_KEY`]?.trim(),
+      requestQueue: env[`LLM_BACKEND_${i}_REQUEST_QUEUE`]?.trim(),
     };
     const rawWindow = env[`LLM_BACKEND_${i}_CONTEXT_TOKENS`]?.trim();
     if (rawWindow) {
@@ -132,6 +139,43 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
     }
   }
 
+  // More than one private-llm means more than one MODEL behind the private network, and a
+  // model is reachable only through the queue its worker polls. Sharing one queue makes the
+  // route a coin flip — whichever worker grabs the message answers — and the symptom is an
+  // answer from the wrong model, which reads as a bad answer rather than a misconfiguration.
+  // So: once there are two, every one of them names its own queue. No inheriting the global
+  // default for backend 1 and overriding for backend 2; that asymmetry is what hides the bug.
+  const privateLlms = backends.filter((b) => b.kind === "private-llm");
+  if (privateLlms.length > 1) {
+    const owner = new Map<string, string>();
+    for (const b of privateLlms) {
+      const i = backends.indexOf(b) + 1;
+      if (!b.requestQueue) {
+        throw new Error(
+          `LLM_BACKEND_${i}_REQUEST_QUEUE is required: ${privateLlms.length} private-llm backends ` +
+          `(${privateLlms.map((p) => p.name).join(", ")}) each need their own SQS request queue, ` +
+          `one per worker. With one private-llm the global SQS_REQUEST_QUEUE_NAME is enough.`
+        );
+      }
+      // A standard queue rejects the MessageGroupId every send carries, so the name must be
+      // FIFO — otherwise resolveQueueUrl happily CREATES a standard queue and every request
+      // fails at send time instead of here.
+      if (!b.requestQueue.endsWith(".fifo")) {
+        throw new Error(
+          `LLM_BACKEND_${i}_REQUEST_QUEUE must be a FIFO queue name ending in ".fifo", got ${JSON.stringify(b.requestQueue)}`
+        );
+      }
+      const taken = owner.get(b.requestQueue);
+      if (taken) {
+        throw new Error(
+          `LLM backends "${taken}" and "${b.name}" both read SQS request queue "${b.requestQueue}" — ` +
+          `one queue per model, or the router cannot choose between them`
+        );
+      }
+      owner.set(b.requestQueue, b.name);
+    }
+  }
+
   return { backends, heavy, light };
 }
 
@@ -143,7 +187,7 @@ export function buildBackends(specs: BackendSpec[]): Map<string, LLMClient> {
     } else if (s.kind === "openai-compatible") {
       out.set(s.name, new OpenAICompatibleClient({ baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model }));
     } else {
-      out.set(s.name, new SQSLLMClient());
+      out.set(s.name, new SQSLLMClient(s.requestQueue));
     }
   }
   return out;

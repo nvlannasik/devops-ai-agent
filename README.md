@@ -288,6 +288,25 @@ path**, the others call out directly. Indices must be contiguous from 1, routes 
 and every route name must exist — all of it validated at boot, so an env typo is a pod that
 refuses to start rather than the first alert of the day failing.
 
+**More than one private LLM** is allowed, and then each one names the SQS request queue its own
+worker polls:
+
+```
+LLM_BACKEND_1_NAME=qwen            LLM_BACKEND_2_NAME=deepseek
+LLM_BACKEND_1_KIND=private-llm     LLM_BACKEND_2_KIND=private-llm
+LLM_BACKEND_1_REQUEST_QUEUE=llm-request-qwen.fifo
+                                   LLM_BACKEND_2_REQUEST_QUEUE=llm-request-deepseek.fifo
+```
+
+One queue per **model**, not per replica: replicas of one model share a queue and SQS spreads the
+work across them (every request is its own `MessageGroupId`, so FIFO never serialises them). The
+*response* queue stays global and shared — replies are routed by `requestId`, never by which model
+produced them. With a single `private-llm` the global `SQS_REQUEST_QUEUE_NAME` is enough and
+`_REQUEST_QUEUE` can be omitted; with two or more it is required on each, because two backends
+quietly sharing one queue makes the route a coin flip and the symptom is an answer from the wrong
+model — which reads as a bad answer, not a misconfiguration. Each worker deployment sets its own
+`SQS_REQUEST_QUEUE_NAME` to match.
+
 **Light** is used for plain Slack mentions and the RCA-format backstop. Everything else — alerts,
 explicit investigation requests, remediation proposals — runs **heavy**. Failover is
 **up-only**: a light backend that fails escalates into the heavy chain and stays there for the

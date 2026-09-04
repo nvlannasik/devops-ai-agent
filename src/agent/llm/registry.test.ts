@@ -96,6 +96,7 @@ test("parses 20 contiguous backends (upper bound reachable)", () => {
   for (let i = 1; i <= 20; i++) {
     env[`LLM_BACKEND_${i}_NAME`] = `backend${i}`;
     env[`LLM_BACKEND_${i}_KIND`] = "private-llm";
+    env[`LLM_BACKEND_${i}_REQUEST_QUEUE`] = `q${i}.fifo`;
     if (i === 1) env.LLM_ROUTE_HEAVY = "backend1";
   }
   const r = parseRegistry(env);
@@ -143,10 +144,13 @@ test("rejects a duplicate within LLM_ROUTE_LIGHT", () => {
   const env = {
     LLM_BACKEND_1_NAME: "a",
     LLM_BACKEND_1_KIND: "private-llm",
+    LLM_BACKEND_1_REQUEST_QUEUE: "a.fifo",
     LLM_BACKEND_2_NAME: "b",
     LLM_BACKEND_2_KIND: "private-llm",
+    LLM_BACKEND_2_REQUEST_QUEUE: "b.fifo",
     LLM_BACKEND_3_NAME: "c",
     LLM_BACKEND_3_KIND: "private-llm",
+    LLM_BACKEND_3_REQUEST_QUEUE: "c.fifo",
     LLM_ROUTE_HEAVY: "a",
     LLM_ROUTE_LIGHT: "b,c,b",
   } satisfies NodeJS.ProcessEnv;
@@ -176,5 +180,50 @@ test("a non-numeric CONTEXT_TOKENS is rejected at boot", () => {
       LLM_ROUTE_LIGHT: "light", LLM_ROUTE_HEAVY: "light",
     } as NodeJS.ProcessEnv),
     /LLM_BACKEND_1_CONTEXT_TOKENS/
+  );
+});
+
+// --- two private LLMs, two queues ---------------------------------------------------------
+
+const twoPrivate = {
+  LLM_BACKEND_1_NAME: "qwen",
+  LLM_BACKEND_1_KIND: "private-llm",
+  LLM_BACKEND_1_REQUEST_QUEUE: "llm-request-qwen.fifo",
+  LLM_BACKEND_2_NAME: "deepseek",
+  LLM_BACKEND_2_KIND: "private-llm",
+  LLM_BACKEND_2_REQUEST_QUEUE: "llm-request-deepseek.fifo",
+  LLM_ROUTE_HEAVY: "qwen",
+  LLM_ROUTE_LIGHT: "deepseek",
+} satisfies NodeJS.ProcessEnv;
+
+test("two private-llm backends each keep their own request queue", () => {
+  const r = parseRegistry(twoPrivate);
+  assert.deepEqual(r.backends.map((b) => b.requestQueue), [
+    "llm-request-qwen.fifo",
+    "llm-request-deepseek.fifo",
+  ]);
+});
+
+test("a lone private-llm still inherits the global queue", () => {
+  const r = parseRegistry(valid);
+  assert.equal(r.backends[2].requestQueue, undefined);
+});
+
+test("a second private-llm without its own queue is rejected at boot", () => {
+  const { LLM_BACKEND_2_REQUEST_QUEUE, ...missing } = twoPrivate;
+  assert.throws(() => parseRegistry(missing), /LLM_BACKEND_2_REQUEST_QUEUE is required/);
+});
+
+test("two private-llm backends sharing one queue are rejected at boot", () => {
+  assert.throws(
+    () => parseRegistry({ ...twoPrivate, LLM_BACKEND_2_REQUEST_QUEUE: "llm-request-qwen.fifo" }),
+    /both read SQS request queue/,
+  );
+});
+
+test("a non-FIFO request queue is rejected at boot", () => {
+  assert.throws(
+    () => parseRegistry({ ...twoPrivate, LLM_BACKEND_2_REQUEST_QUEUE: "llm-request-deepseek" }),
+    /must be a FIFO queue name/,
   );
 });

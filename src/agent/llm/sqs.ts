@@ -92,7 +92,10 @@ export class SQSLLMClient implements LLMClient {
   private readonly abort = new AbortController();
   private startPromise?: Promise<void>;
 
-  constructor() {
+  // requestQueueName is per-BACKEND (one private LLM model = one worker = one queue); the
+  // response queue stays global and shared, because routing is by requestId and never by
+  // which model answered. Defaults to the global name, which is the only private-llm.
+  constructor(private readonly requestQueueName: string = config.llm.sqs.requestQueueName) {
     this.sqs = new SQSClient({
       region: this.cfg.region,
       // Bound every SQS call. The dispatcher is the SOLE deliverer of LLM responses;
@@ -164,7 +167,7 @@ export class SQSLLMClient implements LLMClient {
 
   private async doStart(): Promise<void> {
     const [requestUrl, responseUrl] = await Promise.all([
-      resolveQueueUrl(this.sqs, this.cfg.requestQueueName),
+      resolveQueueUrl(this.sqs, this.requestQueueName),
       resolveQueueUrl(this.sqs, this.cfg.responseQueueName),
     ]);
     this.requestQueueUrl = requestUrl;
@@ -175,7 +178,17 @@ export class SQSLLMClient implements LLMClient {
   }
 
   /**
-   * Single poller per process over the SHARED response queue. SQS has no selective
+   * One poller per CLIENT over the SHARED response queue — so a router with two private-llm
+   * backends runs two, in one process, both pulling from the same queue.
+   *
+   * ponytail: two dispatchers in one process is wasteful, not wrong. Each treats the other's
+   * responses as "not ours" and releases them (visibility 0) — the same path that already
+   * handles cross-replica delivery — so the cost is doubled polling plus one release
+   * round-trip per response, and correctness is unchanged. Upgrade path if it shows up in
+   * latency: hoist `pending`, `issued` and the loop to module scope, keyed by response queue
+   * name. requestId is a UUID, so one shared map routes every client's answers correctly.
+   *
+   * SQS has no selective
    * receive, so a replica may pull a response belonging to another replica. We
    * route by requestId:
    *   - ours & awaited      → delete + resolve/reject
