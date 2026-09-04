@@ -18,7 +18,7 @@ import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/re
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
-import { withRoute } from "../utils/trace/index.js";
+import { withRoute, withTrace } from "../utils/trace/index.js";
 
 // How many ungrounded names the thread warning lists before it summarises the rest. A wall of
 // them says the same thing as five of them — the answer is not standing on its evidence.
@@ -48,11 +48,46 @@ class Semaphore {
   }
 }
 
+/**
+ * Serialises work per Slack thread. The Semaphore above bounds how many investigations run
+ * at once; this bounds how many run in ONE CONVERSATION, and the answer is one.
+ *
+ * A thread is a conversation, and its turns are ordered by the person having it. Running
+ * two in parallel made the ordering an accident of latency: an approval card produced by
+ * turn N arrived 40 seconds late, after the person had already asked turn N+1, and read as
+ * a reply to a question it had never seen. It also let `lastAssistantText` — how a bare
+ * "ya" is recognised as approving what the agent proposed in the turn before — read a reply
+ * from a turn that had not finished being written.
+ *
+ * Cost, stated plainly: a follow-up asked mid-investigation now waits for that
+ * investigation instead of running beside it. That is the trade this is: predictable order
+ * over parallelism inside a single conversation. Different threads are untouched.
+ */
+export class ThreadQueue {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tails.get(key) ?? Promise.resolve();
+    // .then(fn, fn) — a predecessor that REJECTED must still release its successor, or one
+    // failed turn wedges the thread for the lifetime of the process.
+    const result = prev.then(fn, fn);
+    const tail = result.then(() => {}, () => {});
+    this.tails.set(key, tail);
+    // Only the current tail clears the entry. Without the identity check a slow turn
+    // settling late would delete a newer turn's link and unserialise the thread.
+    void tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
+    return result;
+  }
+}
+
 export class SlackApp {
   private app: App;
   private agent: DevOpsAgent;
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
+  private readonly threadQueue = new ThreadQueue();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -199,67 +234,81 @@ export class SlackApp {
     const investigation = wantsInvestigation(text);
     const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
 
-    await this.semaphore.acquire();
-    // Captured before the investigation appends this turn's own messages: a bare "ya" is an
-    // approval only if the agent put a change on the table in the turn before it.
-    const previousReply = await this.agent.lastAssistantText(threadId).catch(() => "");
-    try {
-      // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
-      // format detection when the model bolds the RCA labels with **
-      // Conversation-mode mentions are the cheap tier. Investigation requests and the alert
-      // path stay heavy by omission — default heavy is deliberate, so a new LLM call added
-      // later gets the strong model rather than a silent downgrade.
-      let reply = toMrkdwn(
-        investigation
-          ? await this.agent.investigate(threadId, message, budget)
-          : await withRoute("light", () => this.agent.investigate(threadId, message, budget))
-      );
-      if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
-        // Deterministic format backstop — the model sometimes ignores the conversation-mode
-        // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
-        // simple change request). Rewrite instead of shipping the wall of text.
-        logger.warn(`[slack] conversation-mode mention leaked RCA structure — reformatting (thread ${threadId})`);
-        reply = await this.agent.reformatToConversation(reply).catch(() => reply);
-      }
-      const isRca = isRcaResponse(reply);
-      logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
-      if (isRca) {
-        await client.chat.postMessage({
-          channel: event.channel,
-          thread_ts: threadId,
-          text: reply,
-          blocks: buildRcaBlocks(reply),
-        });
-      } else {
-        // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
-        // fence-safe, so displayed logs keep rendering as code blocks
-        for (const part of splitForSlack(reply)) {
-          await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+    // Serialised per thread: the card and the notices this turn produces must land before
+    // the next turn in the same conversation starts, and previousReply must be read after
+    // the previous turn finished writing it. The semaphore is acquired INSIDE, so waiting
+    // for our turn never holds a global investigation slot.
+    await this.threadQueue.run(threadId, async () => {
+      await this.semaphore.acquire();
+      // Captured before the investigation appends this turn's own messages: a bare "ya" is an
+      // approval only if the agent put a change on the table in the turn before it.
+      const previousReply = await this.agent.lastAssistantText(threadId).catch(() => "");
+      try {
+        // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
+        // format detection when the model bolds the RCA labels with **
+        // Conversation-mode mentions are the cheap tier. Investigation requests and the alert
+        // path stay heavy by omission — default heavy is deliberate, so a new LLM call added
+        // later gets the strong model rather than a silent downgrade.
+        let reply = toMrkdwn(
+          investigation
+            ? await this.agent.investigate(threadId, message, budget)
+            : await withRoute("light", () => this.agent.investigate(threadId, message, budget))
+        );
+        if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
+          // Deterministic format backstop — the model sometimes ignores the conversation-mode
+          // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
+          // simple change request). Rewrite instead of shipping the wall of text.
+          logger.warn(`[slack] conversation-mode mention leaked RCA structure — reformatting (thread ${threadId})`);
+          reply = await this.agent.reformatToConversation(reply).catch(() => reply);
         }
+        const isRca = isRcaResponse(reply);
+        logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
+        if (isRca) {
+          await client.chat.postMessage({
+            channel: event.channel,
+            thread_ts: threadId,
+            text: reply,
+            blocks: buildRcaBlocks(reply),
+          });
+        } else {
+          // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
+          // fence-safe, so displayed logs keep rendering as code blocks
+          for (const part of splitForSlack(reply)) {
+            await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+          }
+        }
+        if (isRca) {
+          await this.agent.markRcaSent(threadId);
+        }
+        // Approval-gated remediation runs for BOTH mention response types: an RCA that
+        // implies a fix, or a direct request ("restart X") answered in conversation mode.
+        // The user text is part of the proposal context so an explicit command is enough
+        // evidence. No incident row to link (no alert labels), so incidentId is null.
+        // The gate is what keeps a read-only "status check" on a healthy cluster from
+        // spending a heavy LLM call to be told {"action": null} — see worthProposing.
+        await this.warnIfUngrounded(event.channel, threadId, reply);
+        await this.notifyIfLowConfidence(event.channel, threadId, reply);
+        // AWAITED, and last. Fire-and-forget put the card wherever the backend's latency
+        // happened to land it — on a slow private LLM, 40 seconds later and under the NEXT
+        // question. Awaiting is what makes the ThreadQueue above mean anything: the turn is
+        // not over until its card is posted. withTrace so the proposal's own LLM call carries
+        // the threadId, which as a detached call it never did — the one log line you needed to
+        // join an orphan card back to its conversation was the one line that had no trace.
+        const gate = worthProposing(text, reply, isRca, previousReply);
+        if (gate.propose) {
+          await withTrace(threadId, () =>
+            this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`)
+          );
+        } else {
+          logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
+        }
+      } catch (err) {
+        logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
+        await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
+      } finally {
+        this.semaphore.release();
       }
-      if (isRca) {
-        await this.agent.markRcaSent(threadId);
-      }
-      // Approval-gated remediation runs for BOTH mention response types: an RCA that
-      // implies a fix, or a direct request ("restart X") answered in conversation mode.
-      // The user text is part of the proposal context so an explicit command is enough
-      // evidence. No incident row to link (no alert labels), so incidentId is null.
-      // The gate is what keeps a read-only "status check" on a healthy cluster from
-      // spending a heavy LLM call to be told {"action": null} — see worthProposing.
-      const gate = worthProposing(text, reply, isRca, previousReply);
-      if (gate.propose) {
-        void this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`);
-      } else {
-        logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
-      }
-      await this.warnIfUngrounded(event.channel, threadId, reply);
-      await this.notifyIfLowConfidence(event.channel, threadId, reply);
-    } catch (err) {
-      logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
-      await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
-    } finally {
-      this.semaphore.release();
-    }
+    });
   }
 
   // `@agent learn` handler — see docs/DESIGN_oncall_feedback_learning.md.
@@ -426,7 +475,11 @@ export class SlackApp {
         subjects ? `${subjects.key}=[${subjects.values.join(", ")}]` : `none (labels: ${[...new Set(firing.flatMap((a) => Object.keys(a.labels)))].sort().join(", ")})`
       } — delegation hint ${hint ? "emitted" : "not emitted"}`
     );
-    void this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs);
+    // Same queue as the mentions: a repeat alert on a thread someone is already talking in
+    // must not interleave with that conversation.
+    void this.threadQueue.run(threadId, () =>
+      this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs)
+    );
   }
 
   // D. resolved-alert loop: release the dedup claim (a re-fire must re-investigate),
@@ -553,9 +606,11 @@ export class SlackApp {
       // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
       // proposal model needs to avoid re-proposing.
       const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
-      if (incidentId) void this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext);
       await this.warnIfUngrounded(channel, threadId, rca);
       await this.notifyIfLowConfidence(channel, threadId, rca);
+      if (incidentId) {
+        await withTrace(threadId, () => this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext));
+      }
     } catch (err) {
       logger.error(`[slack] background investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await this.app.client.chat
