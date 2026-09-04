@@ -156,8 +156,14 @@ const ACTION_INTENT =
 // firing and nothing is pending" has to lose `firing` too, not just `alerts`. The window
 // between them stops at a contrastive conjunction so "no logs, but it is in CrashLoopBackOff"
 // keeps its evidence — that clause is not a negation of the thing after "but".
+//
+// BOTH LANGUAGES, because the agent answers in Indonesian and quotes the Kubernetes reason
+// strings in English. "tanpa kejadian `Pending`, `Failed`" is a clean bill of health that an
+// English-only negator list reads as fault evidence — it opened a remediation proposal on a
+// healthy namespace, and the card landed in Slack with nothing to explain it. The negators
+// are Indonesian, the words they negate stay English: those come out of tool output verbatim.
 const NEGATED =
-  /\b(no|zero|0|none|nothing|neither|not|never|without)\b(?:(?:(?!\b(?:but|however|though|although|except|while)\b)[^.;\n]){0,30}?\b(?:alerts?|firing|restarts?|errors?|failures?|issues?|problems?|crash\w*|oom\w*|unhealthy|pending|failed|failing|unavailable|degraded|down)\b)+/gi;
+  /\b(no|zero|0|none|nothing|neither|not|never|without|tidak|tak|tanpa|bukan|belum|nihil|nol)\b(?:(?:(?!\b(?:but|however|though|although|except|while|tapi|tetapi|namun|meski|meskipun|walau|walaupun|kecuali|sedangkan)\b)[^.;\n]){0,30}?\b(?:alerts?|firing|restarts?|errors?|failures?|issues?|problems?|crash\w*|oom\w*|unhealthy|pending|failed|failing|unavailable|degraded|down|gagal|galat|masalah|kendala)\b)+/gi;
 
 // What's left has to be an actual negative state. Most of these are Kubernetes reason strings
 // the agent quotes verbatim out of tool output, which is exactly why they're matched literally.

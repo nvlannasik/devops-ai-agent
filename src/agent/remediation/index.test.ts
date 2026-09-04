@@ -119,6 +119,27 @@ test("negated health vocabulary does not read as fault evidence", () => {
   assert.equal(worthProposing("apa ada masalah?", "No alerts are firing and nothing is pending.", false).propose, false);
 });
 
+test("an Indonesian negation reads as a negation, not as fault evidence", () => {
+  // The agent answers in Indonesian and quotes the Kubernetes reasons in English, so a clean
+  // bill of health is a mix: "tanpa kejadian `Pending`, `Failed`". This exact sentence opened
+  // a proposal on a healthy namespace in production — an English-only negator list saw only
+  // the word `Failed`, and the approval card arrived in Slack with nothing to explain it.
+  const healthy =
+    "Namespace `sample-apps` memiliki 5 pod aktif, semuanya dalam status `Running` dan `ready`, " +
+    "tanpa kejadian `Pending`, `Failed`, atau `Unknown`. Tidak ditemukan event terkait dalam 3 jam terakhir.";
+  assert.equal(worthProposing("check namespace sample-apps", healthy, false).propose, false);
+  assert.equal(worthProposing("apa ada masalah?", "Tidak ada alert yang firing dan tidak ada pod pending.", false).propose, false);
+  assert.equal(worthProposing("cek deployment", "Belum ada error dan tidak ada restart.", false).propose, false);
+});
+
+test("an Indonesian contrastive keeps the fault after it", () => {
+  // "tapi" is the Indonesian "but": the clause after it is not what the negation covered, so
+  // stripping through it would delete the only evidence in the sentence.
+  const gate = worthProposing("cek log", "Tidak ada error di log, tapi pod-nya CrashLoopBackOff.", false);
+  assert.equal(gate.propose, true);
+  assert.match(gate.reason, /CrashLoopBackOff/);
+});
+
 test("an explicit change request survives the gate on a healthy cluster", () => {
   // buildProposalPrompt treats a user request as sufficient evidence on its own — the gate
   // must not overrule that, in either language
