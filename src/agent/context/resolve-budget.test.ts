@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveBudget, windowOf } from "./resolve-budget.js";
+import { resolveBudget, windowOf, outputOf } from "./resolve-budget.js";
 import type { Registry } from "../llm/registry.js";
 
 const reg = (...b: Registry["backends"]): Registry => ({ backends: b, heavy: [], light: [] });
@@ -62,5 +62,53 @@ test("throws when the smallest window cannot fit the prompt, the tools and the r
       provider: "router", maxTokens: 8096, overheadTokens: 12_000,
     }),
     /backend "tiny".*9000.*leaves no room/s
+  );
+});
+
+// ---- the output reserve -------------------------------------------------------------------
+
+test("a backend's output ceiling defaults to the global and an explicit value wins", () => {
+  assert.equal(outputOf({ name: "a", kind: "claude" }, 8096), 8096);
+  assert.equal(outputOf({ name: "b", kind: "private-llm", maxTokens: 16_384 }, 8096), 16_384);
+});
+
+// The window is conservative DOWNWARD and the reserve conservative UPWARD, because a request
+// must fit the smallest window and its answer must fit whatever the loudest backend emits.
+test("the reserve is the LARGEST output ceiling across configured backends", () => {
+  const b = resolveBudget({
+    registry: reg(
+      { name: "fast", kind: "claude" },
+      { name: "worker", kind: "private-llm", contextTokens: 128_000, maxTokens: 16_384 },
+    ),
+    provider: "router", maxTokens: 8096, overheadTokens: 12_000,
+  });
+  assert.equal(b.reserveTokens, 16_384 + 1024, "the small global ceiling was still driving the reserve");
+});
+
+// The exact shape from the log this fixes: the smallest window and the largest output come
+// from DIFFERENT backends, so taking both from one spec gets one of them wrong.
+test("the smallest window and the largest output may come from different backends", () => {
+  const b = resolveBudget({
+    registry: reg(
+      { name: "small-window", kind: "private-llm", contextTokens: 32_000 },
+      { name: "loud", kind: "claude", maxTokens: 16_384 },
+    ),
+    provider: "router", maxTokens: 8096, overheadTokens: 5_000,
+  });
+  assert.equal(b.contextTokens, 32_000);
+  assert.equal(b.reserveTokens, 16_384 + 1024);
+});
+
+test("a backend whose declared output cannot fit the smallest window is named in the error", () => {
+  assert.throws(
+    () =>
+      resolveBudget({
+        registry: reg(
+          { name: "tiny", kind: "private-llm" },
+          { name: "greedy", kind: "claude", maxTokens: 30_000 },
+        ),
+        provider: "router", maxTokens: 8096, overheadTokens: 5_000,
+      }),
+    /backend "greedy" may emit 30000 output tokens/,
   );
 });

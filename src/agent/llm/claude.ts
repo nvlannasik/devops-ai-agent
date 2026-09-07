@@ -8,15 +8,22 @@ import { sanitizeForWire } from "./sanitize.js";
 export interface ClaudeOptions {
   apiKey?: string;
   model?: string;
+  maxTokens?: number;
 }
 
 export class ClaudeClient implements LLMClient {
   private client: Anthropic;
   readonly model: string;
+  // Per backend, because one global ceiling cannot fit both a reasoning model and a fast one:
+  // the number that lets the first finish is wasteful for the second, and the number that
+  // suits the second makes the first spend its whole budget thinking and return nothing.
+  // resolve-budget.ts sizes the output reserve from the LARGEST of these.
+  readonly maxTokens: number;
 
   constructor(opts: ClaudeOptions = {}) {
     this.client = new Anthropic({ apiKey: opts.apiKey ?? config.llm.claude.apiKey });
     this.model = opts.model ?? config.llm.claude.model;
+    this.maxTokens = opts.maxTokens ?? config.llm.maxTokens;
   }
 
   async chat(rawMessages: Message[], tools: ToolDefinition[], rawSystemPrompt: string): Promise<LLMResponse> {
@@ -25,7 +32,7 @@ export class ClaudeClient implements LLMClient {
     const { messages, systemPrompt } = sanitizeForWire(rawMessages, rawSystemPrompt);
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: config.llm.maxTokens,
+      max_tokens: this.maxTokens,
       // system prompt as a cacheable block — large static content, stable across iterations
       system: [
         {

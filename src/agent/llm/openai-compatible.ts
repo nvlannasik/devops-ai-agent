@@ -49,6 +49,7 @@ export interface OpenAICompatibleOptions {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  maxTokens?: number;
 }
 
 // The 400 a newer OpenAI model answers with when it is sent `max_tokens`. Matched on the
@@ -70,6 +71,10 @@ export class OpenAICompatibleClient implements LLMClient {
   // are built once at boot (registry.ts), so the lesson costs one wasted request per backend
   // per pod, not one per call.
   private tokenParam: "max_tokens" | "max_completion_tokens" = "max_tokens";
+  // Per backend. A reasoning model spends this budget THINKING before it writes anything, so
+  // a ceiling that suits a fast model makes it return `stop=max_tokens` with empty content —
+  // 86 seconds and a whole failover, deterministically, for as long as the two share a number.
+  readonly maxTokens: number;
 
   constructor(opts: OpenAICompatibleOptions = {}) {
     this.client = new OpenAI({
@@ -77,12 +82,13 @@ export class OpenAICompatibleClient implements LLMClient {
       apiKey: opts.apiKey ?? config.llm.openaiCompatible.apiKey,
     });
     this.model = opts.model ?? config.llm.openaiCompatible.model;
+    this.maxTokens = opts.maxTokens ?? config.llm.maxTokens;
   }
 
   private body(messages: Message[], tools: ToolDefinition[], systemPrompt: string): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
     return {
       model: this.model,
-      [this.tokenParam]: config.llm.maxTokens,
+      [this.tokenParam]: this.maxTokens,
       messages: [{ role: "system", content: systemPrompt }, ...toOpenAIMessages(messages)],
       // omit when the agent disables tools (tool budget reached) — some providers reject []
       ...(tools.length > 0 && {

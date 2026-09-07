@@ -19,6 +19,17 @@ export interface BackendSpec {
   // Context window in tokens. Optional — defaults by kind in resolve-budget.ts. Set it when a
   // self-hosted model's window is not the kind's default (a 128k private LLM, say).
   contextTokens?: number;
+  // Output ceiling in tokens. Optional — defaults to the global MAX_TOKENS.
+  //
+  // It means two different things by kind, and the difference matters. For claude and
+  // openai-compatible it is SENT: the max_tokens (or max_completion_tokens) on the wire. For
+  // private-llm nothing is sent — llm-worker holds its own LLM_MAX_TOKENS — so here it is a
+  // DECLARATION of what that worker is configured to emit, read only to size the output
+  // reserve. Declaring it wrong does not change what the backend does; it makes the agent
+  // reserve the wrong amount of window for the answer, which is the failure it exists to stop:
+  // a worker on LLM_MAX_TOKENS=16384 behind an agent reserving 9120 returned 14564 output
+  // tokens into a window that had not been kept clear for them.
+  maxTokens?: number;
   // private-llm only: the SQS request queue this backend's worker reads. One queue per MODEL,
   // never per replica — replicas of one model share a queue and SQS load-balances them
   // (every message is its own MessageGroupId, so FIFO does not serialise consumption).
@@ -36,6 +47,19 @@ const KINDS: BackendKind[] = ["claude", "openai-compatible", "private-llm"];
 
 const splitNames = (v: string | undefined): string[] =>
   (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+// Token counts are optional, and an unparseable one must not silently become a default:
+// a typo'd MAX_TOKENS that fell back to the global would size the reserve from a number
+// nobody wrote. Undefined when unset, throw when set to anything but a positive integer.
+function positiveInt(env: NodeJS.ProcessEnv, i: number, field: string): number | undefined {
+  const raw = env[`LLM_BACKEND_${i}_${field}`]?.trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new Error(`LLM_BACKEND_${i}_${field} must be a positive integer, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
 
 // Which fields each kind needs. private-llm takes none on its own: credentials stay in
 // config.llm.sqs, and its request queue is only REQUIRED once a second private-llm exists
@@ -93,14 +117,8 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
       apiKey: env[`LLM_BACKEND_${i}_KEY`]?.trim(),
       requestQueue: env[`LLM_BACKEND_${i}_REQUEST_QUEUE`]?.trim(),
     };
-    const rawWindow = env[`LLM_BACKEND_${i}_CONTEXT_TOKENS`]?.trim();
-    if (rawWindow) {
-      const n = Number(rawWindow);
-      if (!Number.isSafeInteger(n) || n <= 0) {
-        throw new Error(`LLM_BACKEND_${i}_CONTEXT_TOKENS must be a positive integer, got ${JSON.stringify(rawWindow)}`);
-      }
-      spec.contextTokens = n;
-    }
+    spec.contextTokens = positiveInt(env, i, "CONTEXT_TOKENS");
+    spec.maxTokens = positiveInt(env, i, "MAX_TOKENS");
     assertFields(spec, i);
     backends.push(spec);
   }
@@ -183,9 +201,9 @@ export function buildBackends(specs: BackendSpec[]): Map<string, LLMClient> {
   const out = new Map<string, LLMClient>();
   for (const s of specs) {
     if (s.kind === "claude") {
-      out.set(s.name, new ClaudeClient({ apiKey: s.apiKey, model: s.model }));
+      out.set(s.name, new ClaudeClient({ apiKey: s.apiKey, model: s.model, maxTokens: s.maxTokens }));
     } else if (s.kind === "openai-compatible") {
-      out.set(s.name, new OpenAICompatibleClient({ baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model }));
+      out.set(s.name, new OpenAICompatibleClient({ baseUrl: s.baseUrl, apiKey: s.apiKey, model: s.model, maxTokens: s.maxTokens }));
     } else {
       out.set(s.name, new SQSLLMClient(s.requestQueue));
     }

@@ -283,6 +283,23 @@ LLM_ROUTE_LIGHT=local              # optional
 LLM_ROUTE_HEAVY=opus               # required; comma-separated = ordered failover chain
 ```
 
+Two per-backend numbers are worth setting rather than leaving to the global defaults:
+
+- `LLM_BACKEND_<N>_CONTEXT_TOKENS` — the window. The budget takes the **smallest** across all
+  backends, because the router picks one *after* the request is built.
+- `LLM_BACKEND_<N>_MAX_TOKENS` — the output ceiling. The budget reserves the **largest**,
+  because whichever backend answers, its answer has to fit in what is left. Conservative in
+  opposite directions, on purpose: an over-reserve shortens the history, an under-reserve
+  truncates the answer.
+
+  For `claude` and `openai-compatible` this is sent on the wire, and one global value cannot
+  serve both a reasoning model and a fast one — a ceiling that suits the fast model makes the
+  reasoning model spend its whole budget thinking and return `stop=max_tokens` with empty
+  content. For `private-llm` nothing is sent: llm-worker holds its own `LLM_MAX_TOKENS`, so
+  the value here is a **declaration** of that worker's setting, read only to size the reserve.
+  Declare it wrong and the backend still behaves the same — the agent just keeps the wrong
+  amount of window clear for the reply.
+
 `_KIND` is `claude` / `openai-compatible` / `private-llm`; **only `private-llm` takes the SQS
 path**, the others call out directly. Indices must be contiguous from 1, routes may not overlap,
 and every route name must exist — all of it validated at boot, so an env typo is a pod that

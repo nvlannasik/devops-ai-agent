@@ -227,3 +227,17 @@ test("a non-FIFO request queue is rejected at boot", () => {
     /must be a FIFO queue name/,
   );
 });
+
+test("MAX_TOKENS is parsed per backend and left undefined when unset", () => {
+  const r = parseRegistry({ ...valid, LLM_BACKEND_1_MAX_TOKENS: "32000" });
+  assert.equal(r.backends[0].maxTokens, 32_000);
+  assert.equal(r.backends[1].maxTokens, undefined, "an unset ceiling must stay unset, not become the global");
+});
+
+test("a non-numeric MAX_TOKENS is rejected at boot", () => {
+  assert.throws(
+    () => parseRegistry({ ...valid, LLM_BACKEND_1_MAX_TOKENS: "32k" }),
+    /LLM_BACKEND_1_MAX_TOKENS must be a positive integer/,
+  );
+  assert.throws(() => parseRegistry({ ...valid, LLM_BACKEND_1_MAX_TOKENS: "0" }), /positive integer/);
+});
