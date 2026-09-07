@@ -181,8 +181,15 @@ benchmark that exercises a different build measures nothing about the deployed o
 
 ## Case file schema
 
-One JSON file per scenario, `bench/cases/<id>.json`. Zero-dependency to parse; the same file
-drives both tracks.
+One JSON file per scenario, `bench/cases/<id>/case.json` — a directory rather than a bare
+file, so the injection and cleanup scripts live beside the case they belong to. Zero-dependency
+to parse; the same file drives both tracks.
+
+**Implementation status:** `bench/` implements the proposal axis of the lab track only, over
+two cases (A02, C01). Its `expect` block is the concrete form of `truth.expectedProposal`
+below, which this section left as a placeholder. Nothing else here is built: no replay track,
+no LLM judge, and five of the six scoring axes are unimplemented. See `bench/README.md` for
+what is real.
 
 ```jsonc
 {

@@ -8,7 +8,7 @@
 # Running, because an Indonesian negation read as fault evidence), and a suite of positive
 # tasks would have scored it perfectly.
 set -euo pipefail
-NS="bench-healthy"
+NS="bench-c01"
 
 kubectl delete namespace "$NS" --ignore-not-found --wait=true
 kubectl create namespace "$NS"
@@ -18,7 +18,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web
-  namespace: bench-healthy
+  namespace: bench-c01
   labels: { app: web }
 spec:
   replicas: 2

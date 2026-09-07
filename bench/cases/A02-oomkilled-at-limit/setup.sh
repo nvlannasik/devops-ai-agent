@@ -5,7 +5,7 @@
 # and the script exits only once the kernel has actually killed the container, so the agent
 # is never asked to diagnose a fault that has not happened yet.
 set -euo pipefail
-NS="bench-oom"
+NS="bench-a02"
 
 kubectl delete namespace "$NS" --ignore-not-found --wait=true
 kubectl create namespace "$NS"
@@ -15,7 +15,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend-api
-  namespace: bench-oom
+  namespace: bench-a02
   labels: { app: backend-api }
 spec:
   replicas: 1

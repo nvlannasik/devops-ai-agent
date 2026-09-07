@@ -33,6 +33,31 @@ export interface Expectation {
    * answer, and pinning one would score the model's taste rather than its diagnosis.
    */
   changed?: Record<string, string>;
+  /**
+   * toolParams entries that must be PRESENT and strictly greater, compared as Kubernetes
+   * quantities rather than strings.
+   *
+   * `changed` alone is not enough for A02, and the doc says so: a proposal at or below the
+   * observed peak working set is a fail even though the action type is right. "512Mi" and
+   * "129Mi" both differ from the broken 128Mi; only one of them stops the OOM.
+   */
+  greaterThan?: Record<string, string>;
+}
+
+// Kubernetes quantity -> a number in base units. Binary and decimal suffixes mean different
+// things (1Mi = 1048576, 1M = 1000000) and conflating them would pass a proposal that is 5%
+// short. `m` is milli, for the CPU fields.
+const SUFFIX: Record<string, number> = {
+  "": 1, m: 1e-3,
+  k: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
+  Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50, Ei: 2 ** 60,
+};
+
+export function parseQuantity(v: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)([a-zA-Z]*)$/.exec(v.trim());
+  if (!m) return null;
+  const mult = SUFFIX[m[2]!];
+  return mult === undefined ? null : Number(m[1]) * mult;
 }
 
 export interface Score {
@@ -68,6 +93,20 @@ export function scoreProposal(expect: Expectation, proposal: Proposal | null): S
     const got = str(proposal.toolParams[k]);
     if (got === undefined) reasons.push(`${k} not set; it is what the fix has to change`);
     else if (got === broken) reasons.push(`${k}=${got}, unchanged from the broken value`);
+  }
+  for (const [k, floorStr] of Object.entries(expect.greaterThan ?? {})) {
+    const got = str(proposal.toolParams[k]);
+    const floor = parseQuantity(floorStr);
+    if (floor === null) throw new Error(`bench expectation greaterThan.${k}=${JSON.stringify(floorStr)} is not a Kubernetes quantity`);
+    if (got === undefined) {
+      reasons.push(`${k} not set; it has to exceed ${floorStr}`);
+      continue;
+    }
+    const n = parseQuantity(got);
+    // An unparseable proposal value is the agent's miss, not the harness's: the MCP server
+    // would reject it too.
+    if (n === null) reasons.push(`${k}=${got} is not a valid quantity`);
+    else if (n <= floor) reasons.push(`${k}=${got} is not above ${floorStr}, so the fault survives the fix`);
   }
   return { pass: reasons.length === 0, reasons };
 }

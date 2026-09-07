@@ -1,0 +1,27 @@
+{
+  "id": "C01-flap-nothing-wrong",
+  "tier": "C",
+  "title": "Nothing is actually wrong (flap)",
+  "settleSeconds": 5,
+  "groupLabels": {
+    "alertname": "KubePodNotReady",
+    "namespace": "bench-c01",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "namespace": "bench-c01",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "A pod in bench-c01 has been in a non-ready state",
+        "description": "A pod in namespace bench-c01 has been in a non-ready state for longer than 15 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": null
+  }
+}

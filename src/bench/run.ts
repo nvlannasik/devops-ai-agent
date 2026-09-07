@@ -21,10 +21,10 @@ import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
 import logger from "../utils/logger/index.js";
-import { loadTasks, type Task } from "./task.js";
+import { loadCases, type Case } from "./case.js";
 import { passRates, scoreProposal, type Score, type TaskRun } from "./score.js";
 
-const TASKS_DIR = join(process.cwd(), "bench", "tasks");
+const CASES_DIR = join(process.cwd(), "bench", "cases");
 const RESULTS_DIR = join(process.cwd(), "bench", "results");
 
 const flag = (name: string): string | undefined => {
@@ -34,7 +34,7 @@ const flag = (name: string): string | undefined => {
 const has = (name: string): boolean => process.argv.includes(`--${name}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function hook(task: Task, script: "setup.sh" | "cleanup.sh"): void {
+function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
   const path = join(task.dir, script);
   if (!existsSync(path)) return;
   execFileSync("bash", [path], { stdio: "inherit", env: process.env });
@@ -44,10 +44,10 @@ function hook(task: Task, script: "setup.sh" | "cleanup.sh"): void {
 const textOf = (content: Array<{ type: string; text?: string }>): string =>
   content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
 
-async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Task, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null }> {
+async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null }> {
   // A fresh thread per attempt. Sharing one would let attempt 2 read attempt 1's conclusion out
   // of conversation memory and score the memory rather than the model.
-  const threadId = `bench-${task.name}-${n}-${Date.now()}`;
+  const threadId = `bench-${task.id}-${n}-${Date.now()}`;
   const issue = buildGroupAlertText(task.groupLabels, task.alerts, task.commonAnnotations);
   try {
     const rca = await agent.investigate(threadId, issue);
@@ -72,8 +72,8 @@ async function main(): Promise<void> {
   const attempts = Number(flag("attempts") ?? 1);
   if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("--attempts must be a positive integer");
   const filterArg = flag("filter");
-  const tasks = loadTasks(TASKS_DIR, { filter: filterArg ? new RegExp(filterArg) : undefined, all: has("all") });
-  if (tasks.length === 0) throw new Error(`no bench tasks matched${filterArg ? ` --filter ${filterArg}` : ""}`);
+  const tasks = loadCases(CASES_DIR, { filter: filterArg ? new RegExp(filterArg) : undefined, all: has("all") });
+  if (tasks.length === 0) throw new Error(`no bench cases matched${filterArg ? ` --filter ${filterArg}` : ""}`);
 
   const agent = new DevOpsAgent();
   await agent.initialize();
@@ -85,17 +85,17 @@ async function main(): Promise<void> {
   for (const task of tasks) {
     const scores: Score[] = [];
     for (let n = 1; n <= attempts; n++) {
-      logger.info(`[bench] ${task.name} attempt ${n}/${attempts} — setup`);
+      logger.info(`[bench] ${task.id} attempt ${n}/${attempts} — setup`);
       hook(task, "setup.sh");
       if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
       const { score, rca, proposal } = await attempt(agent, llm, task, n);
       // cleanup in the same iteration as its setup, so a thrown attempt still tears down
       hook(task, "cleanup.sh");
-      logger.info(`[bench] ${task.name} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
+      logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
       scores.push(score);
-      detail.push({ task: task.name, attempt: n, pass: score.pass, reasons: score.reasons, proposal, rca });
+      detail.push({ task: task.id, attempt: n, pass: score.pass, reasons: score.reasons, proposal, rca });
     }
-    runs.push({ task: task.name, attempts: scores });
+    runs.push({ task: task.id, attempts: scores });
   }
 
   const rates = passRates(runs);

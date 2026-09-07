@@ -1,0 +1,39 @@
+{
+  "id": "A02-oomkilled-at-limit",
+  "tier": "A",
+  "title": "OOMKilled at the limit",
+  "settleSeconds": 15,
+  "groupLabels": {
+    "alertname": "PodOOMKilled",
+    "namespace": "bench-a02",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "PodOOMKilled",
+        "namespace": "bench-a02",
+        "container": "api-server",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Container api-server in bench-a02 has been OOMKilled",
+        "description": "A container in namespace bench-a02 was terminated with exit code 137 and has restarted more than once in the last 10 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": "k8s_set_resources",
+    "namespace": "bench-a02",
+    "target": "backend-api",
+    "params": {
+      "kind": "deployment"
+    },
+    "changed": {
+      "memory_limit": "128Mi"
+    },
+    "greaterThan": {
+      "memory_limit": "150Mi"
+    }
+  }
+}

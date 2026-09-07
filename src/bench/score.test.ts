@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scoreProposal, passRates, type Expectation, type TaskRun } from "./score.js";
+import { scoreProposal, passRates, parseQuantity, type Expectation, type TaskRun } from "./score.js";
 import type { Proposal } from "../agent/remediation/proposal.js";
 
 const proposal = (over: Partial<Proposal> = {}): Proposal => ({
@@ -94,4 +94,37 @@ test("a task with no attempts is not consistent", () => {
 
 test("no tasks is zero, not a division by zero", () => {
   assert.deepEqual(passRates([]), { pass1: 0, passK: 0, passHatK: 0, k: 0, tasks: 0 });
+});
+
+// ---- quantities ---------------------------------------------------------------------------
+
+test("Kubernetes quantities parse, and binary is not decimal", () => {
+  assert.equal(parseQuantity("128Mi"), 128 * 2 ** 20);
+  assert.equal(parseQuantity("1Gi"), 2 ** 30);
+  // 1M is 1000000 and 1Mi is 1048576. Treating them alike passes a proposal that is 5% short.
+  assert.notEqual(parseQuantity("1M"), parseQuantity("1Mi"));
+  assert.equal(parseQuantity("500m"), 0.5);
+  assert.equal(parseQuantity("2"), 2);
+  assert.equal(parseQuantity("1.5Gi"), 1.5 * 2 ** 30);
+  assert.equal(parseQuantity("lots"), null);
+  assert.equal(parseQuantity("128Xi"), null, "an unknown suffix must not silently mean 1");
+});
+
+// docs/BENCHMARK_agent_stack.md A02: "memory_limit strictly greater than the observed peak
+// working set. A proposal at or below peak is a fail even though the action type is right."
+test("greaterThan fails a limit that differs from the broken value but still OOMs", () => {
+  const e: Expectation = { action: "k8s_set_resources", changed: { memory_limit: "128Mi" }, greaterThan: { memory_limit: "150Mi" } };
+  const at = (v: string) => proposal({ toolParams: { ...proposal().toolParams, memory_limit: v } });
+  assert.equal(scoreProposal(e, at("512Mi")).pass, true);
+  assert.equal(scoreProposal(e, at("129Mi")).pass, false, "129Mi differs from 128Mi and still OOMs at 150Mi");
+  assert.match(scoreProposal(e, at("150Mi")).reasons.join(), /not above 150Mi/, "the bound is strict");
+  assert.match(scoreProposal(e, at("big")).reasons.join(), /not a valid quantity/);
+  assert.match(scoreProposal(e, proposal({ toolParams: { workload: "x" } })).reasons.join(), /has to exceed 150Mi/);
+});
+
+test("an unparseable bound in the case file is the harness's bug and throws", () => {
+  assert.throws(
+    () => scoreProposal({ action: "a", greaterThan: { memory_limit: "biggish" } }, proposal({ action: "a" })),
+    /is not a Kubernetes quantity/,
+  );
 });
