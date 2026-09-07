@@ -183,6 +183,41 @@ export function forcedFinalAnswer(state: {
 // long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
 // insertion-order, and a thread that outlives its entry simply re-selects from its next message.
 export const MAX_TRACKED_THREADS = 500;
+
+/**
+ * Identity of a tool call, for the per-investigation memo in executeToolCalls.
+ *
+ * Scalars are stringified and object keys sorted, so `{"start":1788487759}` and
+ * `{"start":"1788487759"}` are ONE call. That is not a nicety — it is the exact pair a live
+ * investigation produced: the first round came back `[]`, the model read the empty result as
+ * a sign it had got the argument TYPE wrong, and re-sent all four tools with the numbers
+ * quoted. The repeat cost a whole round, which spent the last of a 2-round budget and forced
+ * the answer out early. Type-blind matching is what makes that a memo hit rather than a
+ * second identical query.
+ */
+export function toolCallKey(name: string | undefined, input: unknown): string {
+  const norm = (v: unknown): unknown => {
+    if (v === null || v === undefined) return null;
+    if (Array.isArray(v)) return v.map(norm);
+    if (typeof v === "object") {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, x]) => [k, norm(x)])
+      );
+    }
+    return String(v);
+  };
+  return `${name ?? ""}\u0000${JSON.stringify(norm(input))}`;
+}
+
+// Loud on purpose. Handing back the same payload silently is what let the model try a third
+// spelling; it has to be told the result is a property of the data, not of how it asked.
+const REPEAT_NOTICE =
+  "[repeat call] You already ran this exact tool with these exact arguments in this " +
+  "investigation. The result below is that same result — calling it again, or with the " +
+  "arguments spelled differently, returns this. If it is empty, the data does not exist: " +
+  "query something else or answer with what you have.\n\n";
 // Ceiling on the playbooks one investigation may accumulate. Selection runs again on every
 // tool round (see runInvestigation), and each of those rounds may match up to
 // MAX_MATCHED_SKILLS more — without a ceiling a long investigation ends up carrying the whole
@@ -345,6 +380,9 @@ export class DevOpsAgent {
   private gitops: SqsGitOpsClient | null;
   private readonly skills: SkillRegistry;
   private readonly threadSkills: ThreadSkills = new Map();
+  // threadId -> (tool call key -> in-flight or settled result). One entry per INVESTIGATION,
+  // not per thread: a later turn must be free to re-fetch, because the cluster moved on.
+  private readonly toolMemo = new Map<string, Map<string, Promise<string>>>();
   private budget: Budget;
 
   constructor() {
@@ -497,6 +535,16 @@ export class DevOpsAgent {
     logger.info(`[${threadId}] Investigation started`);
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
+
+    // A fresh memo per investigation — a follow-up an hour later must be allowed to re-query.
+    // Capped like threadSkills: a thread that never comes back would otherwise hold its
+    // results for the life of the process.
+    this.toolMemo.set(threadId, new Map());
+    while (this.toolMemo.size > MAX_TRACKED_THREADS) {
+      const oldest = this.toolMemo.keys().next().value;
+      if (oldest === undefined) break;
+      this.toolMemo.delete(oldest);
+    }
 
     // Deterministic tool budget. Prompt-level scope rules alone don't hold: the model
     // kept chasing anomalies into other namespaces on plain data questions. Once the
@@ -853,6 +901,7 @@ export class DevOpsAgent {
           // delegate against a Map capped at MAX_TRACKED_THREADS.
           await this.memory.clear(sub).catch((e) => logger.warn(`[${threadId}] delegate ${sub} memory cleanup failed: ${errDetail(e)}`));
           this.threadSkills.delete(sub);
+          this.toolMemo.delete(sub);
         }
       })
     );
@@ -891,13 +940,34 @@ export class DevOpsAgent {
             content: "Error: write tools require the human approval flow and cannot be called during an investigation.",
           };
         }
+        // Repeat suppression. The memo holds the PROMISE, not the settled value, so two
+        // identical calls in the same parallel round collapse onto one request as well.
+        // Only successes stay memoised — a failure that is retried may genuinely succeed,
+        // and pinning it would turn one transient error into a dead tool for the rest of
+        // the investigation.
+        const memo = this.toolMemo.get(threadId);
+        const key = toolCallKey(name, input);
+        const cached = memo?.get(key);
+        if (cached) {
+          try {
+            const result = await cached;
+            logger.info(`[${threadId}] ⟲ tool: ${name} repeat call — served from this investigation's memo (${result.length} chars), not re-run`);
+            return { type: "tool_result" as const, tool_use_id: id, content: guard(REPEAT_NOTICE + result, name) };
+          } catch {
+            memo?.delete(key); // it failed; let this call have its own attempt
+          }
+        }
+
         const start = Date.now();
         logger.info(`[${threadId}] → tool: ${name} input: ${truncate(JSON.stringify(input))}`);
+        const pending = this.mcp.callTool(name!, input as Record<string, unknown>);
+        memo?.set(key, pending);
         try {
-          const result = await this.mcp.callTool(name!, input as Record<string, unknown>);
+          const result = await pending;
           logger.info(`[${threadId}] ← tool: ${name} ok (${Date.now() - start}ms, ${result.length} chars)`);
           return { type: "tool_result" as const, tool_use_id: id, content: guard(result, name) };
         } catch (err) {
+          memo?.delete(key);
           const errMsg = err instanceof Error ? err.message : String(err);
           logger.error(`[${threadId}] ← tool: ${name} failed (${Date.now() - start}ms): ${errMsg}`);
           // Guarded too: an upstream error quotes what it choked on, so an annotation or a
