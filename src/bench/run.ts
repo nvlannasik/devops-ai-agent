@@ -37,6 +37,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
   const path = join(task.dir, script);
   if (!existsSync(path)) return;
+  if (script === "cleanup.sh") {
+    // Never throws: it runs in a finally, and an exception here would replace whatever real
+    // failure sent us there with a teardown error.
+    try {
+      execFileSync("bash", [path], { stdio: "inherit", env: process.env });
+    } catch (err) {
+      logger.error(`[bench] ${task.id} cleanup failed, namespace may be left behind: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
   execFileSync("bash", [path], { stdio: "inherit", env: process.env });
 }
 
@@ -86,11 +96,23 @@ async function main(): Promise<void> {
     const scores: Score[] = [];
     for (let n = 1; n <= attempts; n++) {
       logger.info(`[bench] ${task.id} attempt ${n}/${attempts} — setup`);
-      hook(task, "setup.sh");
-      if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
-      const { score, rca, proposal } = await attempt(agent, llm, task, n);
-      // cleanup in the same iteration as its setup, so a thrown attempt still tears down
-      hook(task, "cleanup.sh");
+      let score: Score;
+      let rca = "";
+      let proposal: Proposal | null = null;
+      try {
+        // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
+        // catch inside attempt(). It also must not skip cleanup: the first live run of this
+        // harness hit a fault injector that could not fire, and the crash left its namespace
+        // behind on the cluster.
+        hook(task, "setup.sh");
+        if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
+        ({ score, rca, proposal } = await attempt(agent, llm, task, n));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
+      } finally {
+        hook(task, "cleanup.sh");
+      }
       logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
       scores.push(score);
       detail.push({ task: task.id, attempt: n, pass: score.pass, reasons: score.reasons, proposal, rca });
@@ -105,8 +127,14 @@ async function main(): Promise<void> {
     console.log(`${r.task.padEnd(34)} ${r.attempts.map((a) => (a.pass ? "." : "x")).join("")}`);
   }
   console.log("-".repeat(64));
-  console.log(`${rates.tasks} tasks x ${rates.k} attempts   pass@1 ${pct(rates.pass1)}   pass@${rates.k} ${pct(rates.passK)}   pass^${rates.k} ${pct(rates.passHatK)}`);
-  console.log("pass^k is the one that matters: an agent right four times in five is one whose output must be checked every time.\n");
+  // With k=1 the three rates are the same number, and printing "pass@1 x pass@1 x pass^1" reads
+  // like a bug in the reporter rather than a single-attempt run.
+  const line =
+    rates.k === 1
+      ? `pass@1 ${pct(rates.pass1)}  (one attempt each — run --attempts 5 for consistency)`
+      : `pass@1 ${pct(rates.pass1)}   pass@${rates.k} ${pct(rates.passK)}   pass^${rates.k} ${pct(rates.passHatK)}`;
+  console.log(`${rates.tasks} cases x ${rates.k} attempts   ${line}`);
+  if (rates.k > 1) console.log("pass^k is the one that matters: an agent right four times in five is one whose output must be checked every time.\n");
 
   mkdirSync(RESULTS_DIR, { recursive: true });
   const out = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
