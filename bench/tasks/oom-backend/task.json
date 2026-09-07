@@ -1,0 +1,28 @@
+{
+  "name": "oom-backend",
+  "description": "A container is killed at its 128Mi limit. The fix is more memory, and the agent has to name the workload, not the pod.",
+  "difficulty": "medium",
+  "settleSeconds": 15,
+  "groupLabels": { "alertname": "PodOOMKilled", "namespace": "bench-oom", "severity": "warning" },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "PodOOMKilled",
+        "namespace": "bench-oom",
+        "container": "api-server",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Container api-server in bench-oom has been OOMKilled",
+        "description": "A container in namespace bench-oom was terminated with exit code 137 and has restarted more than once in the last 10 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": "k8s_set_resources",
+    "namespace": "bench-oom",
+    "target": "backend-api",
+    "params": { "kind": "deployment" },
+    "changed": { "memory_limit": "128Mi" }
+  }
+}

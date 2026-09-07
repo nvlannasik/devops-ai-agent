@@ -11,7 +11,8 @@
     "migrate": "node --import tsx src/db/migrate-cli.ts",
     "migrate:prod": "node dist/src/db/migrate-cli.js",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "build:client": "node scripts/build-client.mjs"
+    "build:client": "node scripts/build-client.mjs",
+    "bench": "node --import tsx src/bench/run.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
