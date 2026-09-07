@@ -86,31 +86,119 @@ placeholder. Three matchers, and each earns its place:
   healthy namespace is a bug this repo has shipped, and a suite of positive cases scores it
   perfectly. That is C01.
 
-## Running it
+## What it needs
 
-Needs three things, none of which this creates:
+Verified by running it with `env -i` and nothing else set: the harness boots, loads the skills,
+builds the agent, and stops at the MCP connection. That is the whole list.
 
-1. **A cluster** in `KUBECONFIG`. `kind create cluster` is enough; the tasks only use core
-   objects. Nothing here provisions one, on purpose — the harness should not be able to point
-   at a cluster you did not choose.
-2. **An MCP server** pointed at that cluster (`MCP_HTTP_URL`, `MCP_AUTH_TOKEN`). Set the server's
-   `kubernetes.authMode: kubeconfig` with `kubeconfigPath`.
-3. **An LLM backend** — whatever `LLM_PROVIDER` you want to measure.
+| | |
+|---|---|
+| Node 24 | `~/.nvm/versions/node/v24.16.0/bin` on PATH |
+| A cluster | in `KUBECONFIG`, with `kubectl` on PATH — the hooks are kubectl scripts |
+| An MCP server | pointed at that cluster, `TRANSPORT=http` |
+| An LLM backend | whichever one you want to measure |
 
-A database is not needed: the runner calls `buildProposalPrompt` + `parseProposal` directly
-rather than `agent.proposeRemediation()`, which would store a row and require write tools to
-have been registered. The part under test is the model's judgement, and those are its two
-pure ends.
+**Not** needed, and worth saying because the design doc's prerequisites table lists some of
+them: Slack, Postgres, Redis, SQS, `MCP_ENABLE_WRITE_TOOLS`, `ALLOWED_REMEDIATION_NAMESPACES`.
+Those are for the tiers scored through `proposeRemediation()`; this runner calls
+`buildProposalPrompt` + `parseProposal` directly, so read tools are enough.
+
+Nothing here provisions a cluster, on purpose. A harness that can reach for a cluster you did
+not name is a harness that can inject a fault into one.
+
+### The port to get right
+
+`MCP_HTTP_URL` must be set explicitly. The agent's default is `http://localhost:3001/mcp`; the
+MCP server's default `PORT` is 3000, and 3001 is the agent's own dashboard. Left at the
+defaults, both sides are wrong.
+
+## Path A — a throwaway cluster (start here)
 
 ```bash
-npm run bench                          # every enabled case, 1 attempt
-npm run bench -- --attempts 5          # pass@1 / pass@5 / pass^5
-npm run bench -- --filter '^A'         # regex on the case id — a whole tier, or one case
-npm run bench -- --all                 # include disabled cases
+kind create cluster --name bench          # or k3d / minikube
+
+# terminal 1 — MCP server
+cd ../devops-mcp-server
+TRANSPORT=http PORT=3000 MCP_AUTH_TOKEN=devtoken \
+K8S_AUTH_MODE=kubeconfig K8S_KUBECONFIG_PATH=~/.kube/config \
+npm run dev
+
+# terminal 2 — the benchmark
+MCP_TRANSPORT=http MCP_HTTP_URL=http://localhost:3000/mcp MCP_AUTH_TOKEN=devtoken \
+LLM_PROVIDER=claude CLAUDE_API_KEY=sk-ant-... CLAUDE_MODEL=claude-haiku-4-5 \
+npm run bench -- --attempts 5
 ```
 
-Exits non-zero unless **pass^k is 100%**, so it can gate CI without a second script deciding
-what good means.
+```bash
+npm run bench                     # every enabled case, 1 attempt
+npm run bench -- --attempts 5     # pass@1 / pass@5 / pass^5
+npm run bench -- --filter '^A'    # regex on the case id — a whole tier, or one case
+npm run bench -- --all            # include disabled cases
+```
+
+**What you measure is the backend you point it at.** With `LLM_PROVIDER=claude` you are
+measuring Claude, not this stack. That is still the right setup for catching prompt and format
+regressions, because it is cheap enough to run on every edit. Numbers that describe production
+only come from a run configured the way production is — which means the SQS path, which means
+`llm-worker` and AWS credentials, which is Path B.
+
+## Path B — a cluster that already runs the stack
+
+⚠️ **Read this before injecting anything.** If the cluster's alert rules are not scoped to a
+namespace — and the dev cluster's are not — then injecting a fault fires a real alert, which
+reaches the real agent's webhook, which posts a real investigation into the real Slack channel
+and may raise a real approval card.
+
+```
+KubernetesContainerOomKiller       no namespace selector
+KubernetesPodCrashLooping          increase(kube_pod_container_status_restarts_total[5m]) > 2
+```
+
+A02 trips both. Silence them for the duration of the run, matching the bench namespaces:
+
+```bash
+kubectl -n monitoring port-forward svc/alertmanager 9093:9093 &
+
+curl -s -XPOST http://localhost:9093/api/v2/silences -H 'Content-Type: application/json' -d '{
+  "matchers": [{"name":"namespace","value":"bench-.*","isRegex":true,"isEqual":true}],
+  "startsAt": "'"$(date -u +%FT%TZ)"'",
+  "endsAt":   "'"$(date -u -d '+2 hours' +%FT%TZ)"'",
+  "createdBy": "bench",
+  "comment": "fault injection — do not page the agent"
+}'
+```
+
+Delete the silence when the run finishes. An open-ended silence on `bench-.*` is harmless; one
+left on a broader matcher is how a real incident goes unnoticed.
+
+Then point the harness at the in-cluster MCP server and use the production LLM config:
+
+```bash
+kubectl -n devops-tools port-forward svc/devops-mcp-server 3000:3000 &
+
+MCP_TRANSPORT=http MCP_HTTP_URL=http://localhost:3000/mcp MCP_AUTH_TOKEN=<the real token> \
+LLM_PROVIDER=router \
+LLM_BACKEND_1_NAME=... \
+npm run bench -- --attempts 5
+```
+
+Copy the `LLM_BACKEND_*` and `SQS_*` variables from the running Deployment so the run measures
+the router you actually ship:
+
+```bash
+kubectl -n devops-tools get deploy devops-ai-agent \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}'
+```
+
+The SQS path needs AWS credentials the pod gets from IAM Roles Anywhere. Without them the
+private-llm backends fail and the router falls through to the direct ones — which still runs,
+but is no longer the configuration you meant to measure. Check the log for `route=heavy
+backend=private-llm-chatgpt` before trusting the numbers.
+
+The bench namespaces (`bench-a02`, `bench-c01`) are created and deleted by the case hooks. They
+are not in the GitOps repo, so Flux will not fight them, and they are not in
+`ALLOWED_REMEDIATION_NAMESPACES`, so nothing could be executed against them even if a proposal
+were approved by hand.
 
 ## Reading the score
 
