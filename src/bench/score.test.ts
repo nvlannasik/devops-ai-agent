@@ -185,8 +185,16 @@ test("a history line is one JSON object per run, with what produced the number",
   const path = join(mkdtempSync(join(tmpdir(), "bench-")), "history.jsonl");
   const meta = { gitSha: "abc123-dirty", provider: "router", backends: "a (m1), b (m2)", maxTokens: 8096 };
   const rates = { tasks: 2, k: 5, pass1: 1 / 3, passK: 1, passHatK: 0 };
-  appendHistory(path, { meta, rates, axes: { proposal: [6, 10] } });
-  appendHistory(path, { meta, rates: { ...rates, passHatK: 1 }, axes: { proposal: [10, 10] } });
+  const runs: TaskRun[] = [
+    { task: "A02", attempts: [
+      { pass: false, reasons: ["no proposal; expected k8s_set_resources"] },
+      { pass: false, reasons: ["no proposal; expected k8s_set_resources"] },
+      { pass: true, reasons: [] },
+    ] },
+    { task: "C01", attempts: [{ pass: true, reasons: [] }, { pass: true, reasons: [] }, { pass: true, reasons: [] }] },
+  ];
+  appendHistory(path, { meta, rates, axes: { proposal: [6, 10] }, runs });
+  appendHistory(path, { meta, rates: { ...rates, passHatK: 1 }, axes: { proposal: [10, 10] }, runs });
 
   const lines = readFileSync(path, "utf8").trim().split("\n");
   assert.equal(lines.length, 2, "appends must not rewrite the file — that is what makes it merge-safe");
@@ -197,6 +205,12 @@ test("a history line is one JSON object per run, with what produced the number",
   assert.equal(first.pass1, 0.333, "rates are rounded, or a float tail makes every diff noisy");
   assert.deepEqual(first.axes, { proposal: [6, 10] });
   assert.equal(JSON.parse(lines[1]!).passHatK, 1);
-  // The transcript is deliberately absent: a run's RCA text is tens of kilobytes.
+  // marks is one character per attempt, in order — "xxxx." and ".xxxx" are different problems
+  // and the rate alone cannot tell them apart.
+  assert.deepEqual(first.marks, { A02: "xx.", C01: "..." });
+  assert.equal(first.failures.length, 2);
+  assert.deepEqual(first.failures[0], { case: "A02", attempt: 1, reasons: ["no proposal; expected k8s_set_resources"] });
+  // The RCA text is deliberately absent: one run is tens of kilobytes of it.
   assert.ok(!("detail" in first) && !("rca" in first));
+  assert.ok(lines[0]!.length < 700, "a history line has to stay small enough to read in a diff");
 });

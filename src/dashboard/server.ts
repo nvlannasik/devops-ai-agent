@@ -4,6 +4,7 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
+import { loadBenchHistory } from "./bench.js";
 import { benchPage, contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -440,16 +441,11 @@ export class DashboardServer {
       );
     }
 
-    // BEFORE the database gate, and benchRuns() returns [] without a pool. Every other page
-    // behind that gate is meaningless with no history; this one has something to say — the
-    // empty state explains that a run needs DB_HOST to reach here, which is exactly the
-    // question someone lands on this page asking.
+    // Same side of the database gate as /context and /prompt, and for the same reason: the score
+    // history is a file in the image, read out of the running process. No migration, no pool,
+    // and it answers while Postgres is down.
     if (route.kind === "bench") {
-      return send(
-        200,
-        benchPage(await this.queries.benchRuns(), await this.openCount()),
-        "text/html; charset=utf-8"
-      );
+      return send(200, benchPage(loadBenchHistory(), await this.openCount()), "text/html; charset=utf-8");
     }
 
     if (!this.queries.enabled) {

@@ -23,8 +23,7 @@ import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } fr
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, type Score, type TaskRun } from "./score.js";
-import { appendHistory, axisTally, runMeta, saveBenchRun } from "./store.js";
-import { createPool } from "../db/pool.js";
+import { appendHistory, axisTally, publishHistory, runMeta } from "./store.js";
 import { config } from "../config/index.js";
 import { parseRegistry } from "../agent/llm/registry.js";
 
@@ -181,25 +180,14 @@ async function main(): Promise<void> {
   writeFileSync(out, JSON.stringify({ meta, rates, axes, runs, detail }, null, 2));
   console.log(`full transcript: ${out}`);
 
-  // The one file in bench/results/ that is NOT gitignored. Committing it is what gives the
-  // score a history that outlives this machine and this database.
+  // The one file in bench/results/ that is NOT gitignored, and the only place a score outlives
+  // this machine. Committed and pushed straight away unless --no-push: a score that needs a
+  // second manual step is a score that stops being recorded the first busy week.
   const history = join(RESULTS_DIR, "history.jsonl");
-  appendHistory(history, { meta, rates, axes });
-  console.log(`history line appended: ${history} — commit it to keep the score`);
-
-  // Best effort, and last: the score is already printed and written, so a database that is not
-  // reachable from wherever this ran costs a row, not the run.
-  if (config.incidents.enabled) {
-    const pool = createPool(2);
-    try {
-      const id = await saveBenchRun(pool, { meta, rates, axes, detail });
-      if (id) console.log(`stored as bench run #${id} — see the dashboard's Benchmark page`);
-    } finally {
-      await pool.end().catch(() => {});
-    }
-  } else {
-    console.log("DB_HOST is not set, so this run was not stored — the dashboard will not show it.");
-  }
+  appendHistory(history, { meta, rates, axes, runs });
+  console.log(`history line appended: ${history}`);
+  if (has("no-push")) console.log("--no-push: commit bench/results/history.jsonl yourself to keep the score");
+  else publishHistory(history);
 
   // Non-zero on any inconsistency, so this can gate CI without a second script deciding what
   // "good" means. pass^k, not pass@k — see above.

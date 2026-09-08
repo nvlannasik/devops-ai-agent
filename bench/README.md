@@ -12,6 +12,7 @@ What is here and what is not:
 | cases | 42, tiers A–F | 2 (A02, C01) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 2 axes, pass/fail |
+| results | unspecified | one line per run, committed to the repo |
 | suite gates | 10 metrics incl. calibration, cost, cache | pass^k |
 
 The scenario *shape* — a directory per case holding setup, cleanup and a declaration of what
@@ -212,42 +213,47 @@ never what to look at.
 
 ## Where a score goes
 
-Four places, and each answers a different question.
+**The repo.** `npm run bench` appends one JSON object to `bench/results/history.jsonl`, then
+commits and pushes it. No second step, no database, no migration: a score that needs someone to
+remember a follow-up command is a score that stops being recorded the first busy week.
+
+```
+{"at":"...","sha":"bdad444","provider":"router","backends":"private-llm-chatgpt (gpt-5-nano)",
+ "maxTokens":8096,"cases":2,"attempts":5,"pass1":0.5,"passK":1,"passHatK":0,
+ "axes":{"grounding":[9,10],"proposal":[6,10]},
+ "marks":{"A02-oomkilled-at-limit":"xxxx.","C01-flap-nothing-wrong":"...x."},
+ "failures":[{"case":"C01-flap-nothing-wrong","attempt":4,"reasons":["grounding: ..."]}]}
+```
+
+`git log -p bench/results/history.jsonl` is the whole feature: it shows when the score changed
+and, in the commits around it, what changed with it. Appending is a one-line diff that never
+touches another append's line, so two machines can both write it and rebase resolves without a
+decision.
+
+`marks` is one character per attempt, in order, because `xxxx.` and `.xxxx` are a flaky case
+that landed and a good case that broke — the rate alone cannot tell them apart. `failures`
+carries the reasons, which are a few hundred bytes; the RCA text is not there, because one run
+is tens of kilobytes of it.
+
+The commit is scoped to that one path (`git commit -- <path>`), so it cannot sweep up whatever
+else is in a dirty tree — and the bench is usually run from one, since the reason to measure is
+that something changed. Every git failure is a warning: no remote, no credentials, a detached
+HEAD or a protected branch are reasons to keep the run, not to lose it. `--no-push` opts out.
+
+Two other places, neither of them the record:
 
 | | question it answers | lifetime |
 |---|---|---|
 | stdout | what did this run do | the terminal |
 | `bench/results/<timestamp>.json` | *why* — every RCA, proposal and raw model output | that machine |
-| `bench/results/history.jsonl` | did the number move, and with which commit | **git** |
-| Dashboard → Benchmark | did the number move, for anyone with cluster access | Postgres |
 
-`history.jsonl` is the only file in `bench/results/` that is not gitignored, and it is one JSON
-object per run — the rates, the axes, and what produced them. `git log -p
-bench/results/history.jsonl` is the whole feature: it shows when the score changed and, in the
-commits around it, what changed with it. Appending is a one-line diff that never conflicts with
-another append, so CI and a laptop can both write it.
+## On the dashboard
 
-The transcript is deliberately not in there. One run is tens of kilobytes of RCA text, and what
-a reader wants from git is the number and its provenance.
+**Agent → Benchmark** reads that same file out of the image. No table, no migration, no pool —
+the same contract as the prompt and skill pages, which show what the running process is holding.
 
-The dashboard row is written only when `DB_HOST` is set, and best-effort: the score is printed
-and written to disk before the insert is attempted, so an unreachable database costs a row and
-not the run.
-
-## Automatically
-
-`.github/workflows/benchmark.yml` runs it weekly and on demand, against a throwaway kind
-cluster, and commits the history line back — including when the score is bad. A run that scored
-badly is exactly the one worth keeping; dropping it because the gate went red would erase the
-regression from the history that exists to show regressions.
-
-It needs one repository secret, `OPENAI_KEY`.
-
-**It measures the direct backend, not the shipped router.** No SQS in CI means no
-`private-llm-*`, which is what answers first in production's heavy chain. That is deliberate:
-a scheduled job reaching into the real cluster would inject faults on a schedule and page
-whoever is on call. CI catches prompt, format and parser drift cheaply and often; measuring the
-router you actually ship stays a manual Path B run.
+The consequence, and it is on the page: a score pushed after this pod's image was built appears
+on the **next build**. The repo is the record; the dashboard is a view of it as of the image.
 
 
 ## What this cannot measure yet

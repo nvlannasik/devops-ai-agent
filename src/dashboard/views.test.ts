@@ -1,5 +1,5 @@
 import { test } from "node:test";
-import type { BenchRunRow } from "./queries.js";
+import type { BenchRun } from "./bench.js";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
@@ -2491,16 +2491,16 @@ test("the RCA's field strip is a grid, so its labels line up", () => {
 
 // ---- Benchmark page -------------------------------------------------------------------------
 
-const benchRun = (over: Partial<BenchRunRow> = {}): BenchRunRow => ({
-  id: 1, created_at: new Date("2026-09-08T05:28:45Z"), git_sha: "4f1a94c8e2b1",
-  provider: "router", backends: "private-llm-chatgpt (gpt-5-nano)", max_tokens: 8096,
-  cases: 1, attempts: 5, pass1: 0, pass_k: 1, pass_hat_k: 0,
+const benchRun = (over: Partial<BenchRun> = {}): BenchRun => ({
+  at: "2026-09-08T05:28:45.000Z", sha: "4f1a94c8e2b1",
+  provider: "router", backends: "private-llm-chatgpt (gpt-5-nano)", maxTokens: 8096,
+  cases: 1, attempts: 5, pass1: 0, passK: 1, passHatK: 0,
   axes: { proposal: [1, 5], grounding: [5, 5] },
-  detail: [
-    ...[1, 2, 3, 4].map((n) => ({ task: "A02-oomkilled-at-limit", attempt: n, pass: false,
-      axes: { proposal: false, grounding: true }, reasons: ["no proposal; expected k8s_set_resources"] })),
-    { task: "A02-oomkilled-at-limit", attempt: 5, pass: true, axes: { proposal: true, grounding: true }, reasons: [] },
-  ],
+  marks: { "A02-oomkilled-at-limit": "xxxx." },
+  failures: [1, 2, 3, 4].map((n) => ({
+    case: "A02-oomkilled-at-limit", attempt: n,
+    reasons: ["no proposal; expected k8s_set_resources"],
+  })),
   ...over,
 });
 
@@ -2519,8 +2519,7 @@ test("pass^k leads, and a one-attempt run does not print its rate twice", () => 
   assert.match(five, /pass@1 0% · pass@5 100%/);
 
   // With k=1 all three rates are the same number; "pass@1 100% · pass@1 100%" reads as a bug.
-  const one = benchPage([benchRun({ attempts: 1, pass1: 1, pass_k: 1, pass_hat_k: 1, detail: [
-    { task: "A02-oomkilled-at-limit", attempt: 1, pass: true, axes: { proposal: true }, reasons: [] }] })]);
+  const one = benchPage([benchRun({ attempts: 1, pass1: 1, passK: 1, passHatK: 1, marks: { "A02-oomkilled-at-limit": "." }, failures: [] })]);
   assert.doesNotMatch(one, /pass@1 [^·]*· pass@1/);
   assert.match(one, /not a measure of consistency/);
 });
@@ -2530,8 +2529,7 @@ test("every failed attempt states its reason, and a clean run offers no disclosu
   assert.match(html, /4 failed attempts — why/);
   assert.equal([...html.matchAll(/no proposal; expected k8s_set_resources/g)].length, 4);
 
-  const clean = benchPage([benchRun({ pass_hat_k: 1, detail: [
-    { task: "A02-oomkilled-at-limit", attempt: 1, pass: true, axes: { proposal: true }, reasons: [] }] })]);
+  const clean = benchPage([benchRun({ passHatK: 1, marks: { "A02-oomkilled-at-limit": "." }, failures: [] })]);
   // The ELEMENT, not the class name: STYLES is inlined into every page, so `.bench-why` as a
   // CSS selector is present whether or not the disclosure is.
   assert.doesNotMatch(clean, /<details class="bench-why"/);
@@ -2542,11 +2540,11 @@ test("every failed attempt states its reason, and a clean run offers no disclosu
 test("no runs explains why there are none instead of showing an empty card", () => {
   const html = benchPage([]);
   assert.match(html, /No benchmark runs stored yet/);
-  assert.match(html, /DB_HOST/);
+  assert.match(html, /history\.jsonl/);
 });
 
 test("run metadata is escaped, not interpolated raw", () => {
-  const html = benchPage([benchRun({ backends: '<img src=x onerror=alert(1)>', git_sha: "a&b" })]);
+  const html = benchPage([benchRun({ backends: '<img src=x onerror=alert(1)>', sha: "a&b" })]);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
   assert.match(html, /a&amp;b/);

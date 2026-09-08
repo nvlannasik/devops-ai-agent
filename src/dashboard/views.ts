@@ -6,8 +6,9 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  BenchRunRow, FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
+  FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
 } from "./queries.js";
+import type { BenchRun } from "./bench.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { Assets } from "./assets.js";
@@ -1507,27 +1508,22 @@ const RATE_NOTE =
   "it is an agent whose output has to be checked every time, which is most of the work it was " +
   "meant to remove.";
 
-// Marks per attempt, in order, so a run reads as a shape rather than a number: `xxxx.` is a
-// flaky case that finally landed, `...x.` is a good case that slipped once. Those are different
+// Marks per attempt, in order, so a run reads as a shape rather than a number: "xxxx." is a
+// flaky case that finally landed, "...x." is a good case that slipped once. Those are different
 // problems and a single percentage hides which one you have.
-const marks = (run: BenchRunRow, task: string): string =>
-  run.detail
-    .filter((d) => d.task === task)
-    .sort((a, b) => a.attempt - b.attempt)
-    // Filled dot and cross rather than the terminal's `.` and `x`: a period at this size is a
-    // speck, and a row of passes read as an empty row.
-    .map((d) => `<span class="${d.pass ? "mk-pass" : "mk-fail"}">${d.pass ? "●" : "✕"}</span>`)
+const marks = (spec: string): string =>
+  [...spec]
+    .map((c) => `<span class="${c === "x" ? "mk-fail" : "mk-pass"}">${c === "x" ? "✕" : "●"}</span>`)
     .join("");
 
-function benchRunCard(run: BenchRunRow): string {
-  const tasks = [...new Set(run.detail.map((d) => d.task))].sort();
-  const failures = run.detail.filter((d) => !d.pass);
+function benchRunCard(run: BenchRun): string {
+  const cases = Object.keys(run.marks).sort();
   const axes = Object.entries(run.axes ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
 
   return `<article class="card bench-run">
     <header class="bench-head">
       <div>
-        <span class="bench-rate" title="every attempt passed">${fmtPct(run.pass_hat_k, 1)}</span>
+        <span class="bench-rate" title="every attempt passed">${fmtPct(run.passHatK, 1)}</span>
         <span class="meta">pass^${run.attempts}</span>
       </div>
       <div class="meta bench-sub">
@@ -1536,18 +1532,18 @@ function benchRunCard(run: BenchRunRow): string {
           // 100%" reads as a rendering bug rather than a single-attempt run.
           run.attempts === 1
             ? "one attempt each — not a measure of consistency"
-            : `pass@1 ${fmtPct(run.pass1, 1)} · pass@${run.attempts} ${fmtPct(run.pass_k, 1)}`
+            : `pass@1 ${fmtPct(run.pass1, 1)} · pass@${run.attempts} ${fmtPct(run.passK, 1)}`
         } ·
         ${fmtInt(run.cases)} case${run.cases === 1 ? "" : "s"} × ${fmtInt(run.attempts)}
       </div>
-      <div class="meta">${timeTag(run.created_at)}</div>
+      <div class="meta">${timeTag(run.at)}</div>
     </header>
 
     <div class="bench-meta meta">
       ${run.backends ? `<span translate="no">${esc(run.backends)}</span>` : ""}
       ${run.provider ? `<span class="badge">${esc(run.provider)}</span>` : ""}
-      ${run.git_sha ? `<code translate="no">${esc(run.git_sha)}</code>` : ""}
-      ${run.max_tokens ? `<span>MAX_TOKENS ${fmtInt(run.max_tokens)}</span>` : ""}
+      ${run.sha ? `<code translate="no">${esc(run.sha)}</code>` : ""}
+      ${run.maxTokens ? `<span>MAX_TOKENS ${fmtInt(run.maxTokens)}</span>` : ""}
     </div>
 
     ${
@@ -1562,21 +1558,21 @@ function benchRunCard(run: BenchRunRow): string {
     }
 
     <ul class="bench-cases">
-      ${tasks
-        .map((t) => `<li><code translate="no">${esc(t)}</code><span class="marks">${marks(run, t)}</span></li>`)
+      ${cases
+        .map((c) => `<li><code translate="no">${esc(c)}</code><span class="marks">${marks(run.marks[c]!)}</span></li>`)
         .join("")}
     </ul>
 
     ${
-      failures.length === 0
+      run.failures.length === 0
         ? ""
         : `<details class="bench-why">
-             <summary>${fmtInt(failures.length)} failed attempt${failures.length === 1 ? "" : "s"} — why</summary>
-             <ul>${failures
+             <summary>${fmtInt(run.failures.length)} failed attempt${run.failures.length === 1 ? "" : "s"} — why</summary>
+             <ul>${run.failures
                .map(
-                 (d) =>
-                   `<li><code translate="no">${esc(d.task)}</code> #${fmtInt(d.attempt)}` +
-                   `<ul>${d.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></li>`
+                 (f) =>
+                   `<li><code translate="no">${esc(f.case)}</code> #${fmtInt(f.attempt)}` +
+                   `<ul>${f.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></li>`
                )
                .join("")}</ul>
            </details>`
@@ -1584,15 +1580,15 @@ function benchRunCard(run: BenchRunRow): string {
   </article>`;
 }
 
-export function benchPage(runs: BenchRunRow[], openIncidents?: number): string {
+export function benchPage(runs: BenchRun[], openIncidents?: number): string {
   const body =
     runs.length === 0
       ? `<div class="card">
            <p class="meta">No benchmark runs stored yet.</p>
-           <p class="meta">Runs are written by <code translate="no">npm run bench</code>, and only when
-             <code translate="no">DB_HOST</code> is set — the runner writes its JSON transcript either way,
-             but a run with nowhere to go does not reach this page. See
-             <code translate="no">bench/README.md</code>.</p>
+           <p class="meta">Runs are written by <code translate="no">npm run bench</code>, which appends a
+             line to <code translate="no">bench/results/history.jsonl</code> and pushes it. This page reads
+             that file out of the image, so a score recorded after this pod was built appears on the next
+             build. See <code translate="no">bench/README.md</code>.</p>
          </div>`
       : runs.map(benchRunCard).join("");
 

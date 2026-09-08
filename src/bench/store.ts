@@ -1,11 +1,11 @@
-// Writing a run to Postgres, so the dashboard has something to read.
+// Where a score goes to outlive the terminal.
 //
-// Best-effort and OPTIONAL: the runner's job is to produce a score, and a database that is
-// unreachable from wherever the bench happens to run must not cost you the run. The JSON
-// transcript is always written; this is the copy that outlives the terminal.
+// Git, not Postgres. A table needed a migration run against a cluster before a score could be
+// seen, and the runner already lives in a checkout — so the repo is both the store and the
+// history, and the dashboard reads the same file the image was built with. One less moving
+// part than a database that has to be reachable from wherever the bench happened to run.
 
-import type { Pool } from "pg";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { config } from "../config/index.js";
@@ -60,42 +60,6 @@ export function axisTally(runs: TaskRun[]): Record<string, [number, number]> {
   return out;
 }
 
-export async function saveBenchRun(
-  pool: Pool,
-  input: {
-    meta: RunMeta;
-    rates: { tasks: number; k: number; pass1: number; passK: number; passHatK: number };
-    axes: Record<string, [number, number]>;
-    detail: unknown[];
-  }
-): Promise<number | null> {
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO bench_runs
-         (git_sha, provider, backends, max_tokens, cases, attempts, pass1, pass_k, pass_hat_k, axes, detail)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING id`,
-      [
-        input.meta.gitSha,
-        input.meta.provider,
-        input.meta.backends,
-        input.meta.maxTokens,
-        input.rates.tasks,
-        input.rates.k,
-        input.rates.pass1,
-        input.rates.passK,
-        input.rates.passHatK,
-        JSON.stringify(input.axes),
-        JSON.stringify(input.detail),
-      ]
-    );
-    return rows[0]?.id ?? null;
-  } catch (err) {
-    logger.error(`[bench] could not store the run (the JSON transcript is still written): ${errDetail(err)}`);
-    return null;
-  }
-}
-
 /**
  * One line per run, appended to a file that IS committed — the transcripts beside it are not.
  *
@@ -109,10 +73,34 @@ export async function saveBenchRun(
  * writes from a laptop. A JSON array would rewrite the closing bracket on every run and
  * conflict on every parallel one.
  *
- * The transcript is NOT in here. A run's RCA text is tens of kilobytes and belongs in the file
- * the runner already writes; what a reader wants from git is the number and what produced it.
+ * The RCA text is NOT in here — it belongs in the transcript the runner already writes. What
+ * a reader wants from git is the number, what produced it, and what went wrong.
  */
-export function appendHistory(path: string, input: { meta: RunMeta; rates: { tasks: number; k: number; pass1: number; passK: number; passHatK: number }; axes: Record<string, [number, number]> }): void {
+export function appendHistory(
+  path: string,
+  input: {
+    meta: RunMeta;
+    rates: { tasks: number; k: number; pass1: number; passK: number; passHatK: number };
+    axes: Record<string, [number, number]>;
+    runs: TaskRun[];
+  }
+): void {
+  // `marks` and `failures` are the two parts of the transcript small enough to keep. A run's
+  // RCA text is tens of kilobytes and stays out; five failure reasons are about five hundred
+  // bytes, and without them the history says a score dropped but not what dropped it — which
+  // is the only question anyone opens it to answer.
+  //
+  // marks is one character per attempt, in order: "xxxx." and ".xxxx" are a flaky case that
+  // landed and a good case that broke, and the rate alone cannot tell them apart.
+  const marks: Record<string, string> = {};
+  const failures: Array<{ case: string; attempt: number; reasons: string[] }> = [];
+  for (const r of input.runs) {
+    marks[r.task] = r.attempts.map((a) => (a.pass ? "." : "x")).join("");
+    r.attempts.forEach((a, i) => {
+      if (!a.pass) failures.push({ case: r.task, attempt: i + 1, reasons: a.reasons });
+    });
+  }
+
   const line = JSON.stringify({
     at: new Date().toISOString(),
     sha: input.meta.gitSha,
@@ -125,7 +113,46 @@ export function appendHistory(path: string, input: { meta: RunMeta; rates: { tas
     passK: Number(input.rates.passK.toFixed(3)),
     passHatK: Number(input.rates.passHatK.toFixed(3)),
     axes: input.axes,
+    marks,
+    failures,
   });
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, line + "\n");
+}
+
+/**
+ * Commit the history line and push it, so a score reaches the repo without a second step.
+ *
+ * Scoped to ONE path. `git commit -- <path>` commits that file from the working tree whatever
+ * else is staged, which matters because the bench is usually run from a dirty checkout: the
+ * whole reason to measure is that something changed.
+ *
+ * Every failure here is a warning, never a throw. The score is already printed and on disk by
+ * the time this runs; no remote, no credentials, a detached HEAD or a protected branch are all
+ * reasons to keep the run, not to lose it.
+ */
+export function publishHistory(path: string): void {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  try {
+    if (git("status", "--porcelain", "--", path) === "") {
+      logger.info("[bench] history unchanged — nothing to publish");
+      return;
+    }
+    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    if (branch === "HEAD") {
+      logger.warn("[bench] detached HEAD — the history line is written but not committed");
+      return;
+    }
+    const line = JSON.parse(readFileSync(path, "utf8").trim().split("\n").at(-1)!);
+    git("add", "--", path);
+    git("commit", "-m", `chore(bench): pass^${line.attempts} ${Math.round(line.passHatK * 100)}% on ${line.cases} case(s)\n\n${JSON.stringify(line)}`, "--", path);
+    // Rebase before pushing: the file is append-only and two appends never touch the same
+    // line, so a concurrent run elsewhere resolves without a decision from anyone.
+    git("pull", "--rebase", "--autostash", "origin", branch);
+    git("push", "origin", `HEAD:${branch}`);
+    logger.info(`[bench] score committed and pushed to ${branch}`);
+  } catch (err) {
+    logger.warn(`[bench] could not publish the score (it is still in ${path}): ${errDetail(err)}`);
+  }
 }

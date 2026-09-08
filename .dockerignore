@@ -3,3 +3,5 @@ dist
 .env
 .git
 .DS_Store
+# Benchmark transcripts: local to whoever ran it, and large. history.jsonl is what ships.
+bench/results/*.json
