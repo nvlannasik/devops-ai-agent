@@ -64,6 +64,45 @@ export interface Score {
   pass: boolean;
   /** Why it missed. A number alone tells you the agent regressed, never what to look at. */
   reasons: string[];
+  /** Per-axis outcome, so a failing suite says WHICH axis moved. Merged by combine(). */
+  axes?: Record<string, boolean>;
+}
+
+/**
+ * Evidence grounding — the design doc's second axis, and the only one of the remaining five
+ * that needs no LLM judge.
+ *
+ * `names` comes from agent.ungroundedNames(): resource names the RCA asserts in backticks that
+ * appear in no tool result for that run. A hard fail, per the doc, and the suite gate is zero:
+ * an invented name reaches Slack, then incidents.root_cause, then comes back as recall context
+ * for the next investigation. A correct proposal does not redeem an RCA that cites a workload
+ * nobody ever saw.
+ *
+ * Safe as a hard fail because groundingGaps is biased the other way: it requires a backticked,
+ * DNS-1123-shaped token with a separator and a three-letter run, so it misses inventions rather
+ * than inventing them. A positive here is worth acting on.
+ *
+ * What it does NOT catch: a name that IS in the tool output but is described wrongly — an RCA
+ * calling `backend-api-6bf8dbdf65-dnkl6` a workload when it is a pod passes this axis, because
+ * the string was observed. That error belongs to the root-cause axis, which needs the judge.
+ */
+export function scoreGrounding(names: string[]): Score {
+  return names.length === 0
+    ? { pass: true, reasons: [], axes: { grounding: true } }
+    : {
+        pass: false,
+        reasons: [`grounding: the RCA names ${names.length} resource(s) no tool result contained — ${names.join(", ")}`],
+        axes: { grounding: false },
+      };
+}
+
+/** All must pass. Reasons concatenate; axes merge, so the report can say which one moved. */
+export function combine(...scores: Score[]): Score {
+  return {
+    pass: scores.every((s) => s.pass),
+    reasons: scores.flatMap((s) => s.reasons),
+    axes: Object.assign({}, ...scores.map((s) => s.axes ?? {})),
+  };
 }
 
 const str = (v: unknown): string | undefined => (v === undefined || v === null ? undefined : String(v));
@@ -71,12 +110,14 @@ const str = (v: unknown): string | undefined => (v === undefined || v === null ?
 export function scoreProposal(expect: Expectation, proposal: Proposal | null): Score {
   const reasons: string[] = [];
 
+  const axed = (pass: boolean, reasons: string[]): Score => ({ pass, reasons, axes: { proposal: pass } });
+
   if (expect.action === null) {
     return proposal
-      ? { pass: false, reasons: [`proposed ${proposal.action} on ${proposal.namespace}/${proposal.name}, but the correct answer is no proposal`] }
-      : { pass: true, reasons: [] };
+      ? axed(false, [`proposed ${proposal.action} on ${proposal.namespace}/${proposal.name}, but the correct answer is no proposal`])
+      : axed(true, []);
   }
-  if (!proposal) return { pass: false, reasons: [`no proposal; expected ${expect.action}`] };
+  if (!proposal) return axed(false, [`no proposal; expected ${expect.action}`]);
 
   if (proposal.action !== expect.action) reasons.push(`action ${proposal.action}, expected ${expect.action}`);
   if (expect.namespace && proposal.namespace !== expect.namespace) {
@@ -108,7 +149,7 @@ export function scoreProposal(expect: Expectation, proposal: Proposal | null): S
     if (n === null) reasons.push(`${k}=${got} is not a valid quantity`);
     else if (n <= floor) reasons.push(`${k}=${got} is not above ${floorStr}, so the fault survives the fix`);
   }
-  return { pass: reasons.length === 0, reasons };
+  return axed(reasons.length === 0, reasons);
 }
 
 export interface TaskRun {

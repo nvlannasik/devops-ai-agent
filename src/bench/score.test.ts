@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scoreProposal, passRates, parseQuantity, type Expectation, type TaskRun } from "./score.js";
+import { scoreProposal, scoreGrounding, combine, passRates, parseQuantity, type Expectation, type TaskRun } from "./score.js";
 import type { Proposal } from "../agent/remediation/proposal.js";
 
 const proposal = (over: Partial<Proposal> = {}): Proposal => ({
@@ -22,7 +22,7 @@ const oom: Expectation = {
 };
 
 test("the right action on the right workload with a raised limit passes", () => {
-  assert.deepEqual(scoreProposal(oom, proposal()), { pass: true, reasons: [] });
+  assert.deepEqual(scoreProposal(oom, proposal()), { pass: true, reasons: [], axes: { proposal: true } });
 });
 
 test("every miss says what it was, because a bare number does not tell you where to look", () => {
@@ -127,4 +127,37 @@ test("an unparseable bound in the case file is the harness's bug and throws", ()
     () => scoreProposal({ action: "a", greaterThan: { memory_limit: "biggish" } }, proposal({ action: "a" })),
     /is not a Kubernetes quantity/,
   );
+});
+
+// ---- grounding axis -----------------------------------------------------------------------
+
+test("grounding passes on an empty gap list and hard-fails on any invented name", () => {
+  assert.deepEqual(scoreGrounding([]), { pass: true, reasons: [], axes: { grounding: true } });
+  const s = scoreGrounding(["order-service", "payments-cache"]);
+  assert.equal(s.pass, false);
+  assert.match(s.reasons[0]!, /names 2 resource\(s\) no tool result contained — order-service, payments-cache/);
+  assert.deepEqual(s.axes, { grounding: false });
+});
+
+test("a correct proposal does not redeem an ungrounded RCA", () => {
+  // The doc makes an invented resource a hard fail, and this is why: the proposal is checked by
+  // a dry-run before anything executes, but the RCA text goes to Slack and to
+  // incidents.root_cause unchallenged, then comes back as recall for the next investigation.
+  const good = scoreProposal({ action: "k8s_rollout_restart" }, proposal({ action: "k8s_rollout_restart" }));
+  assert.equal(good.pass, true);
+  const combined = combine(good, scoreGrounding(["order-service"]));
+  assert.equal(combined.pass, false);
+  assert.deepEqual(combined.axes, { proposal: true, grounding: false });
+  assert.equal(combined.reasons.length, 1, "a passing axis contributes no reason");
+});
+
+test("combine keeps every axis's reasons and reports each axis separately", () => {
+  const c = combine(scoreProposal({ action: "k8s_scale" }, null), scoreGrounding(["ghost-svc"]));
+  assert.equal(c.pass, false);
+  assert.deepEqual(c.axes, { proposal: false, grounding: false });
+  assert.equal(c.reasons.length, 2);
+});
+
+test("combine of nothing is a pass, so a run with no axes cannot fail silently", () => {
+  assert.deepEqual(combine(), { pass: true, reasons: [], axes: {} });
 });

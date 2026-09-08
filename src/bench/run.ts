@@ -22,7 +22,7 @@ import { createLLMClient } from "../agent/llm/index.js";
 import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
-import { passRates, scoreProposal, type Score, type TaskRun } from "./score.js";
+import { combine, passRates, scoreGrounding, scoreProposal, type Score, type TaskRun } from "./score.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
 const RESULTS_DIR = join(process.cwd(), "bench", "results");
@@ -54,25 +54,33 @@ function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
 const textOf = (content: Array<{ type: string; text?: string }>): string =>
   content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
 
-async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null }> {
+async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null; ungrounded: string[] }> {
   // A fresh thread per attempt. Sharing one would let attempt 2 read attempt 1's conclusion out
   // of conversation memory and score the memory rather than the model.
   const threadId = `bench-${task.id}-${n}-${Date.now()}`;
   const issue = buildGroupAlertText(task.groupLabels, task.alerts, task.commonAnnotations);
   try {
     const rca = await agent.investigate(threadId, issue);
+    // BEFORE the finally clears the thread: grounding is checked against this run's own tool
+    // results, which live in the conversation memory the teardown is about to drop.
+    const ungrounded = await agent.ungroundedNames(threadId, rca).catch(() => [] as string[]);
     const res = await llm.chat(
       [{ role: "user", content: buildProposalPrompt(task.groupLabels, rca) }],
       [],
       PROPOSAL_SYSTEM
     );
     const proposal = parseProposal(textOf(res.content as Array<{ type: string; text?: string }>));
-    return { score: scoreProposal(task.expect, proposal), rca, proposal };
+    return {
+      score: combine(scoreProposal(task.expect, proposal), scoreGrounding(ungrounded)),
+      rca,
+      proposal,
+      ungrounded,
+    };
   } catch (err) {
     // A crashed attempt is a failed attempt, not a crashed run: the other tasks still have
     // something to say, and hiding this one behind an exception would inflate every rate.
     const msg = err instanceof Error ? err.message : String(err);
-    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null };
+    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null, ungrounded: [] };
   } finally {
     await agent.clearThread(threadId).catch(() => {});
   }
@@ -99,6 +107,7 @@ async function main(): Promise<void> {
       let score: Score;
       let rca = "";
       let proposal: Proposal | null = null;
+      let ungrounded: string[] = [];
       try {
         // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
         // catch inside attempt(). It also must not skip cleanup: the first live run of this
@@ -106,7 +115,7 @@ async function main(): Promise<void> {
         // behind on the cluster.
         hook(task, "setup.sh");
         if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
-        ({ score, rca, proposal } = await attempt(agent, llm, task, n));
+        ({ score, rca, proposal, ungrounded } = await attempt(agent, llm, task, n));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
@@ -115,7 +124,7 @@ async function main(): Promise<void> {
       }
       logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
       scores.push(score);
-      detail.push({ task: task.id, attempt: n, pass: score.pass, reasons: score.reasons, proposal, rca });
+      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, rca });
     }
     runs.push({ task: task.id, attempts: scores });
   }
@@ -134,6 +143,19 @@ async function main(): Promise<void> {
       ? `pass@1 ${pct(rates.pass1)}  (one attempt each — run --attempts 5 for consistency)`
       : `pass@1 ${pct(rates.pass1)}   pass@${rates.k} ${pct(rates.passK)}   pass^${rates.k} ${pct(rates.passHatK)}`;
   console.log(`${rates.tasks} cases x ${rates.k} attempts   ${line}`);
+  // Which axis moved. With one number and two axes, a drop tells you the agent got worse and
+  // nothing about where to look.
+  const all = runs.flatMap((r) => r.attempts);
+  const axisNames = [...new Set(all.flatMap((a) => Object.keys(a.axes ?? {})))].sort();
+  if (axisNames.length > 0) {
+    const tally = axisNames
+      .map((ax) => {
+        const seen = all.filter((a) => a.axes && ax in a.axes);
+        return `${ax} ${seen.filter((a) => a.axes![ax]).length}/${seen.length}`;
+      })
+      .join("   ");
+    console.log(`axes: ${tally}`);
+  }
   if (rates.k > 1) console.log("pass^k is the one that matters: an agent right four times in five is one whose output must be checked every time.\n");
 
   mkdirSync(RESULTS_DIR, { recursive: true });

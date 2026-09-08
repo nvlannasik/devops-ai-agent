@@ -11,7 +11,7 @@ What is here and what is not:
 |---|---|---|
 | cases | 42, tiers A–F | 2 (A02, C01) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
-| scoring | 6 axes, 100 points, LLM judge for prose | proposal only, pass/fail |
+| scoring | 6 axes, 100 points, LLM judge for prose | 2 axes, pass/fail |
 | suite gates | 10 metrics incl. calibration, cost, cache | pass^k |
 
 The scenario *shape* — a directory per case holding setup, cleanup and a declaration of what
@@ -212,9 +212,16 @@ never what to look at.
 
 ## What this cannot measure yet
 
-- **Five of the six scoring axes.** Only the proposal is checked. Root cause, evidence
-  grounding, tool policy, format and efficiency are all specified in the design doc and none
-  of them are implemented here; the two prose axes need the LLM judge that document describes.
+- **Four of the six scoring axes.** Proposal and evidence grounding are checked. Root cause,
+  tool policy, format and efficiency are specified in the design doc and not implemented here;
+  the two prose axes need the LLM judge that document describes.
+
+  Grounding is the one that transferred cheaply, because `agent.ungroundedNames()` already
+  exists and is deterministic — it asks which backticked resource names in the RCA appear in no
+  tool result for that run, and a hit is a hard fail. Note what it does NOT catch: a name that
+  IS in the tool output but is described wrongly. An RCA calling `backend-api-6bf8dbdf65-dnkl6`
+  a *workload* when it is a pod passes this axis, because the string was observed. That is the
+  root-cause axis's job, and it needs the judge.
 - **The replay track.** Everything here needs a live cluster. The fixture-backed track that
   makes the suite cheap enough to run on every prompt edit does not exist yet.
 - **Anything needing Prometheus, Loki or Jaeger.** A bare kind cluster has none, so the
