@@ -4,7 +4,7 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
-import { contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
+import { benchPage, contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
 import { buildContextView, type ContextView, type SkillView } from "./context.js";
@@ -22,7 +22,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "login" | "logout" }
   | { kind: "asset"; path: string }
   | { kind: "detail"; id: number }
   | { kind: "skill"; name: string };
@@ -35,6 +35,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/logout") return { kind: "logout" };
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
+  if (p === "/bench") return { kind: "bench" };
   // The dashboard's only static assets: the topology map's bundle and stylesheet. The path is
   // NOT resolved against a directory — it is a key into a Map of the two files read at boot —
   // so path traversal has nothing to traverse. An unknown key falls through to 404 below.
@@ -435,6 +436,18 @@ export class DashboardServer {
       return send(
         200,
         promptPage(this.contextView(), await this.openCount()),
+        "text/html; charset=utf-8"
+      );
+    }
+
+    // BEFORE the database gate, and benchRuns() returns [] without a pool. Every other page
+    // behind that gate is meaningless with no history; this one has something to say — the
+    // empty state explains that a run needs DB_HOST to reach here, which is exactly the
+    // question someone lands on this page asking.
+    if (route.kind === "bench") {
+      return send(
+        200,
+        benchPage(await this.queries.benchRuns(), await this.openCount()),
         "text/html; charset=utf-8"
       );
     }

@@ -2101,4 +2101,32 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
      rather than rising — and box-shadow needs longer than a colour to be seen resolving at all. */
   .stat[data-linked] { transition: box-shadow .2s ease, transform .2s ease; }
 }
+
+/* ---- Benchmark ---- */
+/* pass^k is set large and everything else is meta, because the page has one headline number
+   and three that only make sense next to it. */
+.bench-run { display: grid; gap: .7rem; }
+.bench-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1rem; }
+.bench-rate { font-size: 1.9rem; font-weight: 650; line-height: 1; letter-spacing: -.02em; }
+.bench-sub { flex: 1 1 auto; }
+.bench-meta { display: flex; flex-wrap: wrap; gap: .35rem .75rem; align-items: center; }
+.bench-axes { display: flex; flex-wrap: wrap; gap: .4rem; }
+.axis { font-size: .8rem; padding: .12rem .5rem; border-radius: 999px;
+        border: 1px solid var(--line); color: var(--muted); }
+.axis-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.bench-cases { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+/* A fixed name column rather than space-between: on a wide screen the marks were flung to the
+   far edge, and a reader had to track a blank inch to learn which case they belonged to. The
+   column still aligns five attempts under five attempts, which is the reason they were not
+   simply placed next to the name. */
+.bench-cases li { display: grid; grid-template-columns: minmax(0, 20rem) auto;
+                  gap: .25rem 1.25rem; align-items: baseline; }
+/* Monospace so five attempts line up under five attempts across rows — the shape is the point:
+   "xxxx." is a flaky case that finally landed, "...x." is a good one that slipped. */
+.marks { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95rem; letter-spacing: .22em; }
+.mk-pass { color: var(--ok); }
+.mk-fail { color: var(--critical); }
+.bench-why summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+.bench-why ul { margin: .4rem 0 0 1rem; padding: 0; font-size: .85rem; color: var(--muted); }
+.bench-why > ul > li { margin-bottom: .35rem; }
 `;

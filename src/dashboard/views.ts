@@ -6,7 +6,7 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
+  BenchRunRow, FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
 } from "./queries.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
@@ -54,6 +54,7 @@ const ICON = {
   // pairs that DO repeat are deliberate — the wrench is remediation wherever remediation is
   // named, the speech bubble is on-call, the chip is the model — because a reader who learns
   // one on the overview should not have to relearn it on the incident page.
+  bench: ico(`<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/>`),
   chip: ico(
     `<rect x="7" y="7" width="10" height="10" rx="1.7"/>` +
       `<path d="M10 3.2v3.4"/><path d="M14 3.2v3.4"/><path d="M10 17.4v3.4"/><path d="M14 17.4v3.4"/>` +
@@ -101,6 +102,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/topology", label: "Topology", icon: ICON.topology },
       { href: "/context", label: "Context", icon: ICON.context },
+      { href: "/bench", label: "Benchmark", icon: ICON.bench },
     ],
   },
 ];
@@ -1490,5 +1492,122 @@ export function contextPage(v: ContextView, openIncidents?: number): string {
        smallest one it might land in.</p>
      ${budgetRows(v.backends)}`,
     { current: "/context", openIncidents }
+  );
+}
+
+
+// ---- Benchmark ------------------------------------------------------------------------------
+
+// pass^k first and largest. The other two flatter: pass@k counts a case that succeeded once in
+// five tries as a success, which is the number you quote when you want the agent to look good
+// and the number that tells an on-call nothing. The page is ordered the way the design doc
+// argues, not the way the numbers flatter.
+const RATE_NOTE =
+  "pass^k is every attempt passing. An agent right four times in five is not 80% useful — " +
+  "it is an agent whose output has to be checked every time, which is most of the work it was " +
+  "meant to remove.";
+
+// Marks per attempt, in order, so a run reads as a shape rather than a number: `xxxx.` is a
+// flaky case that finally landed, `...x.` is a good case that slipped once. Those are different
+// problems and a single percentage hides which one you have.
+const marks = (run: BenchRunRow, task: string): string =>
+  run.detail
+    .filter((d) => d.task === task)
+    .sort((a, b) => a.attempt - b.attempt)
+    // Filled dot and cross rather than the terminal's `.` and `x`: a period at this size is a
+    // speck, and a row of passes read as an empty row.
+    .map((d) => `<span class="${d.pass ? "mk-pass" : "mk-fail"}">${d.pass ? "●" : "✕"}</span>`)
+    .join("");
+
+function benchRunCard(run: BenchRunRow): string {
+  const tasks = [...new Set(run.detail.map((d) => d.task))].sort();
+  const failures = run.detail.filter((d) => !d.pass);
+  const axes = Object.entries(run.axes ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
+
+  return `<article class="card bench-run">
+    <header class="bench-head">
+      <div>
+        <span class="bench-rate" title="every attempt passed">${fmtPct(run.pass_hat_k, 1)}</span>
+        <span class="meta">pass^${run.attempts}</span>
+      </div>
+      <div class="meta bench-sub">
+        ${
+          // With one attempt the three rates are the same number, and "pass@1 100% · pass@1
+          // 100%" reads as a rendering bug rather than a single-attempt run.
+          run.attempts === 1
+            ? "one attempt each — not a measure of consistency"
+            : `pass@1 ${fmtPct(run.pass1, 1)} · pass@${run.attempts} ${fmtPct(run.pass_k, 1)}`
+        } ·
+        ${fmtInt(run.cases)} case${run.cases === 1 ? "" : "s"} × ${fmtInt(run.attempts)}
+      </div>
+      <div class="meta">${timeTag(run.created_at)}</div>
+    </header>
+
+    <div class="bench-meta meta">
+      ${run.backends ? `<span translate="no">${esc(run.backends)}</span>` : ""}
+      ${run.provider ? `<span class="badge">${esc(run.provider)}</span>` : ""}
+      ${run.git_sha ? `<code translate="no">${esc(run.git_sha)}</code>` : ""}
+      ${run.max_tokens ? `<span>MAX_TOKENS ${fmtInt(run.max_tokens)}</span>` : ""}
+    </div>
+
+    ${
+      axes.length > 0
+        ? `<div class="bench-axes">${axes
+            .map(
+              ([name, [ok, seen]]) =>
+                `<span class="axis${ok === seen ? " axis-ok" : ""}">${esc(name)} <strong>${fmtInt(ok)}/${fmtInt(seen)}</strong></span>`
+            )
+            .join("")}</div>`
+        : ""
+    }
+
+    <ul class="bench-cases">
+      ${tasks
+        .map((t) => `<li><code translate="no">${esc(t)}</code><span class="marks">${marks(run, t)}</span></li>`)
+        .join("")}
+    </ul>
+
+    ${
+      failures.length === 0
+        ? ""
+        : `<details class="bench-why">
+             <summary>${fmtInt(failures.length)} failed attempt${failures.length === 1 ? "" : "s"} — why</summary>
+             <ul>${failures
+               .map(
+                 (d) =>
+                   `<li><code translate="no">${esc(d.task)}</code> #${fmtInt(d.attempt)}` +
+                   `<ul>${d.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></li>`
+               )
+               .join("")}</ul>
+           </details>`
+    }
+  </article>`;
+}
+
+export function benchPage(runs: BenchRunRow[], openIncidents?: number): string {
+  const body =
+    runs.length === 0
+      ? `<div class="card">
+           <p class="meta">No benchmark runs stored yet.</p>
+           <p class="meta">Runs are written by <code translate="no">npm run bench</code>, and only when
+             <code translate="no">DB_HOST</code> is set — the runner writes its JSON transcript either way,
+             but a run with nowhere to go does not reach this page. See
+             <code translate="no">bench/README.md</code>.</p>
+         </div>`
+      : runs.map(benchRunCard).join("");
+
+  return layout(
+    "Benchmark",
+    `<div class="doc">
+     <p class="eyebrow">Agent</p>
+     <h1>Benchmark</h1>
+     <p class="meta">Synthetic incidents replayed through the real investigation path, scored on
+       what the agent produced. Newest first. ${esc(RATE_NOTE)}</p>
+     <p class="meta">Two of the design doc's six axes are implemented — the remediation proposal
+       and evidence grounding. A run showing 100% is silent about the other four.</p>
+     ${section(ICON.bench, "Runs")}
+     ${body}
+     </div>`,
+    { current: "/bench", openIncidents }
   );
 }

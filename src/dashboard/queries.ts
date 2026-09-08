@@ -4,6 +4,19 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DEFAULT_RANGE, PAGE_SIZE, type Filters, type Range } from "./filters.js";
 
+export interface BenchRunRow {
+  id: number; created_at: Date;
+  git_sha: string | null; provider: string | null; backends: string | null; max_tokens: number | null;
+  cases: number; attempts: number;
+  pass1: number; pass_k: number; pass_hat_k: number;
+  axes: Record<string, [number, number]>;
+  detail: Array<{
+    task: string; attempt: number; pass: boolean;
+    axes?: Record<string, boolean>; reasons: string[];
+    ungrounded?: string[]; proposal?: { action: string; namespace: string; name: string } | null;
+  }>;
+}
+
 export interface IncidentRow {
   id: number; created_at: Date; resolved_at: Date | null;
   alertname: string; namespace: string | null;
@@ -478,6 +491,25 @@ export class DashboardQueries {
     // unsee. The floor costs nothing and makes the summary self-consistent by construction.
     const total = Math.max(num(count.rows[0]?.n), offset + rows.length);
     return { rows, hasMore, total, capped: total >= COUNT_CAP };
+  }
+
+  /**
+   * Benchmark runs, newest first. Capped rather than paginated: the page exists to answer
+   * "did the score move", and that question is answered by the last handful. `detail` is the
+   * whole per-attempt record, so the cap is also what keeps the page from loading megabytes
+   * of RCA text nobody scrolled to.
+   */
+  async benchRuns(limit = 20): Promise<BenchRunRow[]> {
+    // Same shape as every other read here: no database is an empty page, not a 500. The bench
+    // is the one feature whose data can legitimately be absent — nobody has run it yet.
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT id, created_at, git_sha, provider, backends, max_tokens, cases, attempts,
+              pass1, pass_k, pass_hat_k, axes, detail
+         FROM bench_runs ORDER BY created_at DESC LIMIT $1`,
+      [Math.max(1, Math.min(100, limit))]
+    );
+    return rows as BenchRunRow[];
   }
 
   async detail(id: number) {

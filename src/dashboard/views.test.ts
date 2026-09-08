@@ -1,7 +1,8 @@
 import { test } from "node:test";
+import type { BenchRunRow } from "./queries.js";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
@@ -742,14 +743,14 @@ test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
   assert.equal(
-    icons.length, 8,
-    "the drawer's two states, the brand mark, four destinations and the sign-out button"
+    icons.length, 9,
+    "the drawer's two states, the brand mark, five destinations and the sign-out button"
   );
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
-  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 5);
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 6);
 });
 
 // ---------- section glyphs ----------
@@ -1916,8 +1917,8 @@ test("the rail groups its destinations, and each caption labels its own list", (
   const html = layout("Test", "<p>hi</p>", { current: "/" });
   assert.match(html, /<p class="rail-group" id="rail-g0">Monitor<\/p><ul aria-labelledby="rail-g0">/);
   assert.match(html, /<p class="rail-group" id="rail-g1">Agent<\/p><ul aria-labelledby="rail-g1">/);
-  // still four destinations, and still exactly one marked
-  assert.equal([...html.matchAll(/<li><a href="/g)].length, 4);
+  // five destinations, and still exactly one marked
+  assert.equal([...html.matchAll(/<li><a href="/g)].length, 5);
   assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
 });
 
@@ -2486,4 +2487,67 @@ test("the RCA's field strip is a grid, so its labels line up", () => {
   // The <div> only groups the pair for the <dl>; its box has to disappear or every pair is one
   // cell and the columns never align.
   assert.match(STYLES, /\.rca-fields > div \{ display: contents; \}/);
+});
+
+// ---- Benchmark page -------------------------------------------------------------------------
+
+const benchRun = (over: Partial<BenchRunRow> = {}): BenchRunRow => ({
+  id: 1, created_at: new Date("2026-09-08T05:28:45Z"), git_sha: "4f1a94c8e2b1",
+  provider: "router", backends: "private-llm-chatgpt (gpt-5-nano)", max_tokens: 8096,
+  cases: 1, attempts: 5, pass1: 0, pass_k: 1, pass_hat_k: 0,
+  axes: { proposal: [1, 5], grounding: [5, 5] },
+  detail: [
+    ...[1, 2, 3, 4].map((n) => ({ task: "A02-oomkilled-at-limit", attempt: n, pass: false,
+      axes: { proposal: false, grounding: true }, reasons: ["no proposal; expected k8s_set_resources"] })),
+    { task: "A02-oomkilled-at-limit", attempt: 5, pass: true, axes: { proposal: true, grounding: true }, reasons: [] },
+  ],
+  ...over,
+});
+
+test("a run reads as a shape: one mark per attempt, in order", () => {
+  const html = benchPage([benchRun()]);
+  const marks = /<span class="marks">([\s\S]*?)<\/span>\s*<\/li>/.exec(html);
+  assert.ok(marks, "the marks strip is missing");
+  // xxxx. — four failures then a pass. A single percentage cannot tell that from .xxxx
+  assert.equal([...marks[1]!.matchAll(/class="mk-(pass|fail)"/g)].map((m) => m[1]).join(","),
+    "fail,fail,fail,fail,pass");
+});
+
+test("pass^k leads, and a one-attempt run does not print its rate twice", () => {
+  const five = benchPage([benchRun()]);
+  assert.match(five, /class="bench-rate"[^>]*>0%<\/span>\s*<span class="meta">pass\^5/);
+  assert.match(five, /pass@1 0% · pass@5 100%/);
+
+  // With k=1 all three rates are the same number; "pass@1 100% · pass@1 100%" reads as a bug.
+  const one = benchPage([benchRun({ attempts: 1, pass1: 1, pass_k: 1, pass_hat_k: 1, detail: [
+    { task: "A02-oomkilled-at-limit", attempt: 1, pass: true, axes: { proposal: true }, reasons: [] }] })]);
+  assert.doesNotMatch(one, /pass@1 [^·]*· pass@1/);
+  assert.match(one, /not a measure of consistency/);
+});
+
+test("every failed attempt states its reason, and a clean run offers no disclosure", () => {
+  const html = benchPage([benchRun()]);
+  assert.match(html, /4 failed attempts — why/);
+  assert.equal([...html.matchAll(/no proposal; expected k8s_set_resources/g)].length, 4);
+
+  const clean = benchPage([benchRun({ pass_hat_k: 1, detail: [
+    { task: "A02-oomkilled-at-limit", attempt: 1, pass: true, axes: { proposal: true }, reasons: [] }] })]);
+  // The ELEMENT, not the class name: STYLES is inlined into every page, so `.bench-why` as a
+  // CSS selector is present whether or not the disclosure is.
+  assert.doesNotMatch(clean, /<details class="bench-why"/);
+});
+
+// The page is reachable without a database — that is the state someone lands in before their
+// first run, and an error page would not tell them what to do about it.
+test("no runs explains why there are none instead of showing an empty card", () => {
+  const html = benchPage([]);
+  assert.match(html, /No benchmark runs stored yet/);
+  assert.match(html, /DB_HOST/);
+});
+
+test("run metadata is escaped, not interpolated raw", () => {
+  const html = benchPage([benchRun({ backends: '<img src=x onerror=alert(1)>', git_sha: "a&b" })]);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x/);
+  assert.match(html, /a&amp;b/);
 });

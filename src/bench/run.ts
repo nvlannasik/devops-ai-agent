@@ -23,6 +23,10 @@ import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } fr
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, type Score, type TaskRun } from "./score.js";
+import { axisTally, runMeta, saveBenchRun } from "./store.js";
+import { createPool } from "../db/pool.js";
+import { config } from "../config/index.js";
+import { parseRegistry } from "../agent/llm/registry.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
 const RESULTS_DIR = join(process.cwd(), "bench", "results");
@@ -138,6 +142,7 @@ async function main(): Promise<void> {
   }
 
   const rates = passRates(runs);
+  const axes = axisTally(runs);
   const pct = (n: number) => `${(n * 100).toFixed(0)}%`;
   console.log("\n" + "-".repeat(64));
   for (const r of runs) {
@@ -166,10 +171,29 @@ async function main(): Promise<void> {
   }
   if (rates.k > 1) console.log("pass^k is the one that matters: an agent right four times in five is one whose output must be checked every time.\n");
 
+  // The registry, not the env: this records what the router actually resolved.
+  const meta = runMeta(
+    config.llm.provider === "router" ? parseRegistry(process.env).backends : [{ name: config.llm.provider }]
+  );
+
   mkdirSync(RESULTS_DIR, { recursive: true });
   const out = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  writeFileSync(out, JSON.stringify({ rates, runs, detail }, null, 2));
+  writeFileSync(out, JSON.stringify({ meta, rates, axes, runs, detail }, null, 2));
   console.log(`full transcript: ${out}`);
+
+  // Best effort, and last: the score is already printed and written, so a database that is not
+  // reachable from wherever this ran costs a row, not the run.
+  if (config.incidents.enabled) {
+    const pool = createPool(2);
+    try {
+      const id = await saveBenchRun(pool, { meta, rates, axes, detail });
+      if (id) console.log(`stored as bench run #${id} — see the dashboard's Benchmark page`);
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  } else {
+    console.log("DB_HOST is not set, so this run was not stored — the dashboard will not show it.");
+  }
 
   // Non-zero on any inconsistency, so this can gate CI without a second script deciding what
   // "good" means. pass^k, not pass@k — see above.
