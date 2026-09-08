@@ -2506,7 +2506,7 @@ const benchRun = (over: Partial<BenchRun> = {}): BenchRun => ({
 
 test("a run reads as a shape: one mark per attempt, in order", () => {
   const html = benchPage([benchRun()]);
-  const marks = /<span class="marks">([\s\S]*?)<\/span>\s*<\/li>/.exec(html);
+  const marks = /<span class="marks" role="img"[^>]*>([\s\S]*?)<\/span><\/li>/.exec(html);
   assert.ok(marks, "the marks strip is missing");
   // xxxx. — four failures then a pass. A single percentage cannot tell that from .xxxx
   assert.equal([...marks[1]!.matchAll(/class="mk-(pass|fail)"/g)].map((m) => m[1]).join(","),
@@ -2555,7 +2555,7 @@ test("the by-case table ranks worst first, and the runs list newest first", () =
     benchRun({ at: "2026-09-01T00:00:00.000Z", passHatK: 1, marks: { easy: ".....", hard: "xxxxx" }, failures: [] }),
     benchRun({ at: "2026-09-08T00:00:00.000Z", passHatK: 0, marks: { easy: ".....", hard: "x...x" }, failures: [] }),
   ]);
-  const cases = [...html.matchAll(/<td><code translate="no">(easy|hard)<\/code><\/td>/g)].map((m) => m[1]);
+  const cases = [...html.matchAll(/data-label="Case"><code translate="no">(easy|hard)<\/code>/g)].map((m) => m[1]);
   assert.deepEqual(cases, ["hard", "easy"], "sorted best-first, a benchmark says what already works");
 
   // The heading claims an order; the page must not depend on the caller for it.
@@ -2567,4 +2567,30 @@ test("one configuration is labelled as one, not presented as a ranking", () => {
   const html = benchPage([benchRun()]);
   assert.match(html, /only one measured so far/);
   assert.doesNotMatch(html, /By configuration[\s\S]{0,200}best first/);
+});
+
+
+// Priority 1 in the UI/UX guidance, and the first version of this page had no answer for it:
+// the marks strip is the reason the page exists and it is exactly what a screen reader cannot
+// see. Glyph-by-glyph it reads "black circle black circle multiplication x".
+test("the marks strip names itself, and its glyphs stay out of the way", () => {
+  const html = benchPage([benchRun({ marks: { "A02-oomkilled-at-limit": "xxxx." } })]);
+  assert.match(html, /class="marks" role="img" aria-label="4 of 5 attempts failed, in order: fail, fail, fail, fail, pass"/);
+  assert.equal([...html.matchAll(/class="mk-(pass|fail)" aria-hidden="true"/g)].length, 5);
+  // Exactly one per case, and never nested: an outer unlabelled wrapper is the element a
+  // screen reader reaches first, and it says nothing.
+  assert.equal([...html.matchAll(/class="marks"/g)].length, 1);
+  assert.doesNotMatch(html, /class="marks"[^>]*>\s*<span class="marks"/);
+
+  const clean = benchPage([benchRun({ marks: { a: "..." }, failures: [] })]);
+  assert.match(clean, /aria-label="all 3 attempts passed"/);
+});
+
+// The helpers carry the roles and the per-cell data-label that turn a table into captioned
+// cards below 40rem. Hand-rolled markup opted these two tables out of it silently.
+test("both aggregate tables are built with the shared table helpers", () => {
+  const html = benchPage([benchRun()]);
+  assert.equal([...html.matchAll(/<table role="table" data-stack data-pairs class="bench-table">/g)].length, 2);
+  assert.match(html, /<th role="columnheader">Pass rate<\/th>/);
+  assert.match(html, /<td role="cell" class="num" data-label="Attempts">/);
 });

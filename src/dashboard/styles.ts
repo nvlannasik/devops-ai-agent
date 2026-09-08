@@ -2137,6 +2137,8 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 .bench-table th { text-align: left; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
                   color: var(--muted); font-weight: 600; padding: 0 .6rem .5rem 0; }
 .bench-table td { padding: .42rem .6rem .42rem 0; border-top: 1px solid var(--line); vertical-align: middle; }
+/* The bar is decorative once the number beside it is read; the fraction in the next column is
+   the accessible statement of the same thing. */
 /* padding-LEFT, not only right: two numeric columns side by side ran their headers together
    into one word ("ATTEMPTSCLEAN RUNS") with nothing between them. */
 .bench-table th.num, .bench-table td.num { text-align: right; padding: 0 0 .5rem 1.25rem;
@@ -2149,15 +2151,33 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 .rate-ok { background: var(--ok); }
 .rate-warn { background: var(--warning); }
 .rate-bad { background: var(--critical); }
-.rate-num { display: inline-block; width: 3rem; text-align: right; font-variant-numeric: tabular-nums; }
-/* Scroll rather than reflow. A case id is one token — "A03-imagepull-tag-missing" — and a
-   narrow column breaks it at every hyphen into a five-line stack that is harder to read than
-   a sideways nudge. */
-.scroll-x { overflow-x: auto; }
+/* nowrap unconditionally: the stacked cell sets overflow-wrap: anywhere so a long case id can
+   break, and a percentage inherited it and split between the digits and the sign. "20" over
+   "%" is not a smaller number, it is a broken one. */
+.rate-num { display: inline-block; width: 3rem; text-align: right; white-space: nowrap;
+            font-variant-numeric: tabular-nums; }
+/* No scroll rule and no min-width here: these tables go through table(..., "cards"), so below
+   40rem they become captioned cards like the incident list and there is nothing left to scroll.
+   The first version hand-rolled the markup and had to invent a sideways nudge to cope. */
 .bench-table code { white-space: nowrap; }
-@media (max-width: 40rem) {
-  .bench-table { min-width: 30rem; }
-  .bench-table td.rate { width: auto; }
+/* Below 46rem table[data-pairs] hangs each caption beside its value, so the column rules that
+   made sense in a table stop applying: a 46% rate column and a bar sized against it mean
+   nothing once the cell is a line of its own. Only the alignment needs saying — right-aligned
+   numbers were pulling away from the captions they belong to, leaving a caption at the left
+   edge and its value at the right with a hand-span of nothing between them. */
+@container page (max-width: 46rem) {
+  .bench-table td.num { text-align: left; padding-left: 6rem; }
+  /* The bar is sized against its COLUMN above this breakpoint, and a column is what a paired
+     cell no longer has: calc(100% - 3.4rem) against a 6rem hanging indent left it with no width
+     to draw and the rate showed as a bare percentage. */
   .rate-bar { width: 5rem; }
+  /* The number's fixed 3rem is a COLUMN alignment device — it keeps percentages ragging right
+     under each other. Beside a hanging caption there is no column to align to, and the fixed
+     width was just enough to push the number onto its own line under the bar. */
+  .rate-num { width: auto; margin-left: .45rem; }
+  /* nowrap keeps a case id whole in a column. In a card there is no column to keep it out of,
+     and the longest ids simply ran past the edge — A01-crashloop-missing-config-key is 32
+     characters against about 20 of room. */
+  .bench-table code { white-space: normal; overflow-wrap: anywhere; }
 }
 `;

@@ -1511,10 +1511,21 @@ const RATE_NOTE =
 // Marks per attempt, in order, so a run reads as a shape rather than a number: "xxxx." is a
 // flaky case that finally landed, "...x." is a good case that slipped once. Those are different
 // problems and a single percentage hides which one you have.
-const marks = (spec: string): string =>
-  [...spec]
-    .map((c) => `<span class="${c === "x" ? "mk-fail" : "mk-pass"}">${c === "x" ? "✕" : "●"}</span>`)
+const marks = (spec: string): string => {
+  const failed = [...spec].filter((c) => c === "x").length;
+  const glyphs = [...spec]
+    // aria-hidden on every glyph: read one by one a screen reader says "black circle black
+    // circle multiplication x", which is noise, not information. The strip carries one name.
+    .map((c) => `<span class="${c === "x" ? "mk-fail" : "mk-pass"}" aria-hidden="true">${c === "x" ? "✕" : "●"}</span>`)
     .join("");
+  // role="img" + a label, because this IS meaningful and had no text alternative — the shape
+  // is the reason it exists, and the shape is exactly what is invisible to a screen reader.
+  const label =
+    failed === 0
+      ? `all ${spec.length} attempts passed`
+      : `${failed} of ${spec.length} attempts failed, in order: ${[...spec].map((c) => (c === "x" ? "fail" : "pass")).join(", ")}`;
+  return `<span class="marks" role="img" aria-label="${esc(label)}">${glyphs}</span>`;
+};
 
 function benchRunCard(run: BenchRun): string {
   const cases = Object.keys(run.marks).sort();
@@ -1559,7 +1570,10 @@ function benchRunCard(run: BenchRun): string {
 
     <ul class="bench-cases">
       ${cases
-        .map((c) => `<li><code translate="no">${esc(c)}</code><span class="marks">${marks(run.marks[c]!)}</span></li>`)
+        // marks() returns the whole element now, labelled. Wrapping it again in a second
+        // <span class="marks"> left an unlabelled one on the outside — which is the one a
+        // screen reader reaches first.
+        .map((c) => `<li><code translate="no">${esc(c)}</code>${marks(run.marks[c]!)}</li>`)
         .join("")}
     </ul>
 
@@ -1594,45 +1608,56 @@ const rateBar = (passed: number, attempts: number): string => {
 
 // Worst first — the ordering is the point, not the table. Sorted best-first a benchmark tells
 // you what already works.
+//
+// Built with table()/headers()/cell() like every other table on this dashboard rather than
+// hand-rolled markup, which is what the first version of this page did. The helpers carry the
+// role attributes and the per-cell data-label that let a table stop being a table below 46rem.
+//
+// "pairs", after two wrong answers. "cards" places cells by CLASS onto a three-column grid —
+// its own comment warns that a table with different columns "would come apart under these
+// rules", and under it these two did: the rate bar landed on top of the case name and no
+// caption appeared at all. Plain "stack" fixed that but put every caption on its own line,
+// which is the case its comment describes as doubling the table's height. "pairs" is the one
+// written for "a record whose values are all short" — a case id, a rate, two counts.
 function byCaseTable(history: BenchRun[]): string {
   const rows = byCase(history);
   if (rows.length === 0) return "";
-  return `${section(ICON.incidents, "By case", "<span class=\"meta\">hardest first</span>")}
-    <div class="card scroll-x">
-      <table class="bench-table">
-        <thead><tr><th>Case</th><th>Pass rate</th><th class="num">Attempts</th><th class="num">Runs</th></tr></thead>
-        <tbody>${rows
-          .map(
-            (r) =>
-              `<tr><td><code translate="no">${esc(r.id)}</code></td>` +
-              `<td class="rate">${rateBar(r.passed, r.attempts)}</td>` +
-              `<td class="num">${fmtInt(r.passed)}/${fmtInt(r.attempts)}</td>` +
-              `<td class="num">${fmtInt(r.runs)}</td></tr>`
-          )
-          .join("")}</tbody>
-      </table>
-    </div>`;
+  const body = rows
+    .map(
+      (r) =>
+        `<tr role="row">` +
+        cell("Case", `<code translate="no">${esc(r.id)}</code>`) +
+        cell("Pass rate", rateBar(r.passed, r.attempts), "rate") +
+        cell("Attempts", `${fmtInt(r.passed)}/${fmtInt(r.attempts)}`, "num") +
+        cell("Runs", fmtInt(r.runs), "num") +
+        `</tr>`
+    )
+    .join("");
+  return `${section(ICON.incidents, "By case", '<span class="meta">hardest first</span>')}
+    <div class="card">${table(headers("Case", "Pass rate", "Attempts", "Runs"), body, "pairs", "bench-table")}</div>`;
 }
 
 function byConfigTable(history: BenchRun[]): string {
   const rows = byConfig(history);
   if (rows.length === 0) return "";
-  return `${section(ICON.bench, "By configuration", `<span class="meta">${rows.length === 1 ? "only one measured so far" : "best first"}</span>`)}
-    <div class="card scroll-x">
-      <table class="bench-table">
-        <thead><tr><th>Backends</th><th>Pass rate</th><th class="num">Attempts</th><th class="num">Clean runs</th></tr></thead>
-        <tbody>${rows
-          .map(
-            (r) =>
-              `<tr><td><span translate="no">${esc(r.backends)}</span>` +
-              (r.provider ? ` <span class="badge">${esc(r.provider)}</span>` : "") +
-              `</td><td class="rate">${rateBar(r.passed, r.attempts)}</td>` +
-              `<td class="num">${fmtInt(r.passed)}/${fmtInt(r.attempts)}</td>` +
-              `<td class="num">${fmtInt(r.cleanRuns)}/${fmtInt(r.runs)}</td></tr>`
-          )
-          .join("")}</tbody>
-      </table>
-    </div>`;
+  const body = rows
+    .map(
+      (r) =>
+        `<tr role="row">` +
+        cell(
+          "Backends",
+          `<span translate="no">${esc(r.backends)}</span>` +
+            (r.provider ? ` <span class="badge">${esc(r.provider)}</span>` : "")
+        ) +
+        cell("Pass rate", rateBar(r.passed, r.attempts), "rate") +
+        cell("Attempts", `${fmtInt(r.passed)}/${fmtInt(r.attempts)}`, "num") +
+        cell("Clean runs", `${fmtInt(r.cleanRuns)}/${fmtInt(r.runs)}`, "num") +
+        `</tr>`
+    )
+    .join("");
+  const caption = rows.length === 1 ? "only one measured so far" : "best first";
+  return `${section(ICON.bench, "By configuration", `<span class="meta">${caption}</span>`)}
+    <div class="card">${table(headers("Backends", "Pass rate", "Attempts", "Clean runs"), body, "pairs", "bench-table")}</div>`;
 }
 
 export function benchPage(input: BenchRun[], openIncidents?: number): string {
