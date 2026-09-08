@@ -74,3 +74,85 @@ export function loadBenchHistory(limit = 20, path = HISTORY): BenchRun[] {
   }
   return out.reverse().slice(0, limit);
 }
+
+/**
+ * Pass rate per CASE, across every run in the history, hardest first.
+ *
+ * Borrowed from k8s-ai-bench's task page, including the ordering, which is the part worth
+ * borrowing: a benchmark sorted best-first tells you what already works. Sorted worst-first it
+ * tells you what to do on Monday.
+ *
+ * The rate here is c/n over every attempt ever recorded — their "Overall Pass@1", and a
+ * different question from the pass@1 on a run card. That one asks "did the first attempt of
+ * that run pass"; this asks "of everything this case has ever been given, how much did it
+ * get right". A case that is 1/10 across two runs is a case that does not work, however
+ * flattering either run looked on its own.
+ */
+export interface CaseStat {
+  id: string;
+  passed: number;
+  attempts: number;
+  runs: number;
+}
+
+export function byCase(history: BenchRun[]): CaseStat[] {
+  const acc = new Map<string, CaseStat>();
+  for (const run of history) {
+    for (const [id, marks] of Object.entries(run.marks ?? {})) {
+      const c = acc.get(id) ?? { id, passed: 0, attempts: 0, runs: 0 };
+      c.runs += 1;
+      for (const m of marks) {
+        c.attempts += 1;
+        if (m !== "x") c.passed += 1;
+      }
+      acc.set(id, c);
+    }
+  }
+  return [...acc.values()].sort((a, b) => {
+    const ra = a.attempts ? a.passed / a.attempts : 0;
+    const rb = b.attempts ? b.passed / b.attempts : 0;
+    // Worst first; ties broken by name so the order is stable between renders.
+    return ra !== rb ? ra - rb : a.id < b.id ? -1 : 1;
+  });
+}
+
+/**
+ * The same numbers grouped by what was measured, which is k8s-ai-bench's leaderboard.
+ *
+ * Theirs ranks models; ours ranks CONFIGURATIONS, because a router is not one model and the
+ * thing that changes between runs here is usually the backend list, the ceiling, or the
+ * commit. One row is not a leaderboard — it becomes one the first time a second backend is
+ * measured, and until then it is an honest statement that only one thing has been tried.
+ */
+export interface ConfigStat {
+  backends: string;
+  provider: string | null;
+  runs: number;
+  passed: number;
+  attempts: number;
+  /** The strictest number this configuration has produced: runs where every attempt passed. */
+  cleanRuns: number;
+  lastAt: string;
+}
+
+export function byConfig(history: BenchRun[]): ConfigStat[] {
+  const acc = new Map<string, ConfigStat>();
+  for (const run of history) {
+    const key = run.backends ?? "(unrecorded)";
+    const c = acc.get(key) ?? {
+      backends: key, provider: run.provider, runs: 0, passed: 0, attempts: 0, cleanRuns: 0, lastAt: run.at,
+    };
+    c.runs += 1;
+    if (run.at > c.lastAt) c.lastAt = run.at;
+    if (run.passHatK === 1) c.cleanRuns += 1;
+    for (const marks of Object.values(run.marks ?? {})) {
+      for (const m of marks) {
+        c.attempts += 1;
+        if (m !== "x") c.passed += 1;
+      }
+    }
+    acc.set(key, c);
+  }
+  const rate = (c: ConfigStat) => (c.attempts ? c.passed / c.attempts : 0);
+  return [...acc.values()].sort((a, b) => rate(b) - rate(a));
+}

@@ -8,7 +8,7 @@ import { NAV_COUNT_CAP } from "./queries.js";
 import type {
   FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
 } from "./queries.js";
-import type { BenchRun } from "./bench.js";
+import { byCase, byConfig, type BenchRun } from "./bench.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { Assets } from "./assets.js";
@@ -1580,7 +1580,66 @@ function benchRunCard(run: BenchRun): string {
   </article>`;
 }
 
-export function benchPage(runs: BenchRun[], openIncidents?: number): string {
+// A rate as a bar. The number is already in the row; the bar is what makes twelve rows
+// scannable, which is the whole reason k8s-ai-bench's task page has one.
+const rateBar = (passed: number, attempts: number): string => {
+  const pct = attempts ? Math.round((passed / attempts) * 100) : 0;
+  const tone = pct === 100 ? "ok" : pct >= 50 ? "warn" : "bad";
+  return (
+    `<span class="rate-bar" role="img" aria-label="${pct}% of ${fmtInt(attempts)} attempts">` +
+    `<span class="rate-fill rate-${tone}" style="width:${pct}%"></span></span>` +
+    `<span class="rate-num">${pct}%</span>`
+  );
+};
+
+// Worst first — the ordering is the point, not the table. Sorted best-first a benchmark tells
+// you what already works.
+function byCaseTable(history: BenchRun[]): string {
+  const rows = byCase(history);
+  if (rows.length === 0) return "";
+  return `${section(ICON.incidents, "By case", "<span class=\"meta\">hardest first</span>")}
+    <div class="card scroll-x">
+      <table class="bench-table">
+        <thead><tr><th>Case</th><th>Pass rate</th><th class="num">Attempts</th><th class="num">Runs</th></tr></thead>
+        <tbody>${rows
+          .map(
+            (r) =>
+              `<tr><td><code translate="no">${esc(r.id)}</code></td>` +
+              `<td class="rate">${rateBar(r.passed, r.attempts)}</td>` +
+              `<td class="num">${fmtInt(r.passed)}/${fmtInt(r.attempts)}</td>` +
+              `<td class="num">${fmtInt(r.runs)}</td></tr>`
+          )
+          .join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+function byConfigTable(history: BenchRun[]): string {
+  const rows = byConfig(history);
+  if (rows.length === 0) return "";
+  return `${section(ICON.bench, "By configuration", `<span class="meta">${rows.length === 1 ? "only one measured so far" : "best first"}</span>`)}
+    <div class="card scroll-x">
+      <table class="bench-table">
+        <thead><tr><th>Backends</th><th>Pass rate</th><th class="num">Attempts</th><th class="num">Clean runs</th></tr></thead>
+        <tbody>${rows
+          .map(
+            (r) =>
+              `<tr><td><span translate="no">${esc(r.backends)}</span>` +
+              (r.provider ? ` <span class="badge">${esc(r.provider)}</span>` : "") +
+              `</td><td class="rate">${rateBar(r.passed, r.attempts)}</td>` +
+              `<td class="num">${fmtInt(r.passed)}/${fmtInt(r.attempts)}</td>` +
+              `<td class="num">${fmtInt(r.cleanRuns)}/${fmtInt(r.runs)}</td></tr>`
+          )
+          .join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+export function benchPage(input: BenchRun[], openIncidents?: number): string {
+  // Sorted HERE, not trusted from the caller. The heading says "newest first", and a heading
+  // that depends on someone else having sorted is a heading that will one day be wrong — the
+  // first render of this page had them oldest-first while the label claimed otherwise.
+  const runs = [...input].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const body =
     runs.length === 0
       ? `<div class="card">
@@ -1601,7 +1660,9 @@ export function benchPage(runs: BenchRun[], openIncidents?: number): string {
        what the agent produced. Newest first. ${esc(RATE_NOTE)}</p>
      <p class="meta">Two of the design doc's six axes are implemented — the remediation proposal
        and evidence grounding. A run showing 100% is silent about the other four.</p>
-     ${section(ICON.bench, "Runs")}
+     ${byCaseTable(runs)}
+     ${byConfigTable(runs)}
+     ${section(ICON.overview, "Runs", '<span class="meta">newest first</span>')}
      ${body}
      </div>`,
     { current: "/bench", openIncidents }

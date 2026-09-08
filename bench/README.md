@@ -9,7 +9,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 2 (A02, C01) |
+| cases | 42, tiers A–F | 6 (A01, A02, A03, A10, C01, C02) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 2 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -251,6 +251,18 @@ Two other places, neither of them the record:
 
 **Agent → Benchmark** reads that same file out of the image. No table, no migration, no pool —
 the same contract as the prompt and skill pages, which show what the running process is holding.
+
+Three views, two of them borrowed from k8s-ai-bench's site:
+
+- **By case**, aggregated across every run and sorted **worst first**. That ordering is the
+  borrowed idea, not the table: sorted best-first, a benchmark tells you what already works.
+  The rate is passes over attempts ever recorded — their "Overall Pass@1", and a different
+  question from a run card's pass@1. A case at 3/11 across three runs does not work, however
+  flattering any single run looked.
+- **By configuration**, their leaderboard, ranking what was measured rather than which model:
+  a router is not one model, and what changes between runs here is the backend list, the
+  ceiling or the commit. One row is labelled as one row, not dressed up as a ranking.
+- **Runs**, newest first, each with its marks strip and its failure reasons.
 
 The consequence, and it is on the page: a score pushed after this pod's image was built appears
 on the **next build**. The repo is the record; the dashboard is a view of it as of the image.

@@ -2549,3 +2549,22 @@ test("run metadata is escaped, not interpolated raw", () => {
   assert.match(html, /&lt;img src=x/);
   assert.match(html, /a&amp;b/);
 });
+
+test("the by-case table ranks worst first, and the runs list newest first", () => {
+  const html = benchPage([
+    benchRun({ at: "2026-09-01T00:00:00.000Z", passHatK: 1, marks: { easy: ".....", hard: "xxxxx" }, failures: [] }),
+    benchRun({ at: "2026-09-08T00:00:00.000Z", passHatK: 0, marks: { easy: ".....", hard: "x...x" }, failures: [] }),
+  ]);
+  const cases = [...html.matchAll(/<td><code translate="no">(easy|hard)<\/code><\/td>/g)].map((m) => m[1]);
+  assert.deepEqual(cases, ["hard", "easy"], "sorted best-first, a benchmark says what already works");
+
+  // The heading claims an order; the page must not depend on the caller for it.
+  const rates = [...html.matchAll(/class="bench-rate"[^>]*>(\d+)%/g)].map((m) => m[1]);
+  assert.deepEqual(rates, ["0", "100"], "the newer run has to come first however the caller sorted");
+});
+
+test("one configuration is labelled as one, not presented as a ranking", () => {
+  const html = benchPage([benchRun()]);
+  assert.match(html, /only one measured so far/);
+  assert.doesNotMatch(html, /By configuration[\s\S]{0,200}best first/);
+});

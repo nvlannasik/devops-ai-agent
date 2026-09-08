@@ -1,0 +1,17 @@
+{
+  "id": "A01-crashloop-missing-config-key",
+  "tier": "A",
+  "title": "CrashLoopBackOff, missing config key",
+  "settleSeconds": 20,
+  "groupLabels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "severity": "critical" },
+  "alerts": [
+    {
+      "labels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "container": "api", "severity": "critical" },
+      "annotations": {
+        "summary": "Container api in bench-a01 is restarting in a loop",
+        "description": "Container `api` in namespace `bench-a01` restarted more than 2 times in the last 5 minutes."
+      }
+    }
+  ],
+  "expect": { "action": null }
+}

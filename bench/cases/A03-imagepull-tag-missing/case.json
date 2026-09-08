@@ -1,0 +1,23 @@
+{
+  "id": "A03-imagepull-tag-missing",
+  "tier": "A",
+  "title": "ImagePullBackOff, tag does not exist",
+  "settleSeconds": 20,
+  "groupLabels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "severity": "critical" },
+  "alerts": [
+    {
+      "labels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "container": "web", "severity": "critical" },
+      "annotations": {
+        "summary": "Pod in bench-a03 cannot pull its image",
+        "description": "A container in namespace `bench-a03` is in ImagePullBackOff and has not started."
+      }
+    }
+  ],
+  "expect": {
+    "action": "k8s_set_image",
+    "namespace": "bench-a03",
+    "target": "storefront",
+    "params": { "kind": "deployment" },
+    "changed": { "image": "nginx:no-such-tag-9f2c" }
+  }
+}

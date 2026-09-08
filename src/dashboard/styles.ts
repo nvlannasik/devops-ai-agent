@@ -2129,4 +2129,35 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 .bench-why summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
 .bench-why ul { margin: .4rem 0 0 1rem; padding: 0; font-size: .85rem; color: var(--muted); }
 .bench-why > ul > li { margin-bottom: .35rem; }
+
+/* By-case and by-configuration tables. The bar is what makes a dozen rows scannable; the
+   number stays beside it, because a bar alone cannot be read off precisely and a rate of
+   1/10 and 10/100 look identical drawn. */
+.bench-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.bench-table th { text-align: left; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+                  color: var(--muted); font-weight: 600; padding: 0 .6rem .5rem 0; }
+.bench-table td { padding: .42rem .6rem .42rem 0; border-top: 1px solid var(--line); vertical-align: middle; }
+/* padding-LEFT, not only right: two numeric columns side by side ran their headers together
+   into one word ("ATTEMPTSCLEAN RUNS") with nothing between them. */
+.bench-table th.num, .bench-table td.num { text-align: right; padding: 0 0 .5rem 1.25rem;
+                  font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.bench-table td.num { padding-top: .42rem; padding-bottom: .42rem; }
+.bench-table td.rate { width: 46%; }
+.rate-bar { display: inline-block; vertical-align: middle; width: calc(100% - 3.4rem); max-width: 22rem;
+            height: .5rem; border-radius: 999px; background: var(--line); overflow: hidden; }
+.rate-fill { display: block; height: 100%; border-radius: 999px; }
+.rate-ok { background: var(--ok); }
+.rate-warn { background: var(--warning); }
+.rate-bad { background: var(--critical); }
+.rate-num { display: inline-block; width: 3rem; text-align: right; font-variant-numeric: tabular-nums; }
+/* Scroll rather than reflow. A case id is one token — "A03-imagepull-tag-missing" — and a
+   narrow column breaks it at every hyphen into a five-line stack that is harder to read than
+   a sideways nudge. */
+.scroll-x { overflow-x: auto; }
+.bench-table code { white-space: nowrap; }
+@media (max-width: 40rem) {
+  .bench-table { min-width: 30rem; }
+  .bench-table td.rate { width: auto; }
+  .rate-bar { width: 5rem; }
+}
 `;
