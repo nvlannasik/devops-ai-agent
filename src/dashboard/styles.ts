@@ -1254,7 +1254,11 @@ form.signout button {
    as belonging to the section it opens rather than floating between two. Slack separates these
    with a blank line and nothing else; a blank line is not available to a page that has already
    spent its vertical rhythm on paragraphs, so the rule stands in for it. */
-.rca-sec + .rca-sec { margin-top: var(--sp-7); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+/* --sp-8, not --sp-7: the scale is 1,2,3,4,5,6,8,10,12 and deliberately has no 7, so the
+   original resolved to nothing and these sections had NO top margin — only the padding
+   below carried them apart. Invisible in the CSS, because a var() typo reads exactly like
+   a var() that works. */
+.rca-sec + .rca-sec { margin-top: var(--sp-8); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
 /* A section that opens with a sentence and then tabulates (renderBody's lead) is the one
    adjacency in the RCA that no heading separates: the last line of the lead and the table's
    header row would otherwise sit a single line apart and read as a caption the table swallowed. */
@@ -2105,52 +2109,60 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 /* ---- Benchmark ---- */
 /* pass^k is set large and everything else is meta, because the page has one headline number
    and three that only make sense next to it. */
-.bench-run { display: grid; gap: .7rem; }
-.bench-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1rem; }
-.bench-rate { font-size: 1.9rem; font-weight: 650; line-height: 1; letter-spacing: -.02em; }
+.bench-run { display: grid; gap: var(--sp-3); }
+.bench-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2) var(--sp-4); }
+.bench-rate { font-size: var(--fs-xl); font-weight: 650; line-height: 1; letter-spacing: -.02em; }
 .bench-sub { flex: 1 1 auto; }
-.bench-meta { display: flex; flex-wrap: wrap; gap: .35rem .75rem; align-items: center; }
-.bench-axes { display: flex; flex-wrap: wrap; gap: .4rem; }
-.axis { font-size: .8rem; padding: .12rem .5rem; border-radius: 999px;
-        border: 1px solid var(--line); color: var(--muted); }
+.bench-meta { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); align-items: center; }
+.bench-axes { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.axis { font-size: var(--fs-sm); padding: .15rem var(--sp-2); border-radius: var(--r-pill);
+        border: 1px solid var(--border); color: var(--text-dim); }
 .axis-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
-.bench-cases { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+.bench-cases { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); }
 /* A fixed name column rather than space-between: on a wide screen the marks were flung to the
    far edge, and a reader had to track a blank inch to learn which case they belonged to. The
    column still aligns five attempts under five attempts, which is the reason they were not
    simply placed next to the name. */
 .bench-cases li { display: grid; grid-template-columns: minmax(0, 20rem) auto;
-                  gap: .25rem 1.25rem; align-items: baseline; }
+                  gap: var(--sp-1) var(--sp-5); align-items: baseline; }
 /* Monospace so five attempts line up under five attempts across rows — the shape is the point:
    "xxxx." is a flaky case that finally landed, "...x." is a good one that slipped. */
-.marks { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95rem; letter-spacing: .22em; }
+.marks { font-family: var(--font-data); font-size: var(--fs-base); letter-spacing: .22em; }
 .mk-pass { color: var(--ok); }
 .mk-fail { color: var(--critical); }
-.bench-why summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
-.bench-why ul { margin: .4rem 0 0 1rem; padding: 0; font-size: .85rem; color: var(--muted); }
-.bench-why > ul > li { margin-bottom: .35rem; }
+.bench-why summary { cursor: pointer; color: var(--text-dim); font-size: var(--fs-sm); }
+.bench-why ul { margin: var(--sp-2) 0 0 var(--sp-4); padding: 0; font-size: var(--fs-sm); color: var(--text-dim); }
+.bench-why > ul > li { margin-bottom: var(--sp-2); }
 
 /* By-case and by-configuration tables. The bar is what makes a dozen rows scannable; the
    number stays beside it, because a bar alone cannot be read off precisely and a rate of
    1/10 and 10/100 look identical drawn. */
-.bench-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-.bench-table th { text-align: left; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
-                  color: var(--muted); font-weight: 600; padding: 0 .6rem .5rem 0; }
-.bench-table td { padding: .42rem .6rem .42rem 0; border-top: 1px solid var(--line); vertical-align: middle; }
+.bench-table { width: 100%; border-collapse: collapse; font-size: var(--fs-base); }
+/* EVERY header, not th.num: headers() emits a plain th and the class only ever reaches the
+   cells, so the nowrap and the padding-left written for the numeric columns never touched the
+   header row at all. "Clean runs" wrapped at 73px and took the whole row to two lines with it.
+   Four short labels, so nowrap costs nothing here.
+   And it must be table.bench-table, not .bench-table: it is overriding
+   table[data-stack] th, which is (0,1,2) because the element selectors count — a plain
+   .bench-table th is (0,1,1) and loses however late it appears. */
+table.bench-table th { text-align: left; font-size: var(--fs-xs); letter-spacing: .06em;
+                  text-transform: uppercase; white-space: nowrap;
+                  color: var(--text-dim); font-weight: 600; padding: 0 var(--sp-3) var(--sp-2) 0; }
+.bench-table td { padding: var(--sp-2) var(--sp-3) var(--sp-2) 0; border-top: 1px solid var(--border); vertical-align: middle; }
 /* The bar is decorative once the number beside it is read; the fraction in the next column is
    the accessible statement of the same thing. */
 /* padding-LEFT, not only right: two numeric columns side by side ran their headers together
    into one word ("ATTEMPTSCLEAN RUNS") with nothing between them. */
-.bench-table th.num, .bench-table td.num { text-align: right; padding: 0 0 .5rem 1.25rem;
-                  font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
-.bench-table td.num { padding-top: .42rem; padding-bottom: .42rem; }
+.bench-table th.num, .bench-table td.num { text-align: right; padding: 0 0 var(--sp-2) var(--sp-5);
+                  font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; }
+.bench-table td.num { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 .bench-table td.rate { width: 46%; }
 .rate-bar { display: inline-block; vertical-align: middle; width: calc(100% - 3.4rem); max-width: 22rem;
-            height: .5rem; border-radius: 999px; background: var(--line); overflow: hidden; }
-.rate-fill { display: block; height: 100%; border-radius: 999px; }
-.rate-ok { background: var(--ok); }
-.rate-warn { background: var(--warning); }
-.rate-bad { background: var(--critical); }
+            height: .5rem; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }
+.rate-fill { display: block; height: 100%; border-radius: var(--r-pill); }
+.rate-ok { background: var(--mark-ok); }
+.rate-warn { background: var(--mark-warning); }
+.rate-bad { background: var(--mark-critical); }
 /* nowrap unconditionally: the stacked cell sets overflow-wrap: anywhere so a long case id can
    break, and a percentage inherited it and split between the digits and the sign. "20" over
    "%" is not a smaller number, it is a broken one. */

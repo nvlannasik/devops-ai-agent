@@ -2594,3 +2594,43 @@ test("both aggregate tables are built with the shared table helpers", () => {
   assert.match(html, /<th role="columnheader">Pass rate<\/th>/);
   assert.match(html, /<td role="cell" class="num" data-label="Attempts">/);
 });
+
+// The Benchmark page shipped written against ANOTHER design system's token names: --muted used
+// five times and --line three, neither defined anywhere. A colour that resolves to nothing
+// falls back to inherited (so dimmed text was not dim) and a border that resolves to nothing is
+// an invalid declaration (so the table had no row separators at all). Both measured in the
+// browser before the fix; neither is visible from reading the CSS, because a var() typo looks
+// exactly like a var() that works.
+//
+// Whole-stylesheet, not bench-specific: this is a class of bug, and the next page written from
+// a different set of habits would reintroduce it somewhere else.
+test("every custom property the stylesheet reads is one it also defines", () => {
+  // NOT anchored to the line start: the token block declares several per line
+  // (--sp-1: .25rem; --sp-2: .5rem; …) and an anchored pattern sees only the first of each,
+  // which reports 200 false positives and hides the real ones.
+  const defined = new Set([...STYLES.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]!));
+  assert.ok(defined.size > 40, `expected the token block, found ${defined.size}`);
+
+  const missing = new Map<string, number>();
+  // Bare var(--x) only. var(--x, fallback) is a deliberate choice — the fallback IS the value
+  // when the token is absent — so it is not a typo and not counted.
+  for (const m of STYLES.matchAll(/var\((--[\w-]+)\s*\)/g)) {
+    const name = m[1]!;
+    if (!defined.has(name)) missing.set(name, (missing.get(name) ?? 0) + 1);
+  }
+  assert.deepEqual(
+    [...missing],
+    [],
+    `these resolve to nothing: a colour falls back to inherited, a border becomes invalid`
+  );
+});
+
+// headers() emits a plain <th> and only cell() carries a class, so th.num matched nothing and
+// the nowrap written for the numeric columns never reached the header row. "Clean runs" wrapped
+// at 73px and took all four headers to two lines with it (46px against the sibling table's 26).
+// The selector must out-specify table[data-stack] th, which is (0,1,2) BECAUSE the element
+// selectors count — a plain .bench-table th is (0,1,1) and loses however late it is written.
+test("the benchmark header row out-specifies the stacked-table rule it overrides", () => {
+  assert.match(STYLES, /table\.bench-table th \{[^}]*white-space: nowrap/);
+  assert.doesNotMatch(STYLES, /^\.bench-table th \{/m, "a bare .bench-table th cannot win");
+});
