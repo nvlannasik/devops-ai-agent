@@ -184,10 +184,17 @@ async function main(): Promise<void> {
   // this machine. Committed and pushed straight away unless --no-push: a score that needs a
   // second manual step is a score that stops being recorded the first busy week.
   const history = join(RESULTS_DIR, "history.jsonl");
-  appendHistory(history, { meta, rates, axes, runs });
-  console.log(`history line appended: ${history}`);
-  if (has("no-push")) console.log("--no-push: commit bench/results/history.jsonl yourself to keep the score");
-  else publishHistory(history);
+  if (has("no-push")) {
+    // Skips the APPEND too, not just the push. The only reason to pass this is that the run is
+    // not one you want kept — a dry run with a deliberately unusable key, a half-finished case.
+    // Recording it and leaving it uncommitted just moves the cleanup to whoever commits next,
+    // which is how a 0% from a bad API key ended up in this file's own history.
+    console.log("--no-push: this run was not recorded");
+  } else {
+    appendHistory(history, { meta, rates, axes, runs });
+    console.log(`history line appended: ${history}`);
+    publishHistory(history);
+  }
 
   // Non-zero on any inconsistency, so this can gate CI without a second script deciding what
   // "good" means. pass^k, not pass@k — see above.
