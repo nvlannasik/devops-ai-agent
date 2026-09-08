@@ -213,4 +213,12 @@ test("a history line is one JSON object per run, with what produced the number",
   // The RCA text is deliberately absent: one run is tens of kilobytes of it.
   assert.ok(!("detail" in first) && !("rca" in first));
   assert.ok(lines[0]!.length < 700, "a history line has to stay small enough to read in a diff");
+
+  // The unbounded part is a reason that quotes the model's raw output.
+  const long = join(mkdtempSync(join(tmpdir(), "bench-")), "history.jsonl");
+  appendHistory(long, { meta, rates, axes: {}, runs: [
+    { task: "A02", attempts: [{ pass: false, reasons: ["x".repeat(5000)] }] },
+  ] });
+  const only = JSON.parse(readFileSync(long, "utf8").trim());
+  assert.ok(only.failures[0].reasons[0].length < 200, "an unbounded reason has to be cut, or the line stops being diffable");
 });

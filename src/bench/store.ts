@@ -9,8 +9,12 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { config } from "../config/index.js";
+import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import type { TaskRun } from "./score.js";
+
+// Long enough to keep the diagnosis, short enough that a line stays one line.
+const REASON_CHARS = 160;
 
 export interface RunMeta {
   gitSha: string | null;
@@ -97,7 +101,14 @@ export function appendHistory(
   for (const r of input.runs) {
     marks[r.task] = r.attempts.map((a) => (a.pass ? "." : "x")).join("");
     r.attempts.forEach((a, i) => {
-      if (!a.pass) failures.push({ case: r.task, attempt: i + 1, reasons: a.reasons });
+      // Reasons are truncated because one of them quotes the model's raw output, which is
+      // unbounded. A real two-case line is already ~900 characters; a twelve-case suite with
+      // the same failure rate would run to several kilobytes and stop being a thing anyone
+      // reads in a diff, which is the only reason it is in git. The full text is in the
+      // transcript the runner writes beside it.
+      if (!a.pass) {
+        failures.push({ case: r.task, attempt: i + 1, reasons: a.reasons.map((x) => truncate(x, REASON_CHARS)) });
+      }
     });
   }
 
