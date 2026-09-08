@@ -295,3 +295,34 @@ test("the previous turn is optional — the old three-argument calls still gate 
   assert.equal(worthProposing("status check", ALL_GREEN, false).propose, false);
   assert.equal(worthProposing("restart the deployment", "ok", false).propose, true);
 });
+
+// Both strings below are verbatim model output from a benchmark run, not invented: two of
+// seven failures were this, and every other field in them was correct.
+test("a field the model explicitly declined to set does not void the proposal", () => {
+  const a02 =
+    '{"action":"k8s_set_resources","namespace":"bench-a02","workload":"backend-api","kind":"deployment",' +
+    '"container":"api-server","cpu_request":null,"memory_request":"128Mi","cpu_limit":null,' +
+    '"memory_limit":"256Mi","reason":"OOMKilled on api-server due to memory limit (128Mi)."}';
+  const p = parseProposal(a02);
+  assert.ok(p, "an explicit null in cpu_request rejected the whole object");
+  assert.equal(p!.action, "k8s_set_resources");
+  assert.equal(p!.name, "backend-api");
+  assert.equal(p!.toolParams.memory_limit, "256Mi");
+  // toolParams goes straight to the MCP server — a null forwarded as a value is the same bug
+  // one layer down.
+  assert.ok(!("cpu_request" in p!.toolParams) && !("cpu_limit" in p!.toolParams));
+});
+
+test("null does not rescue a proposal that had nothing else", () => {
+  // .refine() still requires at least one resource field; nulls must not count as set.
+  assert.equal(
+    parseProposal('{"action":"k8s_set_resources","namespace":"n","workload":"w","kind":"deployment","cpu_limit":null,"memory_limit":null}'),
+    null
+  );
+});
+
+test("null is stripped for every action, not only set_resources", () => {
+  const p = parseProposal('{"action":"k8s_rollout_restart","namespace":"n","workload":"w","kind":null}');
+  assert.ok(p, "a null kind on a field that is optional anyway must not void the restart");
+  assert.equal(p!.toolParams.kind, "deployment", "and the default still applies");
+});

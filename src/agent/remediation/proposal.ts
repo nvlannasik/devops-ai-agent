@@ -53,6 +53,16 @@ export function parseProposal(text: string): Proposal | null {
   // K8s convention writes kinds capitalized ("Deployment") — a correct proposal was once
   // dropped over the D. Normalize before the case-sensitive zod enums.
   if (typeof raw.kind === "string") raw.kind = raw.kind.toLowerCase();
+  // An explicit null is the model saying "not this field", and .optional() accepts undefined
+  // but not null — so the whole proposal was rejected over a field it had declined to set.
+  // Measured, not theorised: two of seven benchmark failures were this, and both carried a
+  // correct action, namespace, workload, kind, container and memory_limit alongside
+  // `"cpu_request": null, "cpu_limit": null`.
+  //
+  // Deleted rather than made nullable in each schema: null and absent have to mean the SAME
+  // thing here, and toolParams goes straight to the MCP server — a null forwarded as a value
+  // is a different bug one layer down. One place, all five action shapes.
+  for (const [k, v] of Object.entries(raw)) if (v === null) delete raw[k];
   const reason = typeof raw.reason === "string" && raw.reason.trim() ? raw.reason.trim() : "proposed by the agent after RCA";
 
   switch (raw.action) {
