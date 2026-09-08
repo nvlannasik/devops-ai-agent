@@ -151,4 +151,10 @@ graphify-out/
 .claude/
 # agent builder gap-probe output (generated payloads + raw responses)
 docs/examples/a2a/gap-responses/
-bench/results/
+# The CONTENTS, not the directory: git will not re-include a file whose parent directory is
+# excluded, so `bench/results/` here would make the negation below silently do nothing.
+bench/results/*
+# The one-line-per-run score history is the point of keeping any of this in git:
+# `git log -p bench/results/history.jsonl` shows when the number moved and what moved with it.
+# The transcripts beside it stay ignored — one run is tens of kilobytes of RCA text.
+!bench/results/history.jsonl

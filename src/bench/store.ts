@@ -5,6 +5,8 @@
 // transcript is always written; this is the copy that outlives the terminal.
 
 import type { Pool } from "pg";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
@@ -92,4 +94,38 @@ export async function saveBenchRun(
     logger.error(`[bench] could not store the run (the JSON transcript is still written): ${errDetail(err)}`);
     return null;
   }
+}
+
+/**
+ * One line per run, appended to a file that IS committed — the transcripts beside it are not.
+ *
+ * The dashboard answers "did the score move" for anyone with cluster access; this answers it
+ * for anyone with the repo, survives the database, and ties a score to the commit that earned
+ * it. `git log -p bench/results/history.jsonl` is the whole feature: it shows when the number
+ * changed and, in the commits around it, what changed with it.
+ *
+ * JSONL rather than a table or a JSON array: appending is a one-line diff that never conflicts
+ * with another append, which is what makes it safe for CI to write on a schedule while a human
+ * writes from a laptop. A JSON array would rewrite the closing bracket on every run and
+ * conflict on every parallel one.
+ *
+ * The transcript is NOT in here. A run's RCA text is tens of kilobytes and belongs in the file
+ * the runner already writes; what a reader wants from git is the number and what produced it.
+ */
+export function appendHistory(path: string, input: { meta: RunMeta; rates: { tasks: number; k: number; pass1: number; passK: number; passHatK: number }; axes: Record<string, [number, number]> }): void {
+  const line = JSON.stringify({
+    at: new Date().toISOString(),
+    sha: input.meta.gitSha,
+    provider: input.meta.provider,
+    backends: input.meta.backends,
+    maxTokens: input.meta.maxTokens,
+    cases: input.rates.tasks,
+    attempts: input.rates.k,
+    pass1: Number(input.rates.pass1.toFixed(3)),
+    passK: Number(input.rates.passK.toFixed(3)),
+    passHatK: Number(input.rates.passHatK.toFixed(3)),
+    axes: input.axes,
+  });
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, line + "\n");
 }

@@ -210,6 +210,46 @@ Every failure records why (`action X, expected Y`), and the full RCA and proposa
 attempt land in `bench/results/<timestamp>.json`. A bare number tells you the agent regressed,
 never what to look at.
 
+## Where a score goes
+
+Four places, and each answers a different question.
+
+| | question it answers | lifetime |
+|---|---|---|
+| stdout | what did this run do | the terminal |
+| `bench/results/<timestamp>.json` | *why* — every RCA, proposal and raw model output | that machine |
+| `bench/results/history.jsonl` | did the number move, and with which commit | **git** |
+| Dashboard → Benchmark | did the number move, for anyone with cluster access | Postgres |
+
+`history.jsonl` is the only file in `bench/results/` that is not gitignored, and it is one JSON
+object per run — the rates, the axes, and what produced them. `git log -p
+bench/results/history.jsonl` is the whole feature: it shows when the score changed and, in the
+commits around it, what changed with it. Appending is a one-line diff that never conflicts with
+another append, so CI and a laptop can both write it.
+
+The transcript is deliberately not in there. One run is tens of kilobytes of RCA text, and what
+a reader wants from git is the number and its provenance.
+
+The dashboard row is written only when `DB_HOST` is set, and best-effort: the score is printed
+and written to disk before the insert is attempted, so an unreachable database costs a row and
+not the run.
+
+## Automatically
+
+`.github/workflows/benchmark.yml` runs it weekly and on demand, against a throwaway kind
+cluster, and commits the history line back — including when the score is bad. A run that scored
+badly is exactly the one worth keeping; dropping it because the gate went red would erase the
+regression from the history that exists to show regressions.
+
+It needs one repository secret, `OPENAI_KEY`.
+
+**It measures the direct backend, not the shipped router.** No SQS in CI means no
+`private-llm-*`, which is what answers first in production's heavy chain. That is deliberate:
+a scheduled job reaching into the real cluster would inject faults on a schedule and page
+whoever is on call. CI catches prompt, format and parser drift cheaply and often; measuring the
+router you actually ship stays a manual Path B run.
+
+
 ## What this cannot measure yet
 
 - **Four of the six scoring axes.** Proposal and evidence grounding are checked. Root cause,

@@ -1,0 +1,121 @@
+# Scheduled benchmark, recorded in git.
+#
+# WHAT THIS MEASURES, AND WHAT IT DOES NOT. It runs against a throwaway kind cluster with the
+# MCP server pointed at it and ONE direct backend. It does not exercise the SQS path, so it says
+# nothing about `private-llm-*` — the backends that actually answer first in production's heavy
+# chain. That is deliberate: a scheduled job that reaches into the real cluster would inject
+# faults on a schedule and page whoever is on call. This catches prompt, format and parser
+# regressions cheaply and often; measuring the shipped router is a manual Path B run
+# (bench/README.md).
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempts:
+        description: "Attempts per case. 1 is a smoke test; 5 is the first number that says anything about consistency."
+        default: "5"
+      filter:
+        description: "Regex on the case id, e.g. ^A to run tier A only. Empty runs every enabled case."
+        default: ""
+  schedule:
+    # Weekly, not nightly. Every run spends real tokens, and the thing being watched — prompt
+    # and parser drift — moves at the speed of commits, not of hours.
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: bench
+
+      - name: MCP server against that cluster
+        env:
+          # Per-run, so a leaked log line from one run cannot authenticate to the next.
+          MCP_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          echo "MCP_TOKEN=$MCP_TOKEN" >> "$GITHUB_ENV"
+          # --network host because kind's kubeconfig points the API server at 127.0.0.1 on the
+          # RUNNER; from inside a bridged container that address is the container itself.
+          docker run -d --name mcp --network host \
+            -v "$HOME/.kube:/root/.kube:ro" \
+            -e TRANSPORT=http -e PORT=3000 \
+            -e MCP_AUTH_TOKEN="$MCP_TOKEN" \
+            -e K8S_AUTH_MODE=kubeconfig -e K8S_KUBECONFIG_PATH=/root/.kube/config \
+            docker.io/nvlannasik/devops-mcp-server:latest
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -XPOST http://localhost:3000/mcp -d '{}' || true)
+            # 401 is the server answering — it is up and the auth gate is on, which is the
+            # only thing this loop needs to know.
+            [ "$code" = "401" ] && { echo "mcp up"; break; }
+            sleep 2
+          done
+          curl -sf -o /dev/null -XPOST http://localhost:3000/mcp -d '{}' -w '%{http_code}\n' || true
+
+      - name: run the benchmark
+        id: bench
+        continue-on-error: true
+        env:
+          MCP_TRANSPORT: http
+          MCP_HTTP_URL: http://localhost:3000/mcp
+          MCP_AUTH_TOKEN: ${{ env.MCP_TOKEN }}
+          LLM_PROVIDER: openai-compatible
+          OPENAI_COMPATIBLE_BASE_URL: https://api.openai.com/v1
+          OPENAI_COMPATIBLE_MODEL: gpt-5-nano-2025-08-07
+          OPENAI_COMPATIBLE_API_KEY: ${{ secrets.OPENAI_KEY }}
+        run: |
+          npm run bench -- --attempts "${{ inputs.attempts || 5 }}" \
+            ${{ inputs.filter && format('--filter {0}', inputs.filter) || '' }}
+
+      - name: mcp logs on failure
+        if: steps.bench.outcome != 'success'
+        run: docker logs mcp --tail 100 || true
+
+      # ALWAYS, and before the job is allowed to fail. A run that scored badly is exactly the
+      # run whose number is worth keeping — dropping it because the gate went red would erase
+      # the regression from the history that exists to show regressions.
+      - name: record the score
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- bench/results/history.jsonl; then
+            echo "no new history line — the run did not get far enough to score"
+            exit 0
+          fi
+          git add bench/results/history.jsonl
+          git commit -m "chore(bench): score from run ${{ github.run_id }}
+
+          $(tail -1 bench/results/history.jsonl)"
+          # Rebase rather than force: this file is append-only and two appends never touch the
+          # same line, so a concurrent push from a laptop resolves without a decision.
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin HEAD:"${{ github.ref_name }}"
+
+      - name: fail if the score is not clean
+        if: steps.bench.outcome != 'success'
+        run: |
+          echo "The benchmark exited non-zero: pass^k is below 100%. The score is recorded above." >&2
+          exit 1

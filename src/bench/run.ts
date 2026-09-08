@@ -23,7 +23,7 @@ import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } fr
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, type Score, type TaskRun } from "./score.js";
-import { axisTally, runMeta, saveBenchRun } from "./store.js";
+import { appendHistory, axisTally, runMeta, saveBenchRun } from "./store.js";
 import { createPool } from "../db/pool.js";
 import { config } from "../config/index.js";
 import { parseRegistry } from "../agent/llm/registry.js";
@@ -180,6 +180,12 @@ async function main(): Promise<void> {
   const out = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
   writeFileSync(out, JSON.stringify({ meta, rates, axes, runs, detail }, null, 2));
   console.log(`full transcript: ${out}`);
+
+  // The one file in bench/results/ that is NOT gitignored. Committing it is what gives the
+  // score a history that outlives this machine and this database.
+  const history = join(RESULTS_DIR, "history.jsonl");
+  appendHistory(history, { meta, rates, axes });
+  console.log(`history line appended: ${history} — commit it to keep the score`);
 
   // Best effort, and last: the score is already printed and written, so a database that is not
   // reachable from wherever this ran costs a row, not the run.

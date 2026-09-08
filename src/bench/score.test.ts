@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { appendHistory } from "./store.js";
 import { scoreProposal, scoreGrounding, combine, passRates, parseQuantity, type Expectation, type TaskRun } from "./score.js";
 import type { Proposal } from "../agent/remediation/proposal.js";
 
@@ -173,4 +177,26 @@ test("a null proposal reports what the model actually returned", () => {
 
   assert.match(scoreProposal({ action: "k8s_scale" }, null, "   ").reasons[0]!, /model returned nothing/);
   assert.match(scoreProposal({ action: "k8s_scale" }, null).reasons[0]!, /model returned nothing/);
+});
+
+// ---- history line -------------------------------------------------------------------------
+
+test("a history line is one JSON object per run, with what produced the number", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "bench-")), "history.jsonl");
+  const meta = { gitSha: "abc123-dirty", provider: "router", backends: "a (m1), b (m2)", maxTokens: 8096 };
+  const rates = { tasks: 2, k: 5, pass1: 1 / 3, passK: 1, passHatK: 0 };
+  appendHistory(path, { meta, rates, axes: { proposal: [6, 10] } });
+  appendHistory(path, { meta, rates: { ...rates, passHatK: 1 }, axes: { proposal: [10, 10] } });
+
+  const lines = readFileSync(path, "utf8").trim().split("\n");
+  assert.equal(lines.length, 2, "appends must not rewrite the file — that is what makes it merge-safe");
+  const first = JSON.parse(lines[0]!);
+  assert.equal(first.sha, "abc123-dirty");
+  assert.equal(first.backends, "a (m1), b (m2)");
+  assert.equal(first.maxTokens, 8096);
+  assert.equal(first.pass1, 0.333, "rates are rounded, or a float tail makes every diff noisy");
+  assert.deepEqual(first.axes, { proposal: [6, 10] });
+  assert.equal(JSON.parse(lines[1]!).passHatK, 1);
+  // The transcript is deliberately absent: a run's RCA text is tens of kilobytes.
+  assert.ok(!("detail" in first) && !("rca" in first));
 });
