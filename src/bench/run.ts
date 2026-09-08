@@ -54,7 +54,7 @@ function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
 const textOf = (content: Array<{ type: string; text?: string }>): string =>
   content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
 
-async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null; ungrounded: string[] }> {
+async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null; proposalRaw: string; ungrounded: string[] }> {
   // A fresh thread per attempt. Sharing one would let attempt 2 read attempt 1's conclusion out
   // of conversation memory and score the memory rather than the model.
   const threadId = `bench-${task.id}-${n}-${Date.now()}`;
@@ -69,18 +69,25 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
       [],
       PROPOSAL_SYSTEM
     );
-    const proposal = parseProposal(textOf(res.content as Array<{ type: string; text?: string }>));
+    // The RAW text, kept whether or not it parsed. parseProposal returning null is three
+    // different failures wearing one face — the model judged that no whitelisted action fits
+    // ({"action": null}), or it emitted prose the brace match mangled, or zod rejected a field
+    // — and they need three different fixes. Without this the first live 5-attempt run could
+    // only report "no proposal" four times and could not say which.
+    const proposalRaw = textOf(res.content as Array<{ type: string; text?: string }>);
+    const proposal = parseProposal(proposalRaw);
     return {
-      score: combine(scoreProposal(task.expect, proposal), scoreGrounding(ungrounded)),
+      score: combine(scoreProposal(task.expect, proposal, proposalRaw), scoreGrounding(ungrounded)),
       rca,
       proposal,
+      proposalRaw,
       ungrounded,
     };
   } catch (err) {
     // A crashed attempt is a failed attempt, not a crashed run: the other tasks still have
     // something to say, and hiding this one behind an exception would inflate every rate.
     const msg = err instanceof Error ? err.message : String(err);
-    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null, ungrounded: [] };
+    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null, proposalRaw: "", ungrounded: [] };
   } finally {
     await agent.clearThread(threadId).catch(() => {});
   }
@@ -107,6 +114,7 @@ async function main(): Promise<void> {
       let score: Score;
       let rca = "";
       let proposal: Proposal | null = null;
+      let proposalRaw = "";
       let ungrounded: string[] = [];
       try {
         // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
@@ -115,7 +123,7 @@ async function main(): Promise<void> {
         // behind on the cluster.
         hook(task, "setup.sh");
         if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
-        ({ score, rca, proposal, ungrounded } = await attempt(agent, llm, task, n));
+        ({ score, rca, proposal, proposalRaw, ungrounded } = await attempt(agent, llm, task, n));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
@@ -124,7 +132,7 @@ async function main(): Promise<void> {
       }
       logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
       scores.push(score);
-      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, rca });
+      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, rca });
     }
     runs.push({ task: task.id, attempts: scores });
   }

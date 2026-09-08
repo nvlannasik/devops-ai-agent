@@ -107,7 +107,7 @@ export function combine(...scores: Score[]): Score {
 
 const str = (v: unknown): string | undefined => (v === undefined || v === null ? undefined : String(v));
 
-export function scoreProposal(expect: Expectation, proposal: Proposal | null): Score {
+export function scoreProposal(expect: Expectation, proposal: Proposal | null, raw?: string): Score {
   const reasons: string[] = [];
 
   const axed = (pass: boolean, reasons: string[]): Score => ({ pass, reasons, axes: { proposal: pass } });
@@ -117,7 +117,15 @@ export function scoreProposal(expect: Expectation, proposal: Proposal | null): S
       ? axed(false, [`proposed ${proposal.action} on ${proposal.namespace}/${proposal.name}, but the correct answer is no proposal`])
       : axed(true, []);
   }
-  if (!proposal) return axed(false, [`no proposal; expected ${expect.action}`]);
+  // The raw text goes in the reason, truncated: "no proposal" four times in a row is a symptom
+  // with three possible causes, and the transcript is where you find out which.
+  if (!proposal) {
+    const seen = raw?.trim();
+    return axed(false, [
+      `no proposal; expected ${expect.action}` +
+        (seen ? ` — model returned ${seen.length} chars: ${JSON.stringify(seen.slice(0, 200))}` : " (model returned nothing)"),
+    ]);
+  }
 
   if (proposal.action !== expect.action) reasons.push(`action ${proposal.action}, expected ${expect.action}`);
   if (expect.namespace && proposal.namespace !== expect.namespace) {

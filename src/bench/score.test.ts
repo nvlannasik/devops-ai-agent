@@ -161,3 +161,16 @@ test("combine keeps every axis's reasons and reports each axis separately", () =
 test("combine of nothing is a pass, so a run with no axes cannot fail silently", () => {
   assert.deepEqual(combine(), { pass: true, reasons: [], axes: {} });
 });
+
+test("a null proposal reports what the model actually returned", () => {
+  // Four "no proposal" lines in the first live run said nothing about WHY. These are the three
+  // causes, and they need three different fixes.
+  const declined = scoreProposal({ action: "k8s_scale" }, null, '{"action": null}');
+  assert.match(declined.reasons[0]!, /model returned 16 chars: "\{\\"action\\": null\}"/);
+
+  const prose = scoreProposal({ action: "k8s_scale" }, null, "I would scale it, but I am not sure.");
+  assert.match(prose.reasons[0]!, /I would scale it/);
+
+  assert.match(scoreProposal({ action: "k8s_scale" }, null, "   ").reasons[0]!, /model returned nothing/);
+  assert.match(scoreProposal({ action: "k8s_scale" }, null).reasons[0]!, /model returned nothing/);
+});
