@@ -209,7 +209,17 @@ export function parseRca(raw: string): Rca | null {
       const t = line.trim();
       const f = FIELD.exec(t);
       if (f) {
-        fields.push({ label: clean(f[1]), value: f[2].trim() });
+        // `*[🟡 Severity:* \`Medium\`]*` — the model wrapped the whole LINE in brackets, a
+        // fifth shape found by the benchmark on its first successful live run. The opening
+        // bracket is absorbed into the label and `clean()` drops it; without this the closing
+        // one rides along in the value and the verdict strip renders "`Medium`]*".
+        //
+        // Conditioned on the label actually opening a bracket, so a value that legitimately
+        // ends in `]` keeps it. Fixed here rather than by trying VERDICT_FIELD first: that
+        // ordering also works, but VERDICT_FIELD strips the backticks FIELD keeps, which
+        // silently changes the rendered shape of every Severity that was already parsing.
+        const bracketed = f[1].includes("[");
+        fields.push({ label: clean(f[1]), value: (bracketed ? f[2].replace(/\]\**$/, "") : f[2]).trim() });
         continue;
       }
       // Before HEADING, because one of the observed shapes IS a whole-line bold span

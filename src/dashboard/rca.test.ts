@@ -471,3 +471,40 @@ test("a verdict label with no value on its line stays a heading", () => {
     "an empty Confidence field was pushed into the strip"
   );
 });
+
+// Found by bench/cases/C01 on the first successful live run: the model wrapped the whole
+// Severity line in brackets, a fifth shape on top of the four in the VERDICT_FIELD comment.
+// FIELD matched it, `(.+)$` swallowed the closing bracket, and the verdict strip rendered
+// "`Medium`]*".
+test("a Severity line wrapped in brackets does not carry the bracket into its value", () => {
+  const rca = [
+    "*[🟡 Severity:* `Medium`]*",
+    "",
+    "*⚡ TL;DR*",
+    "bench-c01/web — pods report Ready; the alert is stale.",
+    "",
+    "*📍 Root Cause*",
+    "1. Alert fired on a stale readiness sample — _k8s_describe_pod_ `bench-c01/web`",
+    "",
+    "*📈 Confidence:* `Low` — the current snapshot is healthy",
+  ].join("\n");
+  const sev = parseRca(rca)?.fields.find((f) => f.label === "Severity");
+  assert.equal(sev?.value, "`Medium`", "the closing bracket rode along into the value");
+});
+
+test("a value that legitimately ends in a bracket keeps it", () => {
+  // The fix is conditioned on the LABEL opening a bracket, so an unbracketed label is untouched.
+  const rca = [
+    "*🔴 Severity:* `Critical`",
+    "",
+    "*⚡ TL;DR*",
+    "x",
+    "",
+    "*📍 Root Cause*",
+    "1. y — _tool_ `ns/res`",
+    "",
+    "*📈 Confidence:* High [see runbook]",
+  ].join("\n");
+  const conf = parseRca(rca)?.fields.find((f) => f.label === "Confidence");
+  assert.equal(conf?.value, "High [see runbook]");
+});
