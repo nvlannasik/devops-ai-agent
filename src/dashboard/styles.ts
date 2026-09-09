@@ -2158,15 +2158,25 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 /* Asymmetric on purpose: the disclosure belongs to the case ABOVE it, and at an even margin it
    sat equidistant between that case and the next one — reading as attached to both. Proximity
    is the only thing saying which case it explains. */
-.case-why { grid-column: 1 / -1; margin: 0 0 var(--sp-3); font-size: var(--fs-sm); }
+/* width 0 with min-width 100%, and it is not a trick for its own sake: a grid item that SPANS
+   intrinsic tracks contributes its own max-content to sizing them, so once the reasons stopped
+   wrapping at 68ch the longest one dragged the case-name track from 302px to 684 and pushed
+   every marks strip to the middle of the card. Zero width contributes nothing to that
+   calculation; min-width then lays it back out across the full span it was given. */
+.case-why { grid-column: 1 / -1; width: 0; min-width: 100%;
+            margin: 0 0 var(--sp-3); font-size: var(--fs-sm); }
 /* padding-block, not decoration: at --fs-sm the summary's own box is 20px and WCAG 2.2 SC
    2.5.8 puts the floor for a pointer target at 24. It is the full row wide, so height is the
    only axis that was short. */
 .case-why > summary { color: var(--text-dim); padding-block: var(--sp-1); }
 /* The rule sits on the list, not the disclosure, so it draws only what is revealed — a
-   2px bar hanging under a closed summary marks nothing. */
+   2px bar hanging under a closed summary marks nothing.
+   No max-width, by decision: the reasons run the full width of the card. The 68ch that was
+   here is the measure the prose blocks keep, and holding it left the text ending around 500px
+   inside a 1321px card. A reason is a diagnostic line scanned for a resource name or an
+   action, not a paragraph read through, which is what makes the trade a reasonable one. */
 .case-why ul { list-style: none; margin: var(--sp-2) 0 0; padding: 0 0 0 var(--sp-3);
-               max-width: 68ch; border-left: 2px solid var(--border);
+               border-left: 2px solid var(--border);
                color: var(--text-dim); overflow-wrap: anywhere; }
 .case-why li + li { margin-top: var(--sp-1); }
 /* The attempt numbers are the join back to the marks strip above — same face, so "#2" here and

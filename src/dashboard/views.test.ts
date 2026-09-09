@@ -2690,6 +2690,16 @@ test("display: contents does not leak into the nested reason list", () => {
   assert.doesNotMatch(STYLES, /\.bench-cases li \{ display: contents/);
 });
 
+// The reasons run the full width of the card by decision, so there is no max-width to hold —
+// but removing it exposed a grid rule that is invisible in the stylesheet: an item SPANNING
+// intrinsic tracks contributes its own max-content to sizing them, so the longest reason
+// dragged the case-name track from 221px to 684 and pushed every marks strip into the middle
+// of the card. width: 0 contributes nothing; min-width: 100% lays it back out across the span.
+test("the reasons fill the card without sizing the case-name column", () => {
+  assert.doesNotMatch(STYLES, /\.case-why ul \{[^}]*max-width/);
+  assert.match(STYLES, /\.case-why \{[^}]*width: 0; min-width: 100%/);
+});
+
 // Nothing spaced the run cards: main > * + * reaches .doc, not what is inside it, so two
 // consecutive cards met at a gap of exactly 0 and their borders read as one line through a
 // single box. Silent and total — the page looked deliberate, just wrong.
