@@ -1,0 +1,32 @@
+{
+  "id": "A05-pending-insufficient-cpu",
+  "tier": "A",
+  "title": "Pod Pending, insufficient CPU",
+  "settleSeconds": 15,
+  "groupLabels": {
+    "alertname": "KubernetesPodNotScheduled",
+    "namespace": "bench-a05",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodNotScheduled",
+        "namespace": "bench-a05",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod in bench-a05 has been Pending for 10 minutes",
+        "description": "A pod in namespace `bench-a05` is `Pending` and has not been scheduled onto any node."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "insufficient cpu|cpu (yang )?(tidak|kurang|belum)|kekurangan cpu|cpu tidak (cukup|mencukupi|tersedia)"
+      ]
+    }
+  }
+}

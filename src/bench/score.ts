@@ -42,6 +42,20 @@ export interface Expectation {
    * "129Mi" both differ from the broken 128Mi; only one of them stops the OOM.
    */
   greaterThan?: Record<string, string>;
+  /**
+   * Phrases the RCA text must (or must not) contain, as case-insensitive regex sources.
+   *
+   * The third axis, and the one the catalog is mostly written in: A04 and A03 fire the SAME
+   * alert with the same symptom and differ only in what the RCA says ("401 Unauthorized" vs
+   * "tag does not exist"), and A06's whole point is that it must not repeat A05's answer.
+   * Scored on the proposal alone those pairs are indistinguishable — both correctly propose
+   * nothing — so a suite without this axis would report them as passes and never see a model
+   * that pattern-matches the alert name.
+   *
+   * Regex rather than substrings because the agent writes prose in two languages: one entry
+   * has to admit "image pull secret", "imagePullSecrets" and "kredensial registry".
+   */
+  rca?: { must?: string[]; mustNot?: string[] };
 }
 
 // Kubernetes quantity -> a number in base units. Binary and decimal suffixes mean different
@@ -94,6 +108,26 @@ export function scoreGrounding(names: string[]): Score {
         reasons: [`grounding: the RCA names ${names.length} resource(s) no tool result contained — ${names.join(", ")}`],
         axes: { grounding: false },
       };
+}
+
+/**
+ * The RCA-text axis. Absent spec -> passes and declares NO axis, so a case that does not use it
+ * leaves the tally alone rather than padding it with free points.
+ *
+ * A `must` entry is quoted in the failure reason; a `mustNot` entry reports what it matched, so
+ * "said the tag does not exist" is legible without opening the transcript.
+ */
+export function scoreRca(spec: Expectation["rca"], rca: string): Score {
+  if (!spec) return { pass: true, reasons: [] };
+  const reasons: string[] = [];
+  for (const src of spec.must ?? []) {
+    if (!new RegExp(src, "i").test(rca)) reasons.push(`RCA never says /${src}/i — the fact this case turns on`);
+  }
+  for (const src of spec.mustNot ?? []) {
+    const hit = new RegExp(src, "i").exec(rca);
+    if (hit) reasons.push(`RCA says ${JSON.stringify(hit[0])}, which /${src}/i forbids for this case`);
+  }
+  return { pass: reasons.length === 0, reasons, axes: { rca: reasons.length === 0 } };
 }
 
 /** All must pass. Reasons concatenate; axes merge, so the report can say which one moved. */

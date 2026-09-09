@@ -1,0 +1,38 @@
+{
+  "id": "A08-running-never-ready",
+  "tier": "A",
+  "title": "Running but never Ready (readiness probe path wrong)",
+  "settleSeconds": 40,
+  "groupLabels": {
+    "alertname": "KubernetesPodNotReady",
+    "namespace": "bench-a08",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodNotReady",
+        "namespace": "bench-a08",
+        "container": "web",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod in bench-a08 has been not Ready for 10 minutes",
+        "description": "A pod in namespace `bench-a08` is `Running` but has never become `Ready`."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "readiness|kesiapan",
+        "/healthz",
+        "restart[^.\\n]{0,40}\\b0\\b|\\b0\\b[^.\\n]{0,25}restart|tidak (pernah )?(di)?restart|belum pernah restart|no restarts"
+      ],
+      "mustNot": [
+        "crashloop|oomkill|out of memory"
+      ]
+    }
+  }
+}

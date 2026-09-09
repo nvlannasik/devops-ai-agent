@@ -1,0 +1,129 @@
+{
+  "id": "B04-group-eight-pods-one-cause",
+  "tier": "B",
+  "title": "Alert group, 8 pods, one cause",
+  "settleSeconds": 40,
+  "groupLabels": {
+    "alertname": "KubernetesPodCrashLooping",
+    "namespace": "bench-b04",
+    "severity": "critical"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-0",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-0` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-1",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-1` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-2",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-2` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-3",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-3` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-4",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-4` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-5",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-5` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-6",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-6` restarted more than 2 times in the last 5 minutes."
+      }
+    },
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-b04",
+        "pod": "payments-7",
+        "container": "api",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container api in bench-b04 is restarting in a loop",
+        "description": "Container `api` in pod `payments-7` restarted more than 2 times in the last 5 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "DATABASE_URL",
+        "(satu|single|one|sama|same)[^.\\n]{0,60}(penyebab|cause|akar|root)|semua .{0,30}pod|all (8|eight) pods|kedelapan"
+      ],
+      "mustNot": [
+        "8 (penyebab|masalah|cause)|delapan (penyebab|masalah)"
+      ]
+    }
+  }
+}

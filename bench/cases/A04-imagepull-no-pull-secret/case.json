@@ -1,0 +1,33 @@
+{
+  "id": "A04-imagepull-no-pull-secret",
+  "tier": "A",
+  "title": "ImagePullBackOff, private registry and no pull secret",
+  "settleSeconds": 20,
+  "groupLabels": {
+    "alertname": "KubernetesPodImagePullFailing",
+    "namespace": "bench-a04",
+    "severity": "critical"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodImagePullFailing",
+        "namespace": "bench-a04",
+        "container": "gateway",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Pod in bench-a04 cannot pull its image",
+        "description": "A container in namespace `bench-a04` is in ImagePullBackOff and has not started."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "403|forbidden|unauthorized|authoriz|otorisas|pull secret|imagepullsecret|credential|kredensial|registry priv|private registry"
+      ]
+    }
+  }
+}

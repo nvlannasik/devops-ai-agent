@@ -1,17 +1,18 @@
 # Incident benchmark — runner
 
 The design is [`docs/BENCHMARK_agent_stack.md`](../docs/BENCHMARK_agent_stack.md): 42 cases in
-six tiers, two tracks, six scoring axes. **This directory implements one axis of one track** —
-the remediation proposal, on the lab track. Case ids, tiers and the `bench-<id>` namespace
-convention are that document's, and its catalog is what a case is ported FROM.
+six tiers, two tracks, six scoring axes. **This directory implements three of those axes, on the
+lab track** — the remediation proposal, evidence grounding, and the facts the RCA text has to
+state. Case ids, tiers and the `bench-<id>` namespace convention are that document's, and its
+catalog is what a case is ported FROM.
 
 What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 6 (A01, A02, A03, A10, C01, C02) |
+| cases | 42, tiers A–F | 16 (A01–A10, A13, B04, C01–C03, C08) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
-| scoring | 6 axes, 100 points, LLM judge for prose | 2 axes, pass/fail |
+| scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
 | suite gates | 10 metrics incl. calibration, cost, cache | pass^k |
 
@@ -70,13 +71,17 @@ uses — `buildGroupAlertText()`, the same function the webhook calls.
     "target": "backend-api",                 // the workload, not the pod
     "params":      { "kind": "deployment" }, // exact match
     "changed":     { "memory_limit": "128Mi" },  // present AND different
-    "greaterThan": { "memory_limit": "150Mi" }   // present AND larger, as a K8s quantity
+    "greaterThan": { "memory_limit": "150Mi" },  // present AND larger, as a K8s quantity
+    "rca": {                                     // regex over the RCA text, case-insensitive
+      "must":    ["oomkill|out of memory"],
+      "mustNot": ["memory leak|kebocoran memori"]
+    }
   }
 }
 ```
 
 `expect` is the concrete form of `truth.expectedProposal`, which the design doc leaves as a
-placeholder. Three matchers, and each earns its place:
+placeholder. Four matchers, and each earns its place:
 
 - `changed` — "raise the limit" has no single right answer. Pinning one would score the
   model's taste rather than its diagnosis; echoing the broken value back is still a miss.
@@ -86,6 +91,15 @@ placeholder. Three matchers, and each earns its place:
 - `"action": null` — the case k8s-ai-bench cannot express at all. A proposal raised against a
   healthy namespace is a bug this repo has shipped, and a suite of positive cases scores it
   perfectly. That is C01.
+- `rca` — because most of the catalog is written in facts the RCA has to state, not in
+  proposals. A04 fires the SAME alert as A03 with the same symptom and a different cause; both
+  correctly propose nothing, so on the proposal axis alone they are the same case and an agent
+  that answers from the alert name scores full marks on both. Absent, the axis is not declared
+  at all, so a case without one does not collect a free point in the tally.
+
+  Regexes, not substrings, because the agent writes prose in two languages: one entry has to
+  admit "image pull secret", "imagePullSecrets" and "kredensial registry". They are compiled at
+  load, so a bad pattern stops the run before the first namespace is created.
 
 ## What it needs
 
@@ -270,9 +284,15 @@ on the **next build**. The repo is the record; the dashboard is a view of it as 
 
 ## What this cannot measure yet
 
-- **Four of the six scoring axes.** Proposal and evidence grounding are checked. Root cause,
-  tool policy, format and efficiency are specified in the design doc and not implemented here;
-  the two prose axes need the LLM judge that document describes.
+- **Three of the six scoring axes.** Proposal, evidence grounding and the RCA-text axis are
+  checked. Tool policy, format and efficiency are specified in the design doc and not
+  implemented here.
+
+  The RCA-text axis is the newest and the least like the design doc's: it is regex over the
+  answer, not a judge. That buys the pairs the catalog is built out of — A03 and A04 fire the
+  same alert with the same symptom and differ only in what the RCA says, as do A05 and A06 —
+  and it buys nothing else. It cannot tell a well-argued answer from a lucky keyword, which is
+  what the root-cause axis is for and why that one still needs the judge.
 
   Grounding is the one that transferred cheaply, because `agent.ungroundedNames()` already
   exists and is deterministic — it asks which backticked resource names in the RCA appear in no
@@ -291,8 +311,23 @@ on the **next build**. The repo is the record; the dashboard is a view of it as 
 
 Port from the design doc's catalog, not from k8s-ai-bench's task list: the catalog already
 states the truth, the required tools and the proposal rule for each case. k8s-ai-bench is
-useful for the other half — ten of its `setup.sh` scripts are ready-made fault injectors for
-cases the catalog describes but does not inject:
+useful for the other half — its `setup.sh` scripts are ready-made fault injectors for cases the
+catalog describes but does not inject. Every row below is now ported; the injectors here are
+written against this cluster rather than copied, because two of them had to be:
+
+- **A04** uses `ghcr.io`, chosen after measuring all three candidates. Docker Hub answers a
+  private repo with *"repository does not exist or may require authorization"* — a message that
+  would let the wrong answer score as right, in the one case whose entire point is telling
+  authorization apart from a missing tag.
+- **A05** gets no `mustNot` for the taint wording. This cluster's master carries
+  `node-role.kubernetes.io/master:NoSchedule`, so the real scheduler message is *"1 node(s) had
+  untolerated taint …, 2 Insufficient cpu"*, and an RCA quoting it is quoting evidence. A06 is
+  where that confusion is tested, and there the mustNot is safe: a pod requesting no CPU cannot
+  produce "Insufficient cpu" in any tool result.
+
+Also worth knowing before writing the next injector: a container that lives a few seconds per
+attempt is in `.state.waiting` for only part of its cycle, so polling `waiting.reason` for
+`CrashLoopBackOff` misses it about half the time. C03 polls `restartCount` instead.
 
 | catalog case | upstream injector | playbook |
 |---|---|---|
@@ -308,6 +343,14 @@ cases the catalog describes but does not inject:
 Take the `setup.sh`, write the alert that would have fired, and replace `verify.sh` with an
 `expect` block. Note `fix-oomkilled`, `fix-crashloop` and `list-images-for-pods` are
 `disabled: true` upstream — their setup scripts need checking before you trust them.
+
+**What is left, and why.** A11, A12, C04, B01 and B03 need Prometheus, Loki or Jaeger driven to
+a known state, which is the observability gap above, not a missing case file. C05, C06 and C07
+are conversation-mode cases: they enter through a Slack mention, and this runner drives
+`investigate()` with an alert group. E03 needs the GitOps PR path and a Flux-managed target.
+E02 is not missing — A01 already IS it, and the failure it names ("proposes
+`k8s_rollout_restart` as a generic gesture") is the one the first live run reproduced five
+times out of seven.
 
 Cases with no upstream injector are the ones that need real work: A11/A12 (5xx and latency)
 need Prometheus and Jaeger, A14/A15 and E03/E04 need a genuinely Flux-managed namespace, and

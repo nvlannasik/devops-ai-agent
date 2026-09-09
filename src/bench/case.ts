@@ -22,6 +22,17 @@ const Expectation = z.object({
   params: z.record(z.string(), z.string()).optional(),
   changed: z.record(z.string(), z.string()).optional(),
   greaterThan: z.record(z.string(), z.string()).optional(),
+  rca: z
+    .object({ must: z.array(z.string()).optional(), mustNot: z.array(z.string()).optional() })
+    // Compiled at load, not at scoring time: a bad pattern in a case file should stop the run
+    // before the first namespace is created, not three hours in on the attempt that hits it.
+    .refine(
+      (v) => [...(v.must ?? []), ...(v.mustNot ?? [])].every((src) => {
+        try { new RegExp(src, "i"); return true; } catch { return false; }
+      }),
+      "rca patterns must be valid regular expressions"
+    )
+    .optional(),
 });
 
 const Alert = z.object({

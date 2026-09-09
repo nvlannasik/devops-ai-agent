@@ -252,7 +252,7 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     '4. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":N,"reason":"..."}\n' +
     "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
     '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +
-    "   — ONLY when ONE specific pod is wedged (stuck, crash-looping, not Ready) while its siblings are healthy — its controller recreates it fresh. Use the exact pod name from the context; prefer k8s_rollout_restart when ALL pods of the workload are affected\n" +
+    "   — ONLY when ONE specific pod is wedged while OTHER pods of the same workload are running fine. That comparison needs siblings to exist: a single-replica workload has no healthy sibling, so its one bad pod is evidence about the SPEC, not about that pod, and deleting it changes nothing. Use the exact pod name from the context; prefer k8s_rollout_restart when ALL pods of the workload are affected\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
     // of real faults, and saying so is what stops the model reaching for a restart to have
     // something to say.
@@ -261,6 +261,12 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     'bad RBAC rule and an absent pull secret are all real faults that none of these five actions ' +
     'repairs. Proposing the nearest action anyway is worse than proposing nothing: a human is asked ' +
     'to approve a change that cannot work.\n' +
+    // The mirror of the paragraph above, added after legitimising null cost two A03 attempts:
+    // the model answered {"action": null} on a nonexistent image tag whose working predecessor
+    // was sitting in the context. An escape hatch with no counterweight becomes the default.
+    'Null is NOT a way out of a decision the context lets you make. If one of the five actions does ' +
+    'fit and the value it needs is already in the context — the tag that was running before the ' +
+    'failing rollout, the container name, the current replica count — propose it.\n' +
     '"workload" is the Deployment/StatefulSet/DaemonSet name — NOT a pod name (strip replicaset/pod hash suffixes like "-84fcf9b4db-r2ddw").\n' +
     '"container" is optional: include it ONLY if the container name literally appears in the context; otherwise omit it (single-container workloads are auto-resolved). NEVER guess a container name from the workload name.\n' +
     "Only use namespaces, workloads, containers, images, and values that appear in the context above — never invent them."

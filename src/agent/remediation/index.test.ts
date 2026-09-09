@@ -339,3 +339,14 @@ test("the proposal prompt tests a restart against the spec, and legitimises prop
   // restart must not be the only action whose condition is soft
   assert.doesNotMatch(prompt, /for transient faults where a clean rolling restart plausibly fixes it now/);
 });
+
+// Round two of the same failure, from the re-run: restart stopped being the generic gesture and
+// k8s_delete_pod took over, because action 5 read "while its siblings are healthy" and a
+// single-replica workload has no unhealthy sibling to contradict it. And null, newly legitimate,
+// started coming back for faults the context could fix.
+test("the proposal prompt closes the single-replica delete_pod loophole and counterweights null", () => {
+  const prompt = buildProposalPrompt({ alertname: "X" }, "an RCA");
+  assert.match(prompt, /a single-replica workload has no healthy sibling/);
+  assert.match(prompt, /evidence about the SPEC, not about that pod/);
+  assert.match(prompt, /Null is NOT a way out of a decision the context lets you make/);
+});

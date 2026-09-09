@@ -22,7 +22,7 @@ import { createLLMClient } from "../agent/llm/index.js";
 import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
-import { combine, passRates, scoreGrounding, scoreProposal, type Score, type TaskRun } from "./score.js";
+import { combine, passRates, scoreGrounding, scoreProposal, scoreRca, type Score, type TaskRun } from "./score.js";
 import { appendHistory, axisTally, publishHistory, runMeta } from "./store.js";
 import { config } from "../config/index.js";
 import { parseRegistry } from "../agent/llm/registry.js";
@@ -80,7 +80,7 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     const proposalRaw = textOf(res.content as Array<{ type: string; text?: string }>);
     const proposal = parseProposal(proposalRaw);
     return {
-      score: combine(scoreProposal(task.expect, proposal, proposalRaw), scoreGrounding(ungrounded)),
+      score: combine(scoreProposal(task.expect, proposal, proposalRaw), scoreGrounding(ungrounded), scoreRca(task.expect.rca, rca)),
       rca,
       proposal,
       proposalRaw,

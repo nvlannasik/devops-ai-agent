@@ -1,0 +1,38 @@
+{
+  "id": "A13-rbac-forbidden",
+  "tier": "A",
+  "title": "RBAC Forbidden, ServiceAccount cannot list pods",
+  "settleSeconds": 30,
+  "groupLabels": {
+    "alertname": "AppErrorLogSpike",
+    "namespace": "bench-a13",
+    "severity": "warning",
+    "source": "loki"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "AppErrorLogSpike",
+        "namespace": "bench-a13",
+        "app": "reporter",
+        "severity": "warning",
+        "source": "loki"
+      },
+      "annotations": {
+        "summary": "Error log spike for reporter in bench-a13",
+        "description": "The `reporter` workload in namespace `bench-a13` is logging errors continuously."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "forbidden|terlarang|ditolak",
+        "\\blist\\b",
+        "\\bpods?\\b",
+        "reporter"
+      ]
+    }
+  }
+}

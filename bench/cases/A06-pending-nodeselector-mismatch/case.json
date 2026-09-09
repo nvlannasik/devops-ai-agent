@@ -1,0 +1,35 @@
+{
+  "id": "A06-pending-nodeselector-mismatch",
+  "tier": "A",
+  "title": "Pod Pending, nodeSelector matches no node",
+  "settleSeconds": 15,
+  "groupLabels": {
+    "alertname": "KubernetesPodNotScheduled",
+    "namespace": "bench-a06",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodNotScheduled",
+        "namespace": "bench-a06",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod in bench-a06 has been Pending for 10 minutes",
+        "description": "A pod in namespace `bench-a06` is `Pending` and has not been scheduled onto any node."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "nodeselector|node selector|node affinity|affinity/selector|label .{0,40}(node|nodes)|disktype"
+      ],
+      "mustNot": [
+        "insufficient cpu|insufficient memory|kekurangan (cpu|memori|memory)"
+      ]
+    }
+  }
+}

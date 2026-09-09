@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendHistory } from "./store.js";
-import { scoreProposal, scoreGrounding, combine, passRates, parseQuantity, type Expectation, type TaskRun } from "./score.js";
+import { scoreProposal, scoreGrounding, combine, passRates, parseQuantity, type Expectation, type TaskRun, scoreRca } from "./score.js";
 import type { Proposal } from "../agent/remediation/proposal.js";
 
 const proposal = (over: Partial<Proposal> = {}): Proposal => ({
@@ -221,4 +221,20 @@ test("a history line is one JSON object per run, with what produced the number",
   ] });
   const only = JSON.parse(readFileSync(long, "utf8").trim());
   assert.ok(only.failures[0].reasons[0].length < 200, "an unbounded reason has to be cut, or the line stops being diffable");
+});
+
+// ---- scoreRca (the third axis) ----
+
+test("the RCA axis fails a right-symptom-wrong-cause answer, and declares no axis when unused", () => {
+  const rca = "The image `nginx:no-such-tag` cannot be pulled: the tag does not exist on the registry.";
+  const spec = { must: ["401|unauthorized|pull secret"], mustNot: ["tag does not exist|no such tag"] };
+  const s = scoreRca(spec, rca);
+  assert.equal(s.pass, false);
+  assert.equal(s.axes?.rca, false);
+  assert.equal(s.reasons.length, 2); // one for the missing fact, one for the forbidden one
+  assert.match(s.reasons[1]!, /tag does not exist/);
+
+  assert.deepEqual(scoreRca({ must: ["tag does not exist"] }, rca).axes, { rca: true });
+  // A case with no rca block must not collect a free point: no axis at all.
+  assert.deepEqual(scoreRca(undefined, rca), { pass: true, reasons: [] });
 });

@@ -1,0 +1,36 @@
+{
+  "id": "C03-evidence-missing-no-logs",
+  "tier": "C",
+  "title": "The evidence is missing (the container logs nothing)",
+  "settleSeconds": 40,
+  "groupLabels": {
+    "alertname": "KubernetesPodCrashLooping",
+    "namespace": "bench-c03",
+    "severity": "critical"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodCrashLooping",
+        "namespace": "bench-c03",
+        "container": "worker",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Container worker in bench-c03 is restarting in a loop",
+        "description": "Container `worker` in namespace `bench-c03` restarted more than 2 times in the last 5 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "(tidak ada|tanpa|no|kosong|empty|unavailable|tidak tersedia|nihil)[^.\\n]{0,60}log|log[^.\\n]{0,60}(tidak ada|kosong|empty|unavailable|tidak tersedia|nihil)"
+      ],
+      "mustNot": [
+        "confidence[^\\n]{0,25}high"
+      ]
+    }
+  }
+}

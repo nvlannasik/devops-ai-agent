@@ -1,0 +1,34 @@
+{
+  "id": "A07-pvc-pending-no-storageclass",
+  "tier": "A",
+  "title": "PVC Pending, no matching StorageClass",
+  "settleSeconds": 15,
+  "groupLabels": {
+    "alertname": "KubernetesPodNotScheduled",
+    "namespace": "bench-a07",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesPodNotScheduled",
+        "namespace": "bench-a07",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod in bench-a07 has been Pending for 10 minutes",
+        "description": "A pod in namespace `bench-a07` is `Pending` and has not been scheduled onto any node."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "storageclass|storage class",
+        "pvc|persistentvolumeclaim|persistent volume claim",
+        "gp3-nonexistent"
+      ]
+    }
+  }
+}

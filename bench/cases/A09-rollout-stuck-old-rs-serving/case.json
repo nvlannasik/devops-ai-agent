@@ -1,0 +1,45 @@
+{
+  "id": "A09-rollout-stuck-old-rs-serving",
+  "tier": "A",
+  "title": "Rollout stuck, old ReplicaSet still serving",
+  "settleSeconds": 30,
+  "groupLabels": {
+    "alertname": "KubernetesDeploymentReplicasMismatch",
+    "namespace": "bench-a09",
+    "severity": "warning"
+  },
+  "alerts": [
+    {
+      "labels": {
+        "alertname": "KubernetesDeploymentReplicasMismatch",
+        "namespace": "bench-a09",
+        "deployment": "web-frontend",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Deployment web-frontend in bench-a09 has not matched its desired replicas for 15 minutes",
+        "description": "Deployment `web-frontend` in namespace `bench-a09` has fewer available replicas than desired."
+      }
+    }
+  ],
+  "expect": {
+    "action": "k8s_set_image",
+    "namespace": "bench-a09",
+    "target": "web-frontend",
+    "params": {
+      "kind": "deployment"
+    },
+    "changed": {
+      "image": "nginx:no-such-tag-a09"
+    },
+    "rca": {
+      "must": [
+        "replicaset|replica set",
+        "(masih|still|tetap)[^.\\n]{0,80}(melayani|serving|serve|menerima|traffic|trafik|berjalan|running|ready)"
+      ],
+      "mustNot": [
+        "(total|complete|full)[- ]?(outage|down)|layanan (mati|down) total|semua pod (mati|gagal)"
+      ]
+    }
+  }
+}

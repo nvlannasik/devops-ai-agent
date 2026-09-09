@@ -1724,8 +1724,9 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
        are borrowed from <a href="https://github.com/gke-labs/k8s-ai-bench" rel="noreferrer noopener"
        target="_blank">k8s-ai-bench</a>. Its scoring is not: every one of its verifiers diffs cluster
        state, and this scores a written proposal. See <code translate="no">bench/README.md</code>.</p>
-     <p class="meta">Two of the design doc's six axes are implemented — the remediation proposal
-       and evidence grounding. A run showing 100% is silent about the other four.</p>
+     <p class="meta">Three of the design doc's six axes are implemented — the remediation proposal,
+       evidence grounding, and the facts the RCA text has to state. A run showing 100% is silent
+       about the other three.</p>
      ${byCaseTable(runs)}
      ${byConfigTable(runs)}
      ${section(ICON.overview, "Runs", '<span class="meta">newest first</span>')}
