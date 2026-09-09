@@ -6,9 +6,14 @@
 # untolerated taint ..., 2 Insufficient cpu" and an RCA that quotes it is quoting evidence.
 # A06 is where the taint/selector confusion is actually tested.
 #
-# No proposal is correct as the prompt stands: action 3 (k8s_set_resources) is scoped to
-# "OOMKilled / resource-exhaustion" - a pod that never started is neither. If that scope is
-# ever widened to cover lowering an impossible request, this expectation changes with it.
+# The expectation is k8s_set_resources, lowering the request. It was written as "no proposal"
+# first, on the reading that action 3 is scoped to OOMKilled - and the first live attempt
+# answered with cpu_request=250m, cpu_limit=500m on the right workload, which is the fix. The
+# case was wrong, not the answer, so the expectation follows the answer and action 3's scope in
+# the prompt now names this shape explicitly.
+#
+# `changed` rather than a pinned value: any request a node can satisfy is a defensible fix, and
+# 64 is the broken one.
 set -euo pipefail
 NS="bench-a05"
 kubectl delete namespace "$NS" --ignore-not-found --wait=true

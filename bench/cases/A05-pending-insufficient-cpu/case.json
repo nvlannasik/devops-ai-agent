@@ -22,7 +22,15 @@
     }
   ],
   "expect": {
-    "action": null,
+    "action": "k8s_set_resources",
+    "namespace": "bench-a05",
+    "target": "orders-api",
+    "params": {
+      "kind": "deployment"
+    },
+    "changed": {
+      "cpu_request": "64"
+    },
     "rca": {
       "must": [
         "insufficient cpu|cpu (yang )?(tidak|kurang|belum)|kekurangan cpu|cpu tidak (cukup|mencukupi|tersedia)"

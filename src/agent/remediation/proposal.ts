@@ -248,7 +248,7 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     '2. {"action":"k8s_set_image","namespace":"...","workload":"...","kind":"...","container":"...","image":"registry/repo:tag","reason":"..."}\n' +
     "   — when the RCA evidence shows the current image is wrong/nonexistent AND names a working image (e.g. the previously running tag), OR the user explicitly requested a specific image/tag. NEVER invent a tag yourself\n" +
     '3. {"action":"k8s_set_resources","namespace":"...","workload":"...","kind":"...","container":"...","memory_limit":"1Gi",...,"reason":"..."}\n' +
-    "   — ONLY for OOMKilled / resource-exhaustion RCAs; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
+    "   — ONLY for OOMKilled / resource-exhaustion RCAs, or a Pending pod whose scheduler message says the REQUEST is larger than any node can satisfy (\"Insufficient cpu\"/\"Insufficient memory\") — that request is the fault and lowering it is the fix; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
     '4. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":N,"reason":"..."}\n' +
     "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
     '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +

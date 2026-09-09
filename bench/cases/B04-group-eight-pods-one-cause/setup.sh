@@ -45,13 +45,16 @@ spec:
             - 'echo "FATAL: DATABASE_URL is not set, refusing to start"; sleep 3; exit 1'
 YAML
 
-echo "waiting for CrashLoopBackOff on the group..."
+# Restart COUNT, not the waiting reason: this container lives a few seconds per attempt, so a
+# poll every three seconds catches it terminated as often as backing off, and .state.waiting is
+# empty in that window. Measured: this wait timed out on a pod with five restarts.
+echo "waiting for restarts to accumulate across the group..."
 for _ in $(seq 1 40); do
-  r=$(kubectl get pods -n "$NS" -o jsonpath='{range .items[*]}{.status.containerStatuses[*].state.waiting.reason} {end}' 2>/dev/null || true)
-  case "$r" in *CrashLoopBackOff*) echo "reason: $r"; exit 0;; esac
+  r=$(kubectl get pods -n "$NS" -o jsonpath='{range .items[*]}{.status.containerStatuses[*].restartCount} {end}' 2>/dev/null || true)
+  case "$r" in *[3-9]*|*[1-9][0-9]*) echo "restarts: $r"; exit 0;; esac
   sleep 3
 done
-echo "setup failed: CrashLoopBackOff on the group never happened" >&2
+echo "setup failed: the group never restarted" >&2
 kubectl get pods -n "$NS" -o wide >&2
 kubectl get events -n "$NS" --sort-by=.lastTimestamp | tail -20 >&2
 exit 1
