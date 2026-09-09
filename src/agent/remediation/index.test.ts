@@ -326,3 +326,16 @@ test("null is stripped for every action, not only set_resources", () => {
   assert.ok(p, "a null kind on a field that is optional anyway must not void the restart");
   assert.equal(p!.toolParams.kind, "deployment", "and the default still applies");
 });
+
+// Prompt-as-contract. These two rules are the whole fix for the failure mode the first
+// six-case benchmark run found — restart proposed on a missing config key, a nonexistent image
+// tag, an OOM at the limit, and a healthy namespace — and prompt text is deleted by accident
+// far more easily than code is.
+test("the proposal prompt tests a restart against the spec, and legitimises proposing nothing", () => {
+  const prompt = buildProposalPrompt({ alertname: "X" }, "an RCA");
+  assert.match(prompt, /replaces a pod with an IDENTICAL one, built from the same spec/);
+  assert.match(prompt, /the replacement has it too/);
+  assert.match(prompt, /CORRECT and common answer, not a failure/);
+  // restart must not be the only action whose condition is soft
+  assert.doesNotMatch(prompt, /for transient faults where a clean rolling restart plausibly fixes it now/);
+});

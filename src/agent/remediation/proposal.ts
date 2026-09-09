@@ -231,8 +231,20 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     `An investigation just completed (alert-driven RCA, or a direct user request in Slack).\nAlert labels: ${JSON.stringify(labels)}\n\nContext:\n${ctx}\n\n` +
     'An explicit user request for one of these actions (e.g. "restart deployment X", "change the image tag to v1.2", "scale to 4 replicas") is sufficient on its own — propose it even without fault evidence; a human still approves it. If the user gives only an image tag, keep the current image repository from the context and change only the tag.\n' +
     "If exactly ONE of these whitelisted actions would plausibly remediate the incident right now, output only its JSON:\n" +
+    // THE SPEC TEST. Five of seven benchmark failures were k8s_rollout_restart proposed as a
+    // generic gesture: on a missing config key, on a nonexistent image tag, on an OOM at the
+    // limit, and on a namespace where every pod was Ready. The design doc predicted exactly
+    // this ("the most likely failure mode of the proposal step"). The list below already said
+    // "ONLY when" for the other four actions; restart said "plausibly", which is not a test —
+    // so it became the answer whenever the model could not map the fault to a specific action.
+    "FIRST, one test that decides most cases. A restart or a pod delete replaces a pod with an " +
+    "IDENTICAL one, built from the same spec. If what is wrong lives in that spec — the image, " +
+    "the resource limits, a missing config key, a Service selector — the replacement has it too " +
+    "and the fault returns within seconds. Propose 1 or 5 ONLY when the spec is right and the " +
+    "running process is wrong (a wedged process, a leaked connection pool, a stale in-memory " +
+    "cache). Never as a generic gesture at a fault you cannot place.\n" +
     '1. {"action":"k8s_rollout_restart","namespace":"...","workload":"...","kind":"deployment|statefulset|daemonset","reason":"one line"}\n' +
-    "   — for transient faults where a clean rolling restart plausibly fixes it now\n" +
+    "   — ONLY when the spec is correct and the running process is not: the evidence shows a fault that a fresh identical pod would not reproduce\n" +
     '2. {"action":"k8s_set_image","namespace":"...","workload":"...","kind":"...","container":"...","image":"registry/repo:tag","reason":"..."}\n' +
     "   — when the RCA evidence shows the current image is wrong/nonexistent AND names a working image (e.g. the previously running tag), OR the user explicitly requested a specific image/tag. NEVER invent a tag yourself\n" +
     '3. {"action":"k8s_set_resources","namespace":"...","workload":"...","kind":"...","container":"...","memory_limit":"1Gi",...,"reason":"..."}\n' +
@@ -241,7 +253,14 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
     '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +
     "   — ONLY when ONE specific pod is wedged (stuck, crash-looping, not Ready) while its siblings are healthy — its controller recreates it fresh. Use the exact pod name from the context; prefer k8s_rollout_restart when ALL pods of the workload are affected\n" +
-    'If the fix requires anything else, or you are not confident, output {"action": null}.\n' +
+    // "No action fits" was being treated as failure. It is the correct answer for a whole class
+    // of real faults, and saying so is what stops the model reaching for a restart to have
+    // something to say.
+    'If the fix requires anything else, or you are not confident, output {"action": null}. That is a ' +
+    'CORRECT and common answer, not a failure — a missing config key, a wrong Service selector, a ' +
+    'bad RBAC rule and an absent pull secret are all real faults that none of these five actions ' +
+    'repairs. Proposing the nearest action anyway is worse than proposing nothing: a human is asked ' +
+    'to approve a change that cannot work.\n' +
     '"workload" is the Deployment/StatefulSet/DaemonSet name — NOT a pod name (strip replicaset/pod hash suffixes like "-84fcf9b4db-r2ddw").\n' +
     '"container" is optional: include it ONLY if the container name literally appears in the context; otherwise omit it (single-container workloads are auto-resolved). NEVER guess a container name from the workload name.\n' +
     "Only use namespaces, workloads, containers, images, and values that appear in the context above — never invent them."
