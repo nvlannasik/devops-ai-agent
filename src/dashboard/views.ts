@@ -1527,8 +1527,29 @@ const marks = (spec: string): string => {
   return `<span class="marks" role="img" aria-label="${esc(label)}">${glyphs}</span>`;
 };
 
+/** A case's failures, grouped by the reasons they give. Four attempts that failed for the same
+ *  reason are one finding observed four times, not four findings — the real data has exactly
+ *  that shape (A02 #1-#4, identical), and listing it per attempt is four copies of one line. */
+function whyByCase(run: BenchRun): Map<string, { attempts: number[]; reasons: string[] }[]> {
+  const out = new Map<string, { attempts: number[]; reasons: string[] }[]>();
+  for (const f of run.failures) {
+    const groups = out.get(f.case) ?? [];
+    // Keyed on the reasons themselves with a separator no reason can contain, so "a; b" and
+    // ["a", "b"] cannot collide into one group.
+    const key = f.reasons.join("\u0000");
+    const hit = groups.find((g) => g.reasons.join("\u0000") === key);
+    if (hit) hit.attempts.push(f.attempt);
+    else groups.push({ attempts: [f.attempt], reasons: f.reasons });
+    out.set(f.case, groups);
+  }
+  return out;
+}
+
 function benchRunCard(run: BenchRun): string {
-  const cases = Object.keys(run.marks).sort();
+  const why = whyByCase(run);
+  // The union, not just the marks: a failure whose case is missing from marks would otherwise
+  // be dropped silently, and this list is now the only place failures are reported.
+  const cases = [...new Set([...Object.keys(run.marks), ...why.keys()])].sort();
   const axes = Object.entries(run.axes ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
 
   return `<article class="card bench-run">
@@ -1570,24 +1591,27 @@ function benchRunCard(run: BenchRun): string {
         // marks() returns the whole element now, labelled. Wrapping it again in a second
         // <span class="marks"> left an unlabelled one on the outside — which is the one a
         // screen reader reaches first.
-        .map((c) => `<li role="listitem"><code translate="no">${esc(c)}</code>${marks(run.marks[c]!)}</li>`)
+        .map((c) => {
+          const groups = why.get(c) ?? [];
+          return (
+            `<li role="listitem"><code translate="no">${esc(c)}</code>${marks(run.marks[c] ?? "")}` +
+            (groups.length === 0
+              ? ""
+              : `<ul class="case-why" role="list">${groups
+                  .map(
+                    (g) =>
+                      `<li role="listitem"><span class="att">${g.attempts
+                        .sort((a, b) => a - b)
+                        .map((n) => `#${fmtInt(n)}`)
+                        .join(" ")}</span> ${g.reasons.map((r) => esc(r)).join(" &middot; ")}</li>`
+                  )
+                  .join("")}</ul>`) +
+            `</li>`
+          );
+        })
         .join("")}
     </ul>
 
-    ${
-      run.failures.length === 0
-        ? ""
-        : `<details class="bench-why">
-             <summary>${fmtInt(run.failures.length)} failed attempt${run.failures.length === 1 ? "" : "s"} — why</summary>
-             <ul>${run.failures
-               .map(
-                 (f) =>
-                   `<li><code translate="no">${esc(f.case)}</code> #${fmtInt(f.attempt)}` +
-                   `<ul>${f.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></li>`
-               )
-               .join("")}</ul>
-           </details>`
-    }
   </article>`;
 }
 

@@ -2141,15 +2141,29 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
                display: grid; grid-template-columns: minmax(0, max-content) auto;
                gap: var(--sp-1) var(--sp-5); align-items: baseline;
                border-top: 1px solid var(--border); }
-.bench-cases li { display: contents; }
+/* > li, not li: the case-why list nested inside these rows is made of list items too, and a
+   descendant selector handed THEM display: contents as well — which took every reason out of
+   its own box and ran "#2 ...no proposal#3 proposed..." together as one line of text. */
+.bench-cases > li { display: contents; }
 /* Monospace so five attempts line up under five attempts across rows — the shape is the point:
    "xxxx." is a flaky case that finally landed, "...x." is a good one that slipped. */
 .marks { font-family: var(--font-data); font-size: var(--fs-base); letter-spacing: .22em; }
 .mk-pass { color: var(--ok); }
 .mk-fail { color: var(--critical); }
-.bench-why summary { cursor: pointer; color: var(--text-dim); font-size: var(--fs-sm); }
-.bench-why ul { margin: var(--sp-2) 0 0 var(--sp-4); padding: 0; font-size: var(--fs-sm); color: var(--text-dim); }
-.bench-why > ul > li { margin-bottom: var(--sp-2); }
+/* Why a case failed, under the case. Spans both columns rather than sitting in the marks
+   column: a reason is a sentence and that column is sized to five characters.
+   overflow-wrap: anywhere, not break-word — a reason can carry a truncated JSON payload with
+   no spaces in it, and only anywhere lowers min-content width enough to stop it widening the
+   whole grid. The 68ch is the same measure the prose blocks use. */
+.case-why { grid-column: 1 / -1; list-style: none; margin: var(--sp-1) 0 var(--sp-2);
+            padding: 0 0 0 var(--sp-3); max-width: 68ch;
+            border-left: 2px solid var(--border);
+            font-size: var(--fs-sm); color: var(--text-dim); overflow-wrap: anywhere; }
+.case-why li + li { margin-top: var(--sp-1); }
+/* The attempt numbers are the join back to the marks strip above — same face, so "#2" here and
+   the second x up there read as the same run. */
+.att { font-family: var(--font-data); font-size: var(--fs-xs); color: var(--text);
+       white-space: nowrap; margin-right: var(--sp-1); }
 
 /* By-case and by-configuration tables. The bar is what makes a dozen rows scannable; the
    number stays beside it, because a bar alone cannot be read off precisely and a rate of

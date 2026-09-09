@@ -2506,7 +2506,7 @@ const benchRun = (over: Partial<BenchRun> = {}): BenchRun => ({
 
 test("a run reads as a shape: one mark per attempt, in order", () => {
   const html = benchPage([benchRun()]);
-  const marks = /<span class="marks" role="img"[^>]*>([\s\S]*?)<\/span><\/li>/.exec(html);
+  const marks = /<span class="marks" role="img"[^>]*>((?:<span class="mk-[^"]*"[^>]*>[^<]*<\/span>)*)/.exec(html);
   assert.ok(marks, "the marks strip is missing");
   // xxxx. — four failures then a pass. A single percentage cannot tell that from .xxxx
   assert.equal([...marks[1]!.matchAll(/class="mk-(pass|fail)"/g)].map((m) => m[1]).join(","),
@@ -2524,15 +2524,19 @@ test("pass^k leads, and a one-attempt run does not print its rate twice", () => 
   assert.match(one, /not a measure of consistency/);
 });
 
-test("every failed attempt states its reason, and a clean run offers no disclosure", () => {
+test("every failed attempt states its reason, under the case it belongs to", () => {
   const html = benchPage([benchRun()]);
-  assert.match(html, /4 failed attempts — why/);
-  assert.equal([...html.matchAll(/no proposal; expected k8s_set_resources/g)].length, 4);
+  // Four attempts, one identical reason, so the reason is stated ONCE and carries the four
+  // attempt numbers. It used to be printed four times at the foot of the card.
+  assert.match(html, /<span class="att">#1 #2 #3 #4<\/span> no proposal; expected k8s_set_resources/);
+  assert.equal([...html.matchAll(/no proposal; expected k8s_set_resources/g)].length, 1);
+  // Inside the case list, not after it: the reasons are the row's third cell.
+  assert.match(html, /<ul class="bench-cases"[\s\S]*class="case-why"[\s\S]*<\/ul>/);
 
   const clean = benchPage([benchRun({ passHatK: 1, marks: { "A02-oomkilled-at-limit": "." }, failures: [] })]);
-  // The ELEMENT, not the class name: STYLES is inlined into every page, so `.bench-why` as a
-  // CSS selector is present whether or not the disclosure is.
-  assert.doesNotMatch(clean, /<details class="bench-why"/);
+  // The ELEMENT, not the class name: STYLES is inlined into every page, so `.case-why` as a
+  // CSS selector is present whether or not any case failed.
+  assert.doesNotMatch(clean, /<ul class="case-why"/);
 });
 
 // The page is reachable without a database — that is the state someone lands in before their
@@ -2638,6 +2642,38 @@ test("the benchmark header row out-specifies the stacked-table rule it overrides
   assert.match(benchPage([benchRun()]), /<th role="columnheader" class="num">/);
 });
 
+// The real data has four attempts failing for one identical reason (A02 #1-#4). Listed per
+// attempt that is four copies of one line; the grouping is what makes the reasons legible
+// enough to sit in the list at all rather than behind a disclosure.
+test("attempts that failed for the same reason are one line, not four", () => {
+  const html = benchPage([benchRun({
+    marks: { "A02-oomkilled-at-limit": "xxxx." },
+    failures: [1, 2, 3, 4].map((n) => ({ case: "A02-oomkilled-at-limit", attempt: n, reasons: ["no proposal"] })),
+  })]);
+  assert.match(html, /<span class="att">#1 #2 #3 #4<\/span> no proposal/);
+  assert.equal([...html.matchAll(/<\/span> no proposal<\/li>/g)].length, 1, "the reason is stated once");
+});
+
+// A failure whose case is missing from marks used to be reported by the disclosure at the
+// bottom. That is gone, so this list is the only place it can appear — dropping it would lose
+// data silently.
+test("a failure with no marks row is still reported", () => {
+  const html = benchPage([benchRun({
+    marks: { "A02-oomkilled-at-limit": "x" },
+    failures: [{ case: "Z99-orphan", attempt: 1, reasons: ["vanished"] }],
+  })]);
+  assert.match(html, /Z99-orphan/);
+  assert.match(html, /vanished/);
+});
+
+// display: contents has to reach the case rows ONLY. As a descendant selector it also caught
+// the reason list nested inside them, which took each reason out of its own box and ran
+// "...no proposal#3 proposed..." together as one line.
+test("display: contents does not leak into the nested reason list", () => {
+  assert.match(STYLES, /\.bench-cases > li \{ display: contents/);
+  assert.doesNotMatch(STYLES, /\.bench-cases li \{ display: contents/);
+});
+
 // Nothing spaced the run cards: main > * + * reaches .doc, not what is inside it, so two
 // consecutive cards met at a gap of exactly 0 and their borders read as one line through a
 // single box. Silent and total — the page looked deliberate, just wrong.
@@ -2661,7 +2697,7 @@ test("a failing axis is toned, not neutral, and shares the bar's threshold", () 
 // display: contents on a list item drops it from the accessibility tree unless the roles are
 // declared — the same trap the tables carry and the reason table() emits a full role chain.
 test("the case list keeps its roles through display: contents", () => {
-  assert.match(STYLES, /\.bench-cases li \{ display: contents/);
+  assert.match(STYLES, /\.bench-cases > li \{ display: contents/);
   const html = benchPage([benchRun()]);
   assert.match(html, /<ul class="bench-cases" role="list">/);
   assert.match(html, /<li role="listitem">/);
