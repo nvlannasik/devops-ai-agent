@@ -2107,6 +2107,12 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 }
 
 /* ---- Benchmark ---- */
+/* The run cards are siblings in .doc, and nothing was spacing them: main > * + * reaches .doc
+   itself, not what is inside it, so consecutive cards sat at a gap of exactly 0 and their two
+   1px borders met as one line. Three runs read as one box with rules through it.
+   --stack, not --sp-4, because that is what these same cards would get from main > * + * if
+   they were not wrapped — the wrapper is a layout detail and should not change the rhythm. */
+.bench-run + .bench-run { margin-top: var(--stack); }
 /* pass^k is set large and everything else is meta, because the page has one headline number
    and three that only make sense next to it. */
 .bench-run { display: grid; gap: var(--sp-3); }

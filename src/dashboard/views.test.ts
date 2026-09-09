@@ -2638,6 +2638,13 @@ test("the benchmark header row out-specifies the stacked-table rule it overrides
   assert.match(benchPage([benchRun()]), /<th role="columnheader" class="num">/);
 });
 
+// Nothing spaced the run cards: main > * + * reaches .doc, not what is inside it, so two
+// consecutive cards met at a gap of exactly 0 and their borders read as one line through a
+// single box. Silent and total — the page looked deliberate, just wrong.
+test("consecutive run cards are separated", () => {
+  assert.match(STYLES, /\.bench-run \+ \.bench-run \{[^}]*margin-top: var\(--stack\)/);
+});
+
 // An axis at 1/5 wore the same neutral chip as one that had not been measured — colour was
 // spent only on the perfect case, so the worst number on the card was also its quietest. The
 // tone comes off the SAME threshold the rate bars use, which is the part worth pinning: two
