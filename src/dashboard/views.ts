@@ -1597,7 +1597,13 @@ function benchRunCard(run: BenchRun): string {
             `<li role="listitem"><code translate="no">${esc(c)}</code>${marks(run.marks[c] ?? "")}` +
             (groups.length === 0
               ? ""
-              : `<ul class="case-why" role="list">${groups
+              // Closed by default, and the summary carries the count because that is what a
+              // reader decides on: the marks strip already shows THAT attempts failed, so an
+              // unlabelled triangle would make them open every row to find out how many.
+              : `<details class="case-why"><summary>${fmtInt(
+                  groups.reduce((n, g) => n + g.attempts.length, 0)
+                )} failed attempt${groups.reduce((n, g) => n + g.attempts.length, 0) === 1 ? "" : "s"} — why</summary>` +
+                `<ul role="list">${groups
                   .map(
                     (g) =>
                       `<li role="listitem"><span class="att">${g.attempts
@@ -1605,7 +1611,7 @@ function benchRunCard(run: BenchRun): string {
                         .map((n) => `#${fmtInt(n)}`)
                         .join(" ")}</span> ${g.reasons.map((r) => esc(r)).join(" &middot; ")}</li>`
                   )
-                  .join("")}</ul>`) +
+                  .join("")}</ul></details>`) +
             `</li>`
           );
         })

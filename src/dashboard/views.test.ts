@@ -2531,12 +2531,12 @@ test("every failed attempt states its reason, under the case it belongs to", () 
   assert.match(html, /<span class="att">#1 #2 #3 #4<\/span> no proposal; expected k8s_set_resources/);
   assert.equal([...html.matchAll(/no proposal; expected k8s_set_resources/g)].length, 1);
   // Inside the case list, not after it: the reasons are the row's third cell.
-  assert.match(html, /<ul class="bench-cases"[\s\S]*class="case-why"[\s\S]*<\/ul>/);
+  assert.match(html, /<ul class="bench-cases"[\s\S]*<details class="case-why">[\s\S]*<\/ul>/);
 
   const clean = benchPage([benchRun({ passHatK: 1, marks: { "A02-oomkilled-at-limit": "." }, failures: [] })]);
   // The ELEMENT, not the class name: STYLES is inlined into every page, so `.case-why` as a
   // CSS selector is present whether or not any case failed.
-  assert.doesNotMatch(clean, /<ul class="case-why"/);
+  assert.doesNotMatch(clean, /<details class="case-why"/);
 });
 
 // The page is reachable without a database — that is the state someone lands in before their
@@ -2652,6 +2652,22 @@ test("attempts that failed for the same reason are one line, not four", () => {
   })]);
   assert.match(html, /<span class="att">#1 #2 #3 #4<\/span> no proposal/);
   assert.equal([...html.matchAll(/<\/span> no proposal<\/li>/g)].length, 1, "the reason is stated once");
+});
+
+// Closed by default and labelled with the count: the marks strip already shows THAT attempts
+// failed, so a bare triangle would make a reader open every row to learn how many. And the
+// summary is a pointer target — at --fs-sm its box is 20px, under WCAG 2.2 SC 2.5.8's floor of
+// 24, so the padding is a requirement rather than spacing.
+test("the reasons are a closed disclosure with a counted label", () => {
+  const html = benchPage([benchRun()]);
+  assert.match(html, /<details class="case-why"><summary>4 failed attempts — why<\/summary>/);
+  assert.doesNotMatch(html, /<details class="case-why" open/);
+  const one = benchPage([benchRun({
+    marks: { "A02-oomkilled-at-limit": "x" },
+    failures: [{ case: "A02-oomkilled-at-limit", attempt: 1, reasons: ["nope"] }],
+  })]);
+  assert.match(one, /<summary>1 failed attempt — why<\/summary>/, "singular");
+  assert.match(STYLES, /\.case-why > summary \{[^}]*padding-block/);
 });
 
 // A failure whose case is missing from marks used to be reported by the disclosure at the

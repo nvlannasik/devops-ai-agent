@@ -2155,10 +2155,19 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
    overflow-wrap: anywhere, not break-word — a reason can carry a truncated JSON payload with
    no spaces in it, and only anywhere lowers min-content width enough to stop it widening the
    whole grid. The 68ch is the same measure the prose blocks use. */
-.case-why { grid-column: 1 / -1; list-style: none; margin: var(--sp-1) 0 var(--sp-2);
-            padding: 0 0 0 var(--sp-3); max-width: 68ch;
-            border-left: 2px solid var(--border);
-            font-size: var(--fs-sm); color: var(--text-dim); overflow-wrap: anywhere; }
+/* Asymmetric on purpose: the disclosure belongs to the case ABOVE it, and at an even margin it
+   sat equidistant between that case and the next one — reading as attached to both. Proximity
+   is the only thing saying which case it explains. */
+.case-why { grid-column: 1 / -1; margin: 0 0 var(--sp-3); font-size: var(--fs-sm); }
+/* padding-block, not decoration: at --fs-sm the summary's own box is 20px and WCAG 2.2 SC
+   2.5.8 puts the floor for a pointer target at 24. It is the full row wide, so height is the
+   only axis that was short. */
+.case-why > summary { color: var(--text-dim); padding-block: var(--sp-1); }
+/* The rule sits on the list, not the disclosure, so it draws only what is revealed — a
+   2px bar hanging under a closed summary marks nothing. */
+.case-why ul { list-style: none; margin: var(--sp-2) 0 0; padding: 0 0 0 var(--sp-3);
+               max-width: 68ch; border-left: 2px solid var(--border);
+               color: var(--text-dim); overflow-wrap: anywhere; }
 .case-why li + li { margin-top: var(--sp-1); }
 /* The attempt numbers are the join back to the marks strip above — same face, so "#2" here and
    the second x up there read as the same run. */
