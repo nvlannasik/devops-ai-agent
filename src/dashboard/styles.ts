@@ -2138,24 +2138,21 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
    number stays beside it, because a bar alone cannot be read off precisely and a rate of
    1/10 and 10/100 look identical drawn. */
 .bench-table { width: 100%; border-collapse: collapse; font-size: var(--fs-base); }
-/* EVERY header, not th.num: headers() emits a plain th and the class only ever reaches the
-   cells, so the nowrap and the padding-left written for the numeric columns never touched the
-   header row at all. "Clean runs" wrapped at 73px and took the whole row to two lines with it.
-   Four short labels, so nowrap costs nothing here.
-   And it must be table.bench-table, not .bench-table: it is overriding
-   table[data-stack] th, which is (0,1,2) because the element selectors count — a plain
-   .bench-table th is (0,1,1) and loses however late it appears. */
-table.bench-table th { text-align: left; font-size: var(--fs-xs); letter-spacing: .06em;
-                  text-transform: uppercase; white-space: nowrap;
-                  color: var(--text-dim); font-weight: 600; padding: 0 var(--sp-3) var(--sp-2) 0; }
-.bench-table td { padding: var(--sp-2) var(--sp-3) var(--sp-2) 0; border-top: 1px solid var(--border); vertical-align: middle; }
+/* No header rule here at all, deliberately. The shared th already sets the face, size,
+   tracking, padding, band and border; this table restated four of those and each one slightly
+   differently — --fs-xs against --fs-2xs, .06em tracking against .1em, a zero top padding that
+   cropped the band — which is exactly why its header row looked like no other on the
+   dashboard. The numeric columns keep their own rule below, and it finally MATCHES: headers()
+   carries a class now, so th.num is a real selector rather than one that silently never fired.
+   .bench-table th.num is (0,2,1) and out-specifies table[data-stack] th at (0,1,2), which is
+   what the nowrap needs in order to hold. */
+.bench-table td { vertical-align: middle; }
 /* The bar is decorative once the number beside it is read; the fraction in the next column is
    the accessible statement of the same thing. */
 /* padding-LEFT, not only right: two numeric columns side by side ran their headers together
    into one word ("ATTEMPTSCLEAN RUNS") with nothing between them. */
-.bench-table th.num, .bench-table td.num { text-align: right; padding: 0 0 var(--sp-2) var(--sp-5);
+.bench-table th.num, .bench-table td.num { text-align: right;
                   font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; }
-.bench-table td.num { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 .bench-table td.rate { width: 46%; }
 .rate-bar { display: inline-block; vertical-align: middle; width: calc(100% - 3.4rem); max-width: 22rem;
             height: .5rem; border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden; }

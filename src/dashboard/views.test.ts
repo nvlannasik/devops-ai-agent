@@ -2625,12 +2625,22 @@ test("every custom property the stylesheet reads is one it also defines", () => 
   );
 });
 
-// headers() emits a plain <th> and only cell() carries a class, so th.num matched nothing and
+// headers() emitted a plain <th> and only cell() carried a class, so th.num matched nothing and
 // the nowrap written for the numeric columns never reached the header row. "Clean runs" wrapped
 // at 73px and took all four headers to two lines with it (46px against the sibling table's 26).
-// The selector must out-specify table[data-stack] th, which is (0,1,2) BECAUSE the element
-// selectors count — a plain .bench-table th is (0,1,1) and loses however late it is written.
+// headers() carries a class now, and the rule has to out-specify table[data-stack] th — which is
+// (0,1,2) BECAUSE the element selectors count. .bench-table th.num is (0,2,1) and wins on the
+// class count; a bare .bench-table th is (0,1,1) and loses however late it is written.
 test("the benchmark header row out-specifies the stacked-table rule it overrides", () => {
-  assert.match(STYLES, /table\.bench-table th \{[^}]*white-space: nowrap/);
+  assert.match(STYLES, /\.bench-table th\.num[^{]*\{[^}]*white-space: nowrap/);
   assert.doesNotMatch(STYLES, /^\.bench-table th \{/m, "a bare .bench-table th cannot win");
+  // The class has to actually arrive, or the selector above is decoration again.
+  assert.match(benchPage([benchRun()]), /<th role="columnheader" class="num">/);
+});
+
+// table() already emits .table-wrap — surface, border, radius, shadow — so a .card around it was
+// a second identical box drawn 1px outside the first. These were the only two tables on the
+// dashboard wrapped that way, and the cells' zero left padding existed solely to sit inside it.
+test("the benchmark tables are not double-boxed", () => {
+  assert.doesNotMatch(benchPage([benchRun()]), /<div class="card">\s*<div class="table-wrap">/);
 });

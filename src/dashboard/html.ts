@@ -169,8 +169,13 @@ export const table = (head: string, body: string, narrow?: Narrow, cls?: string)
   );
 };
 
-export const headers = (...labels: string[]): string =>
-  labels.map((h) => `<th role="columnheader">${esc(h)}</th>`).join("");
+export const headers = (...labels: (string | [label: string, cls: string])[]): string =>
+  labels
+    .map((h) => {
+      const [label, cls] = typeof h === "string" ? [h, ""] : h;
+      return `<th role="columnheader"${cls ? ` class="${esc(cls)}"` : ""}>${esc(label)}</th>`;
+    })
+    .join("");
 
 // A stacked cell is captioned from its own data-label, so the caption travels with the cell
 // instead of being counted out positionally from the header row — insert a column and the

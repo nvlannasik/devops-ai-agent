@@ -1634,7 +1634,7 @@ function byCaseTable(history: BenchRun[]): string {
     )
     .join("");
   return `${section(ICON.incidents, "By case", '<span class="meta">hardest first</span>')}
-    <div class="card">${table(headers("Case", "Pass rate", "Attempts", "Runs"), body, "pairs", "bench-table")}</div>`;
+    ${table(headers("Case", "Pass rate", ["Attempts", "num"], ["Runs", "num"]), body, "pairs", "bench-table")}`;
 }
 
 function byConfigTable(history: BenchRun[]): string {
@@ -1657,7 +1657,7 @@ function byConfigTable(history: BenchRun[]): string {
     .join("");
   const caption = rows.length === 1 ? "only one measured so far" : "best first";
   return `${section(ICON.bench, "By configuration", `<span class="meta">${caption}</span>`)}
-    <div class="card">${table(headers("Backends", "Pass rate", "Attempts", "Clean runs"), body, "pairs", "bench-table")}</div>`;
+    ${table(headers("Backends", "Pass rate", ["Attempts", "num"], ["Clean runs", "num"]), body, "pairs", "bench-table")}`;
 }
 
 export function benchPage(input: BenchRun[], openIncidents?: number): string {
@@ -1683,6 +1683,12 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
      <h1>Benchmark</h1>
      <p class="meta">Synthetic incidents replayed through the real investigation path, scored on
        what the agent produced. Newest first. ${esc(RATE_NOTE)}</p>
+     <p class="meta">Case ids and tiers are this repo's own
+       (<code translate="no">docs/BENCHMARK_agent_stack.md</code>); the scenario shape and two of the
+       three views below &mdash; overall pass rate by case, and the configuration leaderboard &mdash;
+       are borrowed from <a href="https://github.com/gke-labs/k8s-ai-bench" rel="noreferrer noopener"
+       target="_blank">k8s-ai-bench</a>. Its scoring is not: every one of its verifiers diffs cluster
+       state, and this scores a written proposal. See <code translate="no">bench/README.md</code>.</p>
      <p class="meta">Two of the design doc's six axes are implemented — the remediation proposal
        and evidence grounding. A run showing 100% is silent about the other four.</p>
      ${byCaseTable(runs)}
