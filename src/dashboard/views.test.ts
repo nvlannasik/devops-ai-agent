@@ -2638,6 +2638,34 @@ test("the benchmark header row out-specifies the stacked-table rule it overrides
   assert.match(benchPage([benchRun()]), /<th role="columnheader" class="num">/);
 });
 
+// An axis at 1/5 wore the same neutral chip as one that had not been measured — colour was
+// spent only on the perfect case, so the worst number on the card was also its quietest. The
+// tone comes off the SAME threshold the rate bars use, which is the part worth pinning: two
+// copies of "what counts as bad" is how a card and a table come to disagree.
+test("a failing axis is toned, not neutral, and shares the bar's threshold", () => {
+  const html = benchPage([benchRun({ axes: { proposal: [1, 5], grounding: [5, 5] } })]);
+  assert.match(html, /badge" data-tone="critical">proposal 1\/5/);
+  assert.match(html, /badge" data-tone="ok">grounding 5\/5/);
+  // 50% is the bar's warn/bad boundary; an axis has to land on the same side of it.
+  const half = benchPage([benchRun({ axes: { proposal: [3, 5] } })]);
+  assert.match(half, /badge" data-tone="warning">proposal 3\/5/);
+});
+
+// display: contents on a list item drops it from the accessibility tree unless the roles are
+// declared — the same trap the tables carry and the reason table() emits a full role chain.
+test("the case list keeps its roles through display: contents", () => {
+  assert.match(STYLES, /\.bench-cases li \{ display: contents/);
+  const html = benchPage([benchRun()]);
+  assert.match(html, /<ul class="bench-cases" role="list">/);
+  assert.match(html, /<li role="listitem">/);
+});
+
+// A bare max-content track cannot shrink: at 390px one long case id pushed the card 48px past
+// the viewport and put the whole page into a sideways scroll.
+test("the case-name column can shrink below its longest name", () => {
+  assert.match(STYLES, /\.bench-cases \{[^}]*grid-template-columns: minmax\(0, max-content\)/);
+});
+
 // table() already emits .table-wrap — surface, border, radius, shadow — so a .card around it was
 // a second identical box drawn 1px outside the first. These were the only two tables on the
 // dashboard wrapped that way, and the cells' zero left padding existed solely to sit inside it.

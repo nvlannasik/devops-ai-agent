@@ -2111,20 +2111,31 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
    and three that only make sense next to it. */
 .bench-run { display: grid; gap: var(--sp-3); }
 .bench-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2) var(--sp-4); }
+/* The headline and the k it is over are one phrase, and at --fs-xl beside --fs-sm a single
+   collapsed space between them is not a gap: "16%" and "pass^5" read as one token. */
+.bench-head > :first-child { display: flex; align-items: baseline; gap: var(--sp-2); }
 .bench-rate { font-size: var(--fs-xl); font-weight: 650; line-height: 1; letter-spacing: -.02em; }
 .bench-sub { flex: 1 1 auto; }
 .bench-meta { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); align-items: center; }
 .bench-axes { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
-.axis { font-size: var(--fs-sm); padding: .15rem var(--sp-2); border-radius: var(--r-pill);
-        border: 1px solid var(--border); color: var(--text-dim); }
-.axis-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
-.bench-cases { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); }
-/* A fixed name column rather than space-between: on a wide screen the marks were flung to the
-   far edge, and a reader had to track a blank inch to learn which case they belonged to. The
-   column still aligns five attempts under five attempts, which is the reason they were not
-   simply placed next to the name. */
-.bench-cases li { display: grid; grid-template-columns: minmax(0, 20rem) auto;
-                  gap: var(--sp-1) var(--sp-5); align-items: baseline; }
+/* ONE grid for the whole list, with the rows contributing their cells to it — not a grid per
+   row. Both spellings align five attempts under five attempts, which is the point of the
+   column; the difference is what the name column is WIDE. A per-row grid cannot size a track
+   from a sibling row, so it needed a number picked up front, and 20rem was nearly twice the
+   longest case id: every row had a 145px canyon between the name and the marks it labels.
+   max-content is that measurement taken rather than guessed. The minmax(0, ...) is not
+   decoration: a bare max-content track cannot shrink, so at 390px a long case id pushed the
+   card 48px past the viewport and put the whole page into a sideways scroll. With the floor at
+   0 the track is the longest name where there is room and wraps where there is not.
+   Changing a list item's display destroys its implicit role — the same trap the tables carry,
+   documented on table() — so both roles are declared in the markup. */
+/* The border is the card's one internal seam: above it the run identifies and scores itself,
+   below it is the per-case detail. Five bands at one gap read as a single list. */
+.bench-cases { list-style: none; margin: var(--sp-1) 0 0; padding: var(--sp-4) 0 0;
+               display: grid; grid-template-columns: minmax(0, max-content) auto;
+               gap: var(--sp-1) var(--sp-5); align-items: baseline;
+               border-top: 1px solid var(--border); }
+.bench-cases li { display: contents; }
 /* Monospace so five attempts line up under five attempts across rows — the shape is the point:
    "xxxx." is a flaky case that finally landed, "...x." is a good one that slipped. */
 .marks { font-family: var(--font-data); font-size: var(--fs-base); letter-spacing: .22em; }

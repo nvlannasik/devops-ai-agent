@@ -1560,20 +1560,17 @@ function benchRunCard(run: BenchRun): string {
     ${
       axes.length > 0
         ? `<div class="bench-axes">${axes
-            .map(
-              ([name, [ok, seen]]) =>
-                `<span class="axis${ok === seen ? " axis-ok" : ""}">${esc(name)} <strong>${fmtInt(ok)}/${fmtInt(seen)}</strong></span>`
-            )
+            .map(([name, [ok, seen]]) => badge(`${name} ${fmtInt(ok)}/${fmtInt(seen)}`, AXIS_TONE[rateLevel(ok, seen)]))
             .join("")}</div>`
         : ""
     }
 
-    <ul class="bench-cases">
+    <ul class="bench-cases" role="list">
       ${cases
         // marks() returns the whole element now, labelled. Wrapping it again in a second
         // <span class="marks"> left an unlabelled one on the outside — which is the one a
         // screen reader reaches first.
-        .map((c) => `<li><code translate="no">${esc(c)}</code>${marks(run.marks[c]!)}</li>`)
+        .map((c) => `<li role="listitem"><code translate="no">${esc(c)}</code>${marks(run.marks[c]!)}</li>`)
         .join("")}
     </ul>
 
@@ -1596,9 +1593,17 @@ function benchRunCard(run: BenchRun): string {
 
 // A rate as a bar. The number is already in the row; the bar is what makes twelve rows
 // scannable, which is the whole reason k8s-ai-bench's task page has one.
+/** ok / warn / bad for a pass rate. The bar draws it as a fill class and an axis draws it as a
+ *  badge tone, so the two renderings share the threshold rather than each carrying a copy. */
+const rateLevel = (passed: number, attempts: number): "ok" | "warn" | "bad" => {
+  const pct = attempts ? Math.round((passed / attempts) * 100) : 0;
+  return pct === 100 ? "ok" : pct >= 50 ? "warn" : "bad";
+};
+const AXIS_TONE = { ok: "ok", warn: "warning", bad: "critical" } as const;
+
 const rateBar = (passed: number, attempts: number): string => {
   const pct = attempts ? Math.round((passed / attempts) * 100) : 0;
-  const tone = pct === 100 ? "ok" : pct >= 50 ? "warn" : "bad";
+  const tone = rateLevel(passed, attempts);
   return (
     `<span class="rate-bar" role="img" aria-label="${pct}% of ${fmtInt(attempts)} attempts">` +
     `<span class="rate-fill rate-${tone}" style="width:${pct}%"></span></span>` +
