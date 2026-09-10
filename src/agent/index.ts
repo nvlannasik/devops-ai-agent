@@ -1252,8 +1252,13 @@ export class DevOpsAgent {
    * One `k8s_list_pods` call, spent only on the two actions that replace a pod with an identical
    * one. Any failure returns null and lets the proposal through: this guard may add a refusal,
    * never remove one, and an unreachable MCP server is the dry-run's problem one line down.
+   *
+   * Public because `bench/run.ts` calls it. That runner deliberately does not go through
+   * proposeRemediation — no database, no write tools — so without this it would score a proposal
+   * production refuses to card, and the guard would be invisible to the measurement that
+   * motivated it. Calling the same method is what keeps the two in agreement.
    */
-  private async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
+  async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
     const namespace = proposal.toolParams.namespace;
     if (typeof namespace !== "string" || !namespace) return null;
     try {

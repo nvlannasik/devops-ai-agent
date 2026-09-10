@@ -20,6 +20,7 @@ import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
+import { REPLACEMENT_ACTIONS } from "../agent/remediation/replace-guard.js";
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, scoreRca, type Score, type TaskRun } from "./score.js";
@@ -77,8 +78,19 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // ({"action": null}), or it emitted prose the brace match mangled, or zod rejected a field
     // — and they need three different fixes. Without this the first live 5-attempt run could
     // only report "no proposal" four times and could not say which.
-    const proposalRaw = textOf(res.content as Array<{ type: string; text?: string }>);
-    const proposal = parseProposal(proposalRaw);
+    let proposalRaw = textOf(res.content as Array<{ type: string; text?: string }>);
+    let proposal = parseProposal(proposalRaw);
+    // The replacement guard runs in proposeRemediation, which this runner deliberately skips —
+    // so it is applied here by hand, through the agent's own method. Without it the bench would
+    // score a card production never posts: a refusal means no approval card, which is the same
+    // outcome as no proposal and has to be scored as one.
+    if (proposal && REPLACEMENT_ACTIONS.has(proposal.action)) {
+      const refusal = await agent.replacementRefusalFor(proposal).catch(() => null);
+      if (refusal) {
+        proposalRaw = `${proposalRaw}\n[replacement guard refused] ${refusal}`;
+        proposal = null;
+      }
+    }
     return {
       score: combine(scoreProposal(task.expect, proposal, proposalRaw), scoreGrounding(ungrounded), scoreRca(task.expect.rca, rca)),
       rca,
