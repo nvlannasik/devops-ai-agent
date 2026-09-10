@@ -1163,10 +1163,27 @@ tool made it).
   a **runtime trim** (fail gracefully mid-investigation, drop something, keep going), and a noisy
   tool result is **neither** — nothing is wrong with it, it's just a log line repeating, so it gets
   collapsed rather than rejected or trimmed.
-- **`prompts/skills/` holds thirteen files: twelve failure-mode playbooks plus `rca-format.md`.**
+- **`prompts/skills/` holds fourteen files: thirteen failure-mode playbooks plus `rca-format.md`.**
   `rca-format` is `when: always` — every investigation carries the output template regardless of
-  what fired. The twelve playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
+  what fired. The thirteen playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
   also paying tokens for the ImagePullBackOff runbook.
+- **`resource-rightsizing.md` is the one playbook that is NOT only a failure mode**, and it is
+  deliberately duplicated into `prompts/system.md` rather than living in the skill alone. A skill's
+  `when` is a regex: it fires on "unused"/"oomkill"/"throttl"/"boros", and misses "is `orders-api`
+  sized right?". The two capacity tools are auto-discovered, so their descriptions are always
+  present — but `DELEGATION_SECTION` in `src/agent/skills/index.ts` records what that is worth on
+  its own: a tool the model never called once despite a full description, because *one tool
+  description among fifty is not where a model forms strategy*. So the tools are named in `##
+  Tool Usage Reference` (always in the prompt), and the skill carries the longer procedure for
+  the turns where the trigger does hit.
+- **The `k8s_recommend_resources` line sits in `## Execution & Remediation`, not just in the tool
+  list, because the RCA text is what the remediation proposer parses.** `k8s_set_resources` is an
+  approval-card action (`remediation/proposal.ts`) and its extractor prompt asks for "modest values
+  justified by the evidence" — the tool is where that evidence comes from, so the prompt tells the
+  model to take the number from it instead of estimating and to quote the observed peak beside it.
+  Symmetrically, a `k8s_find_unused_resources` finding is barred from Recommended Actions in
+  `## Safety Guidelines`: the scan cannot see an object an operator reads through the API, and the
+  proposal path means a "delete these" line in an RCA is one step from a card.
 - **`## Tool Usage Reference` stayed in `prompts/system.md` instead of becoming a skill.** A
   skill's `when` matches against the alert text, and the alert text has no way to say whether the
   investigation is about to reach for a PromQL query — that decision happens mid-loop, after the
