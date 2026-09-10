@@ -23,10 +23,16 @@ Two tools answer this, and they read different things — pick by the question, 
 1. `k8s_find_unused_resources`, namespace optional (omit it for the whole cluster). Lead with
    `PersistentVolumeClaim` findings — those bill every day — then endpoint-less Services, then
    the idle workloads, then ConfigMaps/Secrets/ServiceAccounts.
-2. It is a review list. An object an operator or CRD reads through the API looks unused here and
-   is not, so a finding is "worth checking with the owner", never "safe to delete". Never turn
-   one into a delete proposal.
-3. `scanned.complete: false` means the scan hit its ceiling — say so rather than presenting the
+2. **Read `crossCheck` before you report anything.** Candidates are already filtered by
+   ownerReferences and matched against every custom resource in the cluster, so
+   `crossCheck.suppressed` shows what an operator saved and which CR did it. But
+   `crdsUnreadable` non-empty means RBAC blocked some CRDs: the cross-check was PARTIAL, and
+   anything those operators reference is still in the list. Say that instead of calling the
+   result verified.
+3. It is still a review list. An object read by name at runtime leaves no trace in any field, so
+   a finding is "worth checking with the owner", never "safe to delete". Never turn one into a
+   delete proposal.
+4. `scanned.complete: false` means the scan hit its ceiling — say so rather than presenting the
    list as the whole picture.
 
 **In an RCA**, this is the *Short-term* Recommended Action, not a separate investigation. An
