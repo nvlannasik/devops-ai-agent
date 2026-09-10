@@ -297,7 +297,16 @@ export class SlackApp {
         const gate = worthProposing(text, reply, isRca, previousReply);
         if (gate.propose) {
           await withTrace(threadId, () =>
-            this.maybeProposeRemediation(event.channel, threadId, null, {}, `User request: ${text}\n\nAgent reply:\n${reply}`)
+            this.maybeProposeRemediation(
+              event.channel,
+              threadId,
+              null,
+              {},
+              `User request: ${text}\n\nAgent reply:\n${reply}`,
+              // worthProposing already decided this; it is the only place that knows whether the
+              // words came from a person or the fault vocabulary came from the agent's own answer.
+              gate.byUser
+            )
           );
         } else {
           logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
@@ -633,10 +642,13 @@ export class SlackApp {
     threadId: string,
     incidentId: number | null, // null when the investigation came from a human mention
     labels: Record<string, string>,
-    rca: string
+    rca: string,
+    // The human named the action, rather than the model reaching for one. Skips the replacement
+    // guard only — every other check, including the dry-run and the approval click, still runs.
+    userRequested = false
   ): Promise<void> {
     try {
-      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca);
+      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested });
       if (!proposed) return; // no write tools / no confident proposal / already active
       if ("refused" in proposed) {
         // the model wanted to act but the MCP server refused (GitOps guard, blocked

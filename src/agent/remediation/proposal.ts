@@ -209,15 +209,20 @@ export function worthProposing(
   reply: string,
   isRca: boolean,
   previousReply = ""
-): { propose: boolean; reason: string } {
-  if (isRca) return { propose: true, reason: "RCA response — a fault was diagnosed" };
-  if (ACTION_INTENT.test(userText)) return { propose: true, reason: "the user asked for a change" };
+): { propose: boolean; reason: string; byUser: boolean } {
+  // `byUser` is what separates "a person named this action" from "the agent's own answer carried
+  // fault vocabulary". Only the first is a reason to skip the replacement guard, and this is the
+  // only place that can tell them apart — by the time proposeRemediation runs, both look like an
+  // RCA-shaped string. Deliberately NOT derived from the reason text: a wording change to a log
+  // line must not silently disable a guard.
+  if (isRca) return { propose: true, reason: "RCA response — a fault was diagnosed", byUser: false };
+  if (ACTION_INTENT.test(userText)) return { propose: true, reason: "the user asked for a change", byUser: true };
   if (isApproval(userText) && ACTION_INTENT.test(previousReply)) {
-    return { propose: true, reason: "the user approved the change proposed in the previous turn" };
+    return { propose: true, reason: "the user approved the change proposed in the previous turn", byUser: true };
   }
   const hit = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE);
-  if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")` };
-  return { propose: false, reason: "read-only question, no fault evidence in the answer" };
+  if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
+  return { propose: false, reason: "read-only question, no fault evidence in the answer", byUser: false };
 }
 
 export const PROPOSAL_SYSTEM =

@@ -1216,6 +1216,47 @@ tool made it).
   renderer nor `src/dashboard/rca.ts` can parse. Failing at boot, loudly, beats failing per-incident,
   silently.
 
+### The replacement guard — restart and delete cannot reach a spec fault (`agent/remediation/replace-guard.ts`)
+
+`k8s_rollout_restart` and `k8s_delete_pod` do the same physical thing: destroy a pod and let its
+controller rebuild it **from the same spec**. So they repair exactly one class of fault — a running
+process gone wrong — and none of the class that lives in the spec: a missing config key, a
+nonexistent image tag, a limit set too low, a wrong probe path. Proposed against a spec fault, the
+replacement reproduces it in seconds, after a human approved a change on our authority.
+
+**Two prompt rounds failed to hold it, which is what moved it into code.** Round one gave
+`k8s_rollout_restart` a spec test and the failures moved wholesale to `k8s_delete_pod` — whose own
+rule read "while its siblings are healthy", and a single-replica workload has no unhealthy sibling
+to contradict that. Round two closed that sentence and the failures came back on both actions
+(benchmark A02, C03, C08). Same conclusion `worthProposing`, the namespace scope lock and the log
+fan-out cap each reached before it.
+
+The guard runs in `proposeRemediation` **before the dry-run**, because the dry-run cannot help
+here: there is nothing wrong with the operation, it just cannot work. One `k8s_list_pods` call,
+spent only on those two actions:
+
+- **delete_pod** claims one pod is wedged while its siblings are fine. Refused when no sibling is
+  ready — and a single-replica workload has no sibling at all. Siblings are derived from the
+  TARGET POD's name, not the workload's, so they are the pods of its own ReplicaSet: mid-rollout
+  the old ReplicaSet is healthy and the new one is not, and counting those as siblings would read
+  "one wedged pod among healthy siblings" off a broken rollout.
+- **rollout_restart** claims a fresh pod would come up healthy. Refused when every pod of the
+  workload is unready AND has restarted at least once: the kubelet has already run that
+  experiment, repeatedly, and the pods came back the same.
+
+**Skipped when the human named the action in words.** The guard stops the MODEL reaching for a
+gesture it cannot place; a person who types "restart the payments deployment" has placed it
+themselves. `worthProposing` returns `byUser` for this and it is a FIELD, not a substring of
+`reason` — a wording change to a log line must not silently disable a guard.
+
+Fails open everywhere: an unparseable payload, an unreachable MCP server, a pod name with no dash
+(a bare pod is not replaced when deleted at all) all return null and let the proposal through.
+This may only ever add a refusal, never remove a check that already runs.
+
+Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a wrong readiness probe
+path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
+genuinely wedged process needs the probe result, which the payload does not carry.
+
 ### The log-gap gate — a selected playbook that gets ignored (`agent/index.ts`, `LOG_GAP_NOTICE`)
 
 **A playbook is a prompt rule, and prompt rules do not hold on their own.** `crashloopbackoff.md`

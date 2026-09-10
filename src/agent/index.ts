@@ -33,6 +33,7 @@ import {
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -1163,7 +1164,8 @@ export class DevOpsAgent {
   async proposeRemediation(
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
     labels: Record<string, string>,
-    rca: string
+    rca: string,
+    opts: { userRequested?: boolean } = {}
   ): Promise<
     | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
     | { refused: string }
@@ -1202,6 +1204,23 @@ export class DevOpsAgent {
       return null;
     }
 
+    // The replacement guard, before the dry-run: a restart or a delete against a fault that
+    // lives in the spec is a change the MCP server will happily validate, because there is
+    // nothing wrong with it as an operation — it just cannot work. See replace-guard.ts for why
+    // this is code and not another paragraph in the prompt.
+    //
+    // Skipped when the human asked for the action in words. The guard exists to stop the MODEL
+    // reaching for a gesture when it cannot place a fault; a person who types "restart the
+    // payments deployment" has placed it themselves and may know something the pod list does not
+    // show. Their request is already sufficient evidence per buildProposalPrompt.
+    if (!opts.userRequested && REPLACEMENT_ACTIONS.has(proposal.action)) {
+      const refusal = await this.replacementRefusalFor(proposal);
+      if (refusal) {
+        logger.info(`[remediation] replacement guard refused ${proposal.summary}: ${refusal}`);
+        return { refused: refusal };
+      }
+    }
+
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
     // server's namespace guardrails with zero side effects.
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
@@ -1227,6 +1246,23 @@ export class DevOpsAgent {
     }
 
     return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+  }
+
+  /**
+   * One `k8s_list_pods` call, spent only on the two actions that replace a pod with an identical
+   * one. Any failure returns null and lets the proposal through: this guard may add a refusal,
+   * never remove one, and an unreachable MCP server is the dry-run's problem one line down.
+   */
+  private async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
+    const namespace = proposal.toolParams.namespace;
+    if (typeof namespace !== "string" || !namespace) return null;
+    try {
+      const raw = await this.mcp.callTool("k8s_list_pods", { namespace });
+      return replacementRefusal(proposal.action, proposal.toolParams, parsePods(raw));
+    } catch (err) {
+      logger.debug(`[remediation] replacement guard could not list pods in ${namespace}: ${errDetail(err)}`);
+      return null;
+    }
   }
 
   // Auto-detect the GitOps overlay path for a HelmRelease from Flux's own config: HR CR →
