@@ -114,3 +114,31 @@ test("an unrelated failure propagates instead of being retried", async () => {
   };
   await assert.rejects(() => c.chat([{ role: "user", content: "hi" }], [], "sys"), /invalid tool schema/);
 });
+
+// A live deepseek round 2 came back `400 The `reasoning_content` in the thinking mode must be
+// passed back to the API.` — round 1 succeeds, so the backend reads as flaky rather than as
+// missing a field. It is not optional for that provider: drop it and every multi-turn tool
+// conversation on it fails.
+test("a reasoning model's thinking is echoed back on the assistant turn", () => {
+  const out = toOpenAIMessages([
+    { role: "user", content: "which resources are unused?" },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "checking", reasoning: "the user wants a cluster-wide scan" },
+        { type: "tool_use", id: "call_1", name: "k8s_find_unused_resources", input: {} },
+      ],
+    },
+  ]);
+  const assistant = out[1] as { role: string; reasoning_content?: string; tool_calls?: unknown[] };
+  assert.equal(assistant.role, "assistant");
+  assert.equal(assistant.reasoning_content, "the user wants a cluster-wide scan");
+  assert.equal(assistant.tool_calls?.length, 1);
+});
+
+test("a turn with no reasoning carries no reasoning_content key at all", () => {
+  const out = toOpenAIMessages([
+    { role: "assistant", content: [{ type: "text", text: "done" }] },
+  ]);
+  assert.ok(!("reasoning_content" in (out[0] as object)));
+});

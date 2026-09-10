@@ -1,7 +1,7 @@
 ---
 name: resource-rightsizing
 description: Turning "the limit is wrong" or "what can we clean up" into concrete numbers and named objects
-when: unused|orphan|unclaimed|idle|wasted|clean ?up|cost|right.?siz|over.?provision|under.?provision|resource limit|limit resource|resource request|request resource|requests and limits|oomkill|out of memory|exit code 137|throttl|insufficient (cpu|memory)|evicted|tidak terpakai|tak terpakai|menganggur|boros
+when: unused|orphan|unclaimed|idle|wasted|clean ?up|cost|right.?siz|over.?provision|under.?provision|resource limit|limit resource|resource request|request resource|requests and limits|oomkill|out of memory|exit code 137|throttl|insufficient (cpu|memory)|evicted|tidak terpakai|tak terpakai|nggak terpakai|ga(k)? ?(ke)?pake|nggak ke?pake|kepake|menganggur|nganggur|boros|sisa|numpuk
 ---
 
 Two tools answer this, and they read different things — pick by the question, not by both.

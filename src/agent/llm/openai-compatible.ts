@@ -30,7 +30,14 @@ export function toOpenAIMessages(messages: Message[]): OpenAI.Chat.ChatCompletio
           type: "function" as const,
           function: { name: b.name ?? "", arguments: JSON.stringify(b.input ?? {}) },
         }));
-      out.push({ role: "assistant", content: text, ...(toolCalls.length > 0 && { tool_calls: toolCalls }) });
+      // Echoed verbatim: DeepSeek's thinking mode 400s on a follow-up that drops it.
+      const reasoning = m.content.map((b) => b.reasoning).find(Boolean);
+      out.push({
+        role: "assistant",
+        content: text,
+        ...(reasoning && { reasoning_content: reasoning }),
+        ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+      });
       continue;
     }
     // user turn: tool results must come FIRST — OpenAI requires every tool message to
@@ -120,8 +127,15 @@ export class OpenAICompatibleClient implements LLMClient {
     const choice = response.choices[0];
     const content: ContentBlock[] = [];
 
-    if (choice.message.content) {
-      content.push({ type: "text", text: choice.message.content });
+    // Not in the OpenAI types — DeepSeek and other thinking models add it, and DeepSeek
+    // requires it back on the next turn. Kept on the text block so it travels with the
+    // assistant turn it belongs to rather than in a side channel that history trimming
+    // could separate from it.
+    const reasoning = (choice.message as { reasoning_content?: unknown }).reasoning_content;
+    const reasoningText = typeof reasoning === "string" && reasoning ? reasoning : undefined;
+
+    if (choice.message.content || reasoningText) {
+      content.push({ type: "text", text: choice.message.content ?? "", ...(reasoningText && { reasoning: reasoningText }) });
     }
 
     for (const tc of choice.message.tool_calls ?? []) {
