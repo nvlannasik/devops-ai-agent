@@ -44,8 +44,22 @@ const MIN_LENGTH = 4;
  * costs more than a false negative — the write-tool filter and the dry-run are the guards that
  * actually stop a bad action, not this.
  */
+/**
+ * Three shapes that pass every rule above and are not resource names. All three were observed as
+ * false positives in ONE benchmark run, which is how they were found — each one had already been
+ * posted into an incident thread as "a name no tool result contained":
+ *
+ * - `payments-api-...` — an elided name. The model shortened it; it is not claiming a resource.
+ * - `helm.toolkit.fluxcd.io` — an API group. So is `docker.io`, out of a split image reference.
+ * - `resources.requests.cpu` — a manifest field path, which is a quotation of a spec, not a name.
+ *
+ * The last two are separated by the same tell: dots without a hyphen. Real workload names in this
+ * system carry a hyphen (`orders-api`, `checkout-gateway`) and rarely more than one dot.
+ */
+const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*\.[^-]*$/;
+
 const looksLikeIdentifier = (name: string): boolean =>
-  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name);
+  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name) && !NOT_A_NAME.test(name);
 
 /** Names the answer asserts, namespace-qualified ones split into their parts. */
 export function citedNames(answer: string): string[] {

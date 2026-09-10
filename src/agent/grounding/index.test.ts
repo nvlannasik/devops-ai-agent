@@ -124,3 +124,14 @@ test("real workload names still survive the same filter", () => {
     ["checkout-gateway", "orders-api", "sample-apps", "storefront-svc"]
   );
 });
+
+test("an elided name, an API group and a field path are not resource claims", () => {
+  // All three were flagged in one benchmark run, and each had already reached a Slack thread as
+  // an ungrounded name. None of them is the model naming a resource.
+  assert.deepEqual(citedNames("the pod `payments-api-...` restarted"), []);
+  // `library` and `nginx` are dropped by the separator rule, `docker.io` by the new one
+  assert.deepEqual(citedNames("managed by `helm.toolkit.fluxcd.io` from `docker.io/library/nginx`"), []);
+  assert.deepEqual(citedNames("raise `resources.requests.cpu`"), []);
+  // still catches what it is for
+  assert.deepEqual(citedNames("the Deployment `order-service` is missing"), ["order-service"]);
+});

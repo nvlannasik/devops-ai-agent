@@ -13,6 +13,7 @@
 // task file, instead of a bash script per task.
 
 import type { Proposal } from "../agent/remediation/proposal.js";
+import { extractSection } from "../utils/slack/blocks.js";
 
 export interface Expectation {
   /**
@@ -111,6 +112,24 @@ export function scoreGrounding(names: string[]): Score {
 }
 
 /**
+ * mustNot is tested against the RCA MINUS its Ruled Out section, because a hypothesis named
+ * there is the opposite of a claim.
+ *
+ * Measured, not anticipated: A06 forbids "Insufficient CPU" — the whole case is that a
+ * nodeSelector mismatch must not be reported as a full cluster — and the agent wrote
+ * "Insufficient CPU/Memory across all nodes — ruled out by the event showing taint/affinity as
+ * the scheduling blocker". That is the correct answer, scored as the failure it is the cure for.
+ * A08 lost an attempt the same way, for "pod shows 0 restarts ... not CrashLoopBackOff".
+ *
+ * `must` still reads the whole text: stating a required fact while ruling something else out is
+ * still stating it.
+ */
+const withoutRuledOut = (rca: string): string => {
+  const section = extractSection(rca, "Ruled Out");
+  return section ? rca.replace(section, "") : rca;
+};
+
+/**
  * The RCA-text axis. Absent spec -> passes and declares NO axis, so a case that does not use it
  * leaves the tally alone rather than padding it with free points.
  *
@@ -120,11 +139,12 @@ export function scoreGrounding(names: string[]): Score {
 export function scoreRca(spec: Expectation["rca"], rca: string): Score {
   if (!spec) return { pass: true, reasons: [] };
   const reasons: string[] = [];
+  const asserted = withoutRuledOut(rca);
   for (const src of spec.must ?? []) {
     if (!new RegExp(src, "i").test(rca)) reasons.push(`RCA never says /${src}/i — the fact this case turns on`);
   }
   for (const src of spec.mustNot ?? []) {
-    const hit = new RegExp(src, "i").exec(rca);
+    const hit = new RegExp(src, "i").exec(asserted);
     if (hit) reasons.push(`RCA says ${JSON.stringify(hit[0])}, which /${src}/i forbids for this case`);
   }
   return { pass: reasons.length === 0, reasons, axes: { rca: reasons.length === 0 } };

@@ -238,3 +238,18 @@ test("the RCA axis fails a right-symptom-wrong-cause answer, and declares no axi
   // A case with no rca block must not collect a free point: no axis at all.
   assert.deepEqual(scoreRca(undefined, rca), { pass: true, reasons: [] });
 });
+
+test("mustNot ignores the Ruled Out section — that is where a hypothesis goes to be denied", () => {
+  const rca = [
+    "*📍 Root Cause*",
+    "The nodeSelector `disktype: nvme-none` matches no node.",
+    "",
+    "*🚫 Ruled Out*",
+    "• Insufficient CPU across all nodes — ruled out by the event showing taint/affinity.",
+  ].join("\n");
+  const spec = { must: ["nodeselector"], mustNot: ["insufficient cpu"] };
+  assert.equal(scoreRca(spec, rca).pass, true);
+  // asserted in the Root Cause section rather than denied in Ruled Out, it still fails
+  const claimed = rca.replace("matches no node.", "matches no node, and there is Insufficient CPU across all nodes.");
+  assert.equal(scoreRca(spec, claimed).pass, false);
+});
