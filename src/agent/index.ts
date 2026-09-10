@@ -1,5 +1,5 @@
 import { createLLMClient } from "./llm/index.js";
-import { SERIALIZED_BLOCKS } from "./llm/router.js";
+import { SERIALIZED_BLOCKS, namesToolOnly } from "./llm/router.js";
 import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
@@ -716,6 +716,17 @@ export class DevOpsAgent {
           logger.warn(
             `[${threadId}] final answer looks like a serialized content array — the backend is likely ` +
             `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`
+          );
+        }
+        // The other shape of the same fault: the model named the tool instead of calling it.
+        // The router escalates on this, so with LLM_PROVIDER=router it is already handled by
+        // the time we get here — this branch is the backstop for the single-backend providers,
+        // which have nothing to fall up to. Logged, not rewritten: a canned reply would hide a
+        // misconfigured tool-call parser behind a friendly sentence.
+        if (namesToolOnly(summary, toolsDisabled ? [] : tools)) {
+          logger.warn(
+            `[${threadId}] final answer is just the tool name \`${summary.trim()}\` — the backend named a ` +
+            `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
           );
         }
         return summary;

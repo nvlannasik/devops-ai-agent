@@ -14,6 +14,25 @@ export const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
 const textOf = (content: ContentBlock[]): string =>
   content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
 
+// The other shape of a dead tool channel, and the one a weak backend actually produces: the
+// model NAMES the tool it should have called and stops. Observed live — "is there any unused
+// resource we can terminate?" came back as the single string `k8s_find_unused_resources`,
+// stop=end_turn, and shipped to Slack as the answer because non-empty prose that is not JSON
+// looked like a valid reply.
+//
+// Exact match after stripping decoration, deliberately. A response whose ENTIRE text is a
+// registered tool name is not a judgement call — no answer to any question is that string. The
+// looser reading ("I'll use `x` to check") is left alone: telling a real sentence that mentions
+// a tool from a failed call needs to weigh intent, and a wrong escalation costs a heavy call on
+// every turn that happens to name a tool.
+const DECORATION = /^[\s`'"*_(\[]+|[\s`'"*_.,:;!?)\]]+$/g;
+
+export function namesToolOnly(text: string, tools: ToolDefinition[]): boolean {
+  const bare = text.replace(DECORATION, "").toLowerCase();
+  if (!bare) return false;
+  return tools.some((t) => t.name.toLowerCase() === bare);
+}
+
 interface Failure {
   reason: string;
   toolChannelDead: boolean;
@@ -21,13 +40,16 @@ interface Failure {
 
 // Only deterministically detectable failures count. A weak-but-valid answer is not one:
 // judging quality needs another LLM call and would not be trustworthy.
-function failureOf(res: LLMResponse): Failure | null {
+function failureOf(res: LLMResponse, tools: ToolDefinition[]): Failure | null {
   // a tool round legitimately carries no text — treating it as empty would escalate every
   // single round of every investigation
   if (res.stopReason === "tool_use") return null;
   const text = textOf(res.content);
   if (!text) return { reason: `empty response (stop=${res.stopReason})`, toolChannelDead: false };
   if (SERIALIZED_BLOCKS.test(text)) return { reason: "serialized content blocks", toolChannelDead: true };
+  if (namesToolOnly(text, tools)) {
+    return { reason: `answered with a tool name instead of calling it (${text.trim()})`, toolChannelDead: true };
+  }
   return null;
 }
 
@@ -68,7 +90,7 @@ export class RouterLLMClient implements LLMClient {
       logger.info(`[llm-router] route=${route} backend=${name} attempt=${i + 1}/${names.length}${traceSuffix()}`);
       try {
         const res = await backend.chat(messages, tools, systemPrompt);
-        const failure = failureOf(res);
+        const failure = failureOf(res, tools);
         if (!failure) {
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop
           if (route === "light" && i >= this.light.length && ctx) ctx.escalated = true;
@@ -76,9 +98,9 @@ export class RouterLLMClient implements LLMClient {
         }
         if (failure.toolChannelDead) {
           logger.warn(
-            `[llm-router] backend=${name} returned serialized content blocks — its tool-call ` +
-            `channel is not working. Check the backend's tool-call parser (vLLM: ` +
-            `--enable-auto-tool-choice --tool-call-parser) and toOpenAIMessages${traceSuffix()}`
+            `[llm-router] backend=${name}: ${failure.reason} — its tool-call channel is not ` +
+            `working. Check the backend's tool-call parser (vLLM: --enable-auto-tool-choice ` +
+            `--tool-call-parser) and toOpenAIMessages${traceSuffix()}`
           );
         } else {
           logger.warn(`[llm-router] backend=${name} failed: ${failure.reason}${traceSuffix()}`);

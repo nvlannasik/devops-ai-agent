@@ -1167,6 +1167,20 @@ tool made it).
   `rca-format` is `when: always` — every investigation carries the output template regardless of
   what fired. The thirteen playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
   also paying tokens for the ImagePullBackOff runbook.
+- **A light-tier answer that is only a tool NAME is a dead tool channel, and the router now
+  falls up on it** (`llm/router.ts:namesToolOnly`). Found live 2026-09-10: "coba check cluster
+  saat ini apakah ada unused resource yang bisa kita terminated?" is conversation mode, and
+  `app/index.ts:255` routes every conversation-mode mention to `light` — the small backend
+  answered with the single string `` `k8s_find_unused_resources` ``, `stop=end_turn`, and it
+  shipped to Slack as the reply. `failureOf()` only knew two shapes (empty text, serialized
+  content blocks), and non-empty prose that is not JSON looked valid. Nothing to do with the new
+  tool: any tool reachable from a light-routed question had the same hole.
+  - Match is **exact after stripping decoration**, never fuzzy. A reply whose ENTIRE text is a
+    registered tool name is not a judgement call; "I'll use `x` to check" is, and escalating on
+    it would buy a heavy call on most turns that mention a tool. `router.test.ts` pins both
+    directions.
+  - `agent/index.ts` warns on the same symptom for the single-backend providers, which have
+    nothing to fall up to — same one-detector rule that already applies to `SERIALIZED_BLOCKS`.
 - **`resource-rightsizing.md` is the one playbook that is NOT only a failure mode**, and it is
   deliberately duplicated into `prompts/system.md` rather than living in the skill alone. A skill's
   `when` is a regex: it fires on "unused"/"oomkill"/"throttl"/"boros", and misses "is `orders-api`

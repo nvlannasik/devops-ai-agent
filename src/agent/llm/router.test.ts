@@ -114,6 +114,40 @@ test("a serialized-content-block answer falls up", async () => {
   assert.equal(res.content[0].text, "H");
 });
 
+// Regression: observed live on 2026-09-10. A light backend answered "is there any unused
+// resource we can terminate?" with the single string `k8s_find_unused_resources` and stopped.
+// Non-empty, not JSON — so the old detector passed it through and Slack got a tool name as the
+// answer, with no escalation and no warning.
+test("an answer that is only a tool name falls up", async () => {
+  const calls: string[] = [];
+  const tools = [{ name: "k8s_find_unused_resources", description: "", input_schema: { type: "object" as const } }];
+  const named = answer("`k8s_find_unused_resources`");
+  const r = build(calls, fake(named, calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  const res = await withRoute("light", () => r.chat([], tools, "sys"));
+  assert.deepEqual(calls, ["light1", "heavy1"]);
+  assert.equal(res.content[0].text, "H");
+});
+
+test("a real sentence that merely mentions a tool is NOT a failure", async () => {
+  const calls: string[] = [];
+  const tools = [{ name: "k8s_find_unused_resources", description: "", input_schema: { type: "object" as const } }];
+  // Escalating on every reply that names a tool would cost a heavy call on most turns.
+  const prose = answer("Nothing unused — `k8s_find_unused_resources` came back empty.");
+  const r = build(calls, fake(prose, calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  const res = await withRoute("light", () => r.chat([], tools, "sys"));
+  assert.deepEqual(calls, ["light1"]);
+  assert.match(res.content[0].text!, /^Nothing unused/);
+});
+
+test("a bare word that is not a registered tool name is left alone", async () => {
+  const calls: string[] = [];
+  const tools = [{ name: "k8s_list_pods", description: "", input_schema: { type: "object" as const } }];
+  const r = build(calls, fake(answer("ok"), calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  const res = await withRoute("light", () => r.chat([], tools, "sys"));
+  assert.deepEqual(calls, ["light1"]);
+  assert.equal(res.content[0].text, "ok");
+});
+
 test("escalation is sticky for the rest of the investigation", async () => {
   const calls: string[] = [];
   const r = build(calls, fake(boom, calls, "light1"), fake(answer("H"), calls, "heavy1"));
