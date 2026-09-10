@@ -44,5 +44,10 @@ test("the notice says what to call, and that an empty query is a fact about the 
   assert.match(LOG_GAP_NOTICE, /Do not recommend that a human run a log query you can run yourself/);
   // C03's: logs genuinely absent is a valid answer, stated and paid for in confidence.
   assert.match(LOG_GAP_NOTICE, /genuinely unavailable/);
+  // C01's: the gate also fires on a healthy namespace, because "nothing is wrong" and "I did not
+  // look" are the same sentence until someone looks. It must not turn a correct clean bill of
+  // health into a hedged one.
+  assert.match(LOG_GAP_NOTICE, /lower the Confidence only if your conclusion actually depends on them/);
+  assert.match(LOG_GAP_NOTICE, /a complete answer, not a thin one/);
   for (const t of LOG_TOOLS) assert.ok(t.startsWith("k8s_") || t.startsWith("loki_"), t);
 });

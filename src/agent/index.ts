@@ -152,8 +152,10 @@ export const LOG_GAP_NOTICE =
   "so retry without it rather than reporting the logs as unavailable. If a log query came back empty, " +
   "that is a fact about the QUERY and not about the workload: drop the level/severity filter and widen " +
   "the selector, or read the pod logs directly instead of Loki. Only if the logs are genuinely " +
-  "unavailable after that, say so explicitly in the answer, state what it leaves unconfirmed, and lower " +
-  "the Confidence. Do not recommend that a human run a log query you can run yourself.]";
+  "unavailable after that, say so explicitly in the answer and state what it leaves unconfirmed — and " +
+  "lower the Confidence only if your conclusion actually depends on them. Finding a healthy workload " +
+  "and quiet logs is a complete answer, not a thin one. Do not recommend that a human run a log query " +
+  "you can run yourself.]";
 
 /** Does any loaded playbook name a log tool? Read from the body, so a new playbook gets this free. */
 export const demandsLogs = (skills: readonly Skill[]): boolean =>
@@ -1137,7 +1139,15 @@ export class DevOpsAgent {
     // `trigger` is the alert payload as Alertmanager sent it — buildGroupAlertText's output,
     // WITHOUT the recall block app/index.ts wraps around it before the model sees it. That
     // distinction is the whole reason it can be counted as evidence; see grounding/index.ts.
-    const gaps = groundingGaps(answer, history, trigger);
+    //
+    // The playbook NAMES ride along for the same reason: we put them in the model's context, so
+    // quoting one back cannot be an invention. Observed on benchmark case A03 — the RCA said the
+    // drift check would need "`gitops-drift` tooling", which is the playbook it had been handed,
+    // and it was reported to the thread as a resource no tool result contained. All registered
+    // names rather than this thread's, because a name we ship is never an invention whoever
+    // loaded it.
+    const given = [trigger, ...this.skills.all().map((s) => s.name)].join("\n");
+    const gaps = groundingGaps(answer, history, given);
     if (gaps.length > 0) {
       logger.warn(
         `[${threadId}] answer names ${gaps.length} resource(s) absent from every tool result: ${gaps.join(", ")}`

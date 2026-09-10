@@ -146,3 +146,11 @@ test("a name the ALERT itself carries is evidence, not an invention", () => {
   // without the trigger, every name in it is a gap
   assert.ok(groundingGaps(rca, []).includes("payments-7"));
 });
+
+test("a playbook name quoted back is not an invented resource", () => {
+  // A03: the RCA said confirming drift would need "`gitops-drift` tooling" — the name of the
+  // playbook it had been handed. Reported to the thread as a resource no tool result contained.
+  const rca = "To confirm drift we would need `gitops-drift` tooling or `k8s_get_custom_resources`.";
+  assert.ok(groundingGaps(rca, []).includes("gitops-drift"));
+  assert.deepEqual(groundingGaps(rca, [], "gitops-drift\npod-pending\nlog-alert"), []);
+});
