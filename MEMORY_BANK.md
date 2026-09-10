@@ -1163,9 +1163,9 @@ tool made it).
   a **runtime trim** (fail gracefully mid-investigation, drop something, keep going), and a noisy
   tool result is **neither** — nothing is wrong with it, it's just a log line repeating, so it gets
   collapsed rather than rejected or trimmed.
-- **`prompts/skills/` holds fourteen files: thirteen failure-mode playbooks plus `rca-format.md`.**
+- **`prompts/skills/` holds fifteen files: fourteen failure-mode playbooks plus `rca-format.md`.**
   `rca-format` is `when: always` — every investigation carries the output template regardless of
-  what fired. The thirteen playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
+  what fired. The fourteen playbooks are regex-gated on the alert text, so an OOMKilled alert isn't
   also paying tokens for the ImagePullBackOff runbook.
 - **A light-tier answer that is only a tool NAME is a dead tool channel, and the router now
   falls up on it** (`llm/router.ts:namesToolOnly`). Found live 2026-09-10: "coba check cluster
@@ -1215,6 +1215,42 @@ tool made it).
   output format, so it would investigate correctly and then answer in a shape neither the Slack
   renderer nor `src/dashboard/rca.ts` can parse. Failing at boot, loudly, beats failing per-incident,
   silently.
+
+### The log-gap gate — a selected playbook that gets ignored (`agent/index.ts`, `LOG_GAP_NOTICE`)
+
+**A playbook is a prompt rule, and prompt rules do not hold on their own.** `crashloopbackoff.md`
+step 2 says to call `k8s_get_pod_logs` with `previous: true`, and it is not advice the model
+missed: benchmark case B04 **selected that playbook**, called `k8s_describe_pod` (step 1), skipped
+step 2, and wrote *"Immediate: Retrieve previous-container logs for all 8 pods"* into its own
+Recommended Actions — handing a human the tool call it was holding. The line it never read said
+`FATAL: DATABASE_URL is not set`. Three attempts out of three, same shape each time.
+
+So the rule moved into code, which is the same move `worthProposing`, the namespace scope lock and
+the log fan-out cap already made. Before the final answer leaves `runInvestigation`: if a selected
+playbook names a log tool and no log tool has RETURNED anything, the run is given one more round
+and told exactly what to fetch. Once per investigation, never when `toolsDisabled` (the ceiling
+notices own that turn), and never on the first round.
+
+**"Did we call a log tool" is the wrong test, and A13 is why.** That case *did* call
+`loki_query_range` — with a `level="error"` filter against output that is not JSON — got an empty
+result, and reported "no error logs in the window" for a pod printing `cannot list resource
+"pods"` every fifteen seconds. An empty result is indistinguishable from a healthy service, which
+is the same failure already recorded here for LogQL labels and PromQL metric names, one level out.
+The gate therefore tracks whether any log result came back with **content**, and
+`prompts/system.md`'s "Empty result = evidence of absence" rule was qualified in the same change:
+absence *for the query you ran*, widen once, then state it.
+
+`demandsLogs()` reads the skill BODY rather than a list of skill names, so a new playbook that
+names a log tool is covered without touching this code — and `log-gap.test.ts` asserts the gate
+against the SHIPPED playbooks, so deleting `k8s_get_pod_logs` from `crashloopbackoff.md` fails the
+suite instead of silently disabling the gate. Deliberately off for `pod-pending`, `pvc-pending` and
+`service-unavailable`: a Pending pod never started a container, so there is nothing to read and the
+nudge would cost an LLM call to be told what is already true.
+
+ponytail: log evidence is detected by a 200-character floor on the result, not by parsing each
+tool's empty shape. An empty Loki envelope measures ~35 characters and a `previous: true` fetch is
+hundreds; parsing properly would mean tracking three response formats from another repo, and being
+wrong costs one extra LLM call.
 
 ## LLM Providers
 

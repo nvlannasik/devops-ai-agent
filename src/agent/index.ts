@@ -111,6 +111,51 @@ export const ITERATION_CEILING_NOTICE = `[ITERATION LIMIT REACHED — ${FINAL_TU
 export const TIME_BUDGET_NOTICE = `[TIME BUDGET REACHED — ${FINAL_TURN_INSTRUCTION}]`;
 
 /**
+ * The tools whose RESULT is log lines, and the notice for an investigation that answered without
+ * any of them.
+ *
+ * This is a prompt rule that did not hold, moved into code — the same move `worthProposing` and
+ * the fan-out cap already made. `prompts/skills/crashloopbackoff.md` step 2 says to call
+ * `k8s_get_pod_logs` with `previous: true`, and the playbook WAS selected: benchmark case B04
+ * loaded it, called `k8s_describe_pod`, and then wrote *"Immediate: Retrieve previous-container
+ * logs for all 8 pods"* into its own Recommended Actions — recommending to a human the tool call
+ * it was holding. The crash message it never read said `FATAL: DATABASE_URL is not set`. Three
+ * attempts out of three.
+ *
+ * A13 is the same gap one level in, and it is why "did we CALL a log tool" is not the test:
+ * `loki_query_range` was called, with a `level="error"` filter the workload's output does not
+ * carry, and an empty result was reported as "no errors in the window" for a pod printing
+ * `cannot list resource "pods"` every fifteen seconds. So the test is whether any log tool
+ * RETURNED anything.
+ *
+ * Only fires when a selected playbook names a log tool, which is what keeps it off the cases
+ * that have no logs to read by construction — a Pending pod never started a container.
+ */
+export const LOG_TOOLS: ReadonlySet<string> = new Set(["k8s_get_pod_logs", "loki_query", "loki_query_range"]);
+
+/**
+ * ponytail: a length threshold, not a parse. An empty Loki response is a JSON envelope around an
+ * empty array and lands around 35 characters (measured); a `previous: true` log fetch of a dead
+ * container is hundreds. Parsing each tool's own empty shape would mean tracking three response
+ * formats from another repo, and the cost of being wrong here is one extra LLM call.
+ */
+const LOG_RESULT_MIN_CHARS = 200;
+
+export const LOG_GAP_NOTICE =
+  "[EVIDENCE GAP — the playbook for this alert reads the container's own logs, and no log query has " +
+  "returned any lines yet. Before you answer: call `k8s_get_pod_logs` with `previous: true` " +
+  "(tail_lines: 200) on an affected pod — for a container that has already died, the crash message " +
+  "is in the PREVIOUS instance, not the fresh one. If a log query already came back empty, that is a " +
+  "fact about the QUERY and not about the workload: drop the level/severity filter and widen the " +
+  "selector, or read the pod logs directly. If the logs are genuinely unavailable, say so explicitly " +
+  "in the answer, state what it leaves unconfirmed, and lower the Confidence accordingly. Do not " +
+  "recommend that a human fetch logs you can fetch yourself.]";
+
+/** Does any loaded playbook name a log tool? Read from the body, so a new playbook gets this free. */
+export const demandsLogs = (skills: readonly Skill[]): boolean =>
+  skills.some((s) => [...LOG_TOOLS].some((t) => s.body.includes(t)));
+
+/**
  * A delegate's ceiling. Neither notice above can serve it: the budget one carries conversation
  * mode's format rule and tells the model to "offer to investigate", the ceiling one says nothing
  * about format at all and leaves the shape to the system prompt, which describes an RCA.
@@ -555,6 +600,8 @@ export class DevOpsAgent {
     let toolRounds = 0;
     let toolsDisabled = false;
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
+    let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
+    let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
 
     const isFollowUp = await this.memory.hasRca(threadId);
 
@@ -729,6 +776,18 @@ export class DevOpsAgent {
             `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
           );
         }
+        // The last gate before an answer leaves: an investigation whose playbook reads logs, that
+        // has never seen a log line, gets one more round and is told exactly what to fetch. Spent
+        // once, and never when tools are already off — the ceiling notices own that turn.
+        if (demandsLogs(skills) && !sawLogLines && !logGapNudged && !toolsDisabled && toolRounds > 0) {
+          logGapNudged = true;
+          logger.info(
+            `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
+            `[${skills.map((s) => s.name).join(", ")}] read logs — one more round`
+          );
+          await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
+          continue;
+        }
         return summary;
       }
 
@@ -815,6 +874,12 @@ export class DevOpsAgent {
         );
 
         const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable) : [];
+        if (!sawLogLines) {
+          const logIds = new Set(executable.filter((t) => LOG_TOOLS.has(t.name ?? "")).map((t) => t.id));
+          sawLogLines = executed.some(
+            (r) => r.type === "tool_result" && logIds.has(r.tool_use_id) && String(r.content ?? "").length >= LOG_RESULT_MIN_CHARS
+          );
+        }
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);
 
         toolRounds++;
