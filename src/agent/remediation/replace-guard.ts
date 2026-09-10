@@ -24,6 +24,8 @@ export interface PodState {
   name: string;
   ready: boolean;
   restarts: number;
+  /** The pod PHASE — `Pending` means no container has run yet, which is a fault a restart repeats. */
+  status: string;
 }
 
 /**
@@ -48,7 +50,12 @@ export function parsePods(raw: string): PodState[] {
     if (typeof it !== "object" || it === null) continue;
     const o = it as Record<string, unknown>;
     if (typeof o.name !== "string") continue;
-    out.push({ name: o.name, ready: o.ready === true, restarts: typeof o.restarts === "number" ? o.restarts : 0 });
+    out.push({
+      name: o.name,
+      ready: o.ready === true,
+      restarts: typeof o.restarts === "number" ? o.restarts : 0,
+      status: typeof o.status === "string" ? o.status : "",
+    });
   }
   return out;
 }
@@ -130,14 +137,33 @@ export function replacementRefusal(
     if (!name) return null;
     const mine = podsOf(pods, name);
     if (mine.length === 0) return null;
-    if (!mine.every((p) => !p.ready && p.restarts > 0)) return null;
+    if (mine.some((p) => p.ready)) return null;
+
+    // Two ways the evidence can already show that a fresh identical pod does not come up healthy.
     const restarts = mine.reduce((n, p) => n + p.restarts, 0);
-    return (
-      `a rolling restart rebuilds these pods from the same spec, and the kubelet has already done ` +
-      `that ${restarts} time(s) — all ${mine.length} pod(s) of \`${name}\` are still unready. The fault ` +
-      `survives a fresh identical pod, so it is in the spec (config, image, limits, probe) and a restart ` +
-      `cannot reach it.`
-    );
+    if (mine.every((p) => p.restarts > 0)) {
+      return (
+        `a rolling restart rebuilds these pods from the same spec, and the kubelet has already done ` +
+        `that ${restarts} time(s) — all ${mine.length} pod(s) of \`${name}\` are still unready. The fault ` +
+        `survives a fresh identical pod, so it is in the spec (config, image, limits, probe) and a restart ` +
+        `cannot reach it.`
+      );
+    }
+    // Never even started. A pod that has not reached Running has failed BEFORE its process — it
+    // cannot pull its image, cannot schedule, cannot mount its volume — and every one of those
+    // lives in the spec. Added after benchmark A04: an ImagePullBackOff pod has restartCount 0
+    // because the container never ran, so the restart-count rule alone let a restart card through
+    // for a nonexistent pull secret.
+    if (mine.every((p) => p.status !== "Running" && p.status !== "")) {
+      const phases = [...new Set(mine.map((p) => p.status))].join("/");
+      return (
+        `a rolling restart replaces these pods with identical ones, and not one of the ${mine.length} ` +
+        `pod(s) of \`${name}\` has reached Running — they are ${phases}. A pod that never started ` +
+        `failed before its process did: it could not pull its image, schedule, or mount its volume, and ` +
+        `all of those live in the spec. A fresh pod stops in exactly the same place.`
+      );
+    }
+    return null;
   }
 
   return null;

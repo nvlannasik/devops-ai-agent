@@ -1240,9 +1240,14 @@ spent only on those two actions:
   TARGET POD's name, not the workload's, so they are the pods of its own ReplicaSet: mid-rollout
   the old ReplicaSet is healthy and the new one is not, and counting those as siblings would read
   "one wedged pod among healthy siblings" off a broken rollout.
-- **rollout_restart** claims a fresh pod would come up healthy. Refused when every pod of the
-  workload is unready AND has restarted at least once: the kubelet has already run that
-  experiment, repeatedly, and the pods came back the same.
+- **rollout_restart** claims a fresh pod would come up healthy. Refused on either of the two
+  shapes where the evidence already says otherwise, both requiring that NO pod of the workload is
+  ready: every pod has restarted at least once (the kubelet has already run that experiment,
+  repeatedly, and they came back the same), or no pod has ever reached `Running` (it failed
+  BEFORE its process — could not pull, schedule or mount — and all of those live in the spec).
+  The second rule was added after benchmark A04 shipped a restart card for a missing pull secret:
+  an ImagePullBackOff pod has restartCount **0**, because the container never ran, so the
+  restart-count rule alone did not see it.
 
 **Skipped when the human named the action in words.** The guard stops the MODEL reaching for a
 gesture it cannot place; a person who types "restart the payments deployment" has placed it

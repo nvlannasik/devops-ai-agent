@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 
-const pod = (name: string, ready: boolean, restarts = 0) => ({ name, ready, restarts });
+const pod = (name: string, ready: boolean, restarts = 0, status = "Running") => ({ name, ready, restarts, status });
 const del = (target: string, pods: ReturnType<typeof pod>[]) =>
   replacementRefusal("k8s_delete_pod", { namespace: "x", pod: target }, pods);
 const restart = (name: string, pods: ReturnType<typeof pod>[]) =>
@@ -48,6 +48,24 @@ test("siblings are the pods of the SAME ReplicaSet, not of the workload", () => 
   assert.match(del("web-frontend-fc9b67d8f-bzbf9", rollout) ?? "", /no healthy sibling/);
 });
 
+test("a restart is refused when no pod ever reached Running", () => {
+  // A04: an ImagePullBackOff pod has restartCount 0 — the container never ran — so the
+  // restart-count rule alone let a restart card through for a missing pull secret.
+  const r = restart("checkout-gateway", [pod("checkout-gateway-7d9f-x2k", false, 0, "Pending")]);
+  assert.match(r ?? "", /has reached Running/);
+  assert.match(r ?? "", /failed before its process did/);
+  // mid-rollout the old ReplicaSet is still serving, so a restart is not obviously futile
+  assert.equal(
+    restart("web-frontend", [
+      pod("web-frontend-fc9b67d8f-bzbf9", false, 0, "Pending"),
+      pod("web-frontend-f5497dbc7-aaaaa", true),
+    ]),
+    null
+  );
+  // an unknown phase is not evidence of anything
+  assert.equal(restart("api", [pod("api-1-a", false, 0, "")]), null);
+});
+
 test("a restart with any pod ready, or with none restarted, is left alone", () => {
   // Partial outage: something is still serving, so a fresh pod plausibly comes up healthy.
   assert.equal(restart("api", [pod("api-1-a", false, 2), pod("api-1-b", true, 0)]), null);
@@ -72,8 +90,8 @@ test("parsePods reads the k8s_list_pods payload and defaults the fields it needs
     'Here are the pods:\n[{"name":"api-1-a","namespace":"x","status":"Running","ready":false,"restarts":7,"node":"w1"},' +
     '{"name":"api-1-b","status":"Running","ready":true}]';
   assert.deepEqual(parsePods(raw), [
-    { name: "api-1-a", ready: false, restarts: 7 },
-    { name: "api-1-b", ready: true, restarts: 0 },
+    { name: "api-1-a", ready: false, restarts: 7, status: "Running" },
+    { name: "api-1-b", ready: true, restarts: 0, status: "Running" },
   ]);
 });
 
