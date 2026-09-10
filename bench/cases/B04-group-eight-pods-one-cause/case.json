@@ -119,7 +119,7 @@
     "rca": {
       "must": [
         "DATABASE_URL",
-        "(satu|single|one|sama|same)[^.\\n]{0,60}(penyebab|cause|akar|root)|semua .{0,30}pod|all (8|eight) pods|kedelapan"
+        "(satu|single|one|sama|same)[^.\\n]{0,60}(penyebab|cause|akar|root)|(semua|all)[^.\\n]{0,30}(pod|replica|replika)|\\b(8|eight|delapan)\\b[^.\\n]{0,30}(pod|replica|replika)|payments-0[^.\\n]{0,20}payments-7"
       ],
       "mustNot": [
         "8 (penyebab|masalah|cause)|delapan (penyebab|masalah)"

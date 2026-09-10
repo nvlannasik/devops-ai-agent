@@ -66,7 +66,7 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     const rca = await agent.investigate(threadId, issue);
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
-    const ungrounded = await agent.ungroundedNames(threadId, rca).catch(() => [] as string[]);
+    const ungrounded = await agent.ungroundedNames(threadId, rca, issue).catch(() => [] as string[]);
     const res = await llm.chat(
       [{ role: "user", content: buildProposalPrompt(task.groupLabels, rca) }],
       [],

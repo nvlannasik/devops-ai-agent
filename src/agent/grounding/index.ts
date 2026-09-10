@@ -99,12 +99,19 @@ export function citedNames(answer: string): string[] {
  * result is visible on its own.
  *
  * Assistant TEXT is still excluded, and that line matters: prose is where the invention lands, so
- * letting it count would let one hallucination confirm the next. The alert message is excluded for
- * the same reason — the recall block it carries is a past incident's root_cause, which is exactly
- * how an invented name propagates forward.
+ * letting it count would let one hallucination confirm the next. The alert MESSAGE as it reaches
+ * the model is excluded for the same reason — the recall block prepended to it is a past
+ * incident's root_cause, which is exactly how an invented name propagates forward.
+ *
+ * The alert PAYLOAD is a different thing and is passed in separately by the caller (`trigger`):
+ * `buildGroupAlertText`'s output, before `app/index.ts` wraps recall around it. Alertmanager wrote
+ * it, so it is evidence in the same sense a tool result is. Without it, an alert group that names
+ * its own pods — which is what an 8-member group looks like — makes every RCA quoting those names
+ * an ungrounded one. Observed on benchmark case B04: `payments-7` reported to the thread as a name
+ * no tool result contained, from an alert whose eight members are `payments-0`..`payments-7`.
  */
-export function observedText(history: Message[]): string {
-  const parts: string[] = [];
+export function observedText(history: Message[], trigger = ""): string {
+  const parts: string[] = [trigger];
   for (const m of history) {
     if (typeof m.content === "string") continue;
     for (const block of m.content) {
@@ -130,9 +137,9 @@ const isGrounded = (name: string, observed: string): boolean =>
   new RegExp(`(?<![a-z0-9.-])${name.replace(/[.]/g, "\\.")}(?![a-z0-9.])`).test(observed);
 
 /** Names asserted in `answer` that no tool result in `history` ever returned, in cited order. */
-export function groundingGaps(answer: string, history: Message[]): string[] {
+export function groundingGaps(answer: string, history: Message[], trigger = ""): string[] {
   const names = citedNames(answer);
   if (names.length === 0) return [];
-  const observed = observedText(history);
+  const observed = observedText(history, trigger);
   return names.filter((n) => !isGrounded(n, observed));
 }

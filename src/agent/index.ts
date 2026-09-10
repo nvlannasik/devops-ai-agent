@@ -1131,9 +1131,12 @@ export class DevOpsAgent {
    * dry-run guards a proposed action, this guards the claim, and the claim is what reaches Slack
    * and `incidents.root_cause` whether or not any action follows.
    */
-  async ungroundedNames(threadId: string, answer: string): Promise<string[]> {
+  async ungroundedNames(threadId: string, answer: string, trigger = ""): Promise<string[]> {
     const history = await this.memory.get(threadId).catch(() => [] as Message[]);
-    const gaps = groundingGaps(answer, history);
+    // `trigger` is the alert payload as Alertmanager sent it — buildGroupAlertText's output,
+    // WITHOUT the recall block app/index.ts wraps around it before the model sees it. That
+    // distinction is the whole reason it can be counted as evidence; see grounding/index.ts.
+    const gaps = groundingGaps(answer, history, trigger);
     if (gaps.length > 0) {
       logger.warn(
         `[${threadId}] answer names ${gaps.length} resource(s) absent from every tool result: ${gaps.join(", ")}`

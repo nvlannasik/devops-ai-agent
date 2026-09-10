@@ -135,3 +135,14 @@ test("an elided name, an API group and a field path are not resource claims", ()
   // still catches what it is for
   assert.deepEqual(citedNames("the Deployment `order-service` is missing"), ["order-service"]);
 });
+
+test("a name the ALERT itself carries is evidence, not an invention", () => {
+  // B04: an 8-member alert group names payments-0..payments-7, the RCA quotes the range, and
+  // `payments-7` was reported to the thread as a name no tool result contained. Alertmanager
+  // wrote it — the model did not.
+  const rca = "Pods `payments-0` through `payments-7` all crash on `DATABASE_URL`.";
+  const trigger = "*Pods:* payments-0, payments-1, payments-7";
+  assert.deepEqual(groundingGaps(rca, [], trigger), []);
+  // without the trigger, every name in it is a gap
+  assert.ok(groundingGaps(rca, []).includes("payments-7"));
+});

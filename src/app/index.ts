@@ -606,7 +606,7 @@ export class SlackApp {
       // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
       // proposal model needs to avoid re-proposing.
       const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
-      await this.warnIfUngrounded(channel, threadId, rca);
+      await this.warnIfUngrounded(channel, threadId, rca, issueText);
       await this.notifyIfLowConfidence(channel, threadId, rca);
       if (incidentId) {
         await withTrace(threadId, () => this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext));
@@ -794,9 +794,9 @@ export class SlackApp {
    * Best-effort, like every other post-answer step here — a check that cannot run must not take
    * the investigation down with it.
    */
-  private async warnIfUngrounded(channel: string, threadId: string, answer: string): Promise<void> {
+  private async warnIfUngrounded(channel: string, threadId: string, answer: string, trigger = ""): Promise<void> {
     try {
-      const names = await this.agent.ungroundedNames(threadId, answer);
+      const names = await this.agent.ungroundedNames(threadId, answer, trigger);
       if (names.length === 0) return;
       const shown = names.slice(0, UNGROUNDED_SHOWN).map((n) => `\`${n}\``).join(", ");
       const rest = names.length - UNGROUNDED_SHOWN;
