@@ -33,10 +33,15 @@ test("it stays off the cases with no logs to read", () => {
 test("the notice says what to call, and that an empty query is a fact about the query", () => {
   assert.match(LOG_GAP_NOTICE, /k8s_get_pod_logs/);
   assert.match(LOG_GAP_NOTICE, /previous.{0,10}true/);
+  // The first wording said "call it with previous: true" flatly, and A13 obeyed it on a pod that
+  // had never restarted: no previous instance exists, the call came back empty, and the answer
+  // reported the logs as inaccessible while the running container was printing the evidence.
+  assert.match(LOG_GAP_NOTICE, /if the pod is Running and has not restarted, there IS no previous instance/);
+  assert.match(LOG_GAP_NOTICE, /retry without it rather than reporting the logs as unavailable/);
   // A13's failure mode: empty result read as evidence of absence.
   assert.match(LOG_GAP_NOTICE, /fact about the QUERY and not about the workload/);
   // B04's: the RCA recommended the tool call it was holding.
-  assert.match(LOG_GAP_NOTICE, /Do not recommend that a human fetch logs you can fetch yourself/);
+  assert.match(LOG_GAP_NOTICE, /Do not recommend that a human run a log query you can run yourself/);
   // C03's: logs genuinely absent is a valid answer, stated and paid for in confidence.
   assert.match(LOG_GAP_NOTICE, /genuinely unavailable/);
   for (const t of LOG_TOOLS) assert.ok(t.startsWith("k8s_") || t.startsWith("loki_"), t);
