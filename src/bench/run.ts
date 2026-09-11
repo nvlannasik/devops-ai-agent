@@ -7,8 +7,8 @@
  *
  * It deliberately does NOT call agent.proposeRemediation(): that stores a row, needs a
  * database, and needs MCP_ENABLE_WRITE_TOOLS to have registered write tools at all. The part
- * under test is the model's judgement, which is buildProposalPrompt + parseProposal — the two
- * pure ends of that method.
+ * under test is the model's judgement, which is proposeWithRetry — the pure middle of that
+ * method, prompt and parser and the one re-ask, with only the storage ends removed.
  *
  * Requires: a cluster in KUBECONFIG, an MCP server pointed at it, and an LLM backend. Nothing
  * here creates any of the three; see bench/README.md.
@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
-import { buildProposalPrompt, parseProposal, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
+import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
 import { REPLACEMENT_ACTIONS } from "../agent/remediation/replace-guard.js";
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
@@ -68,18 +68,20 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
     const ungrounded = await agent.ungroundedNames(threadId, rca, issue).catch(() => [] as string[]);
-    const res = await llm.chat(
-      [{ role: "user", content: buildProposalPrompt(task.groupLabels, rca) }],
-      [],
-      PROPOSAL_SYSTEM
+    // proposeWithRetry, not a bare parseProposal, for the same reason the replacement guard is
+    // applied by hand below: production gets one re-ask on a self-contradicting answer, and a
+    // benchmark that skips it measures a model production does not run.
+    //
+    // Its raw text is kept whether or not it parsed. No proposal is three different failures
+    // wearing one face — the model judged that no whitelisted action fits ({"action": null}), or
+    // it emitted prose the brace match mangled, or zod rejected a field — and they need three
+    // different fixes. Without this the first live 5-attempt run could only report "no proposal"
+    // four times and could not say which.
+    const asked = await proposeWithRetry(task.groupLabels, rca, async (prompt) =>
+      textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
     );
-    // The RAW text, kept whether or not it parsed. parseProposal returning null is three
-    // different failures wearing one face — the model judged that no whitelisted action fits
-    // ({"action": null}), or it emitted prose the brace match mangled, or zod rejected a field
-    // — and they need three different fixes. Without this the first live 5-attempt run could
-    // only report "no proposal" four times and could not say which.
-    let proposalRaw = textOf(res.content as Array<{ type: string; text?: string }>);
-    let proposal = parseProposal(proposalRaw);
+    let proposalRaw = asked.raw;
+    let proposal = asked.proposal;
     // The replacement guard runs in proposeRemediation, which this runner deliberately skips —
     // so it is applied here by hand, through the agent's own method. Without it the bench would
     // score a card production never posts: a refusal means no approval card, which is the same

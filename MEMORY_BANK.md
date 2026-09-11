@@ -1639,3 +1639,45 @@ the eval framework. (Prompt is theory until exercised against real Loki/Jaeger.)
 - [x] **Webhook auth for the `/alert` endpoint** ✅ shipped — `ALERT_WEBHOOK_TOKEN` bearer gate (see *Alert Webhook Auth* below)
 - [ ] Graceful-shutdown drain of in-flight investigations
 - [ ] Cross-alertname correlation (node-down fan-out → KubeNodeNotReady + many KubePodNotReady across namespaces into one incident) — needs a time-window + shared-cause heuristic; risk of merging unrelated incidents. Revisit only if same-group correlation proves insufficient.
+
+### The proposal re-ask — the model had the answer and did not fill in the field (`agent/remediation/proposal.ts`, `proposeWithRetry`)
+
+Two failures in the 16x3 benchmark run, one shape underneath. A05 emitted `k8s_set_resources`
+whose `reason` read *"lower the orders-api CPU requests"* and set **no value**, so the schema
+rejected it. A03 and A09 emitted `{"action": null}` with the tag that had been running before the
+failing rollout sitting in the context they were given. Neither is a judgement error — in both the
+model reached the right conclusion in prose and did not put it in the JSON. `{"action": null}` was
+the third recurrence of the same prompt rule failing (`Null is NOT a way out of a decision the
+context lets you make` was itself round two), which in this repo is when a rule stops being a
+prompt rule: `worthProposing`, the namespace scope lock, the log fan-out cap, the log-gap gate.
+
+So the proposal call is now up to **two** calls, never three. When the first answer does not parse,
+`retryNotice()` branches on `declaredAction()` — the action the model NAMED, read straight out of
+the text whether or not the rest validated:
+
+- **Named an action, left it unusable** → the notice names that action and restates *its* required
+  fields in prose. The model cannot see the zod error, and the field it omitted is the whole
+  failure. `{"action": null}` is explicitly offered as the way out if the context lacks the values.
+- **Named nothing** → the counterweight, and the wording is load-bearing. Six of sixteen benchmark
+  cases END in a correct null (absent pull secret, bad RBAC rule, wrong Service selector, a flap
+  with nothing wrong), so a re-ask that reads as *"you were wrong"* buys A03 by losing those. The
+  notice opens *"a check, not a correction"* and says answering null again is a correct outcome of
+  it. Two tests pin those phrases.
+
+The cost is one extra light-route call on every investigation that correctly proposes nothing —
+accepted, and the safety net is not the notice: a model reaching for something to say reaches for a
+restart or a delete, and `replace-guard.ts` refuses both against a spec fault without asking the
+model anything.
+
+`bench/run.ts` calls `proposeWithRetry` too, for the same reason it applies the replacement guard
+by hand: a benchmark that skips a production step measures a model production does not run. The
+raw text of BOTH attempts is kept when it still fails — "named an action twice and never filled it"
+and "held null under a re-ask" need different fixes, and one text can only show one of them.
+
+**Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
+Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix
+refused over the F. Kubernetes has no object whose name contains an uppercase letter (DNS-1123
+everywhere), so the case is never information, always damage. Same move as the `kind` normalization
+directly above it. **`image` is deliberately excluded**: a registry path is lowercase by Docker's
+rules, but a tag may legitimately carry uppercase (`v1.2-RC1`), and lowercasing it points the
+rollout at an image that does not exist.

@@ -32,7 +32,7 @@ import {
 } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
-import { parseProposal, buildProposalPrompt, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import {
   RemediationCheckStore,
@@ -1198,14 +1198,17 @@ export class DevOpsAgent {
     // simply is not a proposal. parseProposal() returns null and the incident silently gets no
     // card — the "[remediation] no actionable proposal from model" line below is the only
     // symptom, so that log is what to grep if approval cards stop appearing.
-    const response = await withRoute("light", () =>
-      this.llm.chat([{ role: "user", content: buildProposalPrompt(labels, rca) }], [], PROPOSAL_SYSTEM)
-    );
-    this.recordUsage(null, response); // no Slack thread at this call site — never invent one
-    const text = this.extractText(response.content);
-    const proposal = parseProposal(text);
+    //
+    // Two calls at most, not one: proposeWithRetry re-asks once when the first answer named an
+    // action it did not fill in, or answered null. See proposal.ts for why that is code here
+    // rather than another paragraph in the prompt.
+    const { proposal, raw } = await proposeWithRetry(labels, rca, async (prompt) => {
+      const response = await withRoute("light", () => this.llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM));
+      this.recordUsage(null, response); // no Slack thread at this call site — never invent one
+      return this.extractText(response.content);
+    });
     if (!proposal) {
-      logger.info(`[remediation] no actionable proposal from model: ${truncate(text, 200)}`);
+      logger.info(`[remediation] no actionable proposal from model: ${truncate(raw, 200)}`);
       return null;
     }
     // the specific proposed action must actually be registered on the server

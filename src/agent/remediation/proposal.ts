@@ -53,6 +53,17 @@ export function parseProposal(text: string): Proposal | null {
   // K8s convention writes kinds capitalized ("Deployment") — a correct proposal was once
   // dropped over the D. Normalize before the case-sensitive zod enums.
   if (typeof raw.kind === "string") raw.kind = raw.kind.toLowerCase();
+  // Same reasoning one step further out. Kubernetes object names are DNS-1123: lowercase only,
+  // no exceptions anywhere in the API. So an uppercase letter in one of these fields is always
+  // the model's, never the cluster's — benchmark A09 proposed `web-Frontend` against a Deployment
+  // called `web-frontend`, a correct fix refused over the F. `image` is deliberately NOT in this
+  // list: a registry path is lowercase by Docker's rules, but a TAG may legitimately carry
+  // uppercase (`v1.2-RC1`), and lowercasing it would point the rollout at an image that does not
+  // exist. `kind` is handled above because its allowed values are an enum, not a name.
+  for (const k of ["namespace", "workload", "pod", "container"]) {
+    const v = raw[k];
+    if (typeof v === "string") raw[k] = v.toLowerCase();
+  }
   // An explicit null is the model saying "not this field", and .optional() accepts undefined
   // but not null — so the whole proposal was rejected over a field it had declined to set.
   // Measured, not theorised: two of seven benchmark failures were this, and both carried a
@@ -276,4 +287,85 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     '"container" is optional: include it ONLY if the container name literally appears in the context; otherwise omit it (single-container workloads are auto-resolved). NEVER guess a container name from the workload name.\n' +
     "Only use namespaces, workloads, containers, images, and values that appear in the context above — never invent them."
   );
+}
+
+// ---- One retry, when the model's own answer contradicts itself ----
+//
+// Two failures in the 16x3 benchmark run, one shape underneath: the model HAD the answer and
+// did not put it in the fields. A05 emitted `k8s_set_resources` whose reason read "lower the
+// orders-api CPU requests" and set no value, so the schema rejected it; A03 and A09 emitted
+// {"action": null} with the tag that had been running before the failing rollout sitting in the
+// context. Both are a prompt rule failing for the third time, which in this repo is when it
+// stops being a prompt rule (worthProposing, the namespace scope lock, the log fan-out cap,
+// the log-gap gate).
+//
+// One retry, never two. The notice is deliberately not a correction: six of sixteen benchmark
+// cases END in a correct null — an absent pull secret, a bad RBAC rule, a wrong Service
+// selector, a flap with nothing wrong — and a re-ask that reads as "you were wrong" buys A03
+// by losing those. The dangerous direction is covered regardless: a model reaching for
+// something to say reaches for a restart or a delete, and replace-guard.ts refuses both against
+// a spec fault without asking the model anything.
+
+const WHITELIST = ["k8s_rollout_restart", "k8s_set_image", "k8s_scale", "k8s_set_resources", "k8s_delete_pod"];
+
+/** The action the model NAMED, whether or not the rest of the object validated. */
+export function declaredAction(text: string): string | null {
+  const m = text.match(/"action"\s*:\s*"([a-z0-9_]+)"/i);
+  return m && WHITELIST.includes(m[1]) ? m[1] : null;
+}
+
+// What the schema above actually demands, in prose. Restating it beats "your JSON was invalid":
+// the model cannot see the zod error, and the field it left out is the whole failure.
+const REQUIRED: Record<string, string> = {
+  k8s_rollout_restart: "namespace, workload, kind",
+  k8s_set_image: "namespace, workload, kind, and image as a full registry/repo:tag",
+  k8s_scale: "namespace, workload, kind, and replicas as an integer of at least 1",
+  k8s_set_resources:
+    'namespace, workload, kind, and AT LEAST ONE of cpu_request / memory_request / cpu_limit / memory_limit carrying a real Kubernetes quantity ("250m", "512Mi") — naming the action while leaving every value unset is what failed',
+  k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
+};
+
+export function retryNotice(raw: string): string {
+  const action = declaredAction(raw);
+  if (action) {
+    return (
+      `RETRY. Your previous answer named \`${action}\` but left its fields unusable, so it was ` +
+      `discarded and nobody saw it. ${action} needs: ${REQUIRED[action]}. Emit that JSON again with ` +
+      `every field set from the context above. If the context does not give you those values, answer ` +
+      `{"action": null} instead — a named action with no values is the one answer that helps nobody.`
+    );
+  }
+  return (
+    `RETRY — a check, not a correction. Your previous answer proposed no action. That is frequently ` +
+    `the right answer: a missing config key, a wrong Service selector, a bad RBAC rule and an absent ` +
+    `pull secret are real faults none of the five actions repairs, and answering {"action": null} ` +
+    `again is a correct outcome of this check. Before you do, re-read the Recommended Actions in the ` +
+    `context. If they name a concrete change one of the five actions performs — an image tag that was ` +
+    `running before this rollout, a resource value, a replica count — emit that action now with the ` +
+    `values taken from the context. Decide from the context; never invent a value to have something to say.`
+  );
+}
+
+/**
+ * The proposal call, both attempts. `ask` is the caller's one LLM round-trip returning plain text
+ * — the agent's routes it through the light chain and records usage, the benchmark's does not, and
+ * neither concern belongs in here.
+ *
+ * The raw text of BOTH attempts is returned when it still fails, because the pair is the
+ * diagnosis: "named an action twice and never filled it" and "held null under a re-ask" need
+ * different fixes, and one text can only show one of them.
+ */
+export async function proposeWithRetry(
+  labels: Record<string, string>,
+  rca: string,
+  ask: (prompt: string) => Promise<string>
+): Promise<{ proposal: Proposal | null; raw: string }> {
+  const prompt = buildProposalPrompt(labels, rca);
+  const first = await ask(prompt);
+  const parsed = parseProposal(first);
+  if (parsed) return { proposal: parsed, raw: first };
+
+  const second = await ask(`${prompt}\n\n${retryNotice(first)}`);
+  const retried = parseProposal(second);
+  return retried ? { proposal: retried, raw: second } : { proposal: null, raw: `${first}\n[retry] ${second}` };
 }

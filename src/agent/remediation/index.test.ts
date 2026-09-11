@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 
 test("proposal prompt keeps the tail of a long RCA (Recommended Actions live there)", () => {
@@ -349,4 +349,89 @@ test("the proposal prompt closes the single-replica delete_pod loophole and coun
   assert.match(prompt, /a single-replica workload has no healthy sibling/);
   assert.match(prompt, /evidence about the SPEC, not about that pod/);
   assert.match(prompt, /Null is NOT a way out of a decision the context lets you make/);
+});
+
+// ---- DNS-1123 normalization (benchmark A09) ----
+//
+// The model capitalised a Deployment name it had read correctly. Kubernetes has no object whose
+// name contains an uppercase letter, so the case is never information — it is always damage.
+test("a capitalised target is lowercased, because no Kubernetes name has uppercase in it", () => {
+  const p = parseProposal(
+    '{"action":"k8s_set_image","namespace":"Bench-A09","workload":"web-Frontend","kind":"Deployment","container":"Web","image":"ghcr.io/acme/web:v1.2-RC1","reason":"roll back"}'
+  );
+  assert.equal(p?.namespace, "bench-a09");
+  assert.equal(p?.name, "web-frontend");
+  assert.deepEqual(p?.toolParams, {
+    namespace: "bench-a09",
+    name: "web-frontend",
+    kind: "deployment",
+    container: "web",
+    // the TAG is the one field that may legitimately carry uppercase — lowercasing it would
+    // point the rollout at an image that does not exist
+    image: "ghcr.io/acme/web:v1.2-RC1",
+  });
+});
+
+test("a pod name is lowercased too", () => {
+  const p = parseProposal('{"action":"k8s_delete_pod","namespace":"Shop","pod":"Api-84fcf9b4db-R2ddw","reason":"wedged"}');
+  assert.deepEqual(p?.toolParams, { namespace: "shop", pod: "api-84fcf9b4db-r2ddw" });
+});
+
+// ---- the one re-ask (benchmark A03 / A05 / A09) ----
+
+test("declaredAction reads the action the model named, even when the object is unusable", () => {
+  assert.equal(declaredAction('{"action":"k8s_set_resources","namespace":"shop"}'), "k8s_set_resources");
+  assert.equal(declaredAction('{"action": null}'), null);
+  assert.equal(declaredAction('{"action":"kubectl_apply_everything"}'), null); // not whitelisted
+  assert.equal(declaredAction("I could not determine an action."), null);
+});
+
+test("the retry notice names the fields of the action the model left empty", () => {
+  const notice = retryNotice('{"action":"k8s_set_resources","namespace":"shop","workload":"orders-api","kind":"deployment","reason":"lower the orders-api CPU requests"}');
+  assert.match(notice, /named `k8s_set_resources`/);
+  assert.match(notice, /cpu_request \/ memory_request \/ cpu_limit \/ memory_limit/);
+  assert.match(notice, /answer \{"action": null\} instead/); // the honest way out stays open
+});
+
+// The counterweight has to survive the notice: six of sixteen benchmark cases END in a correct
+// null, and a re-ask that reads as a correction buys A03 by losing those.
+test("the retry notice for a null answer offers null back as a correct outcome", () => {
+  const notice = retryNotice('{"action": null}');
+  assert.match(notice, /a check, not a correction/);
+  assert.match(notice, /answering \{"action": null\} again is a correct outcome/);
+  assert.match(notice, /never invent a value to have something to say/);
+});
+
+test("a first answer that parses is not re-asked", async () => {
+  const prompts: string[] = [];
+  const { proposal } = await proposeWithRetry({}, "an RCA", async (p) => {
+    prompts.push(p);
+    return '{"action":"k8s_scale","namespace":"shop","workload":"web","kind":"deployment","replicas":4,"reason":"saturated"}';
+  });
+  assert.equal(prompts.length, 1);
+  assert.equal(proposal?.action, "k8s_scale");
+});
+
+test("a self-contradicting answer is re-asked once and the second answer wins", async () => {
+  const answers = [
+    '{"action":"k8s_set_resources","namespace":"shop","workload":"orders-api","kind":"deployment","reason":"lower the CPU requests"}',
+    '{"action":"k8s_set_resources","namespace":"shop","workload":"orders-api","kind":"deployment","cpu_request":"250m","reason":"lower the CPU requests"}',
+  ];
+  const prompts: string[] = [];
+  const { proposal, raw } = await proposeWithRetry({}, "an RCA", async (p) => {
+    prompts.push(p);
+    return answers[prompts.length - 1];
+  });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /named `k8s_set_resources`/);
+  assert.equal(proposal?.toolParams.cpu_request, "250m");
+  assert.equal(raw, answers[1]); // the discarded first answer is not kept once one parses
+});
+
+test("two failures keep both texts — the pair is the diagnosis", async () => {
+  let n = 0;
+  const { proposal, raw } = await proposeWithRetry({}, "an RCA", async () => `{"action": null, "n": ${++n}}`);
+  assert.equal(n, 2); // never a third
+  assert.equal(proposal, null);
+  assert.match(raw, /"n": 1[\s\S]*\[retry\][\s\S]*"n": 2/);
 });
