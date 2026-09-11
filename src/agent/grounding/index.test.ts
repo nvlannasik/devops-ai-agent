@@ -154,3 +154,13 @@ test("a playbook name quoted back is not an invented resource", () => {
   assert.ok(groundingGaps(rca, []).includes("gitops-drift"));
   assert.deepEqual(groundingGaps(rca, [], "gitops-drift\npod-pending\nlog-alert"), []);
 });
+
+// A05 again, one level shorter than the path the rule was written for. The attempt's proposal
+// was correct and the run scored it a grounding failure.
+test("a two-part manifest field path is not a resource name", () => {
+  assert.deepEqual(groundingGaps("the pod requests `requests.cpu` of 64", []), []);
+  assert.deepEqual(groundingGaps("`resources.requests.cpu` is the field", []), []);
+  assert.deepEqual(groundingGaps("`spec.replicas` is 3", []), []);
+  // a real hyphenated name still has to be grounded, dot or no dot
+  assert.deepEqual(groundingGaps("pod `orders-api-7d9f-x2k` is unready", []), ["orders-api-7d9f-x2k"]);
+});

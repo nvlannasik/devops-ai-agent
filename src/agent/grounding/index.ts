@@ -55,8 +55,13 @@ const MIN_LENGTH = 4;
  *
  * The last two are separated by the same tell: dots without a hyphen. Real workload names in this
  * system carry a hyphen (`orders-api`, `checkout-gateway`) and rarely more than one dot.
+ *
+ * The dotted-path branch counts TWO parts, not three. It was written for
+ * `resources.requests.cpu` and the next run produced `requests.cpu`, the same field path quoted
+ * one level shorter — flagged as an invented resource on an A05 attempt whose proposal was
+ * correct. `[^-]*` already spans the inner dots, so one `\.` covers every depth.
  */
-const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*\.[^-]*$/;
+const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*$/;
 
 const looksLikeIdentifier = (name: string): boolean =>
   name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name) && !NOT_A_NAME.test(name);
