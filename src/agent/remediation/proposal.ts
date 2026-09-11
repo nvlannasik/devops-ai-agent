@@ -320,8 +320,11 @@ const REQUIRED: Record<string, string> = {
   k8s_rollout_restart: "namespace, workload, kind",
   k8s_set_image: "namespace, workload, kind, and image as a full registry/repo:tag",
   k8s_scale: "namespace, workload, kind, and replicas as an integer of at least 1",
+  // The pointer at the end is not decoration. A05 named this action with no value, was asked
+  // again, and answered {"action": null} — it took the escape hatch rather than read the number
+  // off the context it already had. So the notice says where the number comes from.
   k8s_set_resources:
-    'namespace, workload, kind, and AT LEAST ONE of cpu_request / memory_request / cpu_limit / memory_limit carrying a real Kubernetes quantity ("250m", "512Mi") — naming the action while leaving every value unset is what failed',
+    'namespace, workload, kind, and AT LEAST ONE of cpu_request / memory_request / cpu_limit / memory_limit carrying a real Kubernetes quantity ("250m", "512Mi") — naming the action while leaving every value unset is what failed. The CURRENT request or limit is in the context above: for a Pending pod the scheduler could not fit, propose a value BELOW it; for an OOMKill, a limit ABOVE it',
   k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
 };
 

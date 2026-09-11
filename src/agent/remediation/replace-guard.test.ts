@@ -54,13 +54,15 @@ test("a restart is refused when no pod ever reached Running", () => {
   const r = restart("checkout-gateway", [pod("checkout-gateway-7d9f-x2k", false, 0, "Pending")]);
   assert.match(r ?? "", /has reached Running/);
   assert.match(r ?? "", /failed before its process did/);
-  // mid-rollout the old ReplicaSet is still serving, so a restart is not obviously futile
-  assert.equal(
+  // Mid-rollout with the old ReplicaSet still serving USED to pass here — this rule needs every
+  // pod to be off Running and the serving one is on it. A09 showed that was the wrong outcome,
+  // so the stuck-rollout rule above now catches this shape instead, by a different sentence.
+  assert.match(
     restart("web-frontend", [
       pod("web-frontend-fc9b67d8f-bzbf9", false, 0, "Pending"),
       pod("web-frontend-f5497dbc7-aaaaa", true),
-    ]),
-    null
+    ]) ?? "",
+    /in flight and stuck/
   );
   // an unknown phase is not evidence of anything
   assert.equal(restart("api", [pod("api-1-a", false, 0, "")]), null);
@@ -97,4 +99,50 @@ test("parsePods reads the k8s_list_pods payload and defaults the fields it needs
 
 test("the guard covers exactly the two actions that rebuild a pod from the same spec", () => {
   assert.deepEqual([...REPLACEMENT_ACTIONS].sort(), ["k8s_delete_pod", "k8s_rollout_restart"]);
+});
+
+// ---- the stuck rollout (benchmark A09) ----
+//
+// 0 for 6 across two runs, and the two earlier rollout_restart rules could never reach it: both
+// return early the moment any pod of the workload is ready, and in this shape the OLD ReplicaSet
+// is ready — that is the whole point of the case.
+const rolloutPods = JSON.stringify([
+  { name: "web-frontend-7c9d4b6f8-aaaaa", ready: true, restarts: 0, status: "Running" },
+  { name: "web-frontend-fc9b67d8f-bbbbb", ready: false, restarts: 0, status: "Running" },
+]);
+
+test("a restart is refused while a rollout is stuck with the old ReplicaSet still serving", () => {
+  const why = replacementRefusal("k8s_rollout_restart", { name: "web-frontend" }, parsePods(rolloutPods));
+  assert.match(why ?? "", /rollout of `web-frontend` is in flight and stuck/);
+  assert.match(why ?? "", /web-frontend-fc9b67d8f/); // names the stalled ReplicaSet
+  assert.match(why ?? "", /web-frontend-7c9d4b6f8/); // and the one carrying traffic
+});
+
+test("a healthy workload on one ReplicaSet is untouched", () => {
+  const pods = JSON.stringify([
+    { name: "web-frontend-7c9d4b6f8-aaaaa", ready: true, restarts: 0, status: "Running" },
+    { name: "web-frontend-7c9d4b6f8-bbbbb", ready: false, restarts: 0, status: "Running" },
+  ]);
+  // one ReplicaSet, one unready pod — a genuinely wedged replica, which is what a restart is for
+  assert.equal(replacementRefusal("k8s_rollout_restart", { name: "web-frontend" }, parsePods(pods)), null);
+});
+
+// podsOf matches by prefix and deliberately over-matches; the two older rules stay quiet under
+// that because they need EVERY pod to look broken. This rule fires on a mixture, so it would
+// fire wrongly without the exact two-segment shape in replicaSetOf.
+test("a different workload sharing the name prefix is not read as a second ReplicaSet", () => {
+  const pods = JSON.stringify([
+    { name: "payments-api-7d9f4c2b1-aaaaa", ready: true, restarts: 0, status: "Running" },
+    { name: "payments-6b747db7c9-bbbbb", ready: false, restarts: 0, status: "Running" },
+  ]);
+  // `payments` has exactly one ReplicaSet here; payments-api is another workload entirely
+  assert.equal(replacementRefusal("k8s_rollout_restart", { name: "payments" }, parsePods(pods)), null);
+});
+
+test("a StatefulSet has no ReplicaSets, so the rollout rule cannot fire on it", () => {
+  const pods = JSON.stringify([
+    { name: "db-0", ready: true, restarts: 0, status: "Running" },
+    { name: "db-1", ready: false, restarts: 0, status: "Running" },
+  ]);
+  assert.equal(replacementRefusal("k8s_rollout_restart", { name: "db" }, parsePods(pods)), null);
 });

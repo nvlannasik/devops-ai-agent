@@ -83,6 +83,23 @@ const podsOf = (pods: readonly PodState[], workload: string): PodState[] =>
  * old ReplicaSet's pods are healthy and the new one's are not, and "one wedged pod among healthy
  * siblings" is exactly the wrong reading of it.
  */
+/**
+ * The ReplicaSet a Deployment pod belongs to, or null when the name is not that shape.
+ *
+ * `web-frontend-fc9b67d8f-9qhq4` → `web-frontend-fc9b67d8f`. Requires EXACTLY two segments after
+ * the workload name, which is what makes this safe to group on where `podsOf` is not: `payments`
+ * over-matches `payments-api-7d9f-x2k`, and that pod leaves three segments, so it is dropped
+ * rather than counted as a second ReplicaSet of `payments`. A StatefulSet's `web-0` leaves one
+ * segment and is dropped too — it has no ReplicaSets, so there is no rollout to detect.
+ *
+ * This one rule refuses on a MIXTURE of healthy and broken pods, unlike the two below it, so the
+ * over-match that keeps those quiet would make this one fire wrongly. Hence the exact shape.
+ */
+function replicaSetOf(podName: string, workload: string): string | null {
+  const parts = podName.slice(workload.length + 1).split("-");
+  return parts.length === 2 ? `${workload}-${parts[0]}` : null;
+}
+
 function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
   // No dash means no generated suffix, so this is a bare pod nobody templated. Null rather than
   // an empty list: "it has no siblings" and "siblings cannot be identified" are different facts,
@@ -97,7 +114,8 @@ function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
 /**
  * Why this proposal must not become a card, or null to let it through.
  *
- * Two rules, each refusing only on evidence that the replacement has ALREADY been tried:
+ * Three rules. Two of them refuse only on evidence that the replacement has ALREADY been tried;
+ * the third refuses on a rollout that is visibly mid-flight and stuck:
  *
  * - `k8s_delete_pod` claims one pod is wedged while its siblings are fine. If no sibling is
  *   ready — and a single-replica workload has no sibling at all — that claim has no support:
@@ -106,6 +124,10 @@ function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
  *   is unready AND has restarted at least once, the kubelet has already run that experiment,
  *   repeatedly, and the pods came back the same. Asking a human to approve one more is asking
  *   them to authorise something that has already failed.
+ * - `k8s_rollout_restart` against a workload whose pods span two ReplicaSets, one of them without
+ *   a single ready pod. That is a stuck rollout: the failing ReplicaSet already runs the current
+ *   spec, so a restart re-applies it, and the ready ReplicaSet is the one serving the traffic
+ *   the restart would roll.
  *
  * Ceiling, named: a pod that is Running, not ready and has NEVER restarted (a wrong readiness
  * probe path — benchmark A08) is not decidable from this payload, and it passes. Separating that
@@ -137,6 +159,35 @@ export function replacementRefusal(
     if (!name) return null;
     const mine = podsOf(pods, name);
     if (mine.length === 0) return null;
+
+    // A stalled rollout, and it has to be tested BEFORE the "no pod is ready" rules below —
+    // in this shape the old ReplicaSet IS ready and would let every one of them through.
+    // Benchmark A09, 0 for 6 across two runs: the new ReplicaSet's pods never become ready, the
+    // old one keeps serving traffic, and the model proposes a restart "to verify if the issue is
+    // transient". A restart re-applies the SAME spec the stalled ReplicaSet is already running,
+    // so its pods stop in the same place — and it rolls the ReplicaSet that currently carries
+    // the traffic. The fix is the spec: the image, the config, the limits, the probe.
+    const groups = new Map<string, PodState[]>();
+    for (const p of mine) {
+      const rs = replicaSetOf(p.name, name);
+      if (rs) groups.set(rs, [...(groups.get(rs) ?? []), p]);
+    }
+    if (groups.size >= 2) {
+      const stalled = [...groups].filter(([, ps]) => ps.every((p) => !p.ready));
+      const serving = [...groups].filter(([, ps]) => ps.some((p) => p.ready));
+      if (stalled.length > 0 && serving.length > 0) {
+        const [badName, bad] = stalled[0];
+        return (
+          `a rollout of \`${name}\` is in flight and stuck: all ${bad.length} pod(s) of ReplicaSet ` +
+          `\`${badName}\` are unready while \`${serving[0][0]}\` still serves traffic. A rolling restart ` +
+          `re-applies the same spec \`${badName}\` is already running, so its pods stop in exactly the ` +
+          `same place — and it would roll the ReplicaSet currently carrying the traffic. What is wrong ` +
+          `is in the spec the new ReplicaSet was built from (image, config, limits, probe); change that, ` +
+          `or put back the image the serving ReplicaSet runs.`
+        );
+      }
+    }
+
     if (mine.some((p) => p.ready)) return null;
 
     // Two ways the evidence can already show that a fresh identical pod does not come up healthy.

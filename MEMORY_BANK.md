@@ -1674,6 +1674,21 @@ by hand: a benchmark that skips a production step measures a model production do
 raw text of BOTH attempts is kept when it still fails — "named an action twice and never filled it"
 and "held null under a re-ask" need different fixes, and one text can only show one of them.
 
+**A third rollout_restart rule: the stuck rollout.** A09 scored 0 for 6 across two runs and
+neither earlier rule could reach it — both return the moment any pod of the workload is ready,
+and in this shape the OLD ReplicaSet is ready. That is the case, not an exception to it: the new
+ReplicaSet's pods never become ready, the old one keeps serving, and the model proposes a restart
+*"to verify if the issue is transient"*. A restart re-applies the same spec the stalled ReplicaSet
+is already running, so its pods stop in the same place — and it rolls the ReplicaSet currently
+carrying the traffic. Pods are grouped by ReplicaSet via `replicaSetOf()`, which requires EXACTLY
+two segments after the workload name (`web-frontend-fc9b67d8f-9qhq4`). That precision is
+load-bearing: `podsOf` over-matches by prefix on purpose, and the two older rules stay quiet under
+it because they need EVERY pod to look broken — this rule fires on a MIXTURE, so `payments-api`'s
+pods must not read as a second ReplicaSet of `payments`. A StatefulSet's `db-0` leaves one segment
+and is dropped; it has no ReplicaSets and no rollout to detect. This supersedes the note added
+with the A04 rule that "a rollout whose old ReplicaSet is still serving is untouched" — it is
+untouched by the other two rules, and caught by this one.
+
 **Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
 Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix
 refused over the F. Kubernetes has no object whose name contains an uppercase letter (DNS-1123
