@@ -1329,6 +1329,34 @@ wrong costs one extra LLM call.
 | `private-llm` | `SQSLLMClient` | Event-driven via SQS, for strict private networks |
 | `router` | `RouterLLMClient` | Workload-routed, up-only failover across the other three — see below |
 
+### Router failover memory (`BackendHealth`)
+The router used to forget a failure the instant it routed around it. A light backend that burned
+its full 240s SQS timeout was retried FIRST on the very next question and burned 240s again —
+the chain always found an answer, so the only symptom was a five-minute reply, never an error.
+- **Two consecutive failures bench a backend for 120s** (`LLM_ROUTER_FAILURE_THRESHOLD`,
+  `LLM_ROUTER_COOLOFF_SECONDS`; threshold `0` disables it). One strike is a transient, not a
+  verdict. A success clears the record, so half-open recovery needs no separate state, and the
+  counter resets with the cool-off rather than re-benching on one strike forever.
+- **`usable()` never returns empty.** If every candidate is cooling, the cool-off is ignored and
+  all of them are tried: a degraded attempt beats a certain failure, and "all backends failed"
+  has to mean they were asked.
+- **Cooling backends are skipped with `continue`, not filtered out of the array.** The escalation
+  check is `i >= this.light.length` against `[...light, ...heavy]`, so a filtered index would
+  report a lateral hop as a tier crossing and make `escalated` sticky for the rest of the
+  investigation. `router.test.ts` pins that case specifically.
+- **Per-process, deliberately not shared through Redis.** A backend unreachable from one pod is
+  usually unreachable *because of* that pod — its network, its credentials, its queue consumer —
+  and benching it fleet-wide on one pod's evidence is a bigger failure than the one it prevents.
+
+### Cached prompt tokens are read, not assumed
+`cacheReadTokens` was hardcoded `0` in BOTH OpenAI paths (`llm/openai-compatible.ts` and the
+worker's `src/llm.ts`), so `llm_usage` showed no cache reads for a ~21k-token system prompt sent
+on every call. These providers cache long prefixes server-side with no flag to set — unlike the
+claude path's explicit `cache_control` — so the question is never "is caching on" but "is it
+hitting", and a hardcoded 0 answered it with a number that was wrong rather than absent.
+`usage.prompt_tokens_details.cached_tokens` is the field; `cacheCreationTokens` stays 0 because
+there is no separate write step to bill for.
+
 ### LLM Router (workload routing + up-only failover)
 `LLM_PROVIDER=router` selects `RouterLLMClient` (`src/agent/llm/router.ts`), a fourth branch in
 `createLLMClient()` (`src/agent/llm/index.ts`) alongside `claude`/`openai-compatible`/`private-llm`.
