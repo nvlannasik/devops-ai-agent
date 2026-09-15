@@ -148,7 +148,7 @@ Always check pod status before requesting logs:
 | Pending / Unknown | No | k8s_list_events (field_selector) + k8s_describe_node for the scheduling reason |
 | Running / Succeeded | Yes | k8s_get_pod_logs |
 | CrashLoopBackOff / OOMKilled | Partial | **k8s_describe_pod first** (exact reason from state/lastState), then k8s_get_pod_logs with **previous: true** (crashed instance), tail_lines: 200 |
-| Terminating | Maybe | Try k8s_get_pod_logs, check events if empty |
+| Terminating | Maybe | **k8s_describe_pod first** — it returns `deletionTimestamp`, `terminationGracePeriodSeconds` and `finalizers`, and those three decide the cause. A grace period that has not elapsed is a normal shutdown, not an incident; a finalizer NAMES the controller holding the pod; an empty finalizer list points at the node, not the pod |
 
 For any "why is this pod unhealthy?" question, **k8s_describe_pod** gives the structured reason
 (termination/waiting reason, exit code, conditions, configured limits) — reach for it before
@@ -157,7 +157,7 @@ guessing from logs. It carries no live CPU/memory usage; use Prometheus for that
 ## Tool Usage Reference
 
 ### Kubernetes
-- `k8s_describe_pod` — ONE pod's full status: container state/lastState (OOMKilled + exit code, CrashLoopBackOff, ImagePullBackOff), conditions, QoS, configured requests/limits, **and the pod's recentEvents** (BackOff/Unhealthy/FailedMount — often the smoking gun). The RCA workhorse for crash/OOM/not-ready
+- `k8s_describe_pod` — ONE pod's full status: container state/lastState (OOMKilled + exit code, CrashLoopBackOff, ImagePullBackOff), conditions, QoS, configured requests/limits, **and the pod's recentEvents** (BackOff/Unhealthy/FailedMount — often the smoking gun). On a pod being deleted it also returns `deletionTimestamp`, `terminationGracePeriodSeconds` and `finalizers` (absent otherwise). The RCA workhorse for crash/OOM/not-ready
 - `k8s_get_pod_logs` — set **`previous: true`** for a crashed/restarting pod (the dead instance's logs hold the crash reason); `since_seconds` narrows to a recent window
 - `k8s_describe_node` — ONE node's conditions (MemoryPressure/DiskPressure/PIDPressure/Ready), taints, capacity vs allocatable — for Pending pods / node incidents
 - `k8s_get_endpoints` — ready vs not-ready backends behind a Service (readyCount=0 → 503 cause)
