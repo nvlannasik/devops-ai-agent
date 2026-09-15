@@ -1703,32 +1703,26 @@ This is the only rule in the file that can refuse a restart which might have wor
 narrow: any ready pod anywhere in the workload returns null two rules earlier, so it fires only
 when NOT ONE replica is serving and NOT ONE has ever been restarted by the kubelet.
 
-### The evidence guard — does the cluster say this is the fault the action names (`agent/remediation/evidence-guard.ts`)
+### A guard that was measured out again (`guardRefusalFor`)
 
-Sibling of the replacement guard and a different question. That one asks whether the ACTION can
-reach the fault; this one asks whether the fault is the KIND the action names.
+Worth keeping because the reasoning was sound and the measurement still said no. A second guard
+required the namespace's EVENTS to name a resource fault — `OOMKilling`, `FailedScheduling ...
+Insufficient cpu` — before `k8s_set_resources` could become a card. It was written for benchmark
+C03, a container running `sleep 3; exit 1` that prints nothing, where two attempts out of three
+proposed a memory limit reasoning from `+Inf` (the memory ratio of a pod with **no limit set** —
+a description of the spec, not a symptom).
 
-`k8s_set_resources` asserts a resource fault, and the proposal prompt already lists the only two
-ways that can be true: a container the kernel killed for memory, or a pod whose REQUEST no node
-can satisfy. Both leave a mark in the namespace's events (`OOMKilling`,
-`FailedScheduling ... Insufficient cpu`); neither can be inferred from a pod that simply keeps
-exiting. Benchmark C03 is a container running `sleep 3; exit 1` that prints nothing — the right
-answer is that the evidence is missing and there is no action, and two attempts out of three
-proposed a memory limit instead, reasoning from `+Inf`. That is the memory-ratio metric of a pod
-with **no limit set**: a description of the spec, not a symptom.
+It refused **A02 five times out of five**, every one of them a correct proposal. The reason is
+where Kubernetes puts the fact: an OOMKill is recorded in the container's
+`lastState.terminated.reason`, and the event log of a pod that has settled into CrashLoopBackOff
+need not mention it at all. Events are the wrong source for this question. And C03 kept failing
+regardless — on its RCA (`Confidence: High` with no evidence), not its proposal — while one
+attempt switched to `k8s_set_image` the moment the resource action was blocked.
 
-Two rules carried over from the modules this copies:
-- **Evidence is raw tool output, never the model's own text.** An RCA that invented a resource
-  theory states it in prose too, so reading the answer back to itself confirms every invention —
-  the same rule `agent/grounding/` follows.
-- **An empty read refuses nothing.** Nothing came back, so nothing is proven absent; that is
-  `prompts/system.md`'s "evidence of absence for the query you ran" applied to ourselves. A
-  refusal built on a failed tool call is a guess wearing a guard's clothes.
-
-`DevOpsAgent.guardRefusalFor()` now runs both guards behind one call, and `bench/run.ts` calls
-that instead of `replacementRefusalFor` behind its own copy of the `REPLACEMENT_ACTIONS` check.
-The split was a drift hazard: which actions a guard applies to is the guard's business, and with
-two guards the runner would have needed to know both.
+The lesson for the next one: a guard's evidence has to come from where Kubernetes actually writes
+the fact, and a guard that needs pod state to be correct is a bigger thing than the single failure
+it was aimed at. `guardRefusalFor()` stays as the one call both production and `bench/run.ts` make,
+so a future guard lands in one place.
 
 **Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
 Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix

@@ -34,7 +34,6 @@ import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./f
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
-import { resourceEvidenceRefusal } from "./remediation/evidence-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -1278,30 +1277,19 @@ export class DevOpsAgent {
    * They did once: `replacementRefusalFor` was public and the runner called it behind its own copy
    * of the `REPLACEMENT_ACTIONS` check, so adding a guard meant remembering to add it in two
    * places. Which actions a guard applies to belongs to the guard, not to its callers.
+   *
+   * One guard today. A second one lived here briefly and was measured out again: it required the
+   * namespace's EVENTS to name a resource fault before `k8s_set_resources` could become a card,
+   * and benchmark A02 went from 5 passes out of 5 to 0 — a real OOMKill is recorded in the
+   * container's `lastState.terminated.reason`, and the event log of a pod that has settled into
+   * CrashLoopBackOff need not mention it at all. The case it was written for (C03) kept failing
+   * anyway, on its RCA rather than its proposal, and one attempt simply switched to
+   * `k8s_set_image` when the resource action was blocked. A guard that has to read pod state to
+   * be correct is a bigger thing than the one failure it fixes.
    */
   async guardRefusalFor(proposal: Proposal): Promise<string | null> {
-    if (!REPLACEMENT_ACTIONS.has(proposal.action)) return this.resourceEvidenceRefusalFor(proposal);
-    return (await this.replacementRefusalFor(proposal)) ?? (await this.resourceEvidenceRefusalFor(proposal));
-  }
-
-  /**
-   * Does the cluster say this is a resource fault? See `evidence-guard.ts`.
-   *
-   * Events rather than the conversation: this runs after the investigation, has no thread to read,
-   * and a fresh read of the namespace is what the replacement guard already does. `since_minutes`
-   * is generous because an OOMKill that aged out of the event log would otherwise read as one that
-   * never happened.
-   */
-  async resourceEvidenceRefusalFor(proposal: Proposal): Promise<string | null> {
-    const namespace = proposal.toolParams.namespace;
-    if (typeof namespace !== "string" || !namespace) return null;
-    try {
-      const raw = await this.mcp.callTool("k8s_list_events", { namespace, since_minutes: 180 });
-      return resourceEvidenceRefusal(proposal.action, raw);
-    } catch (err) {
-      logger.debug(`[remediation] evidence guard could not list events in ${namespace}: ${errDetail(err)}`);
-      return null;
-    }
+    if (!REPLACEMENT_ACTIONS.has(proposal.action)) return null;
+    return this.replacementRefusalFor(proposal);
   }
 
   async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
