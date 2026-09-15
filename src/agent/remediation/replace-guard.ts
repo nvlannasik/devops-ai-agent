@@ -75,15 +75,6 @@ const podsOf = (pods: readonly PodState[], workload: string): PodState[] =>
   pods.filter((p) => p.name.startsWith(`${workload}-`));
 
 /**
- * The siblings of one pod: the other pods created from the same template.
- *
- * Derived from the target's own name rather than the workload's, so a Deployment's siblings are
- * the ones in its OWN ReplicaSet — `api-6b747db7c9-zwdcv` and `api-6b747db7c9-m4p8t` are siblings,
- * and a pod from the previous ReplicaSet is not. That distinction is the case: mid-rollout, the
- * old ReplicaSet's pods are healthy and the new one's are not, and "one wedged pod among healthy
- * siblings" is exactly the wrong reading of it.
- */
-/**
  * The ReplicaSet a Deployment pod belongs to, or null when the name is not that shape.
  *
  * `web-frontend-fc9b67d8f-9qhq4` → `web-frontend-fc9b67d8f`. Requires EXACTLY two segments after
@@ -100,6 +91,15 @@ function replicaSetOf(podName: string, workload: string): string | null {
   return parts.length === 2 ? `${workload}-${parts[0]}` : null;
 }
 
+/**
+ * The siblings of one pod: the other pods created from the same template.
+ *
+ * Derived from the target's own name rather than the workload's, so a Deployment's siblings are
+ * the ones in its OWN ReplicaSet — `api-6b747db7c9-zwdcv` and `api-6b747db7c9-m4p8t` are siblings,
+ * and a pod from the previous ReplicaSet is not. That distinction is the case: mid-rollout, the
+ * old ReplicaSet's pods are healthy and the new one's are not, and "one wedged pod among healthy
+ * siblings" is exactly the wrong reading of it.
+ */
 function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
   // No dash means no generated suffix, so this is a bare pod nobody templated. Null rather than
   // an empty list: "it has no siblings" and "siblings cannot be identified" are different facts,
@@ -114,8 +114,8 @@ function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
 /**
  * Why this proposal must not become a card, or null to let it through.
  *
- * Three rules. Two of them refuse only on evidence that the replacement has ALREADY been tried;
- * the third refuses on a rollout that is visibly mid-flight and stuck:
+ * Four rules. Two refuse only on evidence that the replacement has ALREADY been tried; the
+ * other two refuse on a state where it provably cannot help:
  *
  * - `k8s_delete_pod` claims one pod is wedged while its siblings are fine. If no sibling is
  *   ready — and a single-replica workload has no sibling at all — that claim has no support:
@@ -128,10 +128,20 @@ function siblingsOf(pods: readonly PodState[], pod: string): PodState[] | null {
  *   a single ready pod. That is a stuck rollout: the failing ReplicaSet already runs the current
  *   spec, so a restart re-applies it, and the ready ReplicaSet is the one serving the traffic
  *   the restart would roll.
+ * - `k8s_rollout_restart` against a workload whose pods are ALL Running, none ready, and none
+ *   ever restarted. This was the ceiling this file named and declined to decide, on the grounds
+ *   that separating a wrong readiness probe from a wedged process needs the probe result. It does
+ *   not: in this exact shape a restart cannot help EITHER way. If readiness never passed, the
+ *   probe or the config is wrong and a fresh pod runs the same one; if an external dependency is
+ *   down, a fresh pod reports not-ready too. The remaining reading — a process that served and
+ *   then wedged without ever restarting, on every replica at once — is the one case this refuses
+ *   wrongly, and the refusal text says so, because the guard's output is read by a human who can
+ *   still act on it.
  *
- * Ceiling, named: a pod that is Running, not ready and has NEVER restarted (a wrong readiness
- * probe path — benchmark A08) is not decidable from this payload, and it passes. Separating that
- * from a genuinely wedged process needs the probe result, which `k8s_list_pods` does not carry.
+ * Failing open is the rule everywhere else in this file and this is the one rule that can refuse
+ * a restart which might have worked. It earns that by how narrow it is: any ready pod anywhere in
+ * the workload returns null two lines above, so this can only fire when NOT ONE replica is
+ * serving and NOT ONE has ever been restarted by the kubelet.
  */
 export function replacementRefusal(
   action: string,
@@ -205,6 +215,19 @@ export function replacementRefusal(
     // lives in the spec. Added after benchmark A04: an ImagePullBackOff pod has restartCount 0
     // because the container never ran, so the restart-count rule alone let a restart card through
     // for a nonexistent pull secret.
+    // Running, never ready, never restarted. Benchmark A08 (a readinessProbe pointing at
+    // /healthz on an nginx image that serves no such path) and C08 both reached a restart card
+    // through the gap this closes.
+    if (mine.every((p) => p.status === "Running" && p.restarts === 0)) {
+      return (
+        `all ${mine.length} pod(s) of \`${name}\` are Running with zero restarts and not one is ready. ` +
+        `The containers started and have never been killed, so what is failing is the readiness check ` +
+        `itself — a probe path, a port, or a dependency the app waits on. A rolling restart builds ` +
+        `identical pods that run the same probe against the same image and config, and they stop in ` +
+        `exactly the same place. If instead this workload WAS serving and stopped, that is a wedge and ` +
+        `a restart is the right call — but nothing in the pod list shows it, so say so explicitly.`
+      );
+    }
     if (mine.every((p) => p.status !== "Running" && p.status !== "")) {
       const phases = [...new Set(mine.map((p) => p.status))].join("/");
       return (

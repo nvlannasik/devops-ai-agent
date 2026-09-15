@@ -68,12 +68,13 @@ test("a restart is refused when no pod ever reached Running", () => {
   assert.equal(restart("api", [pod("api-1-a", false, 0, "")]), null);
 });
 
-test("a restart with any pod ready, or with none restarted, is left alone", () => {
+test("a restart with any pod ready is left alone", () => {
   // Partial outage: something is still serving, so a fresh pod plausibly comes up healthy.
   assert.equal(restart("api", [pod("api-1-a", false, 2), pod("api-1-b", true, 0)]), null);
-  // A08's shape — Running, never ready, zero restarts (a wrong probe path). Not decidable from
-  // this payload, and the guard says so by passing it.
-  assert.equal(restart("storefront", [pod("storefront-1-a", false, 0)]), null);
+  // A08's shape — Running, never ready, zero restarts — USED to pass here, on the grounds that a
+  // wrong probe path is not separable from a wedged process without the probe result. It is not
+  // separable and does not need to be: a restart fails either way. Refused below by its own rule.
+  assert.match(restart("storefront", [pod("storefront-1-a", false, 0)]) ?? "", /zero restarts/);
 });
 
 test("it refuses nothing it cannot read", () => {
@@ -145,4 +146,35 @@ test("a StatefulSet has no ReplicaSets, so the rollout rule cannot fire on it", 
     { name: "db-1", ready: false, restarts: 0, status: "Running" },
   ]);
   assert.equal(replacementRefusal("k8s_rollout_restart", { name: "db" }, parsePods(pods)), null);
+});
+
+// ---- Running, never ready, never restarted (benchmark A08) ----
+//
+// The shape this file used to name as its ceiling and decline to decide. A08 is a readinessProbe
+// pointing at /healthz on an nginx image that serves no such path: one replica, Running, zero
+// restarts, never ready.
+test("a restart is refused when every pod is Running with zero restarts and none is ready", () => {
+  const why = restart("storefront", [pod("storefront-6796dcf65d-9qhq4", false, 0, "Running")]);
+  assert.match(why ?? "", /Running with zero restarts and not one is ready/);
+  assert.match(why ?? "", /readiness check/);
+  // the one reading it refuses wrongly is named in the text, because a human reads this
+  assert.match(why ?? "", /WAS serving and stopped/);
+});
+
+test("one restarted pod takes it out of the never-restarted rule and into the restart-count one", () => {
+  const why = restart("storefront", [
+    pod("storefront-6796dcf65d-9qhq4", false, 3, "Running"),
+    pod("storefront-6796dcf65d-aaaaa", false, 2, "Running"),
+  ]);
+  assert.match(why ?? "", /kubelet has already done/);
+});
+
+test("a single ready replica still lets a restart through, whatever the others look like", () => {
+  assert.equal(
+    restart("storefront", [
+      pod("storefront-6796dcf65d-9qhq4", false, 0, "Running"),
+      pod("storefront-6796dcf65d-aaaaa", true, 0, "Running"),
+    ]),
+    null
+  );
 });

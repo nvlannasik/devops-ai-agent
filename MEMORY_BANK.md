@@ -1689,6 +1689,20 @@ and is dropped; it has no ReplicaSets and no rollout to detect. This supersedes 
 with the A04 rule that "a rollout whose old ReplicaSet is still serving is untouched" — it is
 untouched by the other two rules, and caught by this one.
 
+**A fourth rollout_restart rule, and it retracts a ceiling this file had named.** The old note
+said a pod that is Running, not ready and has NEVER restarted (A08: a readinessProbe pointing at
+`/healthz` on an nginx image that serves no such path) was not decidable without the probe result,
+so it passed. It is not decidable and does not need to be — in that exact shape a restart cannot
+help either way. If readiness never passed, the probe or the config is wrong and a fresh pod runs
+the same one; if a dependency is down, a fresh pod reports not-ready too. The one reading it
+refuses wrongly is a process that served and then wedged without ever restarting, on every replica
+at once, and the refusal text names that explicitly because a human reads it.
+
+This is the only rule in the file that can refuse a restart which might have worked, against the
+"fails open, never shut" principle every other rule follows. It earns the exception by being
+narrow: any ready pod anywhere in the workload returns null two rules earlier, so it fires only
+when NOT ONE replica is serving and NOT ONE has ever been restarted by the kubelet.
+
 **Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
 Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix
 refused over the F. Kubernetes has no object whose name contains an uppercase letter (DNS-1123
