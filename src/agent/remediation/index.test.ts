@@ -435,3 +435,12 @@ test("two failures keep both texts — the pair is the diagnosis", async () => {
   assert.equal(proposal, null);
   assert.match(raw, /"n": 1[\s\S]*\[retry\][\s\S]*"n": 2/);
 });
+
+// Three C03 attempts wrote the same fallacy almost word for word — "memory limit not set ...
+// adding limits aims to stabilize startup" — against a container running `sleep 3; exit 1`.
+test("the proposal prompt refuses an absent limit as evidence of a resource fault", () => {
+  const prompt = buildProposalPrompt({ alertname: "X" }, "an RCA");
+  assert.match(prompt, /NO limit set is not evidence of a resource fault/);
+  assert.match(prompt, /there is no denominator/);
+  assert.match(prompt, /hardening opinion about the spec/);
+});

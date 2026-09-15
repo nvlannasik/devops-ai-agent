@@ -265,6 +265,11 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     "   — when the RCA evidence shows the current image is wrong/nonexistent AND names a working image (e.g. the previously running tag), OR the user explicitly requested a specific image/tag. NEVER invent a tag yourself\n" +
     '3. {"action":"k8s_set_resources","namespace":"...","workload":"...","kind":"...","container":"...","memory_limit":"1Gi",...,"reason":"..."}\n' +
     "   — ONLY for OOMKilled / resource-exhaustion RCAs, or a Pending pod whose scheduler message says the REQUEST is larger than any node can satisfy (\"Insufficient cpu\"/\"Insufficient memory\") — that request is the fault and lowering it is the fix; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
+    // The fallacy three benchmark C03 attempts wrote almost word for word — "memory limit not
+    // set ... adding limits aims to prevent unbounded memory usage and stabilize startup" —
+    // against a container running `sleep 3; exit 1`. An absent limit is the DEFAULT, and it is
+    // why the memory-ratio metric reads +Inf: there is no denominator.
+    "   — A workload with NO limit set is not evidence of a resource fault. That is the default, and it is why the memory ratio reads +Inf: there is no denominator. \"Add limits to stabilize it\" is a hardening opinion about the spec, not a remediation for the incident in front of you, and the crash you are looking at happened without any limit being reached. Propose this ONLY when the evidence shows the container hit a limit (OOMKilled, exit code 137) or the scheduler refused the request\n" +
     '4. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":N,"reason":"..."}\n' +
     "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
     '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +
