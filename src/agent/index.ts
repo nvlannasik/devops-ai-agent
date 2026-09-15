@@ -34,6 +34,7 @@ import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./f
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
+import { resourceEvidenceRefusal } from "./remediation/evidence-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -1226,8 +1227,8 @@ export class DevOpsAgent {
     // reaching for a gesture when it cannot place a fault; a person who types "restart the
     // payments deployment" has placed it themselves and may know something the pod list does not
     // show. Their request is already sufficient evidence per buildProposalPrompt.
-    if (!opts.userRequested && REPLACEMENT_ACTIONS.has(proposal.action)) {
-      const refusal = await this.replacementRefusalFor(proposal);
+    if (!opts.userRequested) {
+      const refusal = await this.guardRefusalFor(proposal);
       if (refusal) {
         logger.info(`[remediation] replacement guard refused ${proposal.summary}: ${refusal}`);
         return { refused: refusal };
@@ -1271,6 +1272,38 @@ export class DevOpsAgent {
    * production refuses to card, and the guard would be invisible to the measurement that
    * motivated it. Calling the same method is what keeps the two in agreement.
    */
+  /**
+   * Every pre-dry-run guard, in one call, so the benchmark runner and production cannot drift.
+   *
+   * They did once: `replacementRefusalFor` was public and the runner called it behind its own copy
+   * of the `REPLACEMENT_ACTIONS` check, so adding a guard meant remembering to add it in two
+   * places. Which actions a guard applies to belongs to the guard, not to its callers.
+   */
+  async guardRefusalFor(proposal: Proposal): Promise<string | null> {
+    if (!REPLACEMENT_ACTIONS.has(proposal.action)) return this.resourceEvidenceRefusalFor(proposal);
+    return (await this.replacementRefusalFor(proposal)) ?? (await this.resourceEvidenceRefusalFor(proposal));
+  }
+
+  /**
+   * Does the cluster say this is a resource fault? See `evidence-guard.ts`.
+   *
+   * Events rather than the conversation: this runs after the investigation, has no thread to read,
+   * and a fresh read of the namespace is what the replacement guard already does. `since_minutes`
+   * is generous because an OOMKill that aged out of the event log would otherwise read as one that
+   * never happened.
+   */
+  async resourceEvidenceRefusalFor(proposal: Proposal): Promise<string | null> {
+    const namespace = proposal.toolParams.namespace;
+    if (typeof namespace !== "string" || !namespace) return null;
+    try {
+      const raw = await this.mcp.callTool("k8s_list_events", { namespace, since_minutes: 180 });
+      return resourceEvidenceRefusal(proposal.action, raw);
+    } catch (err) {
+      logger.debug(`[remediation] evidence guard could not list events in ${namespace}: ${errDetail(err)}`);
+      return null;
+    }
+  }
+
   async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
     const namespace = proposal.toolParams.namespace;
     if (typeof namespace !== "string" || !namespace) return null;

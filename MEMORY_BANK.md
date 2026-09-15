@@ -1703,6 +1703,33 @@ This is the only rule in the file that can refuse a restart which might have wor
 narrow: any ready pod anywhere in the workload returns null two rules earlier, so it fires only
 when NOT ONE replica is serving and NOT ONE has ever been restarted by the kubelet.
 
+### The evidence guard — does the cluster say this is the fault the action names (`agent/remediation/evidence-guard.ts`)
+
+Sibling of the replacement guard and a different question. That one asks whether the ACTION can
+reach the fault; this one asks whether the fault is the KIND the action names.
+
+`k8s_set_resources` asserts a resource fault, and the proposal prompt already lists the only two
+ways that can be true: a container the kernel killed for memory, or a pod whose REQUEST no node
+can satisfy. Both leave a mark in the namespace's events (`OOMKilling`,
+`FailedScheduling ... Insufficient cpu`); neither can be inferred from a pod that simply keeps
+exiting. Benchmark C03 is a container running `sleep 3; exit 1` that prints nothing — the right
+answer is that the evidence is missing and there is no action, and two attempts out of three
+proposed a memory limit instead, reasoning from `+Inf`. That is the memory-ratio metric of a pod
+with **no limit set**: a description of the spec, not a symptom.
+
+Two rules carried over from the modules this copies:
+- **Evidence is raw tool output, never the model's own text.** An RCA that invented a resource
+  theory states it in prose too, so reading the answer back to itself confirms every invention —
+  the same rule `agent/grounding/` follows.
+- **An empty read refuses nothing.** Nothing came back, so nothing is proven absent; that is
+  `prompts/system.md`'s "evidence of absence for the query you ran" applied to ourselves. A
+  refusal built on a failed tool call is a guess wearing a guard's clothes.
+
+`DevOpsAgent.guardRefusalFor()` now runs both guards behind one call, and `bench/run.ts` calls
+that instead of `replacementRefusalFor` behind its own copy of the `REPLACEMENT_ACTIONS` check.
+The split was a drift hazard: which actions a guard applies to is the guard's business, and with
+two guards the runner would have needed to know both.
+
 **Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
 Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix
 refused over the F. Kubernetes has no object whose name contains an uppercase letter (DNS-1123

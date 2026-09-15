@@ -20,7 +20,6 @@ import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
-import { REPLACEMENT_ACTIONS } from "../agent/remediation/replace-guard.js";
 import logger from "../utils/logger/index.js";
 import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, scoreRca, type Score, type TaskRun } from "./score.js";
@@ -68,9 +67,9 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
     const ungrounded = await agent.ungroundedNames(threadId, rca, issue).catch(() => [] as string[]);
-    // proposeWithRetry, not a bare parseProposal, for the same reason the replacement guard is
-    // applied by hand below: production gets one re-ask on a self-contradicting answer, and a
-    // benchmark that skips it measures a model production does not run.
+    // proposeWithRetry, not a bare parseProposal, for the same reason the guards are applied by
+    // hand below: production gets one re-ask on a self-contradicting answer, and a benchmark
+    // that skips it measures a model production does not run.
     //
     // Its raw text is kept whether or not it parsed. No proposal is three different failures
     // wearing one face — the model judged that no whitelisted action fits ({"action": null}), or
@@ -82,14 +81,15 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     );
     let proposalRaw = asked.raw;
     let proposal = asked.proposal;
-    // The replacement guard runs in proposeRemediation, which this runner deliberately skips —
-    // so it is applied here by hand, through the agent's own method. Without it the bench would
-    // score a card production never posts: a refusal means no approval card, which is the same
-    // outcome as no proposal and has to be scored as one.
-    if (proposal && REPLACEMENT_ACTIONS.has(proposal.action)) {
-      const refusal = await agent.replacementRefusalFor(proposal).catch(() => null);
+    // The guards run inside proposeRemediation, which this runner deliberately skips — so they
+    // are applied here through the agent's own method. Without them the bench would score a card
+    // production never posts: a refusal means no approval card, which is the same outcome as no
+    // proposal and has to be scored as one. One call, not a per-guard check: which actions a
+    // guard applies to is the guard's business, and the previous split let the two drift.
+    if (proposal) {
+      const refusal = await agent.guardRefusalFor(proposal).catch(() => null);
       if (refusal) {
-        proposalRaw = `${proposalRaw}\n[replacement guard refused] ${refusal}`;
+        proposalRaw = `${proposalRaw}\n[guard refused] ${refusal}`;
         proposal = null;
       }
     }
