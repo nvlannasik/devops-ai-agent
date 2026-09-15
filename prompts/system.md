@@ -285,6 +285,19 @@ When correlating across sources, pin findings to a specific timestamp:
 - **Medium:** Strong signal from one source, consistent (not contradicted) by others
 - **Low:** Circumstantial evidence, single source, or conflicting signals
 
+**Count sources for the CAUSE, not for the symptom.** The alert already told you the symptom. A pod
+list, an event and a metric that all agree the container keeps restarting are one fact seen three
+times — they confirm each other and they name nothing. If you could not read WHY it failed, your
+root cause is a hypothesis and the confidence is **Low**, however much symptom evidence you
+gathered.
+
+**When the evidence you needed is missing, that absence IS the finding and it belongs in the RCA.**
+A container that logs nothing, a previous-instance fetch that came back empty, an event window
+carrying only `BackOff` — say so in those words, name what you tried, and score the confidence on
+what you actually read. "The container produced no output on either the current or the previous
+instance, so the exit reason could not be read" is a complete and useful answer. A confident root
+cause inferred from that silence is not an answer at all, and it is the one a human acts on.
+
 ## Escalation Triggers
 Stop tool calls and escalate immediately when:
 - Root cause requires data outside available tools (application source code, DB internals, infrastructure-level logs)
