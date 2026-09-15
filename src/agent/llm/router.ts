@@ -1,4 +1,5 @@
 import logger, { errDetail } from "../../utils/logger/index.js";
+import { config } from "../../config/index.js";
 import { currentRouteContext, traceSuffix } from "../../utils/trace/index.js";
 import type { ContentBlock, LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
 
@@ -53,6 +54,64 @@ function failureOf(res: LLMResponse, tools: ToolDefinition[]): Failure | null {
   return null;
 }
 
+/**
+ * Per-backend failover memory, exported for the test.
+ *
+ * Without it the router forgets a failure the instant it routes around it: a light backend that
+ * burned its full 240s SQS timeout was retried FIRST on the very next question, and paid the
+ * 240s again. The chain always found an answer, so the only symptom was a five-minute reply.
+ *
+ * Deliberately per-PROCESS, not shared through Redis. A backend unreachable from one pod is
+ * usually unreachable because of that pod — its network, its credentials, its queue consumer —
+ * and benching it fleet-wide on one pod's evidence is a bigger failure than the one it prevents.
+ */
+export class BackendHealth {
+  private readonly fails = new Map<string, number>();
+  private readonly skipUntil = new Map<string, number>();
+
+  constructor(
+    private readonly threshold: number,
+    private readonly cooloffMs: number
+  ) {}
+
+  /** A success clears the record entirely — half-open recovery needs no separate state. */
+  succeeded(name: string): void {
+    this.fails.delete(name);
+    this.skipUntil.delete(name);
+  }
+
+  /** Returns the cool-off it just started, or 0 when the backend is still under the threshold. */
+  failed(name: string, now = Date.now()): number {
+    if (this.threshold <= 0) return 0;
+    const n = (this.fails.get(name) ?? 0) + 1;
+    this.fails.set(name, n);
+    if (n < this.threshold) return 0;
+    this.skipUntil.set(name, now + this.cooloffMs);
+    // Counter resets with the cool-off: the next failure after it expires starts a fresh window
+    // rather than re-benching the backend on one strike forever.
+    this.fails.delete(name);
+    return this.cooloffMs;
+  }
+
+  cooling(name: string, now = Date.now()): boolean {
+    const until = this.skipUntil.get(name);
+    if (until === undefined) return false;
+    if (until > now) return true;
+    this.skipUntil.delete(name);
+    return false;
+  }
+
+  /**
+   * Which of `names` to actually try. Never returns empty: if every candidate is cooling off,
+   * the cool-off is ignored and all of them are tried. A degraded attempt beats a certain
+   * failure, and "all backends failed" must mean they were asked.
+   */
+  usable(names: string[], now = Date.now()): Set<string> {
+    const open = names.filter((n) => !this.cooling(n, now));
+    return new Set(open.length > 0 ? open : names);
+  }
+}
+
 export class RouterLLMClient implements LLMClient {
   constructor(
     private readonly backends: Map<string, LLMClient>,
@@ -61,7 +120,11 @@ export class RouterLLMClient implements LLMClient {
     // backend name -> its configured model (registry.ts BackendSpec.model). Absent/undefined
     // for a backend with no configured model (e.g. private-llm) — chat() must pass that
     // through as undefined, never substitute another backend's model.
-    private readonly models: Map<string, string | undefined> = new Map()
+    private readonly models: Map<string, string | undefined> = new Map(),
+    private readonly health: BackendHealth = new BackendHealth(
+      config.llm.routerFailureThreshold,
+      config.llm.routerCooloffMs
+    )
   ) {
     if (heavy.length === 0) throw new Error("router needs a non-empty heavy chain");
     for (const n of [...heavy, ...light]) {
@@ -85,13 +148,19 @@ export class RouterLLMClient implements LLMClient {
     const failures: string[] = [];
     let last: unknown;
 
+    const usable = this.health.usable(names);
     for (const [i, name] of names.entries()) {
+      if (!usable.has(name)) {
+        logger.info(`[llm-router] skipping backend=${name} — cooling off after repeated failures${traceSuffix()}`);
+        continue;
+      }
       const backend = this.backends.get(name)!;
       logger.info(`[llm-router] route=${route} backend=${name} attempt=${i + 1}/${names.length}${traceSuffix()}`);
       try {
         const res = await backend.chat(messages, tools, systemPrompt);
         const failure = failureOf(res, tools);
         if (!failure) {
+          this.health.succeeded(name);
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop
           if (route === "light" && i >= this.light.length && ctx) ctx.escalated = true;
           return { ...res, backend: name, route, model: this.models.get(name) };
@@ -105,10 +174,12 @@ export class RouterLLMClient implements LLMClient {
         } else {
           logger.warn(`[llm-router] backend=${name} failed: ${failure.reason}${traceSuffix()}`);
         }
+        this.noteFailure(name);
         failures.push(`${name}: ${failure.reason}`);
         last = new Error(`${name}: ${failure.reason}`);
       } catch (err) {
         logger.warn(`[llm-router] backend=${name} threw: ${errDetail(err)}${traceSuffix()}`);
+        this.noteFailure(name);
         failures.push(`${name}: ${errDetail(err)}`);
         last = err;
       }
@@ -116,6 +187,16 @@ export class RouterLLMClient implements LLMClient {
 
     logger.error(`[llm-router] all backends failed on the ${route} chain${traceSuffix()}`);
     throw new Error(`all LLM backends failed — ${failures.join("; ")}`, { cause: last });
+  }
+
+  private noteFailure(name: string): void {
+    const cooloff = this.health.failed(name);
+    if (cooloff > 0) {
+      logger.warn(
+        `[llm-router] backend=${name} benched for ${Math.round(cooloff / 1000)}s after ` +
+        `${config.llm.routerFailureThreshold} consecutive failures${traceSuffix()}`
+      );
+    }
   }
 
   // SQSLLMClient.shutdown() stops its dispatcher and deletes its queue. allSettled so one

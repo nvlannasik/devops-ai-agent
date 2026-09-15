@@ -164,7 +164,13 @@ export class OpenAICompatibleClient implements LLMClient {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        cacheReadTokens: 0,
+        // OpenAI-compatible providers cache long prompt PREFIXES server-side with no flag to
+        // set — unlike the claude path, which asks for it explicitly with cache_control. So
+        // the question here is never "is caching on", it is "is it hitting", and hardcoding 0
+        // answered that with a number that was wrong rather than absent: llm_usage showed no
+        // cache reads for a ~21k-token system prompt re-sent on every call.
+        // cache_creation stays 0 — there is no separate write step to bill for.
+        cacheReadTokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
         cacheCreationTokens: 0,
       },
     };

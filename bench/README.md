@@ -239,6 +239,12 @@ remember a follow-up command is a score that stops being recorded the first busy
  "failures":[{"case":"C01-flap-nothing-wrong","attempt":4,"reasons":["grounding: ..."]}]}
 ```
 
+A `mustNot` has to target an **assertion**, not a mention. C03 forbids a high confidence and its
+first pattern was `confidence[^\n]{0,25}high`, which also matched *"…would raise confidence to
+Medium or High"* — a sentence `rca-format` REQUIRES ("which evidence supports this and what would
+raise it"). It failed an attempt that had asserted `Low`, correctly. Anchor on the field
+(`confidence:\*{0,2}\s*`?high`), not on the word appearing near the level.
+
 `npm run bench:log` renders that file as two tables — one run per row, then a case-by-run matrix
 of marks (`--runs N` to widen the window, 8 by default). The matrix is the one to read: a rate
 that drops four points does not say whether one case broke or four went flaky, and the row for a

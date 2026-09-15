@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RouterLLMClient } from "./router.js";
+import { RouterLLMClient, BackendHealth } from "./router.js";
 import { withRoute } from "../../utils/trace/index.js";
 import type { LLMClient, LLMResponse, Message } from "./types.js";
 
@@ -298,4 +298,77 @@ test("two light backends where first fails and second succeeds does NOT set esca
     assert.deepEqual(calls, ["light1", "light2", "light1"]);
     assert.equal(res2.content[0].text, "L1");
   });
+});
+
+// Cool-off. Live cost that motivated it: private-llm-agus burned its full 240s SQS timeout on
+// the light chain, and the NEXT question tried it first and burned 240s again, because nothing
+// remembered. The chain always found an answer, so the only symptom was a 5-minute reply.
+test("BackendHealth benches a backend only after the threshold, and a success clears it", () => {
+  const h = new BackendHealth(2, 1000);
+  assert.equal(h.failed("a", 0), 0);        // one strike is a transient, not a verdict
+  assert.equal(h.cooling("a", 0), false);
+  assert.equal(h.failed("a", 0), 1000);     // second consecutive: benched
+  assert.equal(h.cooling("a", 500), true);
+  assert.equal(h.cooling("a", 1500), false); // and it comes back on its own
+
+  h.failed("b", 0);
+  h.succeeded("b");
+  assert.equal(h.failed("b", 0), 0); // the counter reset, so this is strike one again
+});
+
+test("a cooling backend is skipped, and the next one answers", async () => {
+  const calls: string[] = [];
+  const health = new BackendHealth(1, 60_000);
+  const m = new Map<string, LLMClient>([
+    ["light1", fake(boom, calls, "light1")],
+    ["heavy1", fake(answer("H"), calls, "heavy1")],
+  ]);
+  const r = new RouterLLMClient(m, ["heavy1"], ["light1"], new Map(), health);
+
+  await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["light1", "heavy1"]); // light1 fails, benched
+
+  calls.length = 0;
+  await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["heavy1"]); // light1 not even attempted — this is the 240s saved
+});
+
+test("when every backend is cooling the cool-off is ignored, never the request", () => {
+  // "all backends failed" has to mean they were asked. A degraded attempt beats a certain
+  // failure, so an all-cooling chain falls back to trying everything.
+  const h = new BackendHealth(1, 60_000);
+  h.failed("a", 0);
+  h.failed("b", 0);
+  assert.deepEqual([...h.usable(["a", "b"], 100)].sort(), ["a", "b"]);
+  // with one still open, only the open one is used
+  h.succeeded("b");
+  assert.deepEqual([...h.usable(["a", "b"], 100)], ["b"]);
+});
+
+test("threshold 0 disables the memory entirely", () => {
+  const h = new BackendHealth(0, 60_000);
+  h.failed("a", 0);
+  h.failed("a", 0);
+  assert.equal(h.cooling("a", 0), false);
+});
+
+test("skipping a light backend does not count as escalating into heavy", async () => {
+  // `escalated` is sticky and forces every later call onto the heavy chain. It must be set by
+  // CROSSING the tier, not by the loop index moving past a backend that was never tried.
+  const calls: string[] = [];
+  const health = new BackendHealth(1, 60_000);
+  const m = new Map<string, LLMClient>([
+    ["light1", fake(boom, calls, "light1")],
+    ["light2", fake(answer("L2"), calls, "light2")],
+    ["heavy1", fake(answer("H"), calls, "heavy1")],
+  ]);
+  const r = new RouterLLMClient(m, ["heavy1"], ["light1", "light2"], new Map(), health);
+
+  await withRoute("light", async () => {
+    await r.chat([], [], "sys");          // light1 throws, light2 answers — lateral, not escalation
+    calls.length = 0;
+    const res = await r.chat([], [], "sys"); // light1 benched; light2 must still be reachable
+    assert.equal(res.content[0].text, "L2");
+  });
+  assert.deepEqual(calls, ["light2"]);
 });

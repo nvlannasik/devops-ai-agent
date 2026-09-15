@@ -51,6 +51,13 @@ export const config = {
       "claude" | "openai-compatible" | "private-llm" | "router",
     // Output token ceiling for claude + openai-compatible. SQS path's limit lives in llm-worker.
     maxTokens: parseInt(process.env.MAX_TOKENS ?? "8096"),
+    // Router failover memory. A backend that just failed is otherwise retried FIRST on the very
+    // next request: a light-chain timeout cost 240s, and then cost it again on the following
+    // question because nothing remembered. Threshold 2 so one transient error never benches a
+    // good backend; cool-off 120s so a recovered one comes back within a couple of questions.
+    // Set the threshold to 0 to disable the memory entirely.
+    routerFailureThreshold: parseInt(process.env.LLM_ROUTER_FAILURE_THRESHOLD ?? "2"),
+    routerCooloffMs: parseInt(process.env.LLM_ROUTER_COOLOFF_SECONDS ?? "120") * 1000,
     claude: {
       apiKey: process.env.ANTHROPIC_API_KEY!,
       model: process.env.CLAUDE_MODEL ?? "claude-opus-4-8",
