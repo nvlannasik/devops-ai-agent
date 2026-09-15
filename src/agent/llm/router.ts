@@ -12,6 +12,19 @@ import type { ContentBlock, LLMClient, LLMResponse, Message, ToolDefinition } fr
 // the two cannot drift apart.
 export const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
 
+/**
+ * Failures a retry cannot fix. Exhausted credit and a rejected key do not heal in 120 seconds,
+ * and the default cool-off treats them as if they might: a bench run lost six attempts to
+ * `429 You have no credits remaining`, re-asking the same dead backend every two minutes.
+ *
+ * Matched on the explicit wording, never on the status code alone: a bare 429 is ordinary rate
+ * limiting, which IS transient and which a short cool-off handles correctly. Over-matching here
+ * benches a working backend for half an hour, so the list stays narrow and literal.
+ */
+const TERMINAL = /no credits remaining|insufficient_quota|insufficient credit|quota exceeded|billing|invalid[ _]api[ _]key|unauthorized|401|403/i;
+
+export const isTerminalFailure = (reason: string): boolean => TERMINAL.test(reason);
+
 const textOf = (content: ContentBlock[]): string =>
   content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
 
@@ -65,6 +78,8 @@ function failureOf(res: LLMResponse, tools: ToolDefinition[]): Failure | null {
  * usually unreachable because of that pod — its network, its credentials, its queue consumer —
  * and benching it fleet-wide on one pod's evidence is a bigger failure than the one it prevents.
  */
+const TERMINAL_COOLOFF_FACTOR = 15; // 120s default becomes 30 minutes
+
 export class BackendHealth {
   private readonly fails = new Map<string, number>();
   private readonly skipUntil = new Map<string, number>();
@@ -80,17 +95,24 @@ export class BackendHealth {
     this.skipUntil.delete(name);
   }
 
-  /** Returns the cool-off it just started, or 0 when the backend is still under the threshold. */
-  failed(name: string, now = Date.now()): number {
+  /**
+   * Returns the cool-off it just started, or 0 when the backend is still under the threshold.
+   * A terminal failure skips the threshold entirely — there is nothing to confirm about a
+   * rejected key, and one more attempt only spends another request to be told the same thing.
+   */
+  failed(name: string, now = Date.now(), terminal = false): number {
     if (this.threshold <= 0) return 0;
     const n = (this.fails.get(name) ?? 0) + 1;
     this.fails.set(name, n);
-    if (n < this.threshold) return 0;
-    this.skipUntil.set(name, now + this.cooloffMs);
+    if (n < this.threshold && !terminal) return 0;
+    // Long, but still finite: credits get topped up and keys get rotated, and a backend benched
+    // for the life of the process would need a restart to come back.
+    const cooloff = terminal ? this.cooloffMs * TERMINAL_COOLOFF_FACTOR : this.cooloffMs;
+    this.skipUntil.set(name, now + cooloff);
     // Counter resets with the cool-off: the next failure after it expires starts a fresh window
     // rather than re-benching the backend on one strike forever.
     this.fails.delete(name);
-    return this.cooloffMs;
+    return cooloff;
   }
 
   cooling(name: string, now = Date.now()): boolean {
@@ -174,12 +196,12 @@ export class RouterLLMClient implements LLMClient {
         } else {
           logger.warn(`[llm-router] backend=${name} failed: ${failure.reason}${traceSuffix()}`);
         }
-        this.noteFailure(name);
+        this.noteFailure(name, failure.reason);
         failures.push(`${name}: ${failure.reason}`);
         last = new Error(`${name}: ${failure.reason}`);
       } catch (err) {
         logger.warn(`[llm-router] backend=${name} threw: ${errDetail(err)}${traceSuffix()}`);
-        this.noteFailure(name);
+        this.noteFailure(name, errDetail(err));
         failures.push(`${name}: ${errDetail(err)}`);
         last = err;
       }
@@ -189,12 +211,14 @@ export class RouterLLMClient implements LLMClient {
     throw new Error(`all LLM backends failed — ${failures.join("; ")}`, { cause: last });
   }
 
-  private noteFailure(name: string): void {
-    const cooloff = this.health.failed(name);
+  private noteFailure(name: string, reason: string): void {
+    const terminal = isTerminalFailure(reason);
+    const cooloff = this.health.failed(name, Date.now(), terminal);
     if (cooloff > 0) {
       logger.warn(
-        `[llm-router] backend=${name} benched for ${Math.round(cooloff / 1000)}s after ` +
-        `${config.llm.routerFailureThreshold} consecutive failures${traceSuffix()}`
+        `[llm-router] backend=${name} benched for ${Math.round(cooloff / 1000)}s — ` +
+        (terminal ? `credentials or quota, which a retry cannot fix` : `${config.llm.routerFailureThreshold} consecutive failures`) +
+        traceSuffix()
       );
     }
   }

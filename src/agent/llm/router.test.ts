@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RouterLLMClient, BackendHealth } from "./router.js";
+import { RouterLLMClient, BackendHealth, isTerminalFailure } from "./router.js";
 import { withRoute } from "../../utils/trace/index.js";
 import type { LLMClient, LLMResponse, Message } from "./types.js";
 
@@ -371,4 +371,32 @@ test("skipping a light backend does not count as escalating into heavy", async (
     assert.equal(res.content[0].text, "L2");
   });
   assert.deepEqual(calls, ["light2"]);
+});
+
+// From a real bench run: six attempts lost to `429 You have no credits remaining`, because the
+// cool-off re-asked the same dead backend every two minutes. Credit and keys do not heal on that
+// timescale; ordinary rate limiting does, which is why the match is on wording, not the code.
+test("a terminal failure benches immediately and for much longer", () => {
+  const h = new BackendHealth(2, 1000);
+  const cooloff = h.failed("a", 0, true);
+  assert.equal(cooloff, 15_000);          // skipped the threshold outright
+  assert.equal(h.cooling("a", 14_000), true);
+  assert.equal(h.cooling("a", 16_000), false); // finite: credits get topped up, keys rotated
+});
+
+test("terminal is decided by wording, never by the status code alone", () => {
+  for (const r of [
+    "LLM worker error: 429 You have no credits remaining. Add credits to continue",
+    "401 Unauthorized",
+    "insufficient_quota",
+    "invalid api key",
+  ]) assert.equal(isTerminalFailure(r), true, r);
+
+  // A bare rate limit IS transient — benching a working backend for half an hour over one
+  // would cost more than the retries it saves.
+  for (const r of [
+    "SQS LLM timeout after 240000ms",
+    "empty response (stop=end_turn)",
+    "500 Internal Server Error",
+  ]) assert.equal(isTerminalFailure(r), false, r);
 });

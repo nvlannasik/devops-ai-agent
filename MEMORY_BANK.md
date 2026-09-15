@@ -1344,6 +1344,13 @@ the chain always found an answer, so the only symptom was a five-minute reply, n
   check is `i >= this.light.length` against `[...light, ...heavy]`, so a filtered index would
   report a lateral hop as a tier crossing and make `escalated` sticky for the rest of the
   investigation. `router.test.ts` pins that case specifically.
+- **A terminal failure skips the threshold and is benched 15x longer** (`isTerminalFailure`).
+  Exhausted credit and a rejected key do not heal in 120s, and the plain cool-off re-asked the
+  same dead backend every two minutes — a bench run lost six attempts to `429 You have no credits
+  remaining` that way, scored as agent failures when no model ever answered. Matched on the
+  explicit WORDING, never on the status code: a bare 429 is ordinary rate limiting, which is
+  transient and which the short cool-off handles correctly. Still finite — credits get topped up
+  and keys get rotated, and a backend benched for the process lifetime would need a restart.
 - **Per-process, deliberately not shared through Redis.** A backend unreachable from one pod is
   usually unreachable *because of* that pod — its network, its credentials, its queue consumer —
   and benching it fleet-wide on one pod's evidence is a bigger failure than the one it prevents.
