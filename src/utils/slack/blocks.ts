@@ -92,7 +92,37 @@ export function isRcaResponse(text: string): boolean {
   return SEVERITY_PATTERN.test(text) && /\*[^*]*Root Cause[^*]*\*/i.test(text);
 }
 
-export function buildRcaBlocks(rcaText: string): Block[] {
+/**
+ * The run footer: how long it took, on which model, over how many rounds.
+ *
+ * Built from measured metadata, never parsed back out of the reply — and appended as its own
+ * Slack block rather than as text, because extractSection() reads a section "up to the next
+ * heading or END OF TEXT". A footer line glued onto the reply would be swallowed into the
+ * Confidence section and land in the dashboard's RCA card as part of the agent's verdict.
+ */
+export function formatRunFooter(meta: {
+  durationMs: number;
+  rounds: number;
+  toolCalls: number;
+  model?: string;
+  backend?: string;
+  route?: "light" | "heavy";
+}): string {
+  const secs = meta.durationMs / 1000;
+  const parts = [`⏱ ${secs < 10 ? secs.toFixed(1) : Math.round(secs)}s`];
+  // backend is the name YOU gave it in the routes; model is what actually ran. Both, when they
+  // differ — "private-llm-chatgpt" alone does not say which model, and a bare model name does
+  // not say which route answered after a failover.
+  const engine = meta.model && meta.backend && meta.model !== meta.backend
+    ? `${meta.backend} (${meta.model})`
+    : meta.model ?? meta.backend;
+  if (engine) parts.push(`🧠 ${engine}${meta.route ? ` · ${meta.route}` : ""}`);
+  parts.push(`${meta.rounds} round${meta.rounds === 1 ? "" : "s"}`);
+  if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool call${meta.toolCalls === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   const blocks: Block[] = [];
 
   // ── Severity ─────────────────────────────────────────────────────────────
@@ -175,6 +205,8 @@ export function buildRcaBlocks(rcaText: string): Block[] {
   if (blocks.length <= 2) {
     return [section(rcaText)];
   }
+
+  if (footer) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: footer }] });
 
   return blocks;
 }

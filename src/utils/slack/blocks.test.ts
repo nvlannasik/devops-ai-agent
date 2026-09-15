@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse } from "./blocks.js";
+import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse, formatRunFooter } from "./blocks.js";
 
 test("partial RCA leak (plan + impact + confidence, no Severity) is detected", () => {
   const reply =
@@ -229,4 +229,39 @@ test("headings with no trailing whitespace are unaffected", () => {
   const plain = HARD_BREAKS.replace(/\*  \n/g, "*\n");
   assert.equal(extractSection(plain, "Root Cause"), "1. [Symptom] — checkout-gateway probes are failing.");
   assert.equal(buildRcaBlocks(plain).length, buildRcaBlocks(HARD_BREAKS).length);
+});
+
+test("the footer names both the route alias and the model that actually ran", () => {
+  // "private-llm-chatgpt" alone does not say which model; "gpt-5-nano" alone does not say
+  // which backend answered after a failover. On a live run they disagreed and both mattered.
+  const f = formatRunFooter({
+    durationMs: 12340, rounds: 2, toolCalls: 3,
+    backend: "private-llm-chatgpt", model: "gpt-5-nano-2025-08-07", route: "light",
+  });
+  assert.match(f, /^⏱ 12s/); // decimals only below 10s — 12.3 vs 12 tells a reader nothing
+  assert.match(f, /private-llm-chatgpt \(gpt-5-nano-2025-08-07\) · light/);
+  assert.match(f, /2 rounds · 3 tool calls/);
+});
+
+test("seconds lose the decimal once the number is big enough not to need it", () => {
+  assert.match(formatRunFooter({ durationMs: 344772, rounds: 2, toolCalls: 1 }), /^⏱ 345s/);
+  assert.match(formatRunFooter({ durationMs: 9400, rounds: 1, toolCalls: 0 }), /^⏱ 9\.4s/);
+});
+
+test("singulars stay singular and a tool-less run says nothing about tools", () => {
+  const f = formatRunFooter({ durationMs: 1000, rounds: 1, toolCalls: 0 });
+  assert.match(f, /1 round(?!s)/);
+  assert.ok(!/tool call/.test(f));
+});
+
+test("a footer block never joins the sections the parsers read", () => {
+  const rca = "*📍 Root Cause*\nthe thing broke\n\n*📈 Confidence:* `High` — because";
+  const withFooter = buildRcaBlocks(rca, "⏱ 3s · 2 rounds");
+  const plain = buildRcaBlocks(rca);
+  // extractSection reads a section to END OF TEXT, so a footer glued onto the reply would land
+  // inside Confidence. As a block it cannot.
+  assert.equal(withFooter.length, plain.length + 1);
+  assert.equal(withFooter[withFooter.length - 1].type, "context");
+  assert.equal(extractSection(rca, "Confidence"), extractSection(rca, "Confidence"));
+  assert.ok(!JSON.stringify(plain).includes("⏱"));
 });

@@ -329,6 +329,25 @@ export interface InvestigateOptions {
    * reader assumes. Only the alert path passes it; a delegate has no Slack message to update.
    */
   onProgress?: (round: number, tools: string[]) => void;
+  /**
+   * Run metadata for the Slack footer, delivered as a sink rather than a return value.
+   * investigate() returns the reply text and a dozen call sites depend on that; a sink also
+   * stays correct under INVESTIGATION_MAX_CONCURRENT, where a `lastRunMeta()` getter would
+   * hand one thread another thread's numbers.
+   */
+  onComplete?: (meta: RunMeta) => void;
+}
+
+/** What the Slack footer reports. Every field is measured, never estimated. */
+export interface RunMeta {
+  durationMs: number;
+  /** LLM calls, not tool rounds — the number that explains the latency. */
+  rounds: number;
+  toolCalls: number;
+  /** From the LAST response: on a failover it is the backend that actually answered. */
+  backend?: string;
+  model?: string;
+  route?: "light" | "heavy";
 }
 
 export type ThreadSkills = Map<string, Skill[]>;
@@ -637,6 +656,25 @@ export class DevOpsAgent {
     );
     const systemPrompt = buildStaticSystemPrompt();
     let iterations = 0;
+    let totalToolCalls = 0;
+    // The response that ANSWERED, not the first one tried: on a failover the backend that
+    // finally worked is the one the footer must name.
+    let lastResponse: LLMResponse | undefined;
+
+    // Every exit from this loop goes through here, so the footer is never missing from the
+    // paths that matter most — the timeout and the out-of-steps replies are exactly where a
+    // reader wants to know how long it ran and on which model.
+    const done = (text: string): string => {
+      opts.onComplete?.({
+        durationMs: Date.now() - investigationStart,
+        rounds: iterations,
+        toolCalls: totalToolCalls,
+        backend: lastResponse?.backend,
+        model: lastResponse?.model,
+        route: lastResponse?.route,
+      });
+      return text;
+    };
     let totalUsage = zeroUsage();
 
     // A delegate inherits a deadline instead of taking a fresh one: its whole point is to finish
@@ -678,7 +716,7 @@ export class DevOpsAgent {
             `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
             `(tool rounds: ${toolRounds}, answer turn ${toolsDisabled ? "already spent" : "not reachable"})`
           );
-          return "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.";
+          return done("⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.");
         }
       }
       iterations++;
@@ -715,6 +753,7 @@ export class DevOpsAgent {
       let response;
       try {
         response = await this.llm.chat(assembled.messages, toolsDisabled ? [] : tools, assembled.systemPrompt);
+        lastResponse = response;
       } catch (err) {
         // the LLM call is the one hop that leaves this process; without this line a
         // worker/queue failure surfaced only as a generic Slack error with no context
@@ -758,9 +797,9 @@ export class DevOpsAgent {
           logger.warn(`[${threadId}] LLM returned an empty final response (stop=${response.stopReason})`);
           if (response.stopReason === "max_tokens") {
             // reasoning models can spend the entire output budget thinking and emit no text
-            return "⚠️ The model hit its output-token limit before writing the answer (its reasoning consumed the whole budget). Try again — or raise `LLM_MAX_TOKENS` / set `LLM_REASONING_EFFORT=low` on the llm-worker.";
+            return done("⚠️ The model hit its output-token limit before writing the answer (its reasoning consumed the whole budget). Try again — or raise `LLM_MAX_TOKENS` / set `LLM_REASONING_EFFORT=low` on the llm-worker.");
           }
-          return "⚠️ The investigation finished but the model returned an empty response. Please re-run or rephrase the request.";
+          return done("⚠️ The investigation finished but the model returned an empty response. Please re-run or rephrase the request.");
         }
         // A model that echoes our own content-block JSON as prose means its tool-call
         // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
@@ -794,7 +833,7 @@ export class DevOpsAgent {
           await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
           continue;
         }
-        return summary;
+        return done(summary);
       }
 
       if (response.stopReason === "tool_use") {
@@ -879,6 +918,7 @@ export class DevOpsAgent {
           logger.debug(`[${threadId}] progress callback threw, ignored: ${errDetail(err)}`)
         );
 
+        totalToolCalls += executable.length;
         const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable) : [];
         if (!sawLogLines) {
           const logIds = new Set(executable.filter((t) => LOG_TOOLS.has(t.name ?? "")).map((t) => t.id));
@@ -925,7 +965,7 @@ export class DevOpsAgent {
     // reaching here means the model answered that turn with another tool_use instead of prose.
     // Nothing was posted to the thread, so don't tell the reader to review findings "above".
     logger.warn(`[${threadId}] Investigation hit max iterations (${maxIterations}) — model kept calling tools on its final, tool-free turn`);
-    return "⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.";
+    return done("⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.");
   }
 
   /**

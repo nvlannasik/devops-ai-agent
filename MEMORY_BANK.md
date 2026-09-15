@@ -1151,6 +1151,28 @@ down, Postgres down, pod killed mid-handler) loses the event for good.
 - Tunables: `INCIDENT_RECONCILE_ENABLED`, `_MIN_AGE_SECONDS` (600 = `resolve_timeout` 5m +
   `group_interval` 5m), `_CONFIRM_SECONDS` (120), `_BATCH` (50).
 
+### Slack run footer + conversation progress
+- **`RunMeta` leaves `investigate()` through an `onComplete` sink, not the return value.** The
+  return type is the reply text and a dozen call sites depend on it; a sink is also the only
+  shape that stays correct under `INVESTIGATION_MAX_CONCURRENT`, where a `lastRunMeta()` getter
+  would hand one thread another thread's numbers. Same pattern as the existing `onProgress`.
+- **Every exit goes through `done()`** — timeout, empty response, max_tokens, out-of-steps, and
+  the normal return. Those failure paths are exactly where a reader most wants the duration and
+  the model, so a footer only on the happy path would be missing when it matters.
+- **The footer is a Slack `context` BLOCK, never appended text.** `extractSection()` reads a
+  section "up to the next heading or END OF TEXT", so a footer line glued onto an RCA is
+  swallowed into Confidence and lands in the dashboard's card as part of the agent's verdict.
+  Conversation replies are plain mrkdwn that nothing parses back, so there it is appended — to
+  the LAST split part only.
+- **The footer names backend AND model when they differ.** `private-llm-chatgpt` alone does not
+  say which model ran; `gpt-5-nano` alone does not say which backend answered after a failover.
+  `lastResponse` is the response that ANSWERED, so on a failover it names the one that worked.
+- **The mention path's progress notice is created on the FIRST tool round, not up front.** A
+  one-round answer posts nothing extra; a scan that is about to spend minutes says so from the
+  moment it starts spending them. No timer, and no "thinking…" message left hanging over a reply
+  that already landed. It is **deleted** when the reply posts — the alert path updates its notice
+  to "complete" instead, because there the notice also anchors the thread.
+
 ### Context Assembly & Skills
 Bounds what actually reaches the LLM call, on both axes that used to be unbounded: which prompt
 content ships (all of it, always) and how large a single tool result can grow (as large as the

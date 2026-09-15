@@ -2,7 +2,7 @@ import { createServer, type Server } from "http";
 import { App, ExpressReceiver, type AllMiddlewareArgs, type SlackEventMiddlewareArgs } from "@slack/bolt";
 import express, { type Request, type Response } from "express";
 import { config } from "../config/index.js";
-import { DevOpsAgent } from "../agent/index.js";
+import { DevOpsAgent, type RunMeta } from "../agent/index.js";
 import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
@@ -12,7 +12,7 @@ import { worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
-import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure } from "../utils/slack/blocks.js";
+import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
@@ -249,11 +249,41 @@ export class SlackApp {
         // Conversation-mode mentions are the cheap tier. Investigation requests and the alert
         // path stay heavy by omission — default heavy is deliberate, so a new LLM call added
         // later gets the strong model rather than a silent downgrade.
+        let meta: RunMeta | undefined;
+        const onComplete = (m: RunMeta) => { meta = m; };
+
+        // The notice is created on the FIRST tool round, not up front. A one-round answer
+        // ("what can you do?") then posts nothing extra at all, while a scan that is about to
+        // spend minutes says so from the moment it starts spending them. No timer, and no
+        // "thinking..." message left hanging over a reply that already landed.
+        let noticeTs: string | undefined;
+        let noticePending = false;
+        const onProgress = (round: number, tools: string[]) => {
+          const text = `🔍 Round ${round}${tools.length > 0 ? ` — ${tools.join(", ")}` : ""}`;
+          if (noticeTs) {
+            void client.chat.update({ channel: event.channel, ts: noticeTs, text })
+              .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
+            return;
+          }
+          if (noticePending) return; // first post still in flight — the next round updates it
+          noticePending = true;
+          void client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text })
+            .then((r) => { noticeTs = r.ts as string | undefined; })
+            .catch((e) => logger.debug(`[slack] progress notice failed for thread ${threadId}: ${errDetail(e)}`));
+        };
+
         let reply = toMrkdwn(
           investigation
-            ? await this.agent.investigate(threadId, message, budget)
-            : await withRoute("light", () => this.agent.investigate(threadId, message, budget))
+            ? await this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress })
+            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress }))
         );
+
+        // Deleted, not updated to "done": in a conversation the notice has no value once the
+        // answer is under it, and a leftover "Round 3" line reads like the agent is still going.
+        if (noticeTs) {
+          await client.chat.delete({ channel: event.channel, ts: noticeTs })
+            .catch((e) => logger.debug(`[slack] could not remove the progress notice for thread ${threadId}: ${errDetail(e)}`));
+        }
         if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
           // Deterministic format backstop — the model sometimes ignores the conversation-mode
           // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
@@ -263,18 +293,28 @@ export class SlackApp {
         }
         const isRca = isRcaResponse(reply);
         logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
+        const footer = meta ? formatRunFooter(meta) : undefined;
         if (isRca) {
           await client.chat.postMessage({
             channel: event.channel,
             thread_ts: threadId,
             text: reply,
-            blocks: buildRcaBlocks(reply),
+            blocks: buildRcaBlocks(reply, footer),
           });
         } else {
           // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
           // fence-safe, so displayed logs keep rendering as code blocks
-          for (const part of splitForSlack(reply)) {
-            await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+          const parts = splitForSlack(reply);
+          for (const [i, part] of parts.entries()) {
+            // Footer on the LAST part only, and appended to the text rather than added as a
+            // block: a conversation reply is posted as plain mrkdwn, and nothing parses it back.
+            const last = i === parts.length - 1;
+            await client.chat.postMessage({
+              channel: event.channel,
+              thread_ts: threadId,
+              text: last && footer ? `${part}\n\n_${footer}_` : part,
+              mrkdwn: true,
+            });
           }
         }
         if (isRca) {
@@ -565,7 +605,14 @@ export class SlackApp {
           }
         : undefined;
 
-      const rca = toMrkdwn(await this.agent.investigate(threadId, fullIssue, { trigger: issueText, onProgress }));
+      let alertMeta: RunMeta | undefined;
+      const rca = toMrkdwn(
+        await this.agent.investigate(threadId, fullIssue, {
+          trigger: issueText,
+          onProgress,
+          onComplete: (m) => { alertMeta = m; },
+        })
+      );
       // The notice has served its purpose; left alone it would sit above the RCA still
       // claiming a round is running.
       if (noticeTs) {
@@ -579,7 +626,7 @@ export class SlackApp {
       // produced garbage twice. Incident store + remediation don't need the template.
       const structured = isRcaResponse(rca) && !!extractSection(rca, "Root Cause");
       if (structured) {
-        const rcaBlocks = buildRcaBlocks(rca);
+        const rcaBlocks = buildRcaBlocks(rca, alertMeta ? formatRunFooter(alertMeta) : undefined);
         // What we actually handed Slack. Added because "the dividers are gone" could not be
         // answered from here: the card rendered (its header comes from buildRcaBlocks and
         // nothing else in the repo writes that string), so the blocks were built — but whether
