@@ -239,6 +239,12 @@ remember a follow-up command is a score that stops being recorded the first busy
  "failures":[{"case":"C01-flap-nothing-wrong","attempt":4,"reasons":["grounding: ..."]}]}
 ```
 
+`npm run bench:log` renders that file as two tables — one run per row, then a case-by-run matrix
+of marks (`--runs N` to widen the window, 8 by default). The matrix is the one to read: a rate
+that drops four points does not say whether one case broke or four went flaky, and the row for a
+case shows its whole history in one line. A case a run never touched is dashed to that run's
+attempt count, so an absence is never mistaken for a longer run.
+
 `git log -p bench/results/history.jsonl` is the whole feature: it shows when the score changed
 and, in the commits around it, what changed with it. Appending is a one-line diff that never
 touches another append's line, so two machines can both write it and rebase resolves without a
