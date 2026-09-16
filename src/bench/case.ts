@@ -14,6 +14,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { wantsInvestigation } from "../agent/intent/index.js";
 
 const Expectation = z.object({
   action: z.string().nullable(),
@@ -41,6 +42,14 @@ const Alert = z.object({
   startsAt: z.string().optional(),
 });
 
+/**
+ * Which door the case enters through. The benchmark measured only `alert` for its first sixteen
+ * cases, while production has three — and two of the three had bugs land in one week that nothing
+ * here could see: a log-gap nudge overwriting a correct conversation answer, and conversation mode
+ * losing its mrkdwn rules. A run mode nothing exercises is a run mode nobody measures.
+ */
+const Mode = z.enum(["alert", "investigation", "conversation"]);
+
 export const CaseFile = z.object({
   /** The catalog id from docs/BENCHMARK_agent_stack.md — A02, C01, E04. Also the directory name. */
   id: z.string().regex(/^[A-F]\d{2}-[a-z0-9-]+$/, "id must look like A02-oomkilled-at-limit"),
@@ -50,11 +59,22 @@ export const CaseFile = z.object({
   disabled: z.boolean().optional(),
   /** How long to wait after setup.sh before investigating — a CrashLoop needs restarts to accumulate. */
   settleSeconds: z.number().int().min(0).max(600).optional(),
-  groupLabels: z.record(z.string(), z.string()),
-  alerts: z.array(Alert).min(1),
+  /** Defaults to `alert`, which is what every case written before this field assumed. */
+  mode: Mode.default("alert"),
+  /** The Slack text, for a case that enters as a mention rather than as an Alertmanager group. */
+  message: z.string().min(1).optional(),
+  groupLabels: z.record(z.string(), z.string()).optional(),
+  alerts: z.array(Alert).min(1).optional(),
   commonAnnotations: z.record(z.string(), z.string()).optional(),
   expect: Expectation,
-});
+})
+  // An alert case needs an alert group; a mention case needs something for the human to have
+  // said. Enforced here rather than in the runner so a half-written case file fails at load,
+  // before the first namespace is created — the same reason the rca patterns compile here.
+  .refine(
+    (c) => (c.mode === "alert" ? !!c.alerts && !!c.groupLabels : !!c.message),
+    "an alert case needs groupLabels + alerts; an investigation or conversation case needs message"
+  );
 
 export type Case = z.infer<typeof CaseFile> & { dir: string };
 
@@ -66,6 +86,19 @@ export function loadCases(root: string, opts: { filter?: RegExp; all?: boolean }
     // Parsed strictly and thrown on, not skipped: a case file with a typo'd expectation would
     // otherwise vanish from the run and take its failures with it, and the score would improve.
     const parsed = CaseFile.parse(JSON.parse(readFileSync(join(dir, "case.json"), "utf8")));
+    // Production does not take the mode from a file — it asks `wantsInvestigation()` about the
+    // text. A case that declares one mode while that classifier picks the other is testing a path
+    // Slack would never route it down, and it would go on saying so silently after any change to
+    // the classifier. Cheap to check, and it makes the case file pin that behaviour too.
+    if (parsed.mode !== "alert") {
+      const production = wantsInvestigation(parsed.message!) ? "investigation" : "conversation";
+      if (production !== parsed.mode) {
+        throw new Error(
+          `bench case ${parsed.id} declares mode ${JSON.stringify(parsed.mode)} but wantsInvestigation() ` +
+          `routes its message to ${JSON.stringify(production)} — production would not run it the way this case asserts`
+        );
+      }
+    }
     if (parsed.id !== d.name) {
       throw new Error(`bench case in ${dir} calls itself ${JSON.stringify(parsed.id)} — id must match the directory`);
     }

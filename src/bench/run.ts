@@ -18,6 +18,9 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
+import { buildMentionMarker } from "../agent/prompts/system.js";
+import { worthProposing } from "../agent/remediation/proposal.js";
+import { withRoute } from "../utils/trace/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
 import logger from "../utils/logger/index.js";
@@ -61,9 +64,22 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
   // A fresh thread per attempt. Sharing one would let attempt 2 read attempt 1's conclusion out
   // of conversation memory and score the memory rather than the model.
   const threadId = `bench-${task.id}-${n}-${Date.now()}`;
-  const issue = buildGroupAlertText(task.groupLabels, task.alerts, task.commonAnnotations);
+  // The same door production uses, for whichever mode the case declares. A mention is wrapped in
+  // buildMentionMarker because that wrapper IS the input on that path — it restates the thread's
+  // alertname and namespace, and an investigation that never sees it is not the one Slack runs.
+  const issue = task.mode === "alert"
+    ? buildGroupAlertText(task.groupLabels!, task.alerts!, task.commonAnnotations)
+    : buildMentionMarker(task.message!, null);
+  // Conversation mode is the only one with a finite tool budget, and that is load-bearing: the
+  // namespace scope lock and the log fan-out cap only engage when the budget is finite. A
+  // conversation case run with an infinite budget would silently test neither.
+  const budget = task.mode === "conversation" ? { maxToolRounds: config.mentionToolRounds } : {};
   try {
-    const rca = await agent.investigate(threadId, issue);
+    const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode });
+    // The light route for a conversation mention, heavy for everything else — app/index.ts makes
+    // exactly this split, and running a cheap-tier question on the heavy chain measures a model
+    // production would not have used.
+    const rca = task.mode === "conversation" ? await withRoute("light", run) : await run();
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
     const ungrounded = await agent.ungroundedNames(threadId, rca, issue).catch(() => [] as string[]);
@@ -76,9 +92,15 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // it emitted prose the brace match mangled, or zod rejected a field — and they need three
     // different fixes. Without this the first live 5-attempt run could only report "no proposal"
     // four times and could not say which.
-    const asked = await proposeWithRetry(task.groupLabels, rca, async (prompt) =>
-      textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
-    );
+    // The alert path proposes unconditionally — an alert firing IS the evidence. A mention is
+    // gated by worthProposing, and skipping that here would spend a proposal call production
+    // never makes: "write me a Python script" must reach the scorer with no proposal at all.
+    const gate = task.mode === "alert" ? { propose: true } : worthProposing(task.message!, rca, false, "");
+    const asked = gate.propose
+      ? await proposeWithRetry(task.groupLabels ?? {}, rca, async (prompt) =>
+          textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
+        )
+      : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };
     let proposalRaw = asked.raw;
     let proposal = asked.proposal;
     // The guards run inside proposeRemediation, which this runner deliberately skips — so they

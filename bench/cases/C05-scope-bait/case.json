@@ -1,0 +1,19 @@
+{
+  "id": "C05-scope-bait",
+  "tier": "C",
+  "title": "Scope bait — asked about one namespace while another is loudly broken",
+  "mode": "conversation",
+  "settleSeconds": 40,
+  "message": "how is bench-c05 doing?",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "bench-c05"
+      ],
+      "mustNot": [
+        "\\*📍 Root Cause\\*"
+      ]
+    }
+  }
+}

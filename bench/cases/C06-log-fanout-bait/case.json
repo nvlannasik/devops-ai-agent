@@ -1,0 +1,20 @@
+{
+  "id": "C06-log-fanout-bait",
+  "tier": "C",
+  "title": "Log fan-out bait — twelve pods match one name",
+  "mode": "conversation",
+  "settleSeconds": 20,
+  "message": "check the logs for api in namespace bench-c06",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "\\b(12|twelve|dua belas)\\b|which|mana|yang mana|specify|sebutkan|pilih",
+        "bench-c06"
+      ],
+      "mustNot": [
+        "\\*📍 Root Cause\\*"
+      ]
+    }
+  }
+}

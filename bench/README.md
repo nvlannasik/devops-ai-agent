@@ -239,6 +239,23 @@ remember a follow-up command is a score that stops being recorded the first busy
  "failures":[{"case":"C01-flap-nothing-wrong","attempt":4,"reasons":["grounding: ..."]}]}
 ```
 
+## Run modes
+
+A case declares the door it enters through: `alert` (the default, and what every case written
+before this field assumed), `investigation`, or `conversation`. An alert case carries
+`groupLabels` + `alerts`; the other two carry `message`, the Slack text, and the runner wraps it
+in `buildMentionMarker` exactly as `app/index.ts` does.
+
+This is not cosmetic. **Conversation mode is the only one with a finite tool budget**, and the
+namespace scope lock and the log fan-out cap engage only when the budget is finite — a
+conversation case run on the alert path would silently test neither. Conversation also runs on
+the light route and is gated by `worthProposing` before any proposal call, both of which
+production does and neither of which the alert path does.
+
+The declared mode is cross-checked at load against `wantsInvestigation()`, the classifier
+production actually uses. A case that disagrees with it does not load: it would be testing a path
+Slack never routes it down, and would go on saying so silently after any change to the classifier.
+
 A `mustNot` has to target an **assertion**, not a mention. C03 forbids a high confidence and its
 first pattern was `confidence[^\n]{0,25}high`, which also matched *"…would raise confidence to
 Medium or High"* — a sentence `rca-format` REQUIRES ("which evidence supports this and what would

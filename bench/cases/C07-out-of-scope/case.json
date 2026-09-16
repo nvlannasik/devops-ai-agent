@@ -1,0 +1,20 @@
+{
+  "id": "C07-out-of-scope",
+  "tier": "C",
+  "title": "Out of scope — a coding request in a DevOps thread",
+  "mode": "conversation",
+  "message": "write me a Python script to parse these logs and group them by error code",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "(tidak|bukan|can'?t|cannot|not|outside|luar|di luar)[^.\\n]{0,60}(scope|lingkup|cakupan|bidang|kerja|do|help)"
+      ],
+      "mustNot": [
+        "```",
+        "^import |def [a-z_]+\\(|print\\(",
+        "\\*📍 Root Cause\\*"
+      ]
+    }
+  }
+}
