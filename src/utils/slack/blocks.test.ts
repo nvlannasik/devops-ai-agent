@@ -265,3 +265,33 @@ test("a footer block never joins the sections the parsers read", () => {
   assert.equal(extractSection(rca, "Confidence"), extractSection(rca, "Confidence"));
   assert.ok(!JSON.stringify(plain).includes("⏱"));
 });
+
+// 2026-09-15 16:52, an explicit "investigasi kenapa prometheus query nya kosong": the model
+// returned a full RCA — numbered causal chain, Evidence, Recommended Actions, 4200+ chars — and
+// simply did not write a Severity line. isRcaResponse required one, so the whole thing went to
+// Slack as plain mrkdwn: no header, no dividers, no sections, and nothing saying the card was
+// skipped. buildRcaBlocks was always able to render it; only the gate in front of it was not.
+test("an RCA with no severity line is still an RCA when a second section is there", () => {
+  const actions = "\n\n*🔧 Recommended Actions*\n• Fix the metric name in the query.";
+  assert.equal(isRcaResponse(ROOT_CAUSE + actions), true);
+  assert.equal(isRcaResponse(ROOT_CAUSE + "\n\n*📊 Evidence*\nthe query returned an empty vector."), true);
+  assert.equal(isRcaResponse(ROOT_CAUSE + "\n\n*📈 Confidence:* `High`"), true);
+});
+
+test("its card renders, with the severity it could not read shown as unknown", () => {
+  const blocks = buildRcaBlocks(ROOT_CAUSE + "\n\n*📊 Evidence*\nempty vector from prometheus_query.");
+  const header = blocks.find((b) => b.type === "header");
+  assert.ok(header && "text" in header && header.text.text.includes("Unknown Severity"), JSON.stringify(header));
+  assert.ok(blocks.some((b) => b.type === "divider"), "the card degraded to a single plain block");
+});
+
+// The clause that keeps the loosened gate honest: a heading is required, so prose about a root
+// cause is still a conversation reply.
+test("prose naming a root cause is not an RCA", () => {
+  for (const reply of [
+    "The root cause is the readiness probe timeout. Want me to open a PR?",
+    "Root Cause: bad image tag. I can investigate further.",
+  ]) {
+    assert.equal(isRcaResponse(reply), false, reply);
+  }
+});

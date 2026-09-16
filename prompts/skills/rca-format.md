@@ -1,7 +1,7 @@
 ---
 name: rca-format
 description: The exact Slack mrkdwn shape every RCA must take
-when: always
+when: mode:(alert|investigation)
 ---
 
 IMPORTANT: Use Slack mrkdwn syntax — NOT standard Markdown.

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { demandsLogs, LOG_GAP_NOTICE, LOG_TOOLS } from "./index.js";
+import { demandsLogs, logGapAction, LOG_GAP_NOTICE, LOG_TOOLS, type LogGapState } from "./index.js";
 import { loadSkills, resolveSkillsDir } from "./skills/index.js";
 
 // The SHIPPED playbooks, like skills/real.test.ts: the gate reads their bodies, so an edit that
@@ -50,4 +50,56 @@ test("the notice says what to call, and that an empty query is a fact about the 
   assert.match(LOG_GAP_NOTICE, /lower the Confidence only if your conclusion actually depends on them/);
   assert.match(LOG_GAP_NOTICE, /a complete answer, not a thin one/);
   for (const t of LOG_TOOLS) assert.ok(t.startsWith("k8s_") || t.startsWith("loki_"), t);
+});
+
+// ── The gate's own decision ──────────────────────────────────────────────────
+// A run that has just answered, with the playbooks that read logs loaded and no log line seen.
+const ripe = (over: Partial<LogGapState> = {}): LogGapState => ({
+  mode: "alert",
+  demandsLogs: true,
+  sawLogLines: false,
+  nudged: false,
+  toolsDisabled: false,
+  toolRounds: 1,
+  toolRoundsAtNudge: -1,
+  holdingAnswer: false,
+  ...over,
+});
+
+test("an alert that never read a log line gets one more round", () => {
+  assert.equal(logGapAction(ripe()), "nudge");
+});
+
+// Observed 2026-09-15 on thread 1789488072: "apakah ada anomali di cluster 1 jam kebelakang ini?"
+// was answered correctly, the gate fired on playbooks four turns older than the question, and the
+// retry replaced the answer with "That's outside what I do". Twice.
+test("a conversation is never nudged — its playbooks belong to earlier questions", () => {
+  assert.equal(logGapAction(ripe({ mode: "conversation" })), "answer");
+  assert.equal(logGapAction(ripe({ mode: "investigation" })), "answer");
+});
+
+test("the nudge is spent once, and never with no tool round behind it or tools already off", () => {
+  assert.equal(logGapAction(ripe({ nudged: true })), "answer");
+  assert.equal(logGapAction(ripe({ toolRounds: 0 })), "answer");
+  assert.equal(logGapAction(ripe({ toolsDisabled: true })), "answer");
+  assert.equal(logGapAction(ripe({ sawLogLines: true })), "answer");
+  assert.equal(logGapAction(ripe({ demandsLogs: false })), "answer");
+});
+
+// The half that was missing: the nudge REPLACES the answer it interrupted, so a retry that
+// gathered nothing must not be allowed to.
+test("a nudge round that ran no tools gives the first answer back", () => {
+  const held = ripe({ nudged: true, holdingAnswer: true, toolRoundsAtNudge: 1, toolRounds: 1 });
+  assert.equal(logGapAction(held), "restore");
+});
+
+test("a nudge round that DID fetch logs keeps its own answer", () => {
+  const fetched = ripe({
+    nudged: true,
+    holdingAnswer: true,
+    toolRoundsAtNudge: 1,
+    toolRounds: 2,
+    sawLogLines: true,
+  });
+  assert.equal(logGapAction(fetched), "answer");
 });

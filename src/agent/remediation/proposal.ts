@@ -12,22 +12,41 @@ export interface Proposal {
   reason: string;
   toolParams: Record<string, unknown>; // exact MCP tool input (dry_run added by callers)
   summary: string; // human-readable one-liner for the approval card / result messages
+  /**
+   * A scale-to-zero quarantine. Set here so the evidence gate upstream does not have to
+   * re-derive "is this a quarantine?" from `toolParams.replicas === 0` at every call site —
+   * one missed call site is a workload taken offline on no evidence.
+   */
+  quarantine?: boolean;
 }
 
 const s = z.string().min(1);
 const kinds = z.enum(["deployment", "statefulset", "daemonset"]);
 
 const RolloutRestart = z.object({ namespace: s, workload: s, kind: kinds.optional() });
+// min(0), not min(1): zero is the reversible quarantine of a workload measured idle. It is not
+// waved through here — `DevOpsAgent.quarantineRefusalFor` requires a k8s_recommend_resources run
+// in the SAME thread to have listed this workload under `idleWorkloads`, the MCP server requires
+// `quarantine: true`, the dry-run runs, and a human still clicks. This schema only stops zero
+// being rejected before any of that can happen.
 const Scale = z.object({
   namespace: s,
   workload: s,
   kind: z.enum(["deployment", "statefulset"]), // daemonsets have no replicas
-  replicas: z.number().int().min(1),
+  replicas: z.number().int().min(0),
 });
 // container optional: the MCP server auto-resolves it for single-container workloads —
 // a model that guesses a container name is worse than one that omits it
 const SetImage = z.object({ namespace: s, workload: s, kind: kinds, container: s.optional(), image: s });
 const DeletePod = z.object({ namespace: s, pod: s });
+// No secret, no persistentvolumeclaim, and that is a permanent exclusion rather than a first
+// phase: a Secret's backup IS its credentials, and a PVC's manifest is not its data. Neither can
+// be made reversible, and reversibility is the only thing that makes this action acceptable.
+const DeleteOrphan = z.object({
+  namespace: s,
+  name: s,
+  kind: z.enum(["configmap", "service", "serviceaccount", "deployment", "statefulset"]),
+});
 const SetResources = z
   .object({
     namespace: s,
@@ -107,13 +126,20 @@ export function parseProposal(text: string): Proposal | null {
       const p = Scale.safeParse(raw);
       if (!p.success) return null;
       const { namespace, workload, kind, replicas } = p.data;
+      const quarantine = replicas === 0;
       return {
         action: "k8s_scale",
         namespace,
         name: workload,
         reason,
-        toolParams: { namespace, name: workload, kind, replicas },
-        summary: `scale ${kind} \`${namespace}/${workload}\` → ${replicas} replicas`,
+        // `quarantine` is sent to the tool only when it is one: the MCP server treats the flag
+        // as the caller asserting intent, and asserting it on every scale would make the
+        // assertion meaningless.
+        toolParams: { namespace, name: workload, kind, replicas, ...(quarantine ? { quarantine: true } : {}) },
+        ...(quarantine ? { quarantine: true } : {}),
+        summary: quarantine
+          ? `quarantine ${kind} \`${namespace}/${workload}\` → 0 replicas (reversible: scale back to restore)`
+          : `scale ${kind} \`${namespace}/${workload}\` → ${replicas} replicas`,
       };
     }
     case "k8s_set_resources": {
@@ -143,6 +169,21 @@ export function parseProposal(text: string): Proposal | null {
         reason,
         toolParams: { namespace, pod },
         summary: `delete pod \`${namespace}/${pod}\` (its controller recreates it)`,
+      };
+    }
+    case "k8s_delete_orphan": {
+      const p = DeleteOrphan.safeParse(raw);
+      if (!p.success) return null;
+      const { namespace, name, kind } = p.data;
+      return {
+        action: "k8s_delete_orphan",
+        namespace,
+        name,
+        reason,
+        toolParams: { namespace, name, kind },
+        // The card has to say what the undo IS, not that one exists. "Reversible" with no
+        // mechanism named reads as reassurance; a stored manifest is a fact.
+        summary: `delete abandoned ${kind} \`${namespace}/${name}\` (manifest is backed up first — restore by re-applying it)`,
       };
     }
     default:
@@ -203,6 +244,26 @@ const DISSENT = /\b(jangan|tidak|nggak|ngga|gak|belum|batal|tunggu|nanti|cancel|
 const isApproval = (text: string): boolean => AFFIRMATIVE.test(text.trim()) && !DISSENT.test(text);
 
 /**
+ * A cleanup or capacity QUESTION, in the user's own words.
+ *
+ * Its answer is a REVIEW LIST, and a review list is written in the same vocabulary a broken
+ * cluster is: a Service with no endpoints reads "unavailable", an idle workload reads "not
+ * ready", a rightsizing row reads "throttled" and "over-provisioned". None of that is a fault
+ * anybody asked to have repaired.
+ *
+ * Observed live 2026-09-16: "ada resource yang ga kepake ga?" was answered with the unused scan
+ * plus the rightsizing table, the fault-evidence branch below matched, and a GitOps PR approval
+ * card appeared for a workload in a namespace the user had never mentioned. They asked whether
+ * anything was unused and were handed a change to approve.
+ *
+ * Deliberately NOT the same vocabulary as `prompts/skills/resource-rightsizing.md`, which also
+ * lists `oomkill`, `evicted` and `throttl` — those ARE faults and must keep proposing. This is
+ * only the "what can we tidy up" half.
+ */
+const CAPACITY_QUESTION =
+  /\b(unused|orphan\w*|unclaimed|idle|wasted|waste|clean ?up|cleanup|cost|right.?siz\w*|over.?provision\w*|optimi[sz]\w*)\b|\b\w{0,4}(terpakai|kepake|pake|nganggur|menganggur|boros|hemat|sisa|numpuk)\w*/i;
+
+/**
  * `isRca` is the strongest signal there is: the agent only reaches for the incident template
  * when it found something to diagnose.
  *
@@ -232,9 +293,48 @@ export function worthProposing(
     return { propose: true, reason: "the user approved the change proposed in the previous turn", byUser: true };
   }
   const hit = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE);
-  if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
+  if (hit) {
+    // The one inference this gate is no longer allowed to make: "the agent used fault vocabulary,
+    // so something must be broken". After a cleanup question it is reporting, not diagnosing.
+    //
+    // The asymmetry note above says to widen rather than tighten, because a false positive costs
+    // one LLM call that answers null. That was true when every proposable action was a repair.
+    // It is not true here: this false positive reaches a human as an approval card for a change
+    // to a workload they never named, and the cost of clicking it is the change.
+    if (CAPACITY_QUESTION.test(userText)) {
+      return {
+        propose: false,
+        reason: `capacity/cleanup question — "${hit[0]}" is a review finding, not a fault to repair`,
+        byUser: false,
+      };
+    }
+    return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
+  }
   return { propose: false, reason: "read-only question, no fault evidence in the answer", byUser: false };
 }
+
+/**
+ * Every action `parseProposal` will accept, and therefore every action the proposal prompt has
+ * to OFFER. The two drifted on 2026-09-16 and the failure was silent in the worst way:
+ * `k8s_delete_orphan` was added to the parser, the MCP server, the RBAC and
+ * `prompts/system.md`, but not to `buildProposalPrompt` — which is a separate structured-output
+ * call with its own action list. The model was asked to pick from five actions, none of which
+ * was the one it needed, and answered `{"action": null}` twice. Nothing errored; the approval
+ * card simply never appeared, and every log line looked healthy.
+ *
+ * The same edit also left clause 4 reading "never zero", so the scale-to-zero quarantine was
+ * explicitly forbidden by the prompt that was supposed to offer it.
+ *
+ * `prompt-offers-every-parseable-action` in index.test.ts is what makes this list load-bearing.
+ */
+export const PROPOSABLE_ACTIONS = [
+  "k8s_rollout_restart",
+  "k8s_set_image",
+  "k8s_set_resources",
+  "k8s_scale",
+  "k8s_delete_pod",
+  "k8s_delete_orphan",
+] as const;
 
 export const PROPOSAL_SYSTEM =
   "You propose Kubernetes remediation actions after an incident investigation. Output ONLY a JSON object, no prose.";
@@ -245,7 +345,7 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
   const ctx = rca.length <= 4000 ? rca : `${rca.slice(0, 2500)}\n...[truncated]...\n${rca.slice(-1500)}`;
   return (
     `An investigation just completed (alert-driven RCA, or a direct user request in Slack).\nAlert labels: ${JSON.stringify(labels)}\n\nContext:\n${ctx}\n\n` +
-    'An explicit user request for one of these actions (e.g. "restart deployment X", "change the image tag to v1.2", "scale to 4 replicas") is sufficient on its own — propose it even without fault evidence; a human still approves it. If the user gives only an image tag, keep the current image repository from the context and change only the tag.\n' +
+    'An explicit user request for one of these actions (e.g. "restart deployment X", "change the image tag to v1.2", "scale to 4 replicas") is sufficient on its own — propose it even without fault evidence; a human still approves it. Actions 6 and 7 are the exception: a request is never enough for them, because the user asking is not evidence that a workload is idle or that an object is abandoned — they are asking BECAUSE they are unsure. Those two need the tool result named beside them, in this context, or the answer is null. If the user gives only an image tag, keep the current image repository from the context and change only the tag.\n' +
     "If exactly ONE of these whitelisted actions would plausibly remediate the incident right now, output only its JSON:\n" +
     // THE SPEC TEST. Five of seven benchmark failures were k8s_rollout_restart proposed as a
     // generic gesture: on a missing config key, on a nonexistent image tag, on an OOM at the
@@ -271,21 +371,26 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     // why the memory-ratio metric reads +Inf: there is no denominator.
     "   — A workload with NO limit set is not evidence of a resource fault. That is the default, and it is why the memory ratio reads +Inf: there is no denominator. \"Add limits to stabilize it\" is a hardening opinion about the spec, not a remediation for the incident in front of you, and the crash you are looking at happened without any limit being reached. Propose this ONLY when the evidence shows the container hit a limit (OOMKilled, exit code 137) or the scheduler refused the request\n" +
     '4. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":N,"reason":"..."}\n' +
-    "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count, never zero\n" +
+    "   — ONLY when the RCA evidence shows under-capacity (load-driven saturation, HPA at max); propose a modest change from the current count. Zero is allowed for ONE case and it is not this one — see 6\n" +
+    '6. {"action":"k8s_scale","namespace":"...","workload":"...","kind":"deployment|statefulset","replicas":0,"reason":"..."}\n' +
+    "   — the QUARANTINE: a workload that is not broken, just doing nothing. ONLY when the context contains a `k8s_recommend_resources` result listing this exact workload under `idleWorkloads`. That list is the tool's own verdict over a 24h+ window, and it is the only thing that counts — \"it looks unused\", \"nobody mentions it\" and the user asking are all NOT evidence. Never propose zero for a workload that is failing: taking a broken thing offline is not a repair\n" +
     '5. {"action":"k8s_delete_pod","namespace":"...","pod":"...","reason":"..."}\n' +
     "   — ONLY when ONE specific pod is wedged while OTHER pods of the same workload are running fine. That comparison needs siblings to exist: a single-replica workload has no healthy sibling, so its one bad pod is evidence about the SPEC, not about that pod, and deleting it changes nothing. Use the exact pod name from the context; prefer k8s_rollout_restart when ALL pods of the workload are affected\n" +
+    '7. {"action":"k8s_delete_orphan","namespace":"...","name":"...","kind":"configmap|service|serviceaccount|deployment|statefulset","reason":"..."}\n' +
+    "   — removes an ABANDONED object. ONLY when the context contains a `k8s_find_unused_resources` result whose `orphanKeys` list holds `namespace/kind/name` for this exact object. `orphanKeys` is narrower than `findings`: it is the subset nothing declares. An object in `findings` with `managedBy` of `flux` or `helm` is NOT proposable — the cluster is not where it gets removed, and something declaring it on purpose is evidence the finding is wrong. Say that instead of proposing this\n" +
+    "   — there is NO delete for a secret or a persistentvolumeclaim, and asking for one is not an option: a Secret's backup is its credentials and a PVC's manifest is not its data, so neither can be made reversible. Output null and say which of those two applies\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
     // of real faults, and saying so is what stops the model reaching for a restart to have
     // something to say.
     'If the fix requires anything else, or you are not confident, output {"action": null}. That is a ' +
     'CORRECT and common answer, not a failure — a missing config key, a wrong Service selector, a ' +
-    'bad RBAC rule and an absent pull secret are all real faults that none of these five actions ' +
+    'bad RBAC rule and an absent pull secret are all real faults that none of these actions ' +
     'repairs. Proposing the nearest action anyway is worse than proposing nothing: a human is asked ' +
     'to approve a change that cannot work.\n' +
     // The mirror of the paragraph above, added after legitimising null cost two A03 attempts:
     // the model answered {"action": null} on a nonexistent image tag whose working predecessor
     // was sitting in the context. An escape hatch with no counterweight becomes the default.
-    'Null is NOT a way out of a decision the context lets you make. If one of the five actions does ' +
+    'Null is NOT a way out of a decision the context lets you make. If one of the actions above does ' +
     'fit and the value it needs is already in the context — the tag that was running before the ' +
     'failing rollout, the container name, the current replica count — propose it.\n' +
     '"workload" is the Deployment/StatefulSet/DaemonSet name — NOT a pod name (strip replicaset/pod hash suffixes like "-84fcf9b4db-r2ddw").\n' +

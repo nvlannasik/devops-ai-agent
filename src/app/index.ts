@@ -272,10 +272,14 @@ export class SlackApp {
             .catch((e) => logger.debug(`[slack] progress notice failed for thread ${threadId}: ${errDetail(e)}`));
         };
 
+        // The mode keeps `rca-format` off a casual mention and the log-gap gate off a question
+        // with no affected pod — see RunMode. It is NOT derivable from `budget`: an explicit
+        // investigation request and the alert path share the same infinite one.
+        const mode = investigation ? "investigation" : "conversation";
         let reply = toMrkdwn(
           investigation
-            ? await this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress })
-            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress }))
+            ? await this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress })
+            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress }))
         );
 
         // Deleted, not updated to "done": in a conversation the notice has no value once the
@@ -335,6 +339,11 @@ export class SlackApp {
         // the threadId, which as a detached call it never did — the one log line you needed to
         // join an orphan card back to its conversation was the one line that had no trace.
         const gate = worthProposing(text, reply, isRca, previousReply);
+        // Logged on BOTH branches now. Only the skip was logged before, so a card that should
+        // never have been proposed left no trace of why it was — which is exactly what happened
+        // on 2026-09-16, when a cleanup question produced a GitOps PR card and the log said
+        // nothing at all about the decision.
+        logger.info(`[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}`);
         if (gate.propose) {
           await withTrace(threadId, () =>
             this.maybeProposeRemediation(
@@ -348,8 +357,6 @@ export class SlackApp {
               gate.byUser
             )
           );
-        } else {
-          logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
         }
       } catch (err) {
         logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
@@ -608,6 +615,7 @@ export class SlackApp {
       let alertMeta: RunMeta | undefined;
       const rca = toMrkdwn(
         await this.agent.investigate(threadId, fullIssue, {
+          mode: "alert",
           trigger: issueText,
           onProgress,
           onComplete: (m) => { alertMeta = m; },
@@ -695,7 +703,9 @@ export class SlackApp {
     userRequested = false
   ): Promise<void> {
     try {
-      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested });
+      // threadId: the quarantine gate reads this thread's tool results for the idle measurement
+      // a scale-to-zero has to stand on. Both call sites already have it.
+      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId });
       if (!proposed) return; // no write tools / no confident proposal / already active
       if ("refused" in proposed) {
         // the model wanted to act but the MCP server refused (GitOps guard, blocked
@@ -773,10 +783,28 @@ export class SlackApp {
       const progress = `⏳ Executing remediation ${remediationId} — approved by <@${userId}>...`;
       await client.chat.update({ channel, ts: messageTs, text: progress, blocks: remediationStatusBlocks(progress) });
 
-      const { text, target } = await this.agent.executeRemediation(remediationId, userId);
+      const { text, target, backup } = await this.agent.executeRemediation(remediationId, userId);
       await client.chat.update({ channel, ts: messageTs, text, blocks: remediationStatusBlocks(text) });
       const noteThread: string | undefined = body.message?.thread_ts;
       if (noteThread) await this.agent.noteInThread(noteThread, text);
+
+      // The deleted object's manifest, posted where whoever approved it can reach it. The row in
+      // Postgres is the primary copy; this one exists because it is the only copy that survives
+      // losing that database, and because a restore at 3am should not require DB access. JSON
+      // rather than YAML: `kubectl apply -f` takes it and it costs no dependency. Failures are
+      // logged, never thrown — the object is already gone and the row already holds the backup,
+      // so losing this copy must not report the deletion as failed.
+      if (backup) {
+        const manifest = JSON.stringify(backup, null, 2);
+        for (const part of splitForSlack(
+          `♻️ *Backup of the deleted object* — remediation \`${remediationId}\`. Restore with ` +
+            `\`kubectl apply -f -\` and this manifest:\n\`\`\`\n${manifest}\n\`\`\``
+        )) {
+          await client.chat
+            .postMessage({ channel, thread_ts: body.message?.thread_ts ?? messageTs, text: part, mrkdwn: true })
+            .catch((e) => logger.error(`[remediation] could not post the backup for ${remediationId}: ${errDetail(e)}`));
+        }
+      }
 
       // Post-remediation verification: scheduled in Postgres, not on a timer in this pod, so
       // a restart between the click and the check costs nothing — whichever replica polls

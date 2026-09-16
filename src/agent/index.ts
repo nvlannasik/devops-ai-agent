@@ -19,7 +19,7 @@ import { resolveBudget } from "./context/resolve-budget.js";
 import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
-import { groundingGaps } from "./grounding/index.js";
+import { groundingGaps, observedText } from "./grounding/index.js";
 import { flagInjection } from "./injection/index.js";
 import {
   DELEGATE_TOOL,
@@ -162,6 +162,129 @@ export const demandsLogs = (skills: readonly Skill[]): boolean =>
   skills.some((s) => [...LOG_TOOLS].some((t) => s.body.includes(t)));
 
 /**
+ * The idle-evidence test for a scale-to-zero, as a pure function so it can be tested without a
+ * Redis, an LLM or a thread. `observed` is the thread's tool output (lowercased by
+ * `observedText`), or null when the run has no conversation to read at all.
+ *
+ * Returns the refusal sentence, or null to let the proposal through.
+ *
+ * One exact substring, not a set of loose ANDed tests: `IdleWorkload.key` exists on the MCP
+ * server for precisely this and appears in no other tool output. The context compactor may have
+ * truncated the result, and a truncated result FAILS the match — the safe direction, costing a
+ * re-run rather than an outage.
+ */
+export function quarantineRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (!proposal.quarantine) return null;
+  const target = `${proposal.namespace}/${proposal.name}`;
+  if (observed === null) {
+    return `Scaling \`${target}\` to zero needs an idle measurement, and this run has no conversation to read one from.`;
+  }
+  // parseProposal already lowercased namespace/name/kind; the toLowerCase is belt and braces.
+  const kind = String(proposal.toolParams.kind ?? "deployment");
+  const key = `${proposal.namespace}/${kind}/${proposal.name}`.toLowerCase();
+  if (observed.includes(key)) return null;
+  return (
+    `Scaling \`${target}\` to zero is refused: no \`k8s_recommend_resources\` result in this thread ` +
+    `lists it under \`idleWorkloads\`. Run it with \`window: "24h"\` first — a workload that has not been ` +
+    `measured idle is a workload nobody has checked, and taking it offline on a hunch is an outage.`
+  );
+}
+
+/**
+ * The orphan-evidence test for a delete, same shape and same fail-closed rule as
+ * `quarantineRefusal` above. `observed` is the thread's tool output, or null when there is no
+ * conversation to read.
+ *
+ * Demands that a `k8s_find_unused_resources` run IN THIS THREAD put this exact object in
+ * `orphanKeys` — the scan's list of findings nothing declares. That is a narrower claim than
+ * "it appeared in the findings": a Flux-declared object appears there too, and deleting one is
+ * both futile and evidence the finding was wrong.
+ *
+ * This gate is about GROUNDING, not about safety — the MCP server re-reads the live object and
+ * refuses on provenance, ownership, replicas and age at execution time, which is the check that
+ * matters. What this stops is the other failure: a model naming an object no scan ever flagged,
+ * which is the same class of invention `groundingGaps` exists for and which no server-side check
+ * can catch, because an invented name can still resolve to a real object.
+ */
+export function orphanDeleteRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (proposal.action !== "k8s_delete_orphan") return null;
+  const target = `${proposal.namespace}/${proposal.name}`;
+  if (observed === null) {
+    return `Deleting \`${target}\` needs an unused-resource scan to have flagged it, and this run has no conversation to read one from.`;
+  }
+  const kind = String(proposal.toolParams.kind ?? "");
+  const key = `${proposal.namespace}/${kind}/${proposal.name}`.toLowerCase();
+  if (observed.includes(key)) return null;
+  return (
+    `Deleting \`${target}\` is refused: no \`k8s_find_unused_resources\` result in this thread lists it under ` +
+    `\`orphanKeys\`. Run the scan on that namespace first. If it IS in the findings but not in \`orphanKeys\`, ` +
+    `something declares it — Flux or Helm — and the cluster is not where it gets removed.`
+  );
+}
+
+/**
+ * Pulls `backupManifest` out of a `k8s_delete_orphan` result.
+ *
+ * Returns null on anything unexpected rather than throwing: this runs AFTER the object has
+ * already been deleted, so a parse failure here must not turn a successful delete into a failed
+ * remediation — it costs the backup, which is bad enough to log and not worth compounding.
+ * Exported for the test.
+ */
+export function backupFrom(result: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(result) as { backupManifest?: unknown };
+    const m = parsed?.backupManifest;
+    return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface LogGapState {
+  mode: RunMode;
+  /** demandsLogs(skills) for the playbooks this run is carrying. */
+  demandsLogs: boolean;
+  sawLogLines: boolean;
+  nudged: boolean;
+  toolsDisabled: boolean;
+  toolRounds: number;
+  /** toolRounds at the moment the nudge fired; -1 while it has not. */
+  toolRoundsAtNudge: number;
+  /** Is an answer from before the nudge being held? */
+  holdingAnswer: boolean;
+}
+
+/**
+ * What to do with an answer the model just finished writing, from the log-gap gate's point of view.
+ *
+ * `restore` is the half that was missing and it is the expensive one. The nudge appends a notice
+ * and loops, so whatever the model says next REPLACES the answer it interrupted — and on
+ * 2026-09-15 a correct "no anomalies; 59 pods across 14 namespaces healthy" was replaced twice in
+ * one thread by the scope-refusal boilerplate ("That's outside what I do — I'm a DevOps agent for
+ * this cluster"). The first answer was complete, was never posted, and nothing in the log said it
+ * had been thrown away. So: if the extra round ran no tools, it learned nothing, and the answer
+ * it produced cannot be an improvement on the one it displaced.
+ *
+ * `nudge` is alert-mode only. `demandsLogs` reads the playbooks the THREAD is carrying, which on
+ * a mention is whatever earlier turns accumulated; "apakah ada anomali di cluster 1 jam
+ * kebelakang ini?" has no affected pod whose container logs could answer it.
+ */
+export function logGapAction(s: LogGapState): "answer" | "nudge" | "restore" {
+  if (s.holdingAnswer && s.toolRounds === s.toolRoundsAtNudge) return "restore";
+  if (
+    s.mode === "alert" &&
+    s.demandsLogs &&
+    !s.sawLogLines &&
+    !s.nudged &&
+    !s.toolsDisabled &&
+    s.toolRounds > 0
+  ) {
+    return "nudge";
+  }
+  return "answer";
+}
+
+/**
  * A delegate's ceiling. Neither notice above can serve it: the budget one carries conversation
  * mode's format rule and tells the model to "offer to investigate", the ceiling one says nothing
  * about format at all and leaves the shape to the system prompt, which describes an RCA.
@@ -276,6 +399,24 @@ const REPEAT_NOTICE =
 export const MAX_THREAD_SKILLS = 5;
 
 /**
+ * How many matched playbooks a thread carries into its NEXT turn.
+ *
+ * MAX_THREAD_SKILLS alone is a one-way ratchet: `selectForThread` only ever adds, so a
+ * conversation that reaches the cap is frozen on the playbooks it happened to pick up and no
+ * later question can load its own. Measured on thread 1789488072 (2026-09-15): turn 5 filled all
+ * five slots with `rca-format, pod-pending, pod-not-ready, multi-pod-one-cause,
+ * resource-rightsizing`, and the seven turns after it — including "investigasi kenapa prometheus
+ * query nya kosong" — ran on that same frozen set. Two of those turns also tripped the log-gap
+ * gate, which reads `demandsLogs(skills)`: playbooks selected six questions ago were still
+ * demanding container logs.
+ *
+ * Decay, not reset: a follow-up genuinely is about the turn before it ("and the logs?"), so the
+ * most recent matches stay. Everything older is dropped and re-earned — a playbook that still
+ * fits the new question matches again on the same text that matched it the first time.
+ */
+export const CARRIED_SKILLS = 2;
+
+/**
  * The last four exist for sub-agent delegation: a delegate is the same loop run with a smaller
  * budget, a borrowed deadline, and no delegate tool of its own. They are options rather than a
  * second loop because the guards that matter — the [WRITE] filter, the namespace scope lock, the
@@ -308,9 +449,36 @@ export function reportProgress(
   }
 }
 
+/**
+ * What kind of run this is. Three things read it and none of them can work it out alone:
+ *
+ * - `rca-format` loads only outside `conversation`. It used to be `when: always`, so the RCA
+ *   template rode along on every casual mention and argued with the conversation-mode marker in
+ *   the very same message. The small model sided with the skill.
+ * - the log-gap gate fires only on `alert`. Its own notice says "the playbook for this alert";
+ *   on a mention there is no alert and no affected pod, so demanding container logs for
+ *   "any anomalies in the last hour?" is a demand nothing can satisfy.
+ * - a delegate is `alert` because it is a slice of one.
+ *
+ * Not derivable from the other options: `maxToolRounds` is `Infinity` for BOTH the alert path
+ * and an explicit investigation request, and `trigger` is set by the alert path only as an
+ * accident of skill selection. Stating it is what stops the next reader guessing.
+ */
+export const RUN_MODES = ["alert", "investigation", "conversation"] as const;
+export type RunMode = (typeof RUN_MODES)[number];
+
+/** The tag `runInvestigation` puts at the head of the skill trigger. See skills/index MODE_TAG. */
+export const modeTag = (mode: RunMode): string => `[mode:${mode}]`;
+
+/** A skill that keys on the run mode describes the shape of the answer, not the fault. */
+export const keysOnMode = (s: Skill): boolean =>
+  s.when !== "always" && RUN_MODES.some((m) => [...modeTag(m).matchAll(s.when as RegExp)].length > 0);
+
 export interface InvestigateOptions {
   maxToolRounds?: number;
   trigger?: string;
+  /** Defaults to "alert" — the strictest of the three, so an unconverted caller loses nothing. */
+  mode?: RunMode;
   /** Defaults to MAX_ITERATIONS. */
   maxIterations?: number;
   /** Absolute epoch ms. Defaults to now + config.investigationTimeoutMs. */
@@ -393,6 +561,31 @@ export function selectForThread(
 }
 
 /**
+ * Shrinks a thread's accumulated playbooks at the start of a NEW turn, and returns the names
+ * dropped so the caller can log them — a playbook that vanishes silently is the bug this whole
+ * mechanism was added to fix, one level up. See CARRIED_SKILLS for why.
+ *
+ * Only called between turns. Inside one investigation selection stays append-only: there the
+ * alert's own playbook outranks one a later log line suggested, and decaying mid-loop would
+ * throw away the playbook the run is actually following.
+ *
+ * Exported for the wiring test.
+ */
+export function decayThreadSkills(tracked: ThreadSkills, threadId: string, keep = CARRIED_SKILLS): string[] {
+  const known = tracked.get(threadId);
+  if (!known || known.length === 0) return [];
+  // A mode-keyed skill is never inherited — it belongs to THIS turn's mode, and the caller
+  // re-selects it from the tag on the very next line. Carried over, `rca-format` would follow an
+  // alert thread into every follow-up mention it ever gets: the exact leak it was moved off
+  // `when: always` to stop.
+  // Insertion order is recency order — selectForThread appends — so the tail is the newest.
+  const kept = known.filter((s) => !keysOnMode(s)).slice(-keep);
+  if (kept.length === known.length) return [];
+  tracked.set(threadId, kept);
+  return known.filter((s) => !kept.includes(s)).map((s) => s.name);
+}
+
+/**
  * Resolves stored playbook names back to skills against the LIVE registry. A name that no longer
  * resolves is dropped rather than carried as a dangling string: `prompts/skills/` is editable
  * between two turns of the same thread, and a thread must never re-inject a skill the directory
@@ -420,9 +613,69 @@ export function evidenceTexts(blocks: readonly ContentBlock[]): string[] {
         : b.type === "text"
           ? (b.text ?? "")
           : "";
-    if (text.trim()) out.push(text);
+    // The evidence stamp is bookkeeping, not evidence — a playbook must never be selected by it.
+    if (text.trim() && !text.startsWith(EVIDENCE_STAMP_PREFIX)) out.push(text);
   }
   return out;
+}
+
+/**
+ * Stamps a tool round with the wall-clock time its results were read, appended to the same user
+ * message the results ride in.
+ *
+ * A `tool_result` in the history carries no time of its own, and neither does the message around
+ * it, so by turn 11 of a conversation the model is looking at a `k8s_cluster_health` snapshot
+ * from 40 minutes earlier that is indistinguishable from one taken this second. It answers from
+ * it. Measured on thread 1789488072 (2026-09-15): "cluster resource saat ini gimana?" at 16:44
+ * was answered with `59 pods in 14 namespaces` — the output of a health scan run at 16:14 — with
+ * zero tool calls that turn, and the grounding check flagged a namespace no tool result in the
+ * thread had ever returned.
+ *
+ * In the history rather than in a side table so it survives a pod restart: the conversation comes
+ * back from Redis and the stamp comes back with it.
+ */
+export const EVIDENCE_STAMP_PREFIX = "[EVIDENCE READ AT]";
+
+export const evidenceStamp = (now: number = Date.now()): string =>
+  `${EVIDENCE_STAMP_PREFIX} ${new Date(now).toISOString()} (unix ${Math.floor(now / 1000)})`;
+
+/** Under this, the evidence is effectively current and the notice is noise. */
+export const STALE_EVIDENCE_MINUTES = 2;
+
+const STAMP_RE = /\[EVIDENCE READ AT\][^(\n]*\(unix (\d+)\)/g;
+
+/**
+ * Warns the NEXT turn that everything it can see was read in an earlier one. Empty when the
+ * thread has no stamped evidence yet, or when the freshest is younger than STALE_EVIDENCE_MINUTES.
+ *
+ * Reads the newest stamp, not the oldest: it is the most generous number available, and the
+ * claim has to stay true — anything older than the freshest result is older still.
+ */
+export function staleEvidenceNotice(history: readonly Message[], now: number = Date.now()): string {
+  let newest = 0;
+  for (const m of history) {
+    const texts =
+      typeof m.content === "string"
+        ? [m.content]
+        : m.content.map((b) => (b.type === "text" ? (b.text ?? "") : ""));
+    for (const t of texts) {
+      for (const match of t.matchAll(STAMP_RE)) {
+        const unix = Number(match[1]);
+        if (unix > newest) newest = unix;
+      }
+    }
+  }
+  if (newest === 0) return "";
+  const minutes = Math.floor((now - newest * 1000) / 60000);
+  if (minutes < STALE_EVIDENCE_MINUTES) return "";
+  return (
+    `[STALE EVIDENCE — the freshest tool result already in this conversation was read ${minutes} ` +
+    `minutes ago, at ${new Date(newest * 1000).toISOString()}; everything else is older. Those ` +
+    `results describe the cluster AS IT WAS THEN. If this question is about the state right now ` +
+    `("saat ini", "sekarang", "now", "still", "already"), call the tools again and answer from ` +
+    `the new result — do not restate counts, pod names or statuses from the old ones. A re-read ` +
+    `costs one round; a stale "everything is healthy" costs an incident.]`
+  );
 }
 
 const zeroUsage = (): TokenUsage => ({
@@ -622,28 +875,56 @@ export class DevOpsAgent {
     const maxToolRounds = opts.maxToolRounds ?? Infinity;
     const maxIterations = opts.maxIterations ?? MAX_ITERATIONS;
     const depth = opts.depth ?? 0;
+    const mode = opts.mode ?? "alert";
     let toolRounds = 0;
     let toolsDisabled = false;
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
     let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
     let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
+    // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
+    // produces no new evidence cannot downgrade an answer that was already complete.
+    let preNudgeSummary = "";
+    let toolRoundsAtNudge = -1;
 
     const isFollowUp = await this.memory.hasRca(threadId);
 
-    // for first message: prepend time context
-    // for follow-up: prepend explicit mode instruction so LLM doesn't default to RCA format
-    const messageToAppend = isFollowUp
-      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
-      : `${buildTimeContext()}\n\n${userMessage}`;
+    // Time context on EVERY turn now, not only the first. It used to ride the opening message
+    // alone, so eleven turns later the newest statement of what "now" means was 50 minutes old
+    // and sat at the far end of the window behind a wall of tool results — the same losing
+    // position that made buildMentionMarker() restate itself every turn. Two lines of timestamps
+    // per turn is a cheap price for the model knowing what day it is.
+    //
+    // The staleness line is the other half: the timestamp only helps if something also says when
+    // the evidence was read. See staleEvidenceNotice.
+    const staleness = staleEvidenceNotice(await this.memory.get(threadId));
+    const messageToAppend = [
+      buildTimeContext(),
+      staleness,
+      // for follow-up: explicit mode instruction so the LLM doesn't default to RCA format
+      isFollowUp
+        ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
+        : userMessage,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
+    if (staleness) logger.debug(`[${threadId}] prior evidence is stale — warned the model to re-read`);
 
     // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
     // prior incidents, and a previous incident's RCA must not select this one's playbook.
     // A thread outlives a pod: its conversation comes back from Redis, so its playbooks have to
     // as well or the follow-up answers with a different skill set than the turn it follows.
     await this.rehydrateThreadSkills(threadId);
-    let skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+    const decayed = decayThreadSkills(this.threadSkills, threadId);
+    if (decayed.length > 0) {
+      logger.info(`[${threadId}] playbooks aged out before this turn: ${decayed.join(", ")} (re-selected if they still match)`);
+    }
+    // The mode tag rides the trigger so a skill can declare its own mode condition in
+    // frontmatter instead of the loop hardcoding a skill name — `rca-format` is `when:
+    // mode:(alert|investigation)`. No playbook regex matches the tag itself; skills/real.test.ts
+    // pins that, because a `when` that happened to contain "alert" would load on every run.
+    let skills = selectForThread(this.skills, this.threadSkills, threadId, `${modeTag(mode)}\n${opts.trigger ?? userMessage}`);
     this.persistThreadSkills(threadId, skills);
 
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
@@ -664,15 +945,33 @@ export class DevOpsAgent {
     // Every exit from this loop goes through here, so the footer is never missing from the
     // paths that matter most — the timeout and the out-of-steps replies are exactly where a
     // reader wants to know how long it ran and on which model.
+    //
+    // The completion line is emitted HERE rather than where the model stops talking, and that is
+    // a fix, not a tidy-up: it used to sit above the log-gap gate, so a run that took the extra
+    // round logged "Investigation complete in 28451ms (2 LLM calls)" and then kept going, twice
+    // in one thread on 2026-09-15. It also never fired at all on the deadline and out-of-steps
+    // exits, which are the two a reader most wants the duration for.
     const done = (text: string): string => {
+      const durationMs = Date.now() - investigationStart;
       opts.onComplete?.({
-        durationMs: Date.now() - investigationStart,
+        durationMs,
         rounds: iterations,
         toolCalls: totalToolCalls,
         backend: lastResponse?.backend,
         model: lastResponse?.model,
         route: lastResponse?.route,
       });
+      logger.info(
+        `[${threadId}] Investigation complete in ${durationMs}ms (${iterations} LLM calls, ` +
+        `${totalToolCalls} tool calls) | total tokens — ` +
+        (totalUsage.inputTokens === 0 && totalUsage.outputTokens === 0
+          // Not "zero tokens" — the agent-builder/Langflow envelope reports no counts at all
+          // (devops-ai-agent-worker/src/agent-builder.ts), and printing in=0 out=0 cache_read=0
+          // read as "prompt caching is broken" for weeks when the truth was "not measurable here".
+          ? `not reported by ${lastResponse?.backend ?? "this backend"}`
+          : `in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
+            `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`)
+      );
       return text;
     };
     let totalUsage = zeroUsage();
@@ -785,12 +1084,6 @@ export class DevOpsAgent {
       await this.memory.append(threadId, { role: "assistant", content: response.content });
 
       if (response.stopReason === "end_turn" || response.stopReason === "max_tokens") {
-        const duration = Date.now() - investigationStart;
-        logger.info(
-          `[${threadId}] Investigation complete in ${duration}ms (${iterations} LLM calls) | ` +
-          `total tokens — in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
-          `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`
-        );
         const summary = this.extractText(response.content);
         if (!summary) {
           // never return empty — Slack chat.postMessage rejects an empty text with `no_text`
@@ -821,11 +1114,28 @@ export class DevOpsAgent {
             `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
           );
         }
-        // The last gate before an answer leaves: an investigation whose playbook reads logs, that
-        // has never seen a log line, gets one more round and is told exactly what to fetch. Spent
-        // once, and never when tools are already off — the ceiling notices own that turn.
-        if (demandsLogs(skills) && !sawLogLines && !logGapNudged && !toolsDisabled && toolRounds > 0) {
+        // The last gate before an answer leaves — see logGapAction for all three outcomes.
+        const gap = logGapAction({
+          mode,
+          demandsLogs: demandsLogs(skills),
+          sawLogLines,
+          nudged: logGapNudged,
+          toolsDisabled,
+          toolRounds,
+          toolRoundsAtNudge,
+          holdingAnswer: preNudgeSummary !== "",
+        });
+        if (gap === "restore") {
+          logger.warn(
+            `[${threadId}] the log-gap round fetched nothing — keeping the pre-nudge answer ` +
+            `(${preNudgeSummary.length} chars) over the retry's ${summary.length}`
+          );
+          return done(preNudgeSummary);
+        }
+        if (gap === "nudge") {
           logGapNudged = true;
+          preNudgeSummary = summary;
+          toolRoundsAtNudge = toolRounds;
           logger.info(
             `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
             `[${skills.map((s) => s.name).join(", ")}] read logs — one more round`
@@ -927,6 +1237,9 @@ export class DevOpsAgent {
           );
         }
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);
+        // Appended, never unshifted: Anthropic requires every tool_result block to come first in
+        // its user message, and a text block ahead of them is a 400.
+        if (executed.length > 0) trimmedResults.push({ type: "text", text: evidenceStamp() });
 
         toolRounds++;
         const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth });
@@ -1215,7 +1528,7 @@ export class DevOpsAgent {
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
     labels: Record<string, string>,
     rca: string,
-    opts: { userRequested?: boolean } = {}
+    opts: { userRequested?: boolean; threadId?: string } = {}
   ): Promise<
     | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
     | { refused: string }
@@ -1274,6 +1587,24 @@ export class DevOpsAgent {
       }
     }
 
+    // The quarantine gate, and unlike the replacement guard it is NOT skipped for a user
+    // request. "Delete the unused mongodb endpoint" is exactly the sentence that produces a
+    // quarantine proposal, and the user saying it is not evidence that the workload is idle —
+    // they are asking BECAUSE they are unsure. Measurement is the only thing that settles it,
+    // and this is where we insist on having done it.
+    const idleRefusal = await this.quarantineRefusalFor(proposal, opts.threadId);
+    if (idleRefusal) {
+      logger.info(`[remediation] quarantine gate refused ${proposal.summary}: ${idleRefusal}`);
+      return { refused: idleRefusal };
+    }
+
+    // Same rule, same reason, for the one action that cannot be undone from the cluster.
+    const orphanRefused = await this.orphanRefusalFor(proposal, opts.threadId);
+    if (orphanRefused) {
+      logger.info(`[remediation] orphan gate refused ${proposal.summary}: ${orphanRefused}`);
+      return { refused: orphanRefused };
+    }
+
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
     // server's namespace guardrails with zero side effects.
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
@@ -1299,6 +1630,36 @@ export class DevOpsAgent {
     }
 
     return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+  }
+
+  /**
+   * Refuses a scale-to-zero unless a `k8s_recommend_resources` run IN THIS THREAD measured this
+   * exact workload idle. Returns null for every other proposal.
+   *
+   * Fails CLOSED, which is the opposite of `guardRefusalFor` beside it and deliberate: that one
+   * lets a proposal through when its evidence call fails, because its worst case is a restart
+   * that does not help. This one's worst case is a workload taken offline, so no evidence means
+   * no card.
+   *
+   * The test is one exact substring against the thread's tool output rather than a re-parse of
+   * the JSON: `observedText` reads the same `tool_result` blocks the model saw, and the context
+   * compactor may have truncated them. A truncated result fails the match, which is the safe
+   * direction — it costs a re-run, not an outage.
+   */
+  private async quarantineRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
+    if (!proposal.quarantine) return null;
+    return quarantineRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  private async orphanRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
+    if (proposal.action !== "k8s_delete_orphan") return null;
+    return orphanDeleteRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  /** The thread's tool output for the grounding gates, or null when there is no thread at all. */
+  private async threadEvidence(threadId?: string): Promise<string | null> {
+    if (!threadId) return null;
+    return observedText(await this.memory.get(threadId).catch(() => [] as Message[]));
   }
 
   /**
@@ -1493,7 +1854,7 @@ export class DevOpsAgent {
   async executeRemediation(
     id: number,
     approvedBy: string
-  ): Promise<{ text: string; target?: { namespace: string; name: string } }> {
+  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown }> {
     const claim = await this.remediations.claimForExecution(id, approvedBy);
     if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
     if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
@@ -1508,6 +1869,11 @@ export class DevOpsAgent {
     try {
       const result = await this.mcp.callTool(claim.action, toolParams);
       const ok = !result.startsWith("Error:");
+      // BEFORE finish(): the backup is the undo for the one action that cannot be undone from
+      // the cluster, so it is stored on the row that authorised it while we still hold the only
+      // copy. `result` cannot carry it — finish() truncates that column to 2000 chars.
+      const backup = ok && claim.action === "k8s_delete_orphan" ? backupFrom(result) : null;
+      if (backup) await this.remediations.saveBackup(id, backup);
       await this.remediations.finish(id, ok, result);
       if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
       // delete_pod targets a pod, not a workload — drop the random suffix so verification
@@ -1515,7 +1881,18 @@ export class DevOpsAgent {
       const targetName = String(toolParams.name ?? String(toolParams.pod ?? "").replace(/-[a-z0-9]+$/, ""));
       return {
         text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
-        target: { namespace: String(toolParams.namespace ?? ""), name: targetName },
+        // No target for a delete: post-remediation verification measures pod readiness, and the
+        // object this removed has no pods. Observed 2026-09-16 — a ConfigMap delete scheduled a
+        // check that came back five minutes later with "inconclusive — 0/0 pods ready", which is
+        // not an inconclusive result, it is a question that was never answerable. The GitOps PR
+        // path already returns no target for the same reason one level along: nothing to look at.
+        ...(claim.action === "k8s_delete_orphan"
+          ? {}
+          : { target: { namespace: String(toolParams.namespace ?? ""), name: targetName } }),
+        // Handed back so the caller can post it into the thread. Two copies on purpose: this one
+        // is the only one that survives losing the agent's Postgres, and it is the one a human
+        // can act on at 3am without database access.
+        ...(backup ? { backup } : {}),
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

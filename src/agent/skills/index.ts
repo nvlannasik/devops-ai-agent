@@ -88,8 +88,16 @@ function parseSkill(file: string, text: string): Skill {
   return { name, description: keys.description!, when, body, chars: text.length };
 }
 
+/**
+ * The run-mode tag `runInvestigation` puts at the head of the trigger — `[mode:alert]`,
+ * `[mode:investigation]`, `[mode:conversation]`. A skill may key on it in its `when`, which is
+ * how `rca-format` stays off casual mentions without the loop hardcoding a skill name.
+ */
+export const MODE_TAG = /^\[mode:[a-z]+\]/;
+
 function selectFrom(skills: readonly Skill[], trigger: string, already: ReadonlySet<string>): Selection {
   const text = trigger.slice(0, TRIGGER_MAX_CHARS);
+  const modeTag = text.match(MODE_TAG)?.[0] ?? "";
 
   const selected: Skill[] = [];
   const scored: { skill: Skill; hits: number }[] = [];
@@ -103,7 +111,14 @@ function selectFrom(skills: readonly Skill[], trigger: string, already: Readonly
     // matchAll clones the regex, so the `g` flag's lastIndex is never shared between calls.
     // Distinct substrings, not raw count: a word repeated 40 times is one signal, not forty.
     const hits = new Set([...text.matchAll(s.when)].map((m) => m[0].toLowerCase())).size;
-    if (hits > 0) scored.push({ skill: s, hits });
+    if (hits === 0) continue;
+    // A skill that keys on the run's MODE is not competing with the failure-mode playbooks —
+    // it describes the shape of the answer, not the fault — so it bypasses MAX_MATCHED_SKILLS
+    // the way `always` does. Without this, `rca-format` (`when: mode:(alert|investigation)`)
+    // scores one hit, ties with three playbooks that each scored one, and loses the
+    // localeCompare tiebreak to `pod-pending`: an alert answered in no output format at all.
+    if (modeTag && [...modeTag.matchAll(s.when)].length > 0) selected.push(s);
+    else scored.push({ skill: s, hits });
   }
 
   scored.sort((a, b) => b.hits - a.hits || a.skill.name.localeCompare(b.skill.name));

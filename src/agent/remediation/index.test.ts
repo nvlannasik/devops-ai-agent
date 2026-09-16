@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS } from "./proposal.js";
 import { RemediationStore } from "./index.js";
+import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
+import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
 
 test("proposal prompt keeps the tail of a long RCA (Recommended Actions live there)", () => {
   const rca = "HEAD-MARKER " + "x".repeat(6000) + " TAIL-MARKER: change image to repo/app:1.2.3";
@@ -66,12 +68,34 @@ test("set_resources requires at least one value and keeps only provided fields",
   assert.match(p!.summary, /memory_limit=1Gi/);
 });
 
-test("scale parses; zero replicas and daemonset are rejected", () => {
+test("scale parses; daemonset is rejected", () => {
   const p = parseProposal('{"action":"k8s_scale","namespace":"payment","workload":"api","kind":"deployment","replicas":4}');
   assert.deepEqual(p?.toolParams, { namespace: "payment", name: "api", kind: "deployment", replicas: 4 });
   assert.match(p!.summary, /scale deployment `payment\/api` → 4 replicas/);
-  assert.equal(parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"deployment","replicas":0}'), null);
+  assert.equal(p!.quarantine, undefined, "an ordinary scale must not be marked a quarantine");
   assert.equal(parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"daemonset","replicas":2}'), null);
+});
+
+// Zero used to be rejected here. It is now parsed as an explicit QUARANTINE and refused later,
+// by DevOpsAgent.quarantineRefusalFor, which requires a k8s_recommend_resources run in the same
+// thread to have measured this workload idle. Rejecting it at parse time meant the only answer
+// to "this workload looks unused" was an irreversible delete — against a cluster with no
+// backups. Scaling to zero is the same decision with an undo.
+test("zero replicas parses as a quarantine, flagged and worded as reversible", () => {
+  const p = parseProposal('{"action":"k8s_scale","namespace":"payment","workload":"api","kind":"deployment","replicas":0}');
+  assert.equal(p?.quarantine, true);
+  assert.deepEqual(p?.toolParams, {
+    namespace: "payment", name: "api", kind: "deployment", replicas: 0, quarantine: true,
+  });
+  assert.match(p!.summary, /quarantine deployment `payment\/api` → 0 replicas/);
+  assert.match(p!.summary, /reversible/, "the card must say how to undo it");
+});
+
+// The flag is the server's signal that the caller MEANT zero. Asserting it on every scale would
+// make the assertion meaningless, so it rides only on the proposals that are actually one.
+test("the quarantine flag is never sent on an ordinary scale", () => {
+  const p = parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"statefulset","replicas":2}');
+  assert.equal("quarantine" in (p?.toolParams ?? {}), false);
 });
 
 test("delete_pod parses; pod name goes to toolParams.pod (not name)", () => {
@@ -443,4 +467,285 @@ test("the proposal prompt refuses an absent limit as evidence of a resource faul
   assert.match(prompt, /NO limit set is not evidence of a resource fault/);
   assert.match(prompt, /there is no denominator/);
   assert.match(prompt, /hardening opinion about the spec/);
+});
+
+// ── The quarantine evidence gate ─────────────────────────────────────────────
+// The only thing standing between "this looks unused" and a workload taken offline. It fails
+// CLOSED, unlike the replacement guard beside it: that guard's worst case is a restart that does
+// not help, this one's is an outage.
+
+const quarantine = (over: Record<string, unknown> = {}) =>
+  parseProposal(
+    JSON.stringify({
+      action: "k8s_scale", namespace: "app", workload: "orders-api", kind: "deployment", replicas: 0, ...over,
+    })
+  )!;
+
+// What the tool actually puts in the thread — IdleWorkload.key, lowercased by observedText.
+const measured = (key = "app/deployment/orders-api") =>
+  `{"idleworkloads":[{"key":"${key}","kind":"deployment","namespace":"app","workload":"orders-api","replicas":2,"cpup95below":"2m"}]}`;
+
+test("a quarantine backed by an idle measurement in the thread is allowed", () => {
+  assert.equal(quarantineRefusal(quarantine(), measured()), null);
+});
+
+test("a quarantine with no measurement anywhere in the thread is refused", () => {
+  const refusal = quarantineRefusal(quarantine(), "some other tool output about app/orders-api");
+  assert.match(refusal!, /refused/);
+  assert.match(refusal!, /idleWorkloads/, "the refusal must name what would satisfy it");
+  assert.match(refusal!, /window: "24h"/, "and how to produce it");
+});
+
+// The measurement is about ONE workload. A different one being idle says nothing about this one.
+test("an idle measurement of a different workload does not carry over", () => {
+  assert.ok(quarantineRefusal(quarantine(), measured("app/deployment/checkout-gateway")));
+  assert.ok(quarantineRefusal(quarantine(), measured("other-ns/deployment/orders-api")));
+  assert.ok(quarantineRefusal(quarantine({ kind: "statefulset" }), measured("app/deployment/orders-api")));
+});
+
+// A tool result the context compactor cut in half must fail, not pass.
+test("a truncated tool result fails the match rather than half-passing it", () => {
+  const cut = measured().slice(0, 30);
+  assert.ok(quarantineRefusal(quarantine(), cut), `a truncated result was accepted: ${cut}`);
+});
+
+test("no conversation at all means no card, and the message says why", () => {
+  assert.match(quarantineRefusal(quarantine(), null)!, /no conversation to read one from/);
+});
+
+// The gate must be invisible to everything that is not a quarantine.
+test("an ordinary scale, a restart and an image change are never gated", () => {
+  const plain = parseProposal('{"action":"k8s_scale","namespace":"app","workload":"orders-api","kind":"deployment","replicas":3}')!;
+  assert.equal(quarantineRefusal(plain, null), null);
+  const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"app","workload":"orders-api"}')!;
+  assert.equal(quarantineRefusal(restart, null), null);
+});
+
+// The gate fails closed, so anything that removes `idleWorkloads` from the stored tool result
+// turns the quarantine into a feature that silently never fires. The rightsizing response is
+// over MAX_TOOL_RESULT_CHARS on any real cluster (40 recommendations), and compactToolResult
+// keeps the head and the tail and drops the middle — which is where idleWorkloads used to sit.
+test("an idle measurement survives the compaction a real-sized response goes through", () => {
+  const recommendation = (i: number) => ({
+    kind: "Deployment", namespace: "app", workload: `svc-${i}`, container: "api", replicas: 2,
+    flags: ["over_provisioned"],
+    current: { cpuRequest: "500m", memoryRequest: "512Mi", cpuLimit: "1000m", memoryLimit: "512Mi" },
+    observed: { cpuP95: "12m", memoryPeak: "120Mi", cpuThrottlePct: 0 },
+    recommended: { cpuRequest: "14m", memoryRequest: "144Mi", memoryLimit: "180Mi", cpuLimit: "1000m" },
+    savings: { cpuCores: 0.486, memoryBytes: 385875968 },
+  });
+  // Key order mirrors the server's return object: idleWorkloads LAST.
+  const raw = JSON.stringify({
+    window: "24h",
+    scanned: { containers: 120, withMetrics: 118 },
+    potentialRequestSavings: { cpu: "48000m", memory: "46080Mi" },
+    recommendationsTotal: 120,
+    recommendations: Array.from({ length: 40 }, (_, i) => recommendation(i)),
+    idleWorkloads: [
+      { key: "app/Deployment/orders-api", kind: "Deployment", namespace: "app", workload: "orders-api", replicas: 2, cpuP95Below: "2m" },
+    ],
+  });
+  assert.ok(raw.length > MAX_TOOL_RESULT_CHARS, `fixture is only ${raw.length} chars — it must exceed the cap to prove anything`);
+
+  const stored = compactToolResult(raw).toLowerCase();
+  assert.ok(stored.includes("app/deployment/orders-api"), "the idle key did not survive compaction");
+  assert.equal(quarantineRefusal(quarantine(), stored), null);
+});
+
+// ── delete_orphan: shape + grounding gate ────────────────────────────────────
+// The MCP server re-reads the live object and refuses on provenance, ownership, replicas and age
+// — that is the safety check. THIS gate is about grounding: stopping the model naming an object
+// no scan ever flagged, which no server-side check can catch because an invented name can still
+// resolve to a real object. Same fail-closed rule as the quarantine.
+
+const orphanProposal = (over: Record<string, unknown> = {}) =>
+  parseProposal(
+    JSON.stringify({
+      action: "k8s_delete_orphan", namespace: "sample-apps", name: "leftover-config", kind: "configmap", ...over,
+    })
+  )!;
+
+// What the scan puts in the thread: orphanKeys, lowercased by observedText.
+const scanned = (...keys: string[]) => `{"orphankeys":[${keys.map((k) => `"${k}"`).join(",")}]}`;
+
+test("delete_orphan parses, and its summary names the undo rather than promising one", () => {
+  const p = orphanProposal();
+  assert.equal(p.action, "k8s_delete_orphan");
+  assert.deepEqual(p.toolParams, { namespace: "sample-apps", name: "leftover-config", kind: "configmap" });
+  assert.match(p.summary, /delete abandoned configmap `sample-apps\/leftover-config`/);
+  assert.match(p.summary, /manifest is backed up first/);
+});
+
+test("secret and persistentvolumeclaim are not proposable kinds at all", () => {
+  for (const kind of ["secret", "persistentvolumeclaim", "pvc", "namespace", "pod"]) {
+    assert.equal(parseProposal(JSON.stringify({
+      action: "k8s_delete_orphan", namespace: "a", name: "b", kind,
+    })), null, `${kind} was accepted`);
+  }
+});
+
+test("a delete the scan flagged as an orphan is allowed", () => {
+  assert.equal(orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/configmap/leftover-config")), null);
+});
+
+test("a delete of something no scan flagged is refused, and told to run the scan", () => {
+  const refusal = orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/configmap/something-else"));
+  assert.match(refusal!, /refused/);
+  assert.match(refusal!, /orphanKeys/);
+  assert.match(refusal!, /Run the scan on that namespace first/);
+  // and it explains the OTHER reason a key can be absent — something declares it
+  assert.match(refusal!, /Flux or Helm/);
+});
+
+// orphanKeys holds only findings nothing declares, so appearing in `findings` is not enough.
+test("appearing in the findings is not the same as appearing in orphanKeys", () => {
+  const declaredFinding = '{"findings":[{"kind":"ConfigMap","namespace":"sample-apps","name":"leftover-config","managedby":"flux"}],"orphankeys":[]}';
+  assert.ok(orphanDeleteRefusal(orphanProposal(), declaredFinding));
+});
+
+test("kind and namespace both have to match the key", () => {
+  assert.ok(orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/service/leftover-config")));
+  assert.ok(orphanDeleteRefusal(orphanProposal(), scanned("other-ns/configmap/leftover-config")));
+});
+
+test("no conversation means no delete", () => {
+  assert.match(orphanDeleteRefusal(orphanProposal(), null)!, /no conversation to read one from/);
+});
+
+test("the orphan gate is invisible to every other action", () => {
+  const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"app","workload":"api"}')!;
+  assert.equal(orphanDeleteRefusal(restart, null), null);
+});
+
+// ── The backup extraction ────────────────────────────────────────────────────
+// Runs AFTER the object is already gone, so it must never throw: a parse failure costs the
+// backup, and turning that into a failed remediation would compound it.
+
+test("the backup manifest is lifted out of a successful delete result", () => {
+  const result = JSON.stringify({
+    action: "delete_orphan", target: "configmap/sample-apps/leftover-config",
+    backupManifest: { apiVersion: "v1", kind: "ConfigMap", metadata: { name: "leftover-config" } },
+  });
+  assert.deepEqual(backupFrom(result), { apiVersion: "v1", kind: "ConfigMap", metadata: { name: "leftover-config" } });
+});
+
+test("anything unparseable or wrongly shaped yields null instead of throwing", () => {
+  for (const bad of ["", "not json", "{}", '{"backupManifest":null}', '{"backupManifest":"a string"}', '{"backupManifest":[]}']) {
+    assert.equal(backupFrom(bad), null, `threw or accepted: ${bad}`);
+  }
+});
+
+// ── The prompt and the parser must offer the same actions ────────────────────
+// 2026-09-16: k8s_delete_orphan reached the parser, the MCP server, the RBAC and
+// prompts/system.md, but not buildProposalPrompt — a SEPARATE structured-output call with its
+// own action list. The model was asked to choose from five actions, none of which was the one
+// it needed, and answered {"action": null}. Nothing errored. The card just never appeared and
+// every log line read healthy. This test is the only cheap thing that catches that shape.
+
+test("the proposal prompt offers every action the parser accepts", () => {
+  const prompt = buildProposalPrompt({}, "some RCA text");
+  for (const action of PROPOSABLE_ACTIONS) {
+    assert.ok(prompt.includes(`"action":"${action}"`), `the prompt never offers ${action}`);
+  }
+});
+
+test("every action the prompt offers is one the parser accepts", () => {
+  const prompt = buildProposalPrompt({}, "some RCA text");
+  const offered = new Set([...prompt.matchAll(/"action":"([a-z0-9_]+)"/g)].map((m) => m[1]));
+  for (const action of offered) {
+    assert.ok(
+      (PROPOSABLE_ACTIONS as readonly string[]).includes(action),
+      `the prompt offers ${action}, which parseProposal rejects — a card the model can never get`
+    );
+  }
+  assert.equal(offered.size, PROPOSABLE_ACTIONS.length);
+});
+
+// The list is only load-bearing if it matches the switch, so round-trip one minimal payload each.
+test("each listed action actually parses", () => {
+  const minimal: Record<string, Record<string, unknown>> = {
+    k8s_rollout_restart: { namespace: "a", workload: "b" },
+    k8s_set_image: { namespace: "a", workload: "b", kind: "deployment", image: "r/i:1" },
+    k8s_set_resources: { namespace: "a", workload: "b", kind: "deployment", memory_limit: "1Gi" },
+    k8s_scale: { namespace: "a", workload: "b", kind: "deployment", replicas: 2 },
+    k8s_delete_pod: { namespace: "a", pod: "b-123" },
+    k8s_delete_orphan: { namespace: "a", name: "b", kind: "configmap" },
+  };
+  for (const action of PROPOSABLE_ACTIONS) {
+    assert.ok(parseProposal(JSON.stringify({ action, ...minimal[action] })), `${action} did not parse`);
+  }
+});
+
+// The clause that blocked the quarantine: action 4 used to end "never zero", full stop.
+test("the prompt permits zero for the quarantine and names what it requires", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.ok(prompt.includes('"replicas":0'), "zero is not offered at all");
+  assert.match(prompt, /idleWorkloads/, "the quarantine's evidence is not named");
+  assert.match(prompt, /orphanKeys/, "the delete's evidence is not named");
+  assert.doesNotMatch(prompt, /never zero/, "the old blanket ban is still in the prompt");
+});
+
+// A bare request is enough for a restart or an image bump. It is never enough for these two.
+test("the prompt says a user request alone cannot justify a quarantine or a delete", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.match(prompt, /a request is never enough for them/);
+  assert.match(prompt, /asking BECAUSE they are unsure/);
+});
+
+test("the prompt refuses secrets and PVCs by name, with the reason", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.match(prompt, /NO delete for a secret or a persistentvolumeclaim/);
+  assert.match(prompt, /backup is its credentials/);
+  assert.match(prompt, /manifest is not its data/);
+});
+
+// ── A cleanup question is not a fault report ─────────────────────────────────
+// Live 2026-09-16: "ada resource yang ga kepake ga?" was answered with the unused scan plus the
+// rightsizing table. The answer carried fault vocabulary — a Service with no endpoints reads
+// "unavailable", a rightsizing row reads "throttled" — the fault-evidence branch fired, and a
+// GitOps PR approval card appeared for a workload in a namespace the user had never mentioned.
+
+const unusedReport =
+  "*Unused Resources (tidak memiliki referensi aktif):*\n" +
+  "• `Service/headlamp/headlamp-svc` — tidak ada endpoint, unavailable\n" +
+  "• `ConfigMap/default/order-configmap` — tidak ada yang merujuk\n" +
+  "Beberapa workload juga throttled dan over-provisioned.";
+
+test("a cleanup question does not propose, however much fault vocabulary the report carries", () => {
+  for (const q of [
+    "ada resource yang ga kepake ga?",
+    "ada resource yang bisa kita clean up ga?",
+    "what's unused in this cluster?",
+    "anything we can optimize?",
+    "resource apa aja yang tidak terpakai?",
+    "ada yang nganggur ga?",
+    "workload mana yang over-provisioned?",
+  ]) {
+    const gate = worthProposing(q, unusedReport, false);
+    assert.equal(gate.propose, false, `proposed for: ${q} (${gate.reason})`);
+    assert.match(gate.reason, /review finding, not a fault to repair/);
+  }
+});
+
+// The whole point is that it narrows ONE inference. Everything else still proposes.
+test("an explicit request still proposes, even when it uses cleanup words", () => {
+  for (const q of ["order-configmap bisa dihapus", "hapus configmap yang ga kepake", "delete the unused service"]) {
+    const gate = worthProposing(q, unusedReport, false);
+    assert.equal(gate.propose, true, `refused an explicit request: ${q}`);
+    assert.equal(gate.byUser, true, "an explicit request must be marked as the user's");
+  }
+});
+
+test("an RCA still proposes, and a real fault question still proposes", () => {
+  assert.equal(worthProposing("ada resource yang ga kepake ga?", unusedReport, true).propose, true, "an RCA was blocked");
+  const real = worthProposing("kenapa storefront lambat?", "Pod `storefront-7t6mn` is in CrashLoopBackOff.", false);
+  assert.equal(real.propose, true);
+  assert.match(real.reason, /fault evidence/);
+});
+
+// The fault words that also appear in capacity vocabulary must keep their meaning when the
+// question was not a cleanup one.
+test("oomkilled and evicted are faults, not cleanup findings", () => {
+  const gate = worthProposing("kenapa pod ini mati?", "Container was OOMKilled (exit code 137).", false);
+  assert.equal(gate.propose, true);
 });
