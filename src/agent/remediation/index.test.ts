@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS } from "./proposal.js";
 import { RemediationStore } from "./index.js";
@@ -748,4 +749,35 @@ test("an RCA still proposes, and a real fault question still proposes", () => {
 test("oomkilled and evicted are faults, not cleanup findings", () => {
   const gate = worthProposing("kenapa pod ini mati?", "Container was OOMKilled (exit code 137).", false);
   assert.equal(gate.propose, true);
+});
+
+// The drift that motivated merging the two lists: `k8s_delete_orphan` was added to the switch in
+// parseProposal and to neither of them, so a malformed delete_orphan got the "you proposed
+// nothing" retry notice instead of its own required fields. Nothing failed; it was simply wrong.
+//
+// Parsing the source is the only way to enumerate what the switch accepts without restating every
+// action's shape here, which is the duplication that caused this. Same instrument as
+// skills/real.test.ts, which loads the shipped playbooks rather than fixtures of them.
+test("every action parseProposal accepts has retry-notice prose", () => {
+  const src = readFileSync(new URL("./proposal.ts", import.meta.url), "utf8");
+  const accepted = [...src.matchAll(/case "(k8s_[a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(accepted.length >= 6, `expected the switch to still be there, found ${accepted.length} cases`);
+  for (const action of accepted) {
+    assert.match(retryNotice(`{"action":"${action}"}`), /RETRY\. Your previous answer named/, action);
+  }
+});
+
+test("delete_orphan's notice names its kinds and where the object has to come from", () => {
+  const notice = retryNotice('{"action":"k8s_delete_orphan","namespace":"shop"}');
+  assert.match(notice, /named `k8s_delete_orphan`/);
+  assert.match(notice, /orphanKeys/);
+  assert.match(notice, /no delete for a secret or a PVC/);
+});
+
+// Scale's prose said "an integer of at least 1" after the schema had moved to min(0) for the
+// quarantine. A notice that contradicts the schema teaches the model the wrong shape.
+test("scale's notice matches the schema it is describing", () => {
+  const notice = retryNotice('{"action":"k8s_scale","namespace":"shop"}');
+  assert.doesNotMatch(notice, /at least 1/);
+  assert.match(notice, /idleWorkloads/);
 });

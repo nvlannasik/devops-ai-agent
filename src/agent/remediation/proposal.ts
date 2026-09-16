@@ -416,27 +416,33 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
 // something to say reaches for a restart or a delete, and replace-guard.ts refuses both against
 // a spec fault without asking the model anything.
 
-const WHITELIST = ["k8s_rollout_restart", "k8s_set_image", "k8s_scale", "k8s_set_resources", "k8s_delete_pod"];
+
+// What the schema above actually demands, in prose, one entry per action `parseProposal`
+// accepts. Restating it beats "your JSON was invalid": the model cannot see the zod error, and
+// the field it left out is the whole failure.
+//
+// This is the ONLY list of actions in this half of the file — `declaredAction` reads its keys.
+// There were two, hardcoded separately, and `k8s_delete_orphan` was added to the parser without
+// either of them: a malformed delete_orphan then got the "you proposed nothing, null is a correct
+// answer" notice instead of its own fields. Silent, and stale within two days. `proposal.test.ts`
+// parses the switch above and fails if an action ever lands there without an entry here.
+const REQUIRED: Record<string, string> = {
+  k8s_rollout_restart: "namespace, workload, kind",
+  k8s_set_image: "namespace, workload, kind, and image as a full registry/repo:tag",
+  k8s_scale:
+    "namespace, workload, kind, and replicas as an integer. Zero is accepted by the schema but means the QUARANTINE, and only for a workload the context lists under `idleWorkloads` — for an under-capacity scale, give a modest non-zero count",
+  k8s_set_resources:
+    'namespace, workload, kind, and AT LEAST ONE of cpu_request / memory_request / cpu_limit / memory_limit carrying a real Kubernetes quantity ("250m", "512Mi") — naming the action while leaving every value unset is what failed. The CURRENT request or limit is in the context above: for a Pending pod the scheduler could not fit, propose a value BELOW it; for an OOMKill, a limit ABOVE it',
+  k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
+  k8s_delete_orphan:
+    "namespace, name, and kind as one of configmap / service / serviceaccount / deployment / statefulset. The object must appear in a `k8s_find_unused_resources` result's `orphanKeys` as `namespace/kind/name` — there is no delete for a secret or a PVC",
+};
 
 /** The action the model NAMED, whether or not the rest of the object validated. */
 export function declaredAction(text: string): string | null {
   const m = text.match(/"action"\s*:\s*"([a-z0-9_]+)"/i);
-  return m && WHITELIST.includes(m[1]) ? m[1] : null;
+  return m && m[1] in REQUIRED ? m[1] : null;
 }
-
-// What the schema above actually demands, in prose. Restating it beats "your JSON was invalid":
-// the model cannot see the zod error, and the field it left out is the whole failure.
-const REQUIRED: Record<string, string> = {
-  k8s_rollout_restart: "namespace, workload, kind",
-  k8s_set_image: "namespace, workload, kind, and image as a full registry/repo:tag",
-  k8s_scale: "namespace, workload, kind, and replicas as an integer of at least 1",
-  // The pointer at the end is not decoration. A05 named this action with no value, was asked
-  // again, and answered {"action": null} — it took the escape hatch rather than read the number
-  // off the context it already had. So the notice says where the number comes from.
-  k8s_set_resources:
-    'namespace, workload, kind, and AT LEAST ONE of cpu_request / memory_request / cpu_limit / memory_limit carrying a real Kubernetes quantity ("250m", "512Mi") — naming the action while leaving every value unset is what failed. The CURRENT request or limit is in the context above: for a Pending pod the scheduler could not fit, propose a value BELOW it; for an OOMKill, a limit ABOVE it',
-  k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
-};
 
 export function retryNotice(raw: string): string {
   const action = declaredAction(raw);
