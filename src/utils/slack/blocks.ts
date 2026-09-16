@@ -88,8 +88,36 @@ export function leaksRcaStructure(text: string): boolean {
   return commandDump.test(text) || markers.filter((m) => m.test(text)).length >= 2;
 }
 
+// The template's other headings, in the shape extractSection looks for: a whole line wrapped in
+// asterisks. Any ONE of them standing beside Root Cause is enough to say "this is the card".
+const RCA_HEADINGS = [
+  /\*[^*]*Recommended Actions[^*]*\*/i,
+  /\*[^*]*Impact[^*]*\*/i,
+  /\*[^*]*Evidence[^*]*\*/i,
+  /\*[^*]*Ruled Out[^*]*\*/i,
+  /\*[^*]*Confidence[^*]*\*/i,
+  /\*[^*]*TL;DR[^*]*\*/i,
+];
+
+/**
+ * Does this answer want the RCA card?
+ *
+ * Root Cause is required and always was. The severity line is no longer: it is ONE line of the
+ * template, and a model that drops it has still written an RCA. Observed 2026-09-15 16:52 on an
+ * explicit "investigasi kenapa prometheus query nya kosong" — the model returned `*📍 Root Cause*`
+ * with a numbered causal chain, Evidence and Recommended Actions across 4200+ characters, no
+ * Severity line, and all of it went to Slack as plain mrkdwn: no header, no dividers, no sections,
+ * and nothing in the thread saying the card had been skipped. `buildRcaBlocks` already renders a
+ * missing severity as `⚪ Unknown Severity Incident`, so the card could always have carried that
+ * answer — only the gate in front of it could not.
+ *
+ * A second heading is required in severity's place, and that is what keeps the gate honest: an
+ * answer that merely mentions a root cause in prose has no bolded heading at all, so a
+ * conversational reply is still not dragged into the template.
+ */
 export function isRcaResponse(text: string): boolean {
-  return SEVERITY_PATTERN.test(text) && /\*[^*]*Root Cause[^*]*\*/i.test(text);
+  if (!/\*[^*]*Root Cause[^*]*\*/i.test(text)) return false;
+  return SEVERITY_PATTERN.test(text) || RCA_HEADINGS.some((r) => r.test(text));
 }
 
 /**

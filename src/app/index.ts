@@ -272,10 +272,14 @@ export class SlackApp {
             .catch((e) => logger.debug(`[slack] progress notice failed for thread ${threadId}: ${errDetail(e)}`));
         };
 
+        // The mode keeps `rca-format` off a casual mention and the log-gap gate off a question
+        // with no affected pod — see RunMode. It is NOT derivable from `budget`: an explicit
+        // investigation request and the alert path share the same infinite one.
+        const mode = investigation ? "investigation" : "conversation";
         let reply = toMrkdwn(
           investigation
-            ? await this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress })
-            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, onComplete, onProgress }))
+            ? await this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress })
+            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress }))
         );
 
         // Deleted, not updated to "done": in a conversation the notice has no value once the
@@ -608,6 +612,7 @@ export class SlackApp {
       let alertMeta: RunMeta | undefined;
       const rca = toMrkdwn(
         await this.agent.investigate(threadId, fullIssue, {
+          mode: "alert",
           trigger: issueText,
           onProgress,
           onComplete: (m) => { alertMeta = m; },

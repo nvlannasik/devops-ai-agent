@@ -19,9 +19,33 @@ test("every shipped skill file loads", () => {
   }
 });
 
-test("exactly one skill is always-on, and it is the RCA format", () => {
-  const always = loadSkills(resolveSkillsDir()).all().filter((s) => s.when === "always");
-  assert.deepEqual(always.map((s) => s.name), ["rca-format"]);
+// `rca-format` used to be `when: always`, which meant the RCA template rode along on every
+// casual Slack mention and argued with the conversation-mode marker sitting in the same message.
+// The small model sided with the skill. It now keys on the run mode instead, and these are the
+// properties that change has to keep:
+test("the RCA format loads for an alert and an investigation, and never for a conversation", () => {
+  const registry = loadSkills(resolveSkillsDir());
+  const namesFor = (mode: string) =>
+    registry.select(`[mode:${mode}]\nsomething is wrong`, new Set()).selected.map((s) => s.name);
+
+  for (const mode of ["alert", "investigation"]) {
+    assert.ok(namesFor(mode).includes("rca-format"), `rca-format missing in ${mode} mode`);
+  }
+  assert.ok(!namesFor("conversation").includes("rca-format"), "the RCA template leaked into conversation mode");
+});
+
+test("no skill is always-on, and none matches the mode tag by accident", () => {
+  const skills = loadSkills(resolveSkillsDir()).all();
+  assert.deepEqual(skills.filter((s) => s.when === "always").map((s) => s.name), []);
+  // A playbook whose `when` happened to contain "alert" or "mode" would load on every run AND
+  // bypass MAX_MATCHED_SKILLS with it — see selectFrom. `rca-format` is the only skill allowed
+  // to key on the tag.
+  for (const s of skills) {
+    if (s.name === "rca-format" || s.when === "always") continue;
+    for (const tag of ["[mode:alert]", "[mode:investigation]", "[mode:conversation]"]) {
+      assert.equal([...tag.matchAll(s.when)].length, 0, `${s.name} (${s.when}) matches ${tag}`);
+    }
+  }
 });
 
 // The template is the one prompt every RCA is generated against, and it is read literally:

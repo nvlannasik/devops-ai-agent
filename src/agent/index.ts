@@ -161,6 +161,50 @@ export const LOG_GAP_NOTICE =
 export const demandsLogs = (skills: readonly Skill[]): boolean =>
   skills.some((s) => [...LOG_TOOLS].some((t) => s.body.includes(t)));
 
+export interface LogGapState {
+  mode: RunMode;
+  /** demandsLogs(skills) for the playbooks this run is carrying. */
+  demandsLogs: boolean;
+  sawLogLines: boolean;
+  nudged: boolean;
+  toolsDisabled: boolean;
+  toolRounds: number;
+  /** toolRounds at the moment the nudge fired; -1 while it has not. */
+  toolRoundsAtNudge: number;
+  /** Is an answer from before the nudge being held? */
+  holdingAnswer: boolean;
+}
+
+/**
+ * What to do with an answer the model just finished writing, from the log-gap gate's point of view.
+ *
+ * `restore` is the half that was missing and it is the expensive one. The nudge appends a notice
+ * and loops, so whatever the model says next REPLACES the answer it interrupted — and on
+ * 2026-09-15 a correct "no anomalies; 59 pods across 14 namespaces healthy" was replaced twice in
+ * one thread by the scope-refusal boilerplate ("That's outside what I do — I'm a DevOps agent for
+ * this cluster"). The first answer was complete, was never posted, and nothing in the log said it
+ * had been thrown away. So: if the extra round ran no tools, it learned nothing, and the answer
+ * it produced cannot be an improvement on the one it displaced.
+ *
+ * `nudge` is alert-mode only. `demandsLogs` reads the playbooks the THREAD is carrying, which on
+ * a mention is whatever earlier turns accumulated; "apakah ada anomali di cluster 1 jam
+ * kebelakang ini?" has no affected pod whose container logs could answer it.
+ */
+export function logGapAction(s: LogGapState): "answer" | "nudge" | "restore" {
+  if (s.holdingAnswer && s.toolRounds === s.toolRoundsAtNudge) return "restore";
+  if (
+    s.mode === "alert" &&
+    s.demandsLogs &&
+    !s.sawLogLines &&
+    !s.nudged &&
+    !s.toolsDisabled &&
+    s.toolRounds > 0
+  ) {
+    return "nudge";
+  }
+  return "answer";
+}
+
 /**
  * A delegate's ceiling. Neither notice above can serve it: the budget one carries conversation
  * mode's format rule and tells the model to "offer to investigate", the ceiling one says nothing
@@ -276,6 +320,24 @@ const REPEAT_NOTICE =
 export const MAX_THREAD_SKILLS = 5;
 
 /**
+ * How many matched playbooks a thread carries into its NEXT turn.
+ *
+ * MAX_THREAD_SKILLS alone is a one-way ratchet: `selectForThread` only ever adds, so a
+ * conversation that reaches the cap is frozen on the playbooks it happened to pick up and no
+ * later question can load its own. Measured on thread 1789488072 (2026-09-15): turn 5 filled all
+ * five slots with `rca-format, pod-pending, pod-not-ready, multi-pod-one-cause,
+ * resource-rightsizing`, and the seven turns after it — including "investigasi kenapa prometheus
+ * query nya kosong" — ran on that same frozen set. Two of those turns also tripped the log-gap
+ * gate, which reads `demandsLogs(skills)`: playbooks selected six questions ago were still
+ * demanding container logs.
+ *
+ * Decay, not reset: a follow-up genuinely is about the turn before it ("and the logs?"), so the
+ * most recent matches stay. Everything older is dropped and re-earned — a playbook that still
+ * fits the new question matches again on the same text that matched it the first time.
+ */
+export const CARRIED_SKILLS = 2;
+
+/**
  * The last four exist for sub-agent delegation: a delegate is the same loop run with a smaller
  * budget, a borrowed deadline, and no delegate tool of its own. They are options rather than a
  * second loop because the guards that matter — the [WRITE] filter, the namespace scope lock, the
@@ -308,9 +370,36 @@ export function reportProgress(
   }
 }
 
+/**
+ * What kind of run this is. Three things read it and none of them can work it out alone:
+ *
+ * - `rca-format` loads only outside `conversation`. It used to be `when: always`, so the RCA
+ *   template rode along on every casual mention and argued with the conversation-mode marker in
+ *   the very same message. The small model sided with the skill.
+ * - the log-gap gate fires only on `alert`. Its own notice says "the playbook for this alert";
+ *   on a mention there is no alert and no affected pod, so demanding container logs for
+ *   "any anomalies in the last hour?" is a demand nothing can satisfy.
+ * - a delegate is `alert` because it is a slice of one.
+ *
+ * Not derivable from the other options: `maxToolRounds` is `Infinity` for BOTH the alert path
+ * and an explicit investigation request, and `trigger` is set by the alert path only as an
+ * accident of skill selection. Stating it is what stops the next reader guessing.
+ */
+export const RUN_MODES = ["alert", "investigation", "conversation"] as const;
+export type RunMode = (typeof RUN_MODES)[number];
+
+/** The tag `runInvestigation` puts at the head of the skill trigger. See skills/index MODE_TAG. */
+export const modeTag = (mode: RunMode): string => `[mode:${mode}]`;
+
+/** A skill that keys on the run mode describes the shape of the answer, not the fault. */
+export const keysOnMode = (s: Skill): boolean =>
+  s.when !== "always" && RUN_MODES.some((m) => [...modeTag(m).matchAll(s.when as RegExp)].length > 0);
+
 export interface InvestigateOptions {
   maxToolRounds?: number;
   trigger?: string;
+  /** Defaults to "alert" — the strictest of the three, so an unconverted caller loses nothing. */
+  mode?: RunMode;
   /** Defaults to MAX_ITERATIONS. */
   maxIterations?: number;
   /** Absolute epoch ms. Defaults to now + config.investigationTimeoutMs. */
@@ -393,6 +482,31 @@ export function selectForThread(
 }
 
 /**
+ * Shrinks a thread's accumulated playbooks at the start of a NEW turn, and returns the names
+ * dropped so the caller can log them — a playbook that vanishes silently is the bug this whole
+ * mechanism was added to fix, one level up. See CARRIED_SKILLS for why.
+ *
+ * Only called between turns. Inside one investigation selection stays append-only: there the
+ * alert's own playbook outranks one a later log line suggested, and decaying mid-loop would
+ * throw away the playbook the run is actually following.
+ *
+ * Exported for the wiring test.
+ */
+export function decayThreadSkills(tracked: ThreadSkills, threadId: string, keep = CARRIED_SKILLS): string[] {
+  const known = tracked.get(threadId);
+  if (!known || known.length === 0) return [];
+  // A mode-keyed skill is never inherited — it belongs to THIS turn's mode, and the caller
+  // re-selects it from the tag on the very next line. Carried over, `rca-format` would follow an
+  // alert thread into every follow-up mention it ever gets: the exact leak it was moved off
+  // `when: always` to stop.
+  // Insertion order is recency order — selectForThread appends — so the tail is the newest.
+  const kept = known.filter((s) => !keysOnMode(s)).slice(-keep);
+  if (kept.length === known.length) return [];
+  tracked.set(threadId, kept);
+  return known.filter((s) => !kept.includes(s)).map((s) => s.name);
+}
+
+/**
  * Resolves stored playbook names back to skills against the LIVE registry. A name that no longer
  * resolves is dropped rather than carried as a dangling string: `prompts/skills/` is editable
  * between two turns of the same thread, and a thread must never re-inject a skill the directory
@@ -420,9 +534,69 @@ export function evidenceTexts(blocks: readonly ContentBlock[]): string[] {
         : b.type === "text"
           ? (b.text ?? "")
           : "";
-    if (text.trim()) out.push(text);
+    // The evidence stamp is bookkeeping, not evidence — a playbook must never be selected by it.
+    if (text.trim() && !text.startsWith(EVIDENCE_STAMP_PREFIX)) out.push(text);
   }
   return out;
+}
+
+/**
+ * Stamps a tool round with the wall-clock time its results were read, appended to the same user
+ * message the results ride in.
+ *
+ * A `tool_result` in the history carries no time of its own, and neither does the message around
+ * it, so by turn 11 of a conversation the model is looking at a `k8s_cluster_health` snapshot
+ * from 40 minutes earlier that is indistinguishable from one taken this second. It answers from
+ * it. Measured on thread 1789488072 (2026-09-15): "cluster resource saat ini gimana?" at 16:44
+ * was answered with `59 pods in 14 namespaces` — the output of a health scan run at 16:14 — with
+ * zero tool calls that turn, and the grounding check flagged a namespace no tool result in the
+ * thread had ever returned.
+ *
+ * In the history rather than in a side table so it survives a pod restart: the conversation comes
+ * back from Redis and the stamp comes back with it.
+ */
+export const EVIDENCE_STAMP_PREFIX = "[EVIDENCE READ AT]";
+
+export const evidenceStamp = (now: number = Date.now()): string =>
+  `${EVIDENCE_STAMP_PREFIX} ${new Date(now).toISOString()} (unix ${Math.floor(now / 1000)})`;
+
+/** Under this, the evidence is effectively current and the notice is noise. */
+export const STALE_EVIDENCE_MINUTES = 2;
+
+const STAMP_RE = /\[EVIDENCE READ AT\][^(\n]*\(unix (\d+)\)/g;
+
+/**
+ * Warns the NEXT turn that everything it can see was read in an earlier one. Empty when the
+ * thread has no stamped evidence yet, or when the freshest is younger than STALE_EVIDENCE_MINUTES.
+ *
+ * Reads the newest stamp, not the oldest: it is the most generous number available, and the
+ * claim has to stay true — anything older than the freshest result is older still.
+ */
+export function staleEvidenceNotice(history: readonly Message[], now: number = Date.now()): string {
+  let newest = 0;
+  for (const m of history) {
+    const texts =
+      typeof m.content === "string"
+        ? [m.content]
+        : m.content.map((b) => (b.type === "text" ? (b.text ?? "") : ""));
+    for (const t of texts) {
+      for (const match of t.matchAll(STAMP_RE)) {
+        const unix = Number(match[1]);
+        if (unix > newest) newest = unix;
+      }
+    }
+  }
+  if (newest === 0) return "";
+  const minutes = Math.floor((now - newest * 1000) / 60000);
+  if (minutes < STALE_EVIDENCE_MINUTES) return "";
+  return (
+    `[STALE EVIDENCE — the freshest tool result already in this conversation was read ${minutes} ` +
+    `minutes ago, at ${new Date(newest * 1000).toISOString()}; everything else is older. Those ` +
+    `results describe the cluster AS IT WAS THEN. If this question is about the state right now ` +
+    `("saat ini", "sekarang", "now", "still", "already"), call the tools again and answer from ` +
+    `the new result — do not restate counts, pod names or statuses from the old ones. A re-read ` +
+    `costs one round; a stale "everything is healthy" costs an incident.]`
+  );
 }
 
 const zeroUsage = (): TokenUsage => ({
@@ -622,28 +796,56 @@ export class DevOpsAgent {
     const maxToolRounds = opts.maxToolRounds ?? Infinity;
     const maxIterations = opts.maxIterations ?? MAX_ITERATIONS;
     const depth = opts.depth ?? 0;
+    const mode = opts.mode ?? "alert";
     let toolRounds = 0;
     let toolsDisabled = false;
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
     let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
     let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
+    // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
+    // produces no new evidence cannot downgrade an answer that was already complete.
+    let preNudgeSummary = "";
+    let toolRoundsAtNudge = -1;
 
     const isFollowUp = await this.memory.hasRca(threadId);
 
-    // for first message: prepend time context
-    // for follow-up: prepend explicit mode instruction so LLM doesn't default to RCA format
-    const messageToAppend = isFollowUp
-      ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
-      : `${buildTimeContext()}\n\n${userMessage}`;
+    // Time context on EVERY turn now, not only the first. It used to ride the opening message
+    // alone, so eleven turns later the newest statement of what "now" means was 50 minutes old
+    // and sat at the far end of the window behind a wall of tool results — the same losing
+    // position that made buildMentionMarker() restate itself every turn. Two lines of timestamps
+    // per turn is a cheap price for the model knowing what day it is.
+    //
+    // The staleness line is the other half: the timestamp only helps if something also says when
+    // the evidence was read. See staleEvidenceNotice.
+    const staleness = staleEvidenceNotice(await this.memory.get(threadId));
+    const messageToAppend = [
+      buildTimeContext(),
+      staleness,
+      // for follow-up: explicit mode instruction so the LLM doesn't default to RCA format
+      isFollowUp
+        ? `[FOLLOW-UP — conversation mode, do NOT use RCA format. Out-of-scope requests (code, general questions) are still declined in one line per Scope of Work, even mid-thread.]\n${userMessage}`
+        : userMessage,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     await this.memory.append(threadId, { role: "user", content: messageToAppend });
+    if (staleness) logger.debug(`[${threadId}] prior evidence is stale — warned the model to re-read`);
 
     // Matched on the alert text alone, not on userMessage: src/app/index.ts prepends recalled
     // prior incidents, and a previous incident's RCA must not select this one's playbook.
     // A thread outlives a pod: its conversation comes back from Redis, so its playbooks have to
     // as well or the follow-up answers with a different skill set than the turn it follows.
     await this.rehydrateThreadSkills(threadId);
-    let skills = selectForThread(this.skills, this.threadSkills, threadId, opts.trigger ?? userMessage);
+    const decayed = decayThreadSkills(this.threadSkills, threadId);
+    if (decayed.length > 0) {
+      logger.info(`[${threadId}] playbooks aged out before this turn: ${decayed.join(", ")} (re-selected if they still match)`);
+    }
+    // The mode tag rides the trigger so a skill can declare its own mode condition in
+    // frontmatter instead of the loop hardcoding a skill name — `rca-format` is `when:
+    // mode:(alert|investigation)`. No playbook regex matches the tag itself; skills/real.test.ts
+    // pins that, because a `when` that happened to contain "alert" would load on every run.
+    let skills = selectForThread(this.skills, this.threadSkills, threadId, `${modeTag(mode)}\n${opts.trigger ?? userMessage}`);
     this.persistThreadSkills(threadId, skills);
 
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
@@ -664,15 +866,33 @@ export class DevOpsAgent {
     // Every exit from this loop goes through here, so the footer is never missing from the
     // paths that matter most — the timeout and the out-of-steps replies are exactly where a
     // reader wants to know how long it ran and on which model.
+    //
+    // The completion line is emitted HERE rather than where the model stops talking, and that is
+    // a fix, not a tidy-up: it used to sit above the log-gap gate, so a run that took the extra
+    // round logged "Investigation complete in 28451ms (2 LLM calls)" and then kept going, twice
+    // in one thread on 2026-09-15. It also never fired at all on the deadline and out-of-steps
+    // exits, which are the two a reader most wants the duration for.
     const done = (text: string): string => {
+      const durationMs = Date.now() - investigationStart;
       opts.onComplete?.({
-        durationMs: Date.now() - investigationStart,
+        durationMs,
         rounds: iterations,
         toolCalls: totalToolCalls,
         backend: lastResponse?.backend,
         model: lastResponse?.model,
         route: lastResponse?.route,
       });
+      logger.info(
+        `[${threadId}] Investigation complete in ${durationMs}ms (${iterations} LLM calls, ` +
+        `${totalToolCalls} tool calls) | total tokens — ` +
+        (totalUsage.inputTokens === 0 && totalUsage.outputTokens === 0
+          // Not "zero tokens" — the agent-builder/Langflow envelope reports no counts at all
+          // (devops-ai-agent-worker/src/agent-builder.ts), and printing in=0 out=0 cache_read=0
+          // read as "prompt caching is broken" for weeks when the truth was "not measurable here".
+          ? `not reported by ${lastResponse?.backend ?? "this backend"}`
+          : `in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
+            `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`)
+      );
       return text;
     };
     let totalUsage = zeroUsage();
@@ -785,12 +1005,6 @@ export class DevOpsAgent {
       await this.memory.append(threadId, { role: "assistant", content: response.content });
 
       if (response.stopReason === "end_turn" || response.stopReason === "max_tokens") {
-        const duration = Date.now() - investigationStart;
-        logger.info(
-          `[${threadId}] Investigation complete in ${duration}ms (${iterations} LLM calls) | ` +
-          `total tokens — in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
-          `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`
-        );
         const summary = this.extractText(response.content);
         if (!summary) {
           // never return empty — Slack chat.postMessage rejects an empty text with `no_text`
@@ -821,11 +1035,28 @@ export class DevOpsAgent {
             `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
           );
         }
-        // The last gate before an answer leaves: an investigation whose playbook reads logs, that
-        // has never seen a log line, gets one more round and is told exactly what to fetch. Spent
-        // once, and never when tools are already off — the ceiling notices own that turn.
-        if (demandsLogs(skills) && !sawLogLines && !logGapNudged && !toolsDisabled && toolRounds > 0) {
+        // The last gate before an answer leaves — see logGapAction for all three outcomes.
+        const gap = logGapAction({
+          mode,
+          demandsLogs: demandsLogs(skills),
+          sawLogLines,
+          nudged: logGapNudged,
+          toolsDisabled,
+          toolRounds,
+          toolRoundsAtNudge,
+          holdingAnswer: preNudgeSummary !== "",
+        });
+        if (gap === "restore") {
+          logger.warn(
+            `[${threadId}] the log-gap round fetched nothing — keeping the pre-nudge answer ` +
+            `(${preNudgeSummary.length} chars) over the retry's ${summary.length}`
+          );
+          return done(preNudgeSummary);
+        }
+        if (gap === "nudge") {
           logGapNudged = true;
+          preNudgeSummary = summary;
+          toolRoundsAtNudge = toolRounds;
           logger.info(
             `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
             `[${skills.map((s) => s.name).join(", ")}] read logs — one more round`
@@ -927,6 +1158,9 @@ export class DevOpsAgent {
           );
         }
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);
+        // Appended, never unshifted: Anthropic requires every tool_result block to come first in
+        // its user message, and a text block ahead of them is a 400.
+        if (executed.length > 0) trimmedResults.push({ type: "text", text: evidenceStamp() });
 
         toolRounds++;
         const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth });
