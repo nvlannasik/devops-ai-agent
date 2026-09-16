@@ -219,7 +219,7 @@ export class SlackApp {
     const status = parseStatusCommand(text);
     if (status && (await this.handleStatusCommand(event.channel, threadId, event.user ?? "unknown", status))) return;
 
-    await say({ text: "🤖 On it...", thread_ts: threadId });
+    await say({ text: ":pepe-hacker: On it...", thread_ts: threadId });
 
     // Per-message mode marker — same mechanism as the [FOLLOW-UP] prefix. Distant
     // system-prompt rules alone don't hold: the model defaults to RCA format for any
@@ -703,7 +703,7 @@ export class SlackApp {
         await this.app.client.chat.postMessage({
           channel,
           thread_ts: threadId,
-          text: `🚫 *Remediation not proposed* — ${truncate(proposed.refused, 500)}`,
+          text: `:denied: *Remediation not proposed* — ${truncate(proposed.refused, 500)}`,
           mrkdwn: true,
         });
         await this.agent.noteInThread(threadId, `Remediation was REFUSED by the server: ${truncate(proposed.refused, 300)} — do not promise an approval card for this action again; explain the refusal instead.`);
@@ -753,7 +753,7 @@ export class SlackApp {
         await client.chat.postEphemeral({
           channel,
           user: userId,
-          text: "🚫 You're not authorized to approve/reject remediations (SLACK_APPROVER_USERS).",
+          text: ":denied: You're not authorized to approve/reject remediations (SLACK_APPROVER_USERS).",
         });
         return;
       }
