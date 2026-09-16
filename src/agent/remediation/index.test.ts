@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
@@ -633,4 +633,68 @@ test("anything unparseable or wrongly shaped yields null instead of throwing", (
   for (const bad of ["", "not json", "{}", '{"backupManifest":null}', '{"backupManifest":"a string"}', '{"backupManifest":[]}']) {
     assert.equal(backupFrom(bad), null, `threw or accepted: ${bad}`);
   }
+});
+
+// ── The prompt and the parser must offer the same actions ────────────────────
+// 2026-09-16: k8s_delete_orphan reached the parser, the MCP server, the RBAC and
+// prompts/system.md, but not buildProposalPrompt — a SEPARATE structured-output call with its
+// own action list. The model was asked to choose from five actions, none of which was the one
+// it needed, and answered {"action": null}. Nothing errored. The card just never appeared and
+// every log line read healthy. This test is the only cheap thing that catches that shape.
+
+test("the proposal prompt offers every action the parser accepts", () => {
+  const prompt = buildProposalPrompt({}, "some RCA text");
+  for (const action of PROPOSABLE_ACTIONS) {
+    assert.ok(prompt.includes(`"action":"${action}"`), `the prompt never offers ${action}`);
+  }
+});
+
+test("every action the prompt offers is one the parser accepts", () => {
+  const prompt = buildProposalPrompt({}, "some RCA text");
+  const offered = new Set([...prompt.matchAll(/"action":"([a-z0-9_]+)"/g)].map((m) => m[1]));
+  for (const action of offered) {
+    assert.ok(
+      (PROPOSABLE_ACTIONS as readonly string[]).includes(action),
+      `the prompt offers ${action}, which parseProposal rejects — a card the model can never get`
+    );
+  }
+  assert.equal(offered.size, PROPOSABLE_ACTIONS.length);
+});
+
+// The list is only load-bearing if it matches the switch, so round-trip one minimal payload each.
+test("each listed action actually parses", () => {
+  const minimal: Record<string, Record<string, unknown>> = {
+    k8s_rollout_restart: { namespace: "a", workload: "b" },
+    k8s_set_image: { namespace: "a", workload: "b", kind: "deployment", image: "r/i:1" },
+    k8s_set_resources: { namespace: "a", workload: "b", kind: "deployment", memory_limit: "1Gi" },
+    k8s_scale: { namespace: "a", workload: "b", kind: "deployment", replicas: 2 },
+    k8s_delete_pod: { namespace: "a", pod: "b-123" },
+    k8s_delete_orphan: { namespace: "a", name: "b", kind: "configmap" },
+  };
+  for (const action of PROPOSABLE_ACTIONS) {
+    assert.ok(parseProposal(JSON.stringify({ action, ...minimal[action] })), `${action} did not parse`);
+  }
+});
+
+// The clause that blocked the quarantine: action 4 used to end "never zero", full stop.
+test("the prompt permits zero for the quarantine and names what it requires", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.ok(prompt.includes('"replicas":0'), "zero is not offered at all");
+  assert.match(prompt, /idleWorkloads/, "the quarantine's evidence is not named");
+  assert.match(prompt, /orphanKeys/, "the delete's evidence is not named");
+  assert.doesNotMatch(prompt, /never zero/, "the old blanket ban is still in the prompt");
+});
+
+// A bare request is enough for a restart or an image bump. It is never enough for these two.
+test("the prompt says a user request alone cannot justify a quarantine or a delete", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.match(prompt, /a request is never enough for them/);
+  assert.match(prompt, /asking BECAUSE they are unsure/);
+});
+
+test("the prompt refuses secrets and PVCs by name, with the reason", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.match(prompt, /NO delete for a secret or a persistentvolumeclaim/);
+  assert.match(prompt, /backup is its credentials/);
+  assert.match(prompt, /manifest is not its data/);
 });
