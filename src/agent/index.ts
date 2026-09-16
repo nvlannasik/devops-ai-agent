@@ -19,7 +19,7 @@ import { resolveBudget } from "./context/resolve-budget.js";
 import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
-import { groundingGaps } from "./grounding/index.js";
+import { groundingGaps, observedText } from "./grounding/index.js";
 import { flagInjection } from "./injection/index.js";
 import {
   DELEGATE_TOOL,
@@ -160,6 +160,35 @@ export const LOG_GAP_NOTICE =
 /** Does any loaded playbook name a log tool? Read from the body, so a new playbook gets this free. */
 export const demandsLogs = (skills: readonly Skill[]): boolean =>
   skills.some((s) => [...LOG_TOOLS].some((t) => s.body.includes(t)));
+
+/**
+ * The idle-evidence test for a scale-to-zero, as a pure function so it can be tested without a
+ * Redis, an LLM or a thread. `observed` is the thread's tool output (lowercased by
+ * `observedText`), or null when the run has no conversation to read at all.
+ *
+ * Returns the refusal sentence, or null to let the proposal through.
+ *
+ * One exact substring, not a set of loose ANDed tests: `IdleWorkload.key` exists on the MCP
+ * server for precisely this and appears in no other tool output. The context compactor may have
+ * truncated the result, and a truncated result FAILS the match — the safe direction, costing a
+ * re-run rather than an outage.
+ */
+export function quarantineRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (!proposal.quarantine) return null;
+  const target = `${proposal.namespace}/${proposal.name}`;
+  if (observed === null) {
+    return `Scaling \`${target}\` to zero needs an idle measurement, and this run has no conversation to read one from.`;
+  }
+  // parseProposal already lowercased namespace/name/kind; the toLowerCase is belt and braces.
+  const kind = String(proposal.toolParams.kind ?? "deployment");
+  const key = `${proposal.namespace}/${kind}/${proposal.name}`.toLowerCase();
+  if (observed.includes(key)) return null;
+  return (
+    `Scaling \`${target}\` to zero is refused: no \`k8s_recommend_resources\` result in this thread ` +
+    `lists it under \`idleWorkloads\`. Run it with \`window: "24h"\` first — a workload that has not been ` +
+    `measured idle is a workload nobody has checked, and taking it offline on a hunch is an outage.`
+  );
+}
 
 export interface LogGapState {
   mode: RunMode;
@@ -1449,7 +1478,7 @@ export class DevOpsAgent {
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
     labels: Record<string, string>,
     rca: string,
-    opts: { userRequested?: boolean } = {}
+    opts: { userRequested?: boolean; threadId?: string } = {}
   ): Promise<
     | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
     | { refused: string }
@@ -1508,6 +1537,17 @@ export class DevOpsAgent {
       }
     }
 
+    // The quarantine gate, and unlike the replacement guard it is NOT skipped for a user
+    // request. "Delete the unused mongodb endpoint" is exactly the sentence that produces a
+    // quarantine proposal, and the user saying it is not evidence that the workload is idle —
+    // they are asking BECAUSE they are unsure. Measurement is the only thing that settles it,
+    // and this is where we insist on having done it.
+    const idleRefusal = await this.quarantineRefusalFor(proposal, opts.threadId);
+    if (idleRefusal) {
+      logger.info(`[remediation] quarantine gate refused ${proposal.summary}: ${idleRefusal}`);
+      return { refused: idleRefusal };
+    }
+
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
     // server's namespace guardrails with zero side effects.
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
@@ -1533,6 +1573,26 @@ export class DevOpsAgent {
     }
 
     return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+  }
+
+  /**
+   * Refuses a scale-to-zero unless a `k8s_recommend_resources` run IN THIS THREAD measured this
+   * exact workload idle. Returns null for every other proposal.
+   *
+   * Fails CLOSED, which is the opposite of `guardRefusalFor` beside it and deliberate: that one
+   * lets a proposal through when its evidence call fails, because its worst case is a restart
+   * that does not help. This one's worst case is a workload taken offline, so no evidence means
+   * no card.
+   *
+   * The test is one exact substring against the thread's tool output rather than a re-parse of
+   * the JSON: `observedText` reads the same `tool_result` blocks the model saw, and the context
+   * compactor may have truncated them. A truncated result fails the match, which is the safe
+   * direction — it costs a re-run, not an outage.
+   */
+  private async quarantineRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
+    if (!proposal.quarantine) return null;
+    const history = threadId ? await this.memory.get(threadId).catch(() => [] as Message[]) : null;
+    return quarantineRefusal(proposal, history === null ? null : observedText(history));
   }
 
   /**

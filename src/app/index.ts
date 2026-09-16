@@ -700,7 +700,9 @@ export class SlackApp {
     userRequested = false
   ): Promise<void> {
     try {
-      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested });
+      // threadId: the quarantine gate reads this thread's tool results for the idle measurement
+      // a scale-to-zero has to stand on. Both call sites already have it.
+      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId });
       if (!proposed) return; // no write tools / no confident proposal / already active
       if ("refused" in proposed) {
         // the model wanted to act but the MCP server refused (GitOps guard, blocked

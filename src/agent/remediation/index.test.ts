@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry } from "./proposal.js";
 import { RemediationStore } from "./index.js";
+import { quarantineRefusal } from "../index.js";
+import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
 
 test("proposal prompt keeps the tail of a long RCA (Recommended Actions live there)", () => {
   const rca = "HEAD-MARKER " + "x".repeat(6000) + " TAIL-MARKER: change image to repo/app:1.2.3";
@@ -66,12 +68,34 @@ test("set_resources requires at least one value and keeps only provided fields",
   assert.match(p!.summary, /memory_limit=1Gi/);
 });
 
-test("scale parses; zero replicas and daemonset are rejected", () => {
+test("scale parses; daemonset is rejected", () => {
   const p = parseProposal('{"action":"k8s_scale","namespace":"payment","workload":"api","kind":"deployment","replicas":4}');
   assert.deepEqual(p?.toolParams, { namespace: "payment", name: "api", kind: "deployment", replicas: 4 });
   assert.match(p!.summary, /scale deployment `payment\/api` → 4 replicas/);
-  assert.equal(parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"deployment","replicas":0}'), null);
+  assert.equal(p!.quarantine, undefined, "an ordinary scale must not be marked a quarantine");
   assert.equal(parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"daemonset","replicas":2}'), null);
+});
+
+// Zero used to be rejected here. It is now parsed as an explicit QUARANTINE and refused later,
+// by DevOpsAgent.quarantineRefusalFor, which requires a k8s_recommend_resources run in the same
+// thread to have measured this workload idle. Rejecting it at parse time meant the only answer
+// to "this workload looks unused" was an irreversible delete — against a cluster with no
+// backups. Scaling to zero is the same decision with an undo.
+test("zero replicas parses as a quarantine, flagged and worded as reversible", () => {
+  const p = parseProposal('{"action":"k8s_scale","namespace":"payment","workload":"api","kind":"deployment","replicas":0}');
+  assert.equal(p?.quarantine, true);
+  assert.deepEqual(p?.toolParams, {
+    namespace: "payment", name: "api", kind: "deployment", replicas: 0, quarantine: true,
+  });
+  assert.match(p!.summary, /quarantine deployment `payment\/api` → 0 replicas/);
+  assert.match(p!.summary, /reversible/, "the card must say how to undo it");
+});
+
+// The flag is the server's signal that the caller MEANT zero. Asserting it on every scale would
+// make the assertion meaningless, so it rides only on the proposals that are actually one.
+test("the quarantine flag is never sent on an ordinary scale", () => {
+  const p = parseProposal('{"action":"k8s_scale","namespace":"a","workload":"b","kind":"statefulset","replicas":2}');
+  assert.equal("quarantine" in (p?.toolParams ?? {}), false);
 });
 
 test("delete_pod parses; pod name goes to toolParams.pod (not name)", () => {
@@ -443,4 +467,87 @@ test("the proposal prompt refuses an absent limit as evidence of a resource faul
   assert.match(prompt, /NO limit set is not evidence of a resource fault/);
   assert.match(prompt, /there is no denominator/);
   assert.match(prompt, /hardening opinion about the spec/);
+});
+
+// ── The quarantine evidence gate ─────────────────────────────────────────────
+// The only thing standing between "this looks unused" and a workload taken offline. It fails
+// CLOSED, unlike the replacement guard beside it: that guard's worst case is a restart that does
+// not help, this one's is an outage.
+
+const quarantine = (over: Record<string, unknown> = {}) =>
+  parseProposal(
+    JSON.stringify({
+      action: "k8s_scale", namespace: "app", workload: "orders-api", kind: "deployment", replicas: 0, ...over,
+    })
+  )!;
+
+// What the tool actually puts in the thread — IdleWorkload.key, lowercased by observedText.
+const measured = (key = "app/deployment/orders-api") =>
+  `{"idleworkloads":[{"key":"${key}","kind":"deployment","namespace":"app","workload":"orders-api","replicas":2,"cpup95below":"2m"}]}`;
+
+test("a quarantine backed by an idle measurement in the thread is allowed", () => {
+  assert.equal(quarantineRefusal(quarantine(), measured()), null);
+});
+
+test("a quarantine with no measurement anywhere in the thread is refused", () => {
+  const refusal = quarantineRefusal(quarantine(), "some other tool output about app/orders-api");
+  assert.match(refusal!, /refused/);
+  assert.match(refusal!, /idleWorkloads/, "the refusal must name what would satisfy it");
+  assert.match(refusal!, /window: "24h"/, "and how to produce it");
+});
+
+// The measurement is about ONE workload. A different one being idle says nothing about this one.
+test("an idle measurement of a different workload does not carry over", () => {
+  assert.ok(quarantineRefusal(quarantine(), measured("app/deployment/checkout-gateway")));
+  assert.ok(quarantineRefusal(quarantine(), measured("other-ns/deployment/orders-api")));
+  assert.ok(quarantineRefusal(quarantine({ kind: "statefulset" }), measured("app/deployment/orders-api")));
+});
+
+// A tool result the context compactor cut in half must fail, not pass.
+test("a truncated tool result fails the match rather than half-passing it", () => {
+  const cut = measured().slice(0, 30);
+  assert.ok(quarantineRefusal(quarantine(), cut), `a truncated result was accepted: ${cut}`);
+});
+
+test("no conversation at all means no card, and the message says why", () => {
+  assert.match(quarantineRefusal(quarantine(), null)!, /no conversation to read one from/);
+});
+
+// The gate must be invisible to everything that is not a quarantine.
+test("an ordinary scale, a restart and an image change are never gated", () => {
+  const plain = parseProposal('{"action":"k8s_scale","namespace":"app","workload":"orders-api","kind":"deployment","replicas":3}')!;
+  assert.equal(quarantineRefusal(plain, null), null);
+  const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"app","workload":"orders-api"}')!;
+  assert.equal(quarantineRefusal(restart, null), null);
+});
+
+// The gate fails closed, so anything that removes `idleWorkloads` from the stored tool result
+// turns the quarantine into a feature that silently never fires. The rightsizing response is
+// over MAX_TOOL_RESULT_CHARS on any real cluster (40 recommendations), and compactToolResult
+// keeps the head and the tail and drops the middle — which is where idleWorkloads used to sit.
+test("an idle measurement survives the compaction a real-sized response goes through", () => {
+  const recommendation = (i: number) => ({
+    kind: "Deployment", namespace: "app", workload: `svc-${i}`, container: "api", replicas: 2,
+    flags: ["over_provisioned"],
+    current: { cpuRequest: "500m", memoryRequest: "512Mi", cpuLimit: "1000m", memoryLimit: "512Mi" },
+    observed: { cpuP95: "12m", memoryPeak: "120Mi", cpuThrottlePct: 0 },
+    recommended: { cpuRequest: "14m", memoryRequest: "144Mi", memoryLimit: "180Mi", cpuLimit: "1000m" },
+    savings: { cpuCores: 0.486, memoryBytes: 385875968 },
+  });
+  // Key order mirrors the server's return object: idleWorkloads LAST.
+  const raw = JSON.stringify({
+    window: "24h",
+    scanned: { containers: 120, withMetrics: 118 },
+    potentialRequestSavings: { cpu: "48000m", memory: "46080Mi" },
+    recommendationsTotal: 120,
+    recommendations: Array.from({ length: 40 }, (_, i) => recommendation(i)),
+    idleWorkloads: [
+      { key: "app/Deployment/orders-api", kind: "Deployment", namespace: "app", workload: "orders-api", replicas: 2, cpuP95Below: "2m" },
+    ],
+  });
+  assert.ok(raw.length > MAX_TOOL_RESULT_CHARS, `fixture is only ${raw.length} chars — it must exceed the cap to prove anything`);
+
+  const stored = compactToolResult(raw).toLowerCase();
+  assert.ok(stored.includes("app/deployment/orders-api"), "the idle key did not survive compaction");
+  assert.equal(quarantineRefusal(quarantine(), stored), null);
 });

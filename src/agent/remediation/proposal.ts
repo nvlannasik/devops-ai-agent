@@ -12,17 +12,28 @@ export interface Proposal {
   reason: string;
   toolParams: Record<string, unknown>; // exact MCP tool input (dry_run added by callers)
   summary: string; // human-readable one-liner for the approval card / result messages
+  /**
+   * A scale-to-zero quarantine. Set here so the evidence gate upstream does not have to
+   * re-derive "is this a quarantine?" from `toolParams.replicas === 0` at every call site —
+   * one missed call site is a workload taken offline on no evidence.
+   */
+  quarantine?: boolean;
 }
 
 const s = z.string().min(1);
 const kinds = z.enum(["deployment", "statefulset", "daemonset"]);
 
 const RolloutRestart = z.object({ namespace: s, workload: s, kind: kinds.optional() });
+// min(0), not min(1): zero is the reversible quarantine of a workload measured idle. It is not
+// waved through here — `DevOpsAgent.quarantineRefusalFor` requires a k8s_recommend_resources run
+// in the SAME thread to have listed this workload under `idleWorkloads`, the MCP server requires
+// `quarantine: true`, the dry-run runs, and a human still clicks. This schema only stops zero
+// being rejected before any of that can happen.
 const Scale = z.object({
   namespace: s,
   workload: s,
   kind: z.enum(["deployment", "statefulset"]), // daemonsets have no replicas
-  replicas: z.number().int().min(1),
+  replicas: z.number().int().min(0),
 });
 // container optional: the MCP server auto-resolves it for single-container workloads —
 // a model that guesses a container name is worse than one that omits it
@@ -107,13 +118,20 @@ export function parseProposal(text: string): Proposal | null {
       const p = Scale.safeParse(raw);
       if (!p.success) return null;
       const { namespace, workload, kind, replicas } = p.data;
+      const quarantine = replicas === 0;
       return {
         action: "k8s_scale",
         namespace,
         name: workload,
         reason,
-        toolParams: { namespace, name: workload, kind, replicas },
-        summary: `scale ${kind} \`${namespace}/${workload}\` → ${replicas} replicas`,
+        // `quarantine` is sent to the tool only when it is one: the MCP server treats the flag
+        // as the caller asserting intent, and asserting it on every scale would make the
+        // assertion meaningless.
+        toolParams: { namespace, name: workload, kind, replicas, ...(quarantine ? { quarantine: true } : {}) },
+        ...(quarantine ? { quarantine: true } : {}),
+        summary: quarantine
+          ? `quarantine ${kind} \`${namespace}/${workload}\` → 0 replicas (reversible: scale back to restore)`
+          : `scale ${kind} \`${namespace}/${workload}\` → ${replicas} replicas`,
       };
     }
     case "k8s_set_resources": {
