@@ -245,6 +245,12 @@ Medium or High"* — a sentence `rca-format` REQUIRES ("which evidence supports 
 raise it"). It failed an attempt that had asserted `Low`, correctly. Anchor on the field
 (`confidence:\*{0,2}\s*`?high`), not on the word appearing near the level.
 
+A **filtered** run (`--filter '^A08'`) is a spot check and is NOT recorded: it measures one case
+against one fix and says nothing about the agent, while the file it would land in is the one the
+dashboard reads. Measured before this rule existed: 16 lines, 3 of them whole-suite runs, so the
+page was 80% spot checks with the only comparable numbers buried among them. Pass `--record` when
+a subset really is the measurement you want kept; `--no-push` still means keep nothing.
+
 `npm run bench:log` renders that file as two tables — one run per row, then a case-by-run matrix
 of marks (`--runs N` to widen the window, 8 by default). The matrix is the one to read: a rate
 that drops four points does not say whether one case broke or four went flaky, and the row for a

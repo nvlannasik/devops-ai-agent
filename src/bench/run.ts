@@ -198,7 +198,18 @@ async function main(): Promise<void> {
   // this machine. Committed and pushed straight away unless --no-push: a score that needs a
   // second manual step is a score that stops being recorded the first busy week.
   const history = join(RESULTS_DIR, "history.jsonl");
-  if (has("no-push")) {
+  // A FILTERED run is a spot check, not a score. `--filter '^A08'` measures one case against one
+  // fix; it says nothing about the agent, and the file it was landing in is the one the dashboard
+  // reads. Measured on this file: 16 lines, 3 of them whole-suite runs — the page showed 20
+  // newest and was 80% spot checks, with the only three comparable numbers buried among them.
+  //
+  // So the default is inverted for a filtered run: the terminal output and the transcript beside
+  // it are its home, and `--record` opts one in when a subset really is the measurement you want
+  // kept. `--no-push` still means "keep nothing", for either kind.
+  const spotCheck = !!filterArg && !has("record");
+  if (spotCheck) {
+    console.log(`--filter ${filterArg}: spot check, not recorded (pass --record to keep it)`);
+  } else if (has("no-push")) {
     // Skips the APPEND too, not just the push. The only reason to pass this is that the run is
     // not one you want kept — a dry run with a deliberately unusable key, a half-finished case.
     // Recording it and leaving it uncommitted just moves the cleanup to whoever commits next,
