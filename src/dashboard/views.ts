@@ -9,6 +9,7 @@ import type {
   FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
 } from "./queries.js";
 import { byCase, byConfig, type BenchRun } from "./bench.js";
+import { thrownAttempts } from "../bench/store.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
 import type { Assets } from "./assets.js";
@@ -1547,6 +1548,11 @@ function whyByCase(run: BenchRun): Map<string, { attempts: number[]; reasons: st
 
 function benchRunCard(run: BenchRun): string {
   const why = whyByCase(run);
+  // Attempts that died before the model answered. They are scored as failures, which is right —
+  // the run still did not work — but they measure the backend, not the agent, and the rate at the
+  // top of this card silently mixes the two. Two of the seven recorded runs are affected: three
+  // SQS timeouts in one, six `429 no credits` in another.
+  const thrown = thrownAttempts(run.failures);
   // The union, not just the marks: a failure whose case is missing from marks would otherwise
   // be dropped silently, and this list is now the only place failures are reported.
   const cases = [...new Set([...Object.keys(run.marks), ...why.keys()])].sort();
@@ -1583,6 +1589,18 @@ function benchRunCard(run: BenchRun): string {
         ? `<div class="bench-axes">${axes
             .map(([name, [ok, seen]]) => badge(`${name} ${fmtInt(ok)}/${fmtInt(seen)}`, AXIS_TONE[rateLevel(ok, seen)]))
             .join("")}</div>`
+        : ""
+    }
+
+    ${
+      // Text, not a tone alone: the caveat has to survive a reader who cannot see the colour,
+      // and "don't convey information by colour alone" is the rule it would break. The badge
+      // carries its own words and the sentence beside it names the cases.
+      thrown.length > 0
+        ? `<p class="bench-meta meta">${badge(`${fmtInt(thrown.length)} attempt${thrown.length === 1 ? "" : "s"} never answered`, "warning")}
+            <span>died before the model replied (${esc(
+              [...new Set(thrown.map((t) => t.case.split("-")[0]))].join(", ")
+            )}) — infrastructure, not the agent. The rates above count them as failures.</span></p>`
         : ""
     }
 

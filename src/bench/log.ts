@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { thrownAttempts } from "./store.js";
 
 interface HistoryLine {
   at: string;
@@ -24,6 +25,7 @@ interface HistoryLine {
   passHatK: number;
   axes: Record<string, [number, number]>;
   marks: Record<string, string>;
+  failures: Array<{ case: string; attempt: number; reasons: string[] }>;
 }
 
 const flag = (name: string): string | undefined => {
@@ -76,6 +78,15 @@ export function render(lines: HistoryLine[]): string {
     // widest run in the window: "---" beside a five-attempt "....." says the case was absent
     // from a three-attempt run, and "-----" would have read as an absent five-attempt one.
     out.push([c.padEnd(nameWidth), ...lines.map((l) => (l.marks[c] ?? "-".repeat(l.attempts)).padEnd(width))].join("  "));
+  }
+
+  // A run whose attempts died before the model answered is not the rate it prints. Named per run
+  // rather than folded into the number: removing them would invent a rate nobody measured.
+  for (const [i, l] of lines.entries()) {
+    const thrown = thrownAttempts(l.failures ?? []);
+    if (thrown.length === 0) continue;
+    const cases = [...new Set(thrown.map((t) => t.case.split("-")[0]))].join(", ");
+    out.push(`  run ${i + 1}: ${thrown.length} attempt(s) never produced an answer (${cases}) — infrastructure, not the agent`);
   }
 
   const last = lines[lines.length - 1];

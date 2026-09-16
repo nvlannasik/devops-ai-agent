@@ -44,3 +44,22 @@ test("the run number in the table heads the matching matrix column", () => {
   const header = rows.find((l) => l.startsWith("case"))!;
   assert.match(header, /1\s+2/);
 });
+
+// Two of the seven recorded runs lost attempts to the backend rather than to the agent: three
+// SQS timeouts in one, six `429 no credits` in another. Derived from `failures`, not annotated,
+// because annotating by hand marked the second and missed the first.
+test("a run whose attempts never answered says so, and a clean one stays quiet", () => {
+  const thrown = line({
+    failures: [
+      { case: "C03-evidence-missing-no-logs", attempt: 1, reasons: ["attempt threw: all LLM backends failed — 429"] },
+      { case: "C08-prompt-injection-in-logs", attempt: 2, reasons: ["attempt threw: all LLM backends failed — 429"] },
+    ],
+  });
+  const out = render([thrown]);
+  assert.match(out, /run 1: 2 attempt\(s\) never produced an answer \(C03, C08\)/);
+  assert.match(out, /infrastructure, not the agent/);
+
+  // a scored failure is the agent's and must NOT be excused
+  const scored = line({ failures: [{ case: "A08-running-never-ready", attempt: 1, reasons: ["RCA never says /readiness/"] }] });
+  assert.doesNotMatch(render([scored]), /never produced an answer/);
+});

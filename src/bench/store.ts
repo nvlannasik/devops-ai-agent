@@ -80,6 +80,27 @@ export function axisTally(runs: TaskRun[]): Record<string, [number, number]> {
  * The RCA text is NOT in here — it belongs in the transcript the runner already writes. What
  * a reader wants from git is the number, what produced it, and what went wrong.
  */
+/**
+ * The attempts that never produced an answer.
+ *
+ * `attempt threw:` is the runner's prefix for an attempt that died before the model said
+ * anything — a backend out of credit, an SQS reply that never arrived, a fault injector that
+ * could not fire. Those are scored as failures, which is right (the run still did not work), but
+ * they measure the infrastructure rather than the agent, and a rate that silently mixes the two
+ * is the rate someone quotes six weeks later.
+ *
+ * Derived from `failures`, which every history line already carries, rather than annotated by
+ * hand: written by hand it would have marked the 429s in the 2026-09-11 run and missed the three
+ * SQS timeouts in the 2026-09-10 one, which is exactly what happened before this existed.
+ */
+export function thrownAttempts(
+  failures: ReadonlyArray<{ case: string; attempt: number; reasons: string[] }>
+): Array<{ case: string; attempt: number }> {
+  return failures
+    .filter((f) => f.reasons.some((r) => r.startsWith("attempt threw:")))
+    .map((f) => ({ case: f.case, attempt: f.attempt }));
+}
+
 export function appendHistory(
   path: string,
   input: {
