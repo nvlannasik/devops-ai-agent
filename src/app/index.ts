@@ -339,6 +339,11 @@ export class SlackApp {
         // the threadId, which as a detached call it never did — the one log line you needed to
         // join an orphan card back to its conversation was the one line that had no trace.
         const gate = worthProposing(text, reply, isRca, previousReply);
+        // Logged on BOTH branches now. Only the skip was logged before, so a card that should
+        // never have been proposed left no trace of why it was — which is exactly what happened
+        // on 2026-09-16, when a cleanup question produced a GitOps PR card and the log said
+        // nothing at all about the decision.
+        logger.info(`[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}`);
         if (gate.propose) {
           await withTrace(threadId, () =>
             this.maybeProposeRemediation(
@@ -352,8 +357,6 @@ export class SlackApp {
               gate.byUser
             )
           );
-        } else {
-          logger.info(`[remediation] no proposal call for thread ${threadId} — ${gate.reason}`);
         }
       } catch (err) {
         logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);

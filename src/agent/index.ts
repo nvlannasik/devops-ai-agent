@@ -1881,7 +1881,14 @@ export class DevOpsAgent {
       const targetName = String(toolParams.name ?? String(toolParams.pod ?? "").replace(/-[a-z0-9]+$/, ""));
       return {
         text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
-        target: { namespace: String(toolParams.namespace ?? ""), name: targetName },
+        // No target for a delete: post-remediation verification measures pod readiness, and the
+        // object this removed has no pods. Observed 2026-09-16 — a ConfigMap delete scheduled a
+        // check that came back five minutes later with "inconclusive — 0/0 pods ready", which is
+        // not an inconclusive result, it is a question that was never answerable. The GitOps PR
+        // path already returns no target for the same reason one level along: nothing to look at.
+        ...(claim.action === "k8s_delete_orphan"
+          ? {}
+          : { target: { namespace: String(toolParams.namespace ?? ""), name: targetName } }),
         // Handed back so the caller can post it into the thread. Two copies on purpose: this one
         // is the only one that survives losing the agent's Postgres, and it is the one a human
         // can act on at 3am without database access.

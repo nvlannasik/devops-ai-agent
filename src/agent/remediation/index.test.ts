@@ -698,3 +698,54 @@ test("the prompt refuses secrets and PVCs by name, with the reason", () => {
   assert.match(prompt, /backup is its credentials/);
   assert.match(prompt, /manifest is not its data/);
 });
+
+// ── A cleanup question is not a fault report ─────────────────────────────────
+// Live 2026-09-16: "ada resource yang ga kepake ga?" was answered with the unused scan plus the
+// rightsizing table. The answer carried fault vocabulary — a Service with no endpoints reads
+// "unavailable", a rightsizing row reads "throttled" — the fault-evidence branch fired, and a
+// GitOps PR approval card appeared for a workload in a namespace the user had never mentioned.
+
+const unusedReport =
+  "*Unused Resources (tidak memiliki referensi aktif):*\n" +
+  "• `Service/headlamp/headlamp-svc` — tidak ada endpoint, unavailable\n" +
+  "• `ConfigMap/default/order-configmap` — tidak ada yang merujuk\n" +
+  "Beberapa workload juga throttled dan over-provisioned.";
+
+test("a cleanup question does not propose, however much fault vocabulary the report carries", () => {
+  for (const q of [
+    "ada resource yang ga kepake ga?",
+    "ada resource yang bisa kita clean up ga?",
+    "what's unused in this cluster?",
+    "anything we can optimize?",
+    "resource apa aja yang tidak terpakai?",
+    "ada yang nganggur ga?",
+    "workload mana yang over-provisioned?",
+  ]) {
+    const gate = worthProposing(q, unusedReport, false);
+    assert.equal(gate.propose, false, `proposed for: ${q} (${gate.reason})`);
+    assert.match(gate.reason, /review finding, not a fault to repair/);
+  }
+});
+
+// The whole point is that it narrows ONE inference. Everything else still proposes.
+test("an explicit request still proposes, even when it uses cleanup words", () => {
+  for (const q of ["order-configmap bisa dihapus", "hapus configmap yang ga kepake", "delete the unused service"]) {
+    const gate = worthProposing(q, unusedReport, false);
+    assert.equal(gate.propose, true, `refused an explicit request: ${q}`);
+    assert.equal(gate.byUser, true, "an explicit request must be marked as the user's");
+  }
+});
+
+test("an RCA still proposes, and a real fault question still proposes", () => {
+  assert.equal(worthProposing("ada resource yang ga kepake ga?", unusedReport, true).propose, true, "an RCA was blocked");
+  const real = worthProposing("kenapa storefront lambat?", "Pod `storefront-7t6mn` is in CrashLoopBackOff.", false);
+  assert.equal(real.propose, true);
+  assert.match(real.reason, /fault evidence/);
+});
+
+// The fault words that also appear in capacity vocabulary must keep their meaning when the
+// question was not a cleanup one.
+test("oomkilled and evicted are faults, not cleanup findings", () => {
+  const gate = worthProposing("kenapa pod ini mati?", "Container was OOMKilled (exit code 137).", false);
+  assert.equal(gate.propose, true);
+});

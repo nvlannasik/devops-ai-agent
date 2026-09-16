@@ -244,6 +244,26 @@ const DISSENT = /\b(jangan|tidak|nggak|ngga|gak|belum|batal|tunggu|nanti|cancel|
 const isApproval = (text: string): boolean => AFFIRMATIVE.test(text.trim()) && !DISSENT.test(text);
 
 /**
+ * A cleanup or capacity QUESTION, in the user's own words.
+ *
+ * Its answer is a REVIEW LIST, and a review list is written in the same vocabulary a broken
+ * cluster is: a Service with no endpoints reads "unavailable", an idle workload reads "not
+ * ready", a rightsizing row reads "throttled" and "over-provisioned". None of that is a fault
+ * anybody asked to have repaired.
+ *
+ * Observed live 2026-09-16: "ada resource yang ga kepake ga?" was answered with the unused scan
+ * plus the rightsizing table, the fault-evidence branch below matched, and a GitOps PR approval
+ * card appeared for a workload in a namespace the user had never mentioned. They asked whether
+ * anything was unused and were handed a change to approve.
+ *
+ * Deliberately NOT the same vocabulary as `prompts/skills/resource-rightsizing.md`, which also
+ * lists `oomkill`, `evicted` and `throttl` — those ARE faults and must keep proposing. This is
+ * only the "what can we tidy up" half.
+ */
+const CAPACITY_QUESTION =
+  /\b(unused|orphan\w*|unclaimed|idle|wasted|waste|clean ?up|cleanup|cost|right.?siz\w*|over.?provision\w*|optimi[sz]\w*)\b|\b\w{0,4}(terpakai|kepake|pake|nganggur|menganggur|boros|hemat|sisa|numpuk)\w*/i;
+
+/**
  * `isRca` is the strongest signal there is: the agent only reaches for the incident template
  * when it found something to diagnose.
  *
@@ -273,7 +293,23 @@ export function worthProposing(
     return { propose: true, reason: "the user approved the change proposed in the previous turn", byUser: true };
   }
   const hit = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE);
-  if (hit) return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
+  if (hit) {
+    // The one inference this gate is no longer allowed to make: "the agent used fault vocabulary,
+    // so something must be broken". After a cleanup question it is reporting, not diagnosing.
+    //
+    // The asymmetry note above says to widen rather than tighten, because a false positive costs
+    // one LLM call that answers null. That was true when every proposable action was a repair.
+    // It is not true here: this false positive reaches a human as an approval card for a change
+    // to a workload they never named, and the cost of clicking it is the change.
+    if (CAPACITY_QUESTION.test(userText)) {
+      return {
+        propose: false,
+        reason: `capacity/cleanup question — "${hit[0]}" is a review finding, not a fault to repair`,
+        byUser: false,
+      };
+    }
+    return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
+  }
   return { propose: false, reason: "read-only question, no fault evidence in the answer", byUser: false };
 }
 
