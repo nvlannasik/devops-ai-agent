@@ -259,7 +259,7 @@ export class SlackApp {
         let noticeTs: string | undefined;
         let noticePending = false;
         const onProgress = (round: number, tools: string[]) => {
-          const text = `🔍 Round ${round}${tools.length > 0 ? ` — ${tools.join(", ")}` : ""}`;
+          const text = `:spinthinking: Round ${round}${tools.length > 0 ? ` — ${tools.join(", ")}` : ""}`;
           if (noticeTs) {
             void client.chat.update({ channel: event.channel, ts: noticeTs, text })
               .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
@@ -505,7 +505,7 @@ export class SlackApp {
       // The notice's ts is kept so the investigation can report progress into this one
       // message instead of posting a new one per round. Undefined if Slack does not return
       // it — progress is then skipped, which is exactly the old behaviour.
-      const notice = await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: "🔍 Auto-investigating..." });
+      const notice = await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: ":pepe-hacker: Auto-investigating..." });
       noticeTs = notice.ts;
     } catch (err) {
       await this.dedup.clear(groupLabels).catch(() => {});
@@ -607,7 +607,7 @@ export class SlackApp {
         ? (round: number, tools: string[]) => {
             const list = tools.length > 0 ? ` — ${tools.join(", ")}` : "";
             void this.app.client.chat
-              .update({ channel, ts: noticeTs, text: `🔍 Investigating, round ${round}${list}` })
+              .update({ channel, ts: noticeTs, text: `:pepe-hacker: Investigating, round ${round}${list}` })
               .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
           }
         : undefined;
@@ -625,7 +625,7 @@ export class SlackApp {
       // claiming a round is running.
       if (noticeTs) {
         await this.app.client.chat
-          .update({ channel, ts: noticeTs, text: "🔍 Investigation complete." })
+          .update({ channel, ts: noticeTs, text: ":pepe-perfect: Investigation complete." })
           .catch((e) => logger.debug(`[slack] could not close the progress notice for thread ${threadId}: ${errDetail(e)}`));
       }
       // Format-agnostic on purpose: a first occurrence gets the full RCA card, while a
