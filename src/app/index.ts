@@ -780,10 +780,28 @@ export class SlackApp {
       const progress = `⏳ Executing remediation ${remediationId} — approved by <@${userId}>...`;
       await client.chat.update({ channel, ts: messageTs, text: progress, blocks: remediationStatusBlocks(progress) });
 
-      const { text, target } = await this.agent.executeRemediation(remediationId, userId);
+      const { text, target, backup } = await this.agent.executeRemediation(remediationId, userId);
       await client.chat.update({ channel, ts: messageTs, text, blocks: remediationStatusBlocks(text) });
       const noteThread: string | undefined = body.message?.thread_ts;
       if (noteThread) await this.agent.noteInThread(noteThread, text);
+
+      // The deleted object's manifest, posted where whoever approved it can reach it. The row in
+      // Postgres is the primary copy; this one exists because it is the only copy that survives
+      // losing that database, and because a restore at 3am should not require DB access. JSON
+      // rather than YAML: `kubectl apply -f` takes it and it costs no dependency. Failures are
+      // logged, never thrown — the object is already gone and the row already holds the backup,
+      // so losing this copy must not report the deletion as failed.
+      if (backup) {
+        const manifest = JSON.stringify(backup, null, 2);
+        for (const part of splitForSlack(
+          `♻️ *Backup of the deleted object* — remediation \`${remediationId}\`. Restore with ` +
+            `\`kubectl apply -f -\` and this manifest:\n\`\`\`\n${manifest}\n\`\`\``
+        )) {
+          await client.chat
+            .postMessage({ channel, thread_ts: body.message?.thread_ts ?? messageTs, text: part, mrkdwn: true })
+            .catch((e) => logger.error(`[remediation] could not post the backup for ${remediationId}: ${errDetail(e)}`));
+        }
+      }
 
       // Post-remediation verification: scheduled in Postgres, not on a timer in this pod, so
       // a restart between the click and the check costs nothing — whichever replica polls

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry } from "./proposal.js";
 import { RemediationStore } from "./index.js";
-import { quarantineRefusal } from "../index.js";
+import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
 
 test("proposal prompt keeps the tail of a long RCA (Recommended Actions live there)", () => {
@@ -550,4 +550,87 @@ test("an idle measurement survives the compaction a real-sized response goes thr
   const stored = compactToolResult(raw).toLowerCase();
   assert.ok(stored.includes("app/deployment/orders-api"), "the idle key did not survive compaction");
   assert.equal(quarantineRefusal(quarantine(), stored), null);
+});
+
+// ── delete_orphan: shape + grounding gate ────────────────────────────────────
+// The MCP server re-reads the live object and refuses on provenance, ownership, replicas and age
+// — that is the safety check. THIS gate is about grounding: stopping the model naming an object
+// no scan ever flagged, which no server-side check can catch because an invented name can still
+// resolve to a real object. Same fail-closed rule as the quarantine.
+
+const orphanProposal = (over: Record<string, unknown> = {}) =>
+  parseProposal(
+    JSON.stringify({
+      action: "k8s_delete_orphan", namespace: "sample-apps", name: "leftover-config", kind: "configmap", ...over,
+    })
+  )!;
+
+// What the scan puts in the thread: orphanKeys, lowercased by observedText.
+const scanned = (...keys: string[]) => `{"orphankeys":[${keys.map((k) => `"${k}"`).join(",")}]}`;
+
+test("delete_orphan parses, and its summary names the undo rather than promising one", () => {
+  const p = orphanProposal();
+  assert.equal(p.action, "k8s_delete_orphan");
+  assert.deepEqual(p.toolParams, { namespace: "sample-apps", name: "leftover-config", kind: "configmap" });
+  assert.match(p.summary, /delete abandoned configmap `sample-apps\/leftover-config`/);
+  assert.match(p.summary, /manifest is backed up first/);
+});
+
+test("secret and persistentvolumeclaim are not proposable kinds at all", () => {
+  for (const kind of ["secret", "persistentvolumeclaim", "pvc", "namespace", "pod"]) {
+    assert.equal(parseProposal(JSON.stringify({
+      action: "k8s_delete_orphan", namespace: "a", name: "b", kind,
+    })), null, `${kind} was accepted`);
+  }
+});
+
+test("a delete the scan flagged as an orphan is allowed", () => {
+  assert.equal(orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/configmap/leftover-config")), null);
+});
+
+test("a delete of something no scan flagged is refused, and told to run the scan", () => {
+  const refusal = orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/configmap/something-else"));
+  assert.match(refusal!, /refused/);
+  assert.match(refusal!, /orphanKeys/);
+  assert.match(refusal!, /Run the scan on that namespace first/);
+  // and it explains the OTHER reason a key can be absent — something declares it
+  assert.match(refusal!, /Flux or Helm/);
+});
+
+// orphanKeys holds only findings nothing declares, so appearing in `findings` is not enough.
+test("appearing in the findings is not the same as appearing in orphanKeys", () => {
+  const declaredFinding = '{"findings":[{"kind":"ConfigMap","namespace":"sample-apps","name":"leftover-config","managedby":"flux"}],"orphankeys":[]}';
+  assert.ok(orphanDeleteRefusal(orphanProposal(), declaredFinding));
+});
+
+test("kind and namespace both have to match the key", () => {
+  assert.ok(orphanDeleteRefusal(orphanProposal(), scanned("sample-apps/service/leftover-config")));
+  assert.ok(orphanDeleteRefusal(orphanProposal(), scanned("other-ns/configmap/leftover-config")));
+});
+
+test("no conversation means no delete", () => {
+  assert.match(orphanDeleteRefusal(orphanProposal(), null)!, /no conversation to read one from/);
+});
+
+test("the orphan gate is invisible to every other action", () => {
+  const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"app","workload":"api"}')!;
+  assert.equal(orphanDeleteRefusal(restart, null), null);
+});
+
+// ── The backup extraction ────────────────────────────────────────────────────
+// Runs AFTER the object is already gone, so it must never throw: a parse failure costs the
+// backup, and turning that into a failed remediation would compound it.
+
+test("the backup manifest is lifted out of a successful delete result", () => {
+  const result = JSON.stringify({
+    action: "delete_orphan", target: "configmap/sample-apps/leftover-config",
+    backupManifest: { apiVersion: "v1", kind: "ConfigMap", metadata: { name: "leftover-config" } },
+  });
+  assert.deepEqual(backupFrom(result), { apiVersion: "v1", kind: "ConfigMap", metadata: { name: "leftover-config" } });
+});
+
+test("anything unparseable or wrongly shaped yields null instead of throwing", () => {
+  for (const bad of ["", "not json", "{}", '{"backupManifest":null}', '{"backupManifest":"a string"}', '{"backupManifest":[]}']) {
+    assert.equal(backupFrom(bad), null, `threw or accepted: ${bad}`);
+  }
 });

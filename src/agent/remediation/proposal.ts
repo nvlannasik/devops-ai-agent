@@ -39,6 +39,14 @@ const Scale = z.object({
 // a model that guesses a container name is worse than one that omits it
 const SetImage = z.object({ namespace: s, workload: s, kind: kinds, container: s.optional(), image: s });
 const DeletePod = z.object({ namespace: s, pod: s });
+// No secret, no persistentvolumeclaim, and that is a permanent exclusion rather than a first
+// phase: a Secret's backup IS its credentials, and a PVC's manifest is not its data. Neither can
+// be made reversible, and reversibility is the only thing that makes this action acceptable.
+const DeleteOrphan = z.object({
+  namespace: s,
+  name: s,
+  kind: z.enum(["configmap", "service", "serviceaccount", "deployment", "statefulset"]),
+});
 const SetResources = z
   .object({
     namespace: s,
@@ -161,6 +169,21 @@ export function parseProposal(text: string): Proposal | null {
         reason,
         toolParams: { namespace, pod },
         summary: `delete pod \`${namespace}/${pod}\` (its controller recreates it)`,
+      };
+    }
+    case "k8s_delete_orphan": {
+      const p = DeleteOrphan.safeParse(raw);
+      if (!p.success) return null;
+      const { namespace, name, kind } = p.data;
+      return {
+        action: "k8s_delete_orphan",
+        namespace,
+        name,
+        reason,
+        toolParams: { namespace, name, kind },
+        // The card has to say what the undo IS, not that one exists. "Reversible" with no
+        // mechanism named reads as reassurance; a stored manifest is a fact.
+        summary: `delete abandoned ${kind} \`${namespace}/${name}\` (manifest is backed up first — restore by re-applying it)`,
       };
     }
     default:

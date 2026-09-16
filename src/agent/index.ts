@@ -190,6 +190,56 @@ export function quarantineRefusal(proposal: Proposal, observed: string | null): 
   );
 }
 
+/**
+ * The orphan-evidence test for a delete, same shape and same fail-closed rule as
+ * `quarantineRefusal` above. `observed` is the thread's tool output, or null when there is no
+ * conversation to read.
+ *
+ * Demands that a `k8s_find_unused_resources` run IN THIS THREAD put this exact object in
+ * `orphanKeys` — the scan's list of findings nothing declares. That is a narrower claim than
+ * "it appeared in the findings": a Flux-declared object appears there too, and deleting one is
+ * both futile and evidence the finding was wrong.
+ *
+ * This gate is about GROUNDING, not about safety — the MCP server re-reads the live object and
+ * refuses on provenance, ownership, replicas and age at execution time, which is the check that
+ * matters. What this stops is the other failure: a model naming an object no scan ever flagged,
+ * which is the same class of invention `groundingGaps` exists for and which no server-side check
+ * can catch, because an invented name can still resolve to a real object.
+ */
+export function orphanDeleteRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (proposal.action !== "k8s_delete_orphan") return null;
+  const target = `${proposal.namespace}/${proposal.name}`;
+  if (observed === null) {
+    return `Deleting \`${target}\` needs an unused-resource scan to have flagged it, and this run has no conversation to read one from.`;
+  }
+  const kind = String(proposal.toolParams.kind ?? "");
+  const key = `${proposal.namespace}/${kind}/${proposal.name}`.toLowerCase();
+  if (observed.includes(key)) return null;
+  return (
+    `Deleting \`${target}\` is refused: no \`k8s_find_unused_resources\` result in this thread lists it under ` +
+    `\`orphanKeys\`. Run the scan on that namespace first. If it IS in the findings but not in \`orphanKeys\`, ` +
+    `something declares it — Flux or Helm — and the cluster is not where it gets removed.`
+  );
+}
+
+/**
+ * Pulls `backupManifest` out of a `k8s_delete_orphan` result.
+ *
+ * Returns null on anything unexpected rather than throwing: this runs AFTER the object has
+ * already been deleted, so a parse failure here must not turn a successful delete into a failed
+ * remediation — it costs the backup, which is bad enough to log and not worth compounding.
+ * Exported for the test.
+ */
+export function backupFrom(result: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(result) as { backupManifest?: unknown };
+    const m = parsed?.backupManifest;
+    return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface LogGapState {
   mode: RunMode;
   /** demandsLogs(skills) for the playbooks this run is carrying. */
@@ -1548,6 +1598,13 @@ export class DevOpsAgent {
       return { refused: idleRefusal };
     }
 
+    // Same rule, same reason, for the one action that cannot be undone from the cluster.
+    const orphanRefused = await this.orphanRefusalFor(proposal, opts.threadId);
+    if (orphanRefused) {
+      logger.info(`[remediation] orphan gate refused ${proposal.summary}: ${orphanRefused}`);
+      return { refused: orphanRefused };
+    }
+
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
     // server's namespace guardrails with zero side effects.
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
@@ -1591,8 +1648,18 @@ export class DevOpsAgent {
    */
   private async quarantineRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
     if (!proposal.quarantine) return null;
-    const history = threadId ? await this.memory.get(threadId).catch(() => [] as Message[]) : null;
-    return quarantineRefusal(proposal, history === null ? null : observedText(history));
+    return quarantineRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  private async orphanRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
+    if (proposal.action !== "k8s_delete_orphan") return null;
+    return orphanDeleteRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  /** The thread's tool output for the grounding gates, or null when there is no thread at all. */
+  private async threadEvidence(threadId?: string): Promise<string | null> {
+    if (!threadId) return null;
+    return observedText(await this.memory.get(threadId).catch(() => [] as Message[]));
   }
 
   /**
@@ -1787,7 +1854,7 @@ export class DevOpsAgent {
   async executeRemediation(
     id: number,
     approvedBy: string
-  ): Promise<{ text: string; target?: { namespace: string; name: string } }> {
+  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown }> {
     const claim = await this.remediations.claimForExecution(id, approvedBy);
     if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
     if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
@@ -1802,6 +1869,11 @@ export class DevOpsAgent {
     try {
       const result = await this.mcp.callTool(claim.action, toolParams);
       const ok = !result.startsWith("Error:");
+      // BEFORE finish(): the backup is the undo for the one action that cannot be undone from
+      // the cluster, so it is stored on the row that authorised it while we still hold the only
+      // copy. `result` cannot carry it — finish() truncates that column to 2000 chars.
+      const backup = ok && claim.action === "k8s_delete_orphan" ? backupFrom(result) : null;
+      if (backup) await this.remediations.saveBackup(id, backup);
       await this.remediations.finish(id, ok, result);
       if (!ok) return { text: `❌ *Remediation failed* — ${label}:\n\`${truncate(result, 400)}\`` };
       // delete_pod targets a pod, not a workload — drop the random suffix so verification
@@ -1810,6 +1882,10 @@ export class DevOpsAgent {
       return {
         text: `✅ *Remediation executed* — ${label} (approved by <@${approvedBy}>)\n\`${truncate(result, 400)}\``,
         target: { namespace: String(toolParams.namespace ?? ""), name: targetName },
+        // Handed back so the caller can post it into the thread. Two copies on purpose: this one
+        // is the only one that survives losing the agent's Postgres, and it is the one a human
+        // can act on at 3am without database access.
+        ...(backup ? { backup } : {}),
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

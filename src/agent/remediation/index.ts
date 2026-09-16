@@ -79,6 +79,30 @@ export class RemediationStore {
       .catch((e) => logger.error(`[remediation] finish failed: ${e instanceof Error ? e.message : e}`));
   }
 
+  /**
+   * Stores the manifest of an object `k8s_delete_orphan` removed, on the row that authorised it.
+   *
+   * Not in `result`: that column is truncated to 2000 chars above, which is fine for a sentence
+   * and useless for a manifest — a half-stored backup is worse than none, because it looks like
+   * one. `params` is JSONB and untruncated, the row is never pruned (this table has no retention),
+   * and the id is printed on the approval card, so the restore path is "look up remediation N".
+   *
+   * Merged into the existing params rather than replacing them: the tool input has to stay intact
+   * for the audit trail to say what was actually run.
+   *
+   * Best-effort like the rest of the store — but the caller posts the same manifest into the
+   * Slack thread, and that copy is the one that survives losing this database.
+   */
+  async saveBackup(id: number, manifest: unknown): Promise<void> {
+    if (!this.pool) return;
+    await this.pool
+      .query(`UPDATE remediations SET params = params || jsonb_build_object('backupManifest', $2::jsonb) WHERE id = $1`, [
+        id,
+        JSON.stringify(manifest),
+      ])
+      .catch((e) => logger.error(`[remediation] backup save failed for ${id}: ${e instanceof Error ? e.message : e}`));
+  }
+
   // Agent memory: past executed remediations for the same alert (joined via the incident),
   // so a recurring incident recalls what was actually done about it before (+ the PR/result).
   //
