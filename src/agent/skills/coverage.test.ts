@@ -21,7 +21,17 @@ import { buildGroupAlertText } from "../correlation/index.js";
  * The trigger text is built by `buildGroupAlertText`, the same function the webhook path uses, so
  * this measures what selection will actually see and not an approximation of it.
  *
- * **Ceiling, named: this asserts that A playbook was selected, not that the RIGHT one was.** Found
+ * **This measures selection from the ALERT TEXT only, and that is stricter than production
+ * needs.** `runInvestigation` re-runs selection against each tool result as it arrives, so a rule
+ * that matches nothing here is not unguided — `pod-pending` is reached when the events say
+ * `FailedScheduling`, and `forbidden` when a log line says so. Read a failure here as "this alert
+ * starts its investigation with no playbook", which is worth fixing on its own (advice on round
+ * one beats advice on round three), and NOT as "this fault has no playbook". The distinction was
+ * missed once already: three playbooks were briefly called dead because nothing selected them at
+ * alert time, and widening their triggers to fix that would have loaded Pending advice onto every
+ * OOMKill that fires the same catch-all rule.
+ *
+ * **Second ceiling: this asserts that A playbook was selected, not that the RIGHT one was.** Found
  * while writing it — `KubernetesServiceHasNoReadyEndpoints` was matching `multi-pod-one-cause` by
  * accident while `service-unavailable`, written for exactly that alert, missed it: its pattern
  * said `no endpoints` and the rule says "no **ready** endpoints". The regex is fixed, but the hole
