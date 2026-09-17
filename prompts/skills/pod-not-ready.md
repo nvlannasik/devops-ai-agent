@@ -1,7 +1,7 @@
 ---
 name: pod-not-ready
 description: A running container that never passes its readiness probe
-when: not ?ready|readiness|probe fail
+when: not ?ready|readiness|probe fail|unhealthy|not healthy|health issue
 ---
 
 1. k8s_describe_pod — `conditions` (Ready / ContainersReady) + each container's `state`; a failing probe shows as a not-ready container even while Running

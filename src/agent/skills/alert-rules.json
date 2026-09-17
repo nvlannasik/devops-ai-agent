@@ -1,0 +1,304 @@
+[
+  {
+    "alertname": "AppErrorLogSpike",
+    "labels": {
+      "severity": "warning",
+      "source": "loki"
+    },
+    "summary": "Error log spike in `{{ $labels.service }}` at `Dev cluster`",
+    "description": "Pod `{{ $labels.pod }}` is logging errors that never became an HTTP status and that no more specific rule claimed. Read the log, there is no metric for this one. :pedro:"
+  },
+  {
+    "alertname": "AppQueueClaimFailing",
+    "labels": {
+      "severity": "warning",
+      "source": "loki"
+    },
+    "summary": "`{{ $labels.service }}` cannot claim work from the queue",
+    "description": "Pod `{{ $labels.pod }}` is failing to claim settlement batches — the database is unreachable, or the claim query is erroring. Orders keep being accepted; none of them settle. :pepe_susq:"
+  },
+  {
+    "alertname": "AppRefusedToStart",
+    "labels": {
+      "severity": "critical",
+      "source": "loki"
+    },
+    "summary": "`{{ $labels.service }}` is refusing to start at `Dev cluster`",
+    "description": "Pod `{{ $labels.pod }}` aborted during boot — bad config, an out-of-date schema, or a failed migration. It never reached /metrics, so every Prometheus rule about this service is silent by construction. A config failure is logged before the logger exists, so `service` is empty on those lines — go by the pod. :hmmmmm:"
+  },
+  {
+    "alertname": "AppShutdownDrainTimeout",
+    "labels": {
+      "severity": "warning",
+      "source": "loki"
+    },
+    "summary": "`{{ $labels.service }}` is being killed mid-drain at `Dev cluster`",
+    "description": "Pod `{{ $labels.pod }}` hit its drain timeout and cut open connections. GRACEFUL_SHUTDOWN_MS is above terminationGracePeriodSeconds, so every rollout drops in-flight requests as resets that no error metric counts. :pedro:"
+  },
+  {
+    "alertname": "AppUnhandledRouteError",
+    "labels": {
+      "severity": "warning",
+      "source": "loki"
+    },
+    "summary": "Unhandled route errors in `{{ $labels.service }}` at `Dev cluster`",
+    "description": "`{{ $labels.service }}` is returning 500s from pod `{{ $labels.pod }}`. The route and the exception are in the log line, not in the counter. :pepe_susq:"
+  },
+  {
+    "alertname": "CertManagerSyncErrors",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "cert-manager controller `{{ $labels.controller }}` is erroring on sync",
+    "description": "The `{{ $labels.controller }}` controller is failing its reconcile loop. ACME rate limits, a DNS provider rejecting the challenge, and a bad issuer secret all land here."
+  },
+  {
+    "alertname": "CertificateExpiringSoon",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Certificate `{{ $labels.namespace }}/{{ $labels.name }}` expires in {{ printf \\\"%.0f\\\" $value }} days",
+    "description": "Issued by `{{ $labels.issuer_name }}`. Renewal should have happened at 30 days remaining and did not. Every browser and every internal client starts failing TLS on the same day."
+  },
+  {
+    "alertname": "CertificateNotReady",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Certificate `{{ $labels.namespace }}/{{ $labels.name }}` is not Ready",
+    "description": "cert-manager cannot issue or renew this certificate through `{{ $labels.issuer_name }}`. The existing secret keeps serving until it expires, so nothing breaks yet — this is the whole warning."
+  },
+  {
+    "alertname": "ClusterIssuerNotReady",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "ClusterIssuer `{{ $labels.name }}` is not Ready",
+    "description": "No certificate anywhere in the cluster can be issued or renewed through `{{ $labels.name }}` while this holds. Nothing breaks at the moment it happens; things break one by one as each certificate reaches its own renewal date."
+  },
+  {
+    "alertname": "FluxControllerDown",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Flux controller `{{ $labels.pod }}` is not responding to scrapes",
+    "description": "GitOps has stopped for whatever this controller owns. The cluster keeps running the last applied state, so nothing appears wrong until someone merges a change and it never lands."
+  },
+  {
+    "alertname": "FluxReconciliationStalled",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Flux has stopped reconciling `{{ $labels.kind }}` objects",
+    "description": "No `{{ $labels.kind }}` reconcile has been recorded for 15 minutes while the controller is still answering scrapes. Either it is wedged, or these resources are suspended — `flux get {{ $labels.kind }} --all-namespaces` says which."
+  },
+  {
+    "alertname": "KubernetesContainerCPUThrottling",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Container `{{ $labels.container }}` is CPU throttled {{ $value | humanizePercentage }} of the time",
+    "description": "`{{ $labels.namespace }}/{{ $labels.pod }}` is hitting its CPU limit. Latency rises with no error and no restart, so every health check stays green while the service is slow."
+  },
+  {
+    "alertname": "KubernetesContainerMemoryNearLimit",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Container `{{ $labels.container }}` is at {{ $value | humanizePercentage }} of its memory limit",
+    "description": "`{{ $labels.namespace }}/{{ $labels.pod }}` is close enough to its limit that the next allocation spike is an OOMKill. This fires before the kill, so there is still something to change."
+  },
+  {
+    "alertname": "KubernetesContainerOomKiller",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Container `{{ $labels.container }}` was OOMKilled in `{{ $labels.namespace }}/{{ $labels.pod }}`",
+    "description": "Container `{{ $labels.container }}` in pod `{{ $labels.namespace }}/{{ $labels.pod }}` has been OOMKilled {{ $value }} times in the last 10 minutes. The memory limit is the knob; whether the limit is too low or the code leaks is the question."
+  },
+  {
+    "alertname": "KubernetesDeploymentNotReady",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Deployment `{{ $labels.namespace }}/{{ $labels.deployment }}` has replicas that never became ready",
+    "description": "{{ $value }} replica(s) are not ready. Pod phase stays Running in this state, so no phase-based rule sees it — the readiness probe is the thing to look at."
+  },
+  {
+    "alertname": "KubernetesDeploymentRolloutStuck",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Rollout of `{{ $labels.namespace }}/{{ $labels.deployment }}` is not converging",
+    "description": "The Deployment spec changed but the controller has not caught up for 2 minutes. Either the rollout is blocked on a failing probe or the controller is wedged."
+  },
+  {
+    "alertname": "KubernetesNodeMemoryPressure",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Kubernetes Node `{{ $labels.node }}` is under memory pressure",
+    "description": "Node `{{ $labels.node }}` has the MemoryPressure condition. The kubelet will start evicting pods; the eviction victim is rarely the pod that caused it."
+  },
+  {
+    "alertname": "KubernetesPersistentVolumeFillingUp",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "PVC `{{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}` is {{ $value | humanizePercentage }} free",
+    "description": "Less than 25% of the volume remains. A database that fills its volume stops accepting writes and never recovers on its own."
+  },
+  {
+    "alertname": "KubernetesPodCrashLooping",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Crash Loop Detected `{{ $labels.pod }}` in `Dev cluster`",
+    "description": "Container `{{ $labels.container }}` in pod `{{ $labels.namespace }}/{{ $labels.pod }}` restarted {{ printf \"%.0f\" $value }} times in the last 5 minutes. It''s time to break the cycle! :pedro:"
+  },
+  {
+    "alertname": "KubernetesPodImagePullFailing",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Image pull failing for `{{ $labels.namespace }}/{{ $labels.pod }}`",
+    "description": "Container `{{ $labels.container }}` cannot pull its image. The tag, the registry, or the pull secret is wrong — the container has never started, so there is nothing in its log to read. :hmmmmm:"
+  },
+  {
+    "alertname": "KubernetesPodNotHealthy",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Unhealthy Pod `{{ $labels.pod }}` at `Dev cluster`",
+    "description": "Not feeling so well! Pod `{{ $labels.pod }}` in `{{ $labels.namespace }}` has health issues. Time for a check-up! :pepe_susq:"
+  },
+  {
+    "alertname": "KubernetesServiceHasNoReadyEndpoints",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "EndpointSlice `{{ $labels.namespace }}/{{ $labels.endpointslice }}` has no ready endpoints",
+    "description": "This Service is a black hole — it accepts connections and routes them nowhere. The slice name is `<service>-<hash>`. Check the selector against the pod labels before assuming the pods are down."
+  },
+  {
+    "alertname": "KubernetesStatefulSetDown",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Kubernetes StatefulSet `{{ $labels.namespace }}/{{ $labels.statefulset }}` is down",
+    "description": "StatefulSet `{{ $labels.namespace }}/{{ $labels.statefulset }}` has unready replicas and no rollout in progress."
+  },
+  {
+    "alertname": "PostgresConnectionsNearLimit",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Postgres is at {{ $value | humanizePercentage }} of max_connections",
+    "description": "New connections start being refused at 100%, and the first thing to fail is whatever reconnects next — usually not the workload that exhausted the pool."
+  },
+  {
+    "alertname": "PostgresDeadlocks",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Postgres is resolving deadlocks in `{{ $labels.datname }}`",
+    "description": "Postgres broke a deadlock by killing one transaction. The application sees a failed query, retries, and usually succeeds — so this is invisible from the app side and shows up as unexplained latency."
+  },
+  {
+    "alertname": "PostgresDown",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Postgres exporter cannot reach the database",
+    "description": "`pg_up` is 0. The agent loses its incident memory and the sample apps stop writing orders. If this appears immediately after enabling metrics and the database is plainly healthy, the exporter cannot authenticate — check the sidecar log, not the database."
+  },
+  {
+    "alertname": "PostgresIdleInTransaction",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "A transaction has been idle in `{{ $labels.datname }}` for {{ $value | humanizeDuration }}",
+    "description": "An open transaction is doing nothing while holding its locks and blocking vacuum. Nothing errors; writes that touch the same rows simply wait."
+  },
+  {
+    "alertname": "RedisDown",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Redis exporter cannot reach Redis",
+    "description": "The agent's conversation cache is gone. Investigations still run, but every one of them starts from nothing."
+  },
+  {
+    "alertname": "RedisEvictingKeys",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "Redis is evicting keys",
+    "description": "Redis is at its memory ceiling and dropping keys to stay under it. The agent loses conversation context mid-investigation and cannot tell an evicted thread from a new one — it just starts answering without history."
+  },
+  {
+    "alertname": "RedisRejectingConnections",
+    "labels": {
+      "severity": "warning",
+      "enabled": "false"
+    },
+    "summary": "Redis is refusing new connections",
+    "description": "`maxclients` is reached. Clients already connected keep working, so this looks like a partial outage affecting only whatever restarted most recently."
+  },
+  {
+    "alertname": "SampleAppHighErrorRate",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "`{{ $labels.service }}` is failing {{ $value | humanizePercentage }} of requests",
+    "description": "`{{ $labels.service }}` in `{{ $labels.namespace }}` has returned 5xx for {{ $value | humanizePercentage }} of requests over the last 5 minutes. The counter says how often; the route and the exception are only in the log."
+  },
+  {
+    "alertname": "SampleAppHighLatency",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "`{{ $labels.service }}` p99 latency is {{ $value | humanizeDuration }}",
+    "description": "The 99th percentile request duration for `{{ $labels.service }}` in `{{ $labels.namespace }}` is above 500ms. Error rate can be zero throughout — queueing is not failure."
+  },
+  {
+    "alertname": "SampleAppSettlementQueueNotDraining",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "The `{{ $labels.queue }}` queue is not draining",
+    "description": "The oldest unprocessed job in `{{ $labels.queue }}` is {{ $value | humanizeDuration }} old. Orders are being accepted and never settled — the API looks perfectly healthy from outside."
+  },
+  {
+    "alertname": "SampleAppStaleAssetRequests",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "`{{ $labels.service }}` is 404ing its own stylesheet",
+    "description": "The versioned asset path is returning 404. Every page renders unstyled and no 5xx, latency or restart signal moves. ASSET_VERSION does not match what the build shipped."
+  },
+  {
+    "alertname": "SampleAppTargetDown",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Prometheus cannot scrape `{{ $labels.pod }}`",
+    "description": "`{{ $labels.instance }}` in `{{ $labels.namespace }}` stopped answering scrapes. No restart is required for this — a process that stays up but stops serving looks identical."
+  },
+  {
+    "alertname": "SampleAppUpstreamDependencyErrors",
+    "labels": {
+      "severity": "warning"
+    },
+    "summary": "`{{ $labels.service }}` is failing to reach `{{ $labels.peer }}`",
+    "description": "{{ $value | humanizePercentage }} of calls from `{{ $labels.service }}` to `{{ $labels.peer }}` are timing out or erroring. The blame belongs one hop downstream of the service that is paging."
+  },
+  {
+    "alertname": "WorkerNodeIsNotReady",
+    "labels": {
+      "severity": "critical"
+    },
+    "summary": "Kubernetes Node `{{ $labels.node }}` is not ready",
+    "description": "Kubernetes Node `{{ $labels.node }}` is not ready for more than 3 minutes. Time to check the health of the node! :hmmmmm:"
+  }
+]

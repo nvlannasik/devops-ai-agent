@@ -1,7 +1,7 @@
 ---
 name: service-unavailable
 description: A Service with no ready backends behind it
-when: 503|service unavailable|no endpoints|connection refused
+when: 503|service unavailable|no (ready )?endpoints|endpointslice|connection refused|stopped answering|cannot scrape|target ?down
 ---
 
 1. k8s_get_endpoints (the Service name) — **readyCount = 0 means the Service has NO healthy backend pods** → the direct cause of 503 / connection-refused when the Service exists but routes nowhere
