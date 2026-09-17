@@ -239,6 +239,26 @@ remember a follow-up command is a score that stops being recorded the first busy
  "failures":[{"case":"C01-flap-nothing-wrong","attempt":4,"reasons":["grounding: ..."]}]}
 ```
 
+## B04 is 35%, and that is the number
+
+`B04-group-eight-pods-one-cause` has passed 6 of 17 recorded attempts: `xxx`, `..x`, `.x.`,
+`...`, `x.xx.`. The `...` is the outlier, not the baseline — read at three attempts it looks
+fixed, and at five it does not. **Do not chase it as a regression.** It was misread as one once.
+
+The failing attempts are not wrong, they are blocked, and they say so:
+
+> the exact crash reason cannot be confirmed because the previous-crashed container logs could
+> not be retrieved in this session
+
+The fixture is `echo "FATAL: DATABASE_URL is not set"; sleep 3; exit 1` across eight pods. That
+line only ever exists in a container that has already died, so reading it needs `previous: true`
+— while `MAX_LOG_FANOUT` is 2 and there are eight pods, all of them in backoff. Two log calls for
+eight candidates, and the answer is in the dead instance of any one of them.
+
+That collision is the case. Softening the fixture (a longer `sleep`, so a plain log read works)
+would make it pass more often and stop it testing the thing `crashloopbackoff.md` step 2 exists
+for. Kept hard on purpose: 35% is an honest number about the agent, not a broken case.
+
 ## Run modes
 
 A case declares the door it enters through: `alert` (the default, and what every case written
