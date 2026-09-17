@@ -35,6 +35,7 @@ values. Never emit a bracket in your output.**
   can still be Critical, just as a `critical` one can turn out to be Low.
 - Severity `[emoji]` must match the level you chose: 🔴 Critical, 🟠 High, 🟡 Medium, 🟢 Low.
 - Confidence `[level]` is one of *High*, *Medium*, *Low*, from the Confidence Scoring rules.
+- Copy every resource name from the tool output **character for character** — never shorten a pod name, never drop a suffix, never reconstruct one from a ReplicaSet hash you remember. A name you altered is a name no tool returned, it is reported as ungrounded, and a pod suffix is always five characters.
 
 Output EXACTLY this structure (labels must match precisely for rendering):
 

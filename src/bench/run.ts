@@ -56,6 +56,41 @@ function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
   execFileSync("bash", [path], { stdio: "inherit", env: process.env });
 }
 
+/**
+ * Nothing from another case may be alive when this one starts.
+ *
+ * Every `cleanup.sh` deletes with `--wait=false`, which returns while the namespace is still
+ * Terminating with its pods running. The agent's tool calls are not namespace-scoped by default,
+ * so the previous case stays visible for as long as that takes — and it is the loudest thing on
+ * the cluster, because it is a fault someone injected on purpose. Measured: C01, whose whole
+ * point is that nothing is wrong, proposed a rolling restart of `bench-b04/payments` while
+ * bench-b04 was on its way out with eight crashlooping pods.
+ *
+ * Checked here rather than fixed by making every cleanup wait: this also catches a namespace left
+ * behind by a crashed run, which no cleanup script would have run at all, and a new case cannot
+ * forget to opt in.
+ *
+ * Never throws. A namespace wedged on a finalizer is a reason to say so and carry on, not to end
+ * a five-hour run — the attempt that follows is contaminated, and the log line is what says which.
+ */
+async function waitForIsolation(timeoutMs = 180_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let left: string[] = [];
+  while (Date.now() < deadline) {
+    try {
+      left = execFileSync("kubectl", ["get", "ns", "-o", "name"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .split("\n")
+        .map((l) => l.replace("namespace/", "").trim())
+        .filter((n) => n.startsWith("bench-"));
+    } catch {
+      return; // no cluster reachable is the attempt's problem to report, not this gate's
+    }
+    if (left.length === 0) return;
+    await sleep(3000);
+  }
+  logger.warn(`[bench] ${left.join(", ")} still present after ${timeoutMs / 1000}s — the next attempt can see it`);
+}
+
 /** The text blocks of an LLM answer, joined — the agent's own extractText is private to it. */
 const textOf = (content: Array<{ type: string; text?: string }>): string =>
   content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
@@ -160,6 +195,7 @@ async function main(): Promise<void> {
         // catch inside attempt(). It also must not skip cleanup: the first live run of this
         // harness hit a fault injector that could not fire, and the crash left its namespace
         // behind on the cluster.
+        await waitForIsolation();
         hook(task, "setup.sh");
         if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
         ({ score, rca, proposal, proposalRaw, ungrounded } = await attempt(agent, llm, task, n));
