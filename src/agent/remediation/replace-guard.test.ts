@@ -178,3 +178,31 @@ test("a single ready replica still lets a restart through, whatever the others l
     null
   );
 });
+
+// ---- the sampling race (measured 2026-09-18) ----
+//
+// A CrashLoopBackOff pod running `sleep 3; exit 1` is READY for three seconds of every backoff
+// cycle. Sampled there, k8s_list_pods returns `Running / ready: true / restarts: 2` — a real
+// reading taken off the cluster — and the guard's first line, `some(p.ready)`, skipped all four
+// rules. It refused nothing across a 57-attempt run while refusing correctly in earlier runs;
+// the only difference was when the pods happened to be sampled.
+test("a flapping pod that is ready this instant does not count as serving", () => {
+  const flapping = [pod("settlement-worker-55f4d46d77-7c4zh", true, 2, "Running")];
+  const why = restart("settlement-worker", flapping);
+  assert.match(why ?? "", /kubelet has already done/);
+});
+
+test("a genuinely healthy pod still lets a restart through", () => {
+  assert.equal(restart("api", [pod("api-1-a", true, 0, "Running"), pod("api-1-b", false, 1, "Running")]), null);
+});
+
+test("delete_pod sees a flapping sibling as no sibling at all", () => {
+  const pods = [
+    pod("api-6b747db7c9-zwdcv", false, 3, "Running"),
+    pod("api-6b747db7c9-m4p8t", true, 4, "Running"), // ready right now, restarted four times
+  ];
+  assert.match(
+    replacementRefusal("k8s_delete_pod", { pod: "api-6b747db7c9-zwdcv" }, pods) ?? "",
+    /no healthy sibling|all 2 pods are unready/
+  );
+});

@@ -1284,6 +1284,32 @@ Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a w
 path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
 genuinely wedged process needs the probe result, which the payload does not carry.
 
+### `ready` is a snapshot, and a crash loop is ready part of the time (`replace-guard.ts`, `isServing`)
+
+The guard refused **nothing** across a 57-attempt run, having refused correctly in the runs before
+it. The wiring was fine and the pure functions were fine; what moved was WHEN the pods were
+sampled. Reproduced directly on the cluster:
+
+```
+settlement-worker-55f4d46d77-7c4zh   Running   READY=true   RESTARTS=2
+```
+
+A CrashLoopBackOff pod reports phase `Running`, and for the three seconds its container is alive
+each cycle it also reports `ready: true`. Benchmark C03 and B04 run `sleep 3; exit 1`, so roughly
+a quarter of every early backoff window looks healthy. The guard's first line asked
+`mine.some((p) => p.ready)` and returned null, skipping all four rules.
+
+`isServing` is now `ready && restarts === 0` everywhere readiness is tested — the workload-wide
+early return, the sibling test, and both halves of the stuck-rollout grouping. A pod that has
+restarted is not evidence that anything is serving, whatever this instant says.
+
+Trade named in the code: a workload that genuinely recovered after one restart is now treated as
+not-serving too, so a restart proposed against it can be refused. That costs a card nobody needed
+— restarting a recovered workload repairs nothing — and it buys a guard that does not depend on
+the sampling instant. The wider lesson for anything reading `k8s_list_pods`: **`ready` answers
+"right now", `restarts` answers "over the window the alert covers", and a flapping pod needs the
+second one.**
+
 ### The image-pull gate — the answer names the broken image and no working one (`agent/index.ts`, `imageGapRepo`)
 
 Second gate on the same machinery as the log-gap one, and it shares its hold slot: only one nudge

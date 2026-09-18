@@ -71,6 +71,23 @@ export function parsePods(raw: string): PodState[] {
  * safe direction: every rule below refuses only when EVERY matching pod looks broken, so pulling
  * in an unrelated healthy pod makes the guard stay quiet. It fails open, never shut.
  */
+/**
+ * Is this pod actually serving, as opposed to serving at the instant we looked?
+ *
+ * `ready` is a snapshot, and a CrashLoopBackOff pod is ready for part of every cycle: benchmark
+ * C03 and B04 run `sleep 3; exit 1`, so the container is alive and READY for three seconds of
+ * each backoff window. Sampled there, `k8s_list_pods` returns `Running / ready: true / restarts: 2`
+ * — measured, not theorised — and every rule below was skipped by the one-line early return that
+ * asked only `some(p.ready)`. It is why the guard refused nothing at all across a 57-attempt run
+ * while refusing correctly in the runs before it: the difference was WHEN the pods were sampled.
+ *
+ * So a pod that has restarted does not count as serving here. Trade named: a workload that
+ * genuinely recovered after one restart is now treated as not-serving too, and a restart proposed
+ * against it can be refused. That costs a card nobody needed — a restart of a recovered workload
+ * repairs nothing — and it buys back a guard that does not depend on the sampling instant.
+ */
+const isServing = (p: PodState): boolean => p.ready && p.restarts === 0;
+
 const podsOf = (pods: readonly PodState[], workload: string): PodState[] =>
   pods.filter((p) => p.name.startsWith(`${workload}-`));
 
@@ -154,7 +171,7 @@ export function replacementRefusal(
     const pod = typeof params.pod === "string" ? params.pod : "";
     if (!pod) return null;
     const siblings = siblingsOf(pods, pod);
-    if (siblings === null || siblings.some((p) => p.ready)) return null;
+    if (siblings === null || siblings.some(isServing)) return null;
     return (
       `deleting \`${pod}\` would replace it with an identical pod from the same spec, and there is no ` +
       `healthy sibling to show that a fresh one comes up any different` +
@@ -183,8 +200,8 @@ export function replacementRefusal(
       if (rs) groups.set(rs, [...(groups.get(rs) ?? []), p]);
     }
     if (groups.size >= 2) {
-      const stalled = [...groups].filter(([, ps]) => ps.every((p) => !p.ready));
-      const serving = [...groups].filter(([, ps]) => ps.some((p) => p.ready));
+      const stalled = [...groups].filter(([, ps]) => !ps.some(isServing));
+      const serving = [...groups].filter(([, ps]) => ps.some(isServing));
       if (stalled.length > 0 && serving.length > 0) {
         const [badName, bad] = stalled[0];
         return (
@@ -198,7 +215,7 @@ export function replacementRefusal(
       }
     }
 
-    if (mine.some((p) => p.ready)) return null;
+    if (mine.some(isServing)) return null;
 
     // Two ways the evidence can already show that a fresh identical pod does not come up healthy.
     const restarts = mine.reduce((n, p) => n + p.restarts, 0);
