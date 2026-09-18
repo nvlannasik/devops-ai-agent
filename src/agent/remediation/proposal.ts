@@ -241,6 +241,37 @@ const AFFIRMATIVE =
 // "ya tapi jangan sekarang" agrees with the diagnosis, not with doing the thing.
 const DISSENT = /\b(jangan|tidak|nggak|ngga|gak|belum|batal|tunggu|nanti|cancel|no|don'?t|do not|stop|hold|wait)\b/i;
 
+/**
+ * "Clean up" is a REQUEST when it names what to clean up, and a QUESTION when it does not.
+ *
+ * `ACTION_INTENT` above is a list of verbs, and cleanup vocabulary cannot simply join it:
+ * measured on one thread, 2026-09-18, the same two words carried both intents four minutes apart.
+ *
+ *   14:48  "is there any unused resource that we can clean up?"                  -> a question
+ *   14:50  "i want to clean up this `devops-tools/Service/devops-agent-redis`"   -> a request
+ *
+ * The second got no card, because "clean up" is in neither verb list. Adding it to ACTION_INTENT
+ * would have given the FIRST one a card — for an object nobody had named — which is the exact
+ * regression `CAPACITY_QUESTION` below exists to prevent.
+ *
+ * So the verb is not the signal. The named object is.
+ *
+ * Deliberately narrow: a BACKTICKED token containing a slash. The prompt mandates backticks for
+ * resource names and the agent's own replies use them, so that is how a target actually arrives.
+ * The slash separates an object from a namespace — "anything in `devops-tools` we can clean up?"
+ * is still a question and must stay one.
+ *
+ * ponytail: a bare unbackticked name ("clean up devops-agent-redis") gets no card. The cost is
+ * one "ya" — the answer offers the removal, that reply carries `remove`, and the approval branch
+ * below picks it up next turn. A false positive costs a card for something nobody asked about,
+ * so the miss is the cheaper direction.
+ */
+const CLEANUP_INTENT =
+  /\b(clean ?up|cleanup|get rid of|tidy up|purge|prune)\b|\b\w{0,4}(bersih|rapi|singkir|buang|musnah)\w*/i;
+
+/** A concrete object named in the message: backticked, and holding a path separator. */
+const NAMES_OBJECT = /`[^`\n]*\/[^`\n]*`/;
+
 const isApproval = (text: string): boolean => AFFIRMATIVE.test(text.trim()) && !DISSENT.test(text);
 
 /**
@@ -289,6 +320,10 @@ export function worthProposing(
   // line must not silently disable a guard.
   if (isRca) return { propose: true, reason: "RCA response — a fault was diagnosed", byUser: false };
   if (ACTION_INTENT.test(userText)) return { propose: true, reason: "the user asked for a change", byUser: true };
+  // Cleanup vocabulary counts as a request only when it names the object — see CLEANUP_INTENT.
+  if (CLEANUP_INTENT.test(userText) && NAMES_OBJECT.test(userText)) {
+    return { propose: true, reason: "the user asked to clean up a named object", byUser: true };
+  }
   if (isApproval(userText) && ACTION_INTENT.test(previousReply)) {
     return { propose: true, reason: "the user approved the change proposed in the previous turn", byUser: true };
   }

@@ -781,3 +781,52 @@ test("scale's notice matches the schema it is describing", () => {
   assert.doesNotMatch(notice, /at least 1/);
   assert.match(notice, /idleWorkloads/);
 });
+
+// ── "clean up" is a request only when it names the object ────────────────────
+// One thread, 2026-09-18, the same two words carrying both intents four minutes apart. The
+// request got no card, because "clean up" is in neither verb list of ACTION_INTENT.
+
+const REQUEST = "i want to clean up this `devops-tools/Service/devops-agent-redis` cause its not used";
+const QUESTION = "is there any unused resource that we can clean up?";
+const agentSaysSafe =
+  "You're correct — `devops-tools/Service/devops-agent-redis` is unused and safe to remove:\n" +
+  "• No endpoints (no pods selecting it)\n• Not managed by GitOps (`managedBy: none`)";
+
+test("a cleanup request that names the object proposes", () => {
+  const gate = worthProposing(REQUEST, agentSaysSafe, false);
+  assert.equal(gate.propose, true, gate.reason);
+  assert.equal(gate.byUser, true, "a named request is the user's, not the agent's inference");
+  assert.match(gate.reason, /named object/);
+});
+
+// The regression this must not reintroduce: adding "clean up" to ACTION_INTENT would card this.
+test("the same words without a named object stay a question", () => {
+  assert.equal(worthProposing(QUESTION, agentSaysSafe, false).propose, false);
+  for (const q of [
+    "anything we can clean up?",
+    "is there anything in `devops-tools` we can clean up?", // backticked, but a namespace
+    "bisa dibersihkan ga resource yang nganggur?",
+  ]) {
+    assert.equal(worthProposing(q, agentSaysSafe, false).propose, false, `carded a question: ${q}`);
+  }
+});
+
+test("the named-object form works in both languages and for the other cleanup verbs", () => {
+  for (const q of [
+    "please get rid of `sample-apps/Service/orders-svc`",
+    "prune `default/ConfigMap/old-config`",
+    "tolong bersihkan `devops-tools/Service/devops-agent-redis`",
+    "singkirkan `default/ConfigMap/order-configmap` dong",
+  ]) {
+    assert.equal(worthProposing(q, agentSaysSafe, false).propose, true, `refused a named request: ${q}`);
+  }
+});
+
+// The documented fallback for a bare name: the agent offers, the reply carries `remove`, and the
+// approval branch picks it up. Worth pinning, because it is the reason the miss is acceptable.
+test("a bare unbackticked name is picked up by the approval branch on the next turn", () => {
+  assert.equal(worthProposing("clean up devops-agent-redis", agentSaysSafe, false).propose, false);
+  const next = worthProposing("ya", "", false, agentSaysSafe);
+  assert.equal(next.propose, true, "the follow-up approval did not reach the proposal");
+  assert.match(next.reason, /approved the change proposed in the previous turn/);
+});
