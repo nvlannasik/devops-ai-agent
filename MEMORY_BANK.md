@@ -1284,6 +1284,28 @@ Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a w
 path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
 genuinely wedged process needs the probe result, which the payload does not carry.
 
+### An alert answered without reading anything (`agent/index.ts`, `needsEvidence`)
+
+Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from **one LLM call and
+zero tool calls** — fifteen thousand output tokens describing a cluster neither had looked at.
+Both failed, and both failed on the fact they could not have known: A04 never said "pull secret"
+because nothing had told it one was missing.
+
+This is the gap every other gate leaves open by construction. `logGapAction` requires
+`toolRounds > 0` before it will nudge; the budget and deadline ceilings fire when the model ran
+OUT of room, not when it never asked for any. Nothing watched for an investigation that never
+started.
+
+**Alert mode only, and that is not caution — it is correctness.** In conversation mode a tool-free
+answer is frequently the right one: C07 declines an out-of-scope request with no tools three times
+out of three, and nudging it would be telling it to go and do the thing it had just correctly
+refused. The same run shows C05 answering twice with no tools and passing, which is its own
+question about that case's expectation, not a reason to widen this gate.
+
+It shares the hold slot with the log-gap and image-pull gates, so the restore branch composes for
+free: `toolRoundsAtNudge` is 0, so if the extra round still calls nothing, the original answer is
+kept rather than replaced by a second guess.
+
 ### `ready` is a snapshot, and a crash loop is ready part of the time (`replace-guard.ts`, `isServing`)
 
 **Correction to the first version of this note, which said the guard "refused nothing across a

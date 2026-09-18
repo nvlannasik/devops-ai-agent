@@ -294,6 +294,40 @@ export const IMAGE_GAP_NOTICE =
   "it is Flux-managed. Then name that tag in the answer in full `registry/repo:tag` form. If you look and " +
   "the previous ReplicaSet is gone, say so — that is a finding, and it is why no rollback target exists.]";
 
+/**
+ * An alert answered without reading anything.
+ *
+ * Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from one LLM call and
+ * ZERO tool calls — fifteen thousand output tokens describing a cluster neither had looked at.
+ * Both failed, and on the fact they could not have known: A04 never said "pull secret", because
+ * nothing had told it there was one missing.
+ *
+ * Deliberately alert-mode only. In conversation mode a tool-free answer is often the correct one —
+ * benchmark C07 declines an out-of-scope request with no tools three times out of three, and
+ * nudging it would be telling it to go and do the thing it just correctly refused.
+ *
+ * This is the gap the other gates leave open by construction: `logGapAction` requires
+ * `toolRounds > 0` before it will nudge, and the budget and deadline ceilings fire when the model
+ * ran out of room rather than when it never asked for any.
+ */
+export const NO_EVIDENCE_NOTICE =
+  "[EVIDENCE GAP — you answered an alert without calling a single tool. Everything above is the " +
+  "alert payload and what you already believed; none of it was read from the cluster. An alert " +
+  "names a symptom and a subject, and it is the starting point of an investigation rather than its " +
+  "evidence. Go and look: the pod's state and events, the workload's spec, the logs of whatever is " +
+  "failing. If what you find contradicts the answer you just wrote, the answer was wrong and the " +
+  "evidence wins. Say what you actually read.]";
+
+/** Pure so it can be tested; the loop has no seam for the branch it guards. */
+export function needsEvidence(s: {
+  mode: RunMode;
+  toolRounds: number;
+  nudged: boolean;
+  toolsDisabled: boolean;
+}): boolean {
+  return s.mode === "alert" && s.toolRounds === 0 && !s.nudged && !s.toolsDisabled;
+}
+
 export interface LogGapState {
   mode: RunMode;
   /** demandsLogs(skills) for the playbooks this run is carrying. */
@@ -935,7 +969,8 @@ export class DevOpsAgent {
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
     let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
     let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
-    let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves both gates
+    let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves every gate
+    let noEvidenceNudged = false; // same, for NO_EVIDENCE_NOTICE
     // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
     // produces no new evidence cannot downgrade an answer that was already complete.
     let preNudgeSummary = "";
@@ -1168,6 +1203,16 @@ export class DevOpsAgent {
             `[${threadId}] final answer is just the tool name \`${summary.trim()}\` — the backend named a ` +
             `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
           );
+        }
+        // Before every other gate: an alert answered with no tool call at all has not been
+        // investigated, and whatever the other gates would ask about is downstream of that.
+        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled })) {
+          noEvidenceNudged = true;
+          preNudgeSummary = summary;
+          toolRoundsAtNudge = toolRounds;
+          logger.warn(`[${threadId}] answered an alert with zero tool calls — one more round to go and look`);
+          await this.memory.append(threadId, { role: "user", content: NO_EVIDENCE_NOTICE });
+          continue;
         }
         // The last gate before an answer leaves — see logGapAction for all three outcomes.
         const gap = logGapAction({
