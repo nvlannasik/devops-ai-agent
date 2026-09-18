@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse, formatRunFooter } from "./blocks.js";
+import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse, formatRunFooter, formatDuration } from "./blocks.js";
 
 test("partial RCA leak (plan + impact + confidence, no Severity) is detected", () => {
   const reply =
@@ -243,8 +243,46 @@ test("the footer names both the route alias and the model that actually ran", ()
   assert.match(f, /2 rounds · 3 tool calls/);
 });
 
+// ── Duration units ──────────────────────────────────────────────────────────
+// It used to be seconds all the way up, so a slow private backend printed `⏱ 101s` and the
+// reader had to divide. Investigations here reach minutes routinely.
+
 test("seconds lose the decimal once the number is big enough not to need it", () => {
-  assert.match(formatRunFooter({ durationMs: 344772, rounds: 2, toolCalls: 1 }), /^⏱ 345s/);
+  assert.equal(formatDuration(9400), "9.4s");
+  assert.equal(formatDuration(12000), "12s");
+  // The threshold tests the ROUNDED value, or this would print the odd "10.0s".
+  assert.equal(formatDuration(9999), "10s");
+  assert.equal(formatDuration(9949), "9.9s");
+});
+
+test("a run past a minute is reported in minutes and seconds", () => {
+  assert.equal(formatDuration(101457), "1m 41s"); // measured live, used to read "101s"
+  assert.equal(formatDuration(344772), "5m 45s");
+  assert.equal(formatDuration(59000), "59s", "the last second before a minute is still seconds");
+  assert.equal(formatDuration(60000), "1m");
+});
+
+test("a run past an hour is reported in hours", () => {
+  assert.equal(formatDuration(3600000), "1h");
+  assert.equal(formatDuration(3661000), "1h 1m 1s");
+  assert.equal(formatDuration(7385000), "2h 3m 5s");
+});
+
+// `2m` beats `2m 0s`, and an hour and nine seconds IS "1h 9s".
+test("a zero unit is dropped rather than padded", () => {
+  assert.equal(formatDuration(120000), "2m");
+  assert.equal(formatDuration(3609000), "1h 9s");
+  assert.equal(formatDuration(3660000), "1h 1m");
+});
+
+// Only 0ms reaches the all-zero case, and "0s" is a better answer there than "".
+test("zero and negative input still produce a duration", () => {
+  assert.equal(formatDuration(0), "0.0s");
+  assert.equal(formatDuration(-5), "0.0s");
+});
+
+test("the footer carries whatever formatDuration produced", () => {
+  assert.match(formatRunFooter({ durationMs: 344772, rounds: 2, toolCalls: 1 }), /^⏱ 5m 45s · /);
   assert.match(formatRunFooter({ durationMs: 9400, rounds: 1, toolCalls: 0 }), /^⏱ 9\.4s/);
 });
 

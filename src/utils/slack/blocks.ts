@@ -121,6 +121,42 @@ export function isRcaResponse(text: string): boolean {
 }
 
 /**
+ * A run's wall-clock time, in the units a reader actually thinks in.
+ *
+ * It used to be seconds all the way up, so a slow private backend printed `⏱ 101s` and the reader
+ * had to divide. Investigations on this stack reach minutes routinely — the alert path runs up to
+ * ten LLM calls against a self-hosted model — so minutes are the normal case, not the edge one.
+ *
+ * Sub-10s keeps one decimal, because that is the range where the difference between 2.1s and 8.4s
+ * is the thing worth knowing. The threshold is tested on the value that would be PRINTED, so
+ * 9.9s keeps its decimal and 9.999s prints `10s` rather than the `10.0s` a naive `< 10` gives.
+ *
+ * A zero unit is dropped rather than padded: `2m` beats `2m 0s`, and `1h 9s` is what an hour and
+ * nine seconds is. Exported for the test, and because the dashboard will want the same units the
+ * Slack card shows when it grows a duration column.
+ */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, ms) / 1000;
+  // Rounded to the decimal it would PRINT, not to a whole second: `< 10` on the whole value hands
+  // 9.9s to the integer branch and prints `10s`, and `< 10` on the raw value prints `10.0s` for
+  // 9.999s. Rounding first makes the threshold mean what the comment says it means.
+  const oneDp = Math.round(total * 10) / 10;
+  if (oneDp < 10) return `${oneDp.toFixed(1)}s`;
+
+  const whole = Math.round(total);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = whole % 60;
+  const parts: string[] = [];
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  // The seconds clause also carries the all-zero case, which only `0ms` reaches — and `0s` is a
+  // better answer there than an empty string.
+  if (s || parts.length === 0) parts.push(`${s}s`);
+  return parts.join(" ");
+}
+
+/**
  * The run footer: how long it took, on which model, over how many rounds.
  *
  * Built from measured metadata, never parsed back out of the reply — and appended as its own
@@ -136,8 +172,7 @@ export function formatRunFooter(meta: {
   backend?: string;
   route?: "light" | "heavy";
 }): string {
-  const secs = meta.durationMs / 1000;
-  const parts = [`⏱ ${secs < 10 ? secs.toFixed(1) : Math.round(secs)}s`];
+  const parts = [`⏱ ${formatDuration(meta.durationMs)}`];
   // backend is the name YOU gave it in the routes; model is what actually ran. Both, when they
   // differ — "private-llm-chatgpt" alone does not say which model, and a bare model name does
   // not say which route answered after a failover.
