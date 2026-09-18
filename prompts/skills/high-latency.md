@@ -8,3 +8,4 @@ when: latency|slow|timeout|p99|p95
 2. tracing_search (`service: "Y", minDurationMs: <near the P99>`) — find concrete slow traces, then tracing_get_trace on the worst one to see WHICH span/downstream is slow (DB, cache, external API). This turns "service Y is slow" into "span Z in service Y is slow".
 3. loki_query_range — timeout or connection refused messages around the slow trace's time window
 4. k8s_list_pods — check if downstream pods are ready
+5. **State the P99 and what it was before.** A latency number with no baseline cannot be acted on: nobody knows whether 800ms is the incident or the normal shape of this endpoint. Name the span or dependency the trace blamed, in the same sentence.

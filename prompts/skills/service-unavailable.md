@@ -8,3 +8,4 @@ when: 503|service unavailable|no (ready )?endpoints|endpointslice|connection ref
 2. k8s_list_pods — ready status + restart counts of the backend pods (why are they not ready?)
 3. k8s_list_services + k8s_list_ingresses — confirm the routing config (selector, ports) is intact
 4. If backends ARE ready but traffic still fails: k8s_list_network_policies — a deny-all or missing allow rule can silently block traffic
+5. **Check the selector against the pod labels before concluding the pods are down**, and say which you found. A Service with `readyCount: 0` and healthy pods beside it is a selector that no longer matches — a black hole that accepts connections and routes them nowhere — and its fix is in the Service, not the workload. Name the selector and the labels it failed to match.
