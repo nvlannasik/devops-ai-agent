@@ -1284,6 +1284,33 @@ Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a w
 path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
 genuinely wedged process needs the probe result, which the payload does not carry.
 
+### A change that cannot change anything (`agent/remediation/noop-guard.ts`)
+
+Sibling of the replacement guard, one step out: that one refuses a REPLACEMENT that rebuilds the
+identical pod, this one refuses an EDIT that writes back the value already in the spec.
+
+Found by running C03 against a second model. The `private-llm-agus` backend fixed the axis
+gpt-5-nano kept failing — `rca 3/3`, Confidence Medium/Low, never High, on the same fixture — and
+then proposed `k8s_set_image` to **`busybox:1.36`**, the image the container was already running,
+three times out of three. One said so in its own reason: *"Proposing reapplication of current
+image as it is the only known..."*.
+
+**The first design was a confidence heuristic and the measurement killed it.** Refusing any
+proposal whose RCA rated itself `Confidence: Low` looked reasonable; over 496 recorded attempts
+there were 14 such proposals and **4 of them were correct**. An OOMKill confirmed at a known limit
+is a fine reason to raise that limit while staying unsure why memory grew. A no-op needs no guess
+about the model's certainty — the value it proposes is the value already there.
+
+`k8s_list_deployments` and its siblings return `containers: [{name, image}]`, and the handler's own
+comment says why: "image-change remediations need the current". One listing call, chosen by the
+proposal's kind, and it fails open on anything unreadable.
+
+Also retired here: the second model answered the question the C03 fixture had raised. The earlier
+conclusion in this file — that `Confidence: High` was defensible because `args: ['sleep 3; exit 1']`
+leaks the cause in the spec — was too generous. agus read the same spec and said Medium/Low,
+correctly: the spec tells you THAT it exits, not WHY the workload is misconfigured. **The C03
+fixture does not need replacing.**
+
 ### An alert answered without reading anything (`agent/index.ts`, `needsEvidence`)
 
 Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from **one LLM call and

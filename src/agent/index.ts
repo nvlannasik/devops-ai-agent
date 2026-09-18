@@ -34,6 +34,7 @@ import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./f
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
+import { noOpImageRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -1805,8 +1806,29 @@ export class DevOpsAgent {
    * be correct is a bigger thing than the one failure it fixes.
    */
   async guardRefusalFor(proposal: Proposal): Promise<string | null> {
-    if (!REPLACEMENT_ACTIONS.has(proposal.action)) return null;
-    return this.replacementRefusalFor(proposal);
+    if (REPLACEMENT_ACTIONS.has(proposal.action)) return this.replacementRefusalFor(proposal);
+    if (proposal.action === "k8s_set_image") return this.noOpImageRefusalFor(proposal);
+    return null;
+  }
+
+  /**
+   * Is this image change writing back the image already in the spec? See `noop-guard.ts`.
+   *
+   * One listing call, chosen by the proposal's own kind. Fails open on anything it cannot read,
+   * like the replacement guard — a guard that refuses on a failed tool call is a guess.
+   */
+  async noOpImageRefusalFor(proposal: Proposal): Promise<string | null> {
+    const namespace = proposal.toolParams.namespace;
+    const kind = typeof proposal.toolParams.kind === "string" ? proposal.toolParams.kind : "deployment";
+    const tool = LISTING_FOR_KIND[kind];
+    if (typeof namespace !== "string" || !namespace || !tool) return null;
+    try {
+      const raw = await this.mcp.callTool(tool, { namespace });
+      return noOpImageRefusal(proposal.action, proposal.toolParams, raw);
+    } catch (err) {
+      logger.debug(`[remediation] no-op guard could not list ${kind}s in ${namespace}: ${errDetail(err)}`);
+      return null;
+    }
   }
 
   async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
