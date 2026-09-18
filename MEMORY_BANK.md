@@ -1284,6 +1284,33 @@ Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a w
 path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
 genuinely wedged process needs the probe result, which the payload does not carry.
 
+### The image-pull gate — the answer names the broken image and no working one (`agent/index.ts`, `imageGapRepo`)
+
+Second gate on the same machinery as the log-gap one, and it shares its hold slot: only one nudge
+may be outstanding, so `preNudgeSummary` / `toolRoundsAtNudge` serve both and the `restore` branch
+covers both for free.
+
+Benchmark A03 at five attempts made the diagnosis unambiguous. Pass/fail correlated exactly with
+whether the RCA named the working tag beside the failing one: the two that named `nginx:alpine`
+produced the correct `k8s_set_image`, the three that named only `nginx:no-such-tag-9f2c` answered
+`{"action": null}` — which is the RIGHT answer with no value to propose. **So this was never a
+proposal bug.** `buildProposalPrompt` is handed the RCA, and the tag was never in it; no amount of
+re-asking the proposal can recover a fact the answer does not contain. One failing attempt had
+even CALLED `k8s_list_replicasets` and still not carried the tag across.
+
+`imagepullbackoff.md` says to recover the tag and name it, and that held two times in five — the
+second failure of the rule, which is where it stops being a prompt rule.
+
+**Driven by the evidence, never by what looks like an image in prose.** The failing reference is
+read out of tool output that also carries a pull failure (`ImagePullBackOff`, `manifest unknown`),
+and the gate fires only when the answer names no OTHER tag for that same repository. An answer
+naming no image at all is a gap too. `registry:5000/app:v2` is why the repo splits at the last
+colon AFTER the last slash — splitting at the first one loses the host.
+
+The notice names where to look and what to say when it is not there: a rollout to a bad tag does
+not delete the ReplicaSet it replaced, so read the image off the one still running — and if the
+previous ReplicaSet is gone, say so, because that is why no rollback target exists.
+
 ### The log-gap gate — a selected playbook that gets ignored (`agent/index.ts`, `LOG_GAP_NOTICE`)
 
 **A playbook is a prompt rule, and prompt rules do not hold on their own.** `crashloopbackoff.md`

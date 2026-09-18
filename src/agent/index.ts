@@ -240,6 +240,60 @@ export function backupFrom(result: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * The image-pull gate: an answer that names the BROKEN image and no working one.
+ *
+ * Benchmark A03, measured at five attempts: the two that named `nginx:alpine` beside the failing
+ * `nginx:no-such-tag-9f2c` produced the correct `k8s_set_image`, and the three that named only the
+ * failing tag answered `{"action": null}` — which is the RIGHT answer with no value to propose.
+ * The fault is upstream of the proposal and the proposal step cannot repair it: `buildProposalPrompt`
+ * is handed the RCA, and the working tag was never in it. One attempt had even CALLED
+ * `k8s_list_replicasets` and still did not carry the tag into the answer.
+ *
+ * `imagepullbackoff.md` says to recover it and name it. That held two times in five, which is the
+ * second failure of the rule and the point where it stops being a prompt rule.
+ *
+ * Driven by the EVIDENCE, not by guessing what looks like an image: the failing reference is read
+ * out of tool output that also carries a pull failure, and the gate only fires when the answer
+ * names no other tag for that same repository. A registry port (`registry:5000/app:v2`) is why the
+ * repo is split at the last colon AFTER the last slash.
+ */
+const PULL_FAILURE = /imagepullbackoff|errimagepull|invalidimagename|manifest unknown|manifest for \S+ not found/i;
+const IMAGE_REF = /"image"\s*:\s*"([^"\s]+:[^"\s]+)"|\bimage[:=]?\s+([a-z0-9][^\s"',)]*:[a-zA-Z0-9._-]+)/gi;
+
+const repoOf = (ref: string): string => {
+  const colon = ref.lastIndexOf(":");
+  return colon > ref.lastIndexOf("/") ? ref.slice(0, colon) : ref;
+};
+
+/** The repository whose only named tag is the broken one, or null when the answer is fine. */
+export function imageGapRepo(answer: string, observed: string): string | null {
+  if (!PULL_FAILURE.test(observed)) return null;
+  const failing = new Set<string>();
+  for (const m of observed.matchAll(IMAGE_REF)) {
+    const ref = m[1] ?? m[2];
+    if (ref) failing.add(ref);
+  }
+  for (const ref of failing) {
+    const repo = repoOf(ref);
+    if (repo === ref) continue; // no tag to compare
+    const tags = new Set(
+      [...answer.matchAll(new RegExp(`${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:([a-zA-Z0-9._-]+)`, "g"))].map((t) => t[1])
+    );
+    // Names the broken tag and nothing else for that repo — including naming no tag at all.
+    if (tags.size <= 1 && !([...tags].some((t) => `${repo}:${t}` !== ref))) return repo;
+  }
+  return null;
+}
+
+export const IMAGE_GAP_NOTICE =
+  "[EVIDENCE GAP — you named the image that is FAILING and no image that works, so there is nothing " +
+  "for a remediation to set. The working tag is almost certainly still on this cluster: a rollout to a " +
+  "bad tag does not delete the ReplicaSet it replaced. Call `k8s_list_replicasets` for this workload and " +
+  "read the image off the one whose pods are still running, or `k8s_get_resource` on the HelmRelease if " +
+  "it is Flux-managed. Then name that tag in the answer in full `registry/repo:tag` form. If you look and " +
+  "the previous ReplicaSet is gone, say so — that is a finding, and it is why no rollback target exists.]";
+
 export interface LogGapState {
   mode: RunMode;
   /** demandsLogs(skills) for the playbooks this run is carrying. */
@@ -881,6 +935,7 @@ export class DevOpsAgent {
     let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
     let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
     let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
+    let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves both gates
     // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
     // produces no new evidence cannot downgrade an answer that was already complete.
     let preNudgeSummary = "";
@@ -1126,8 +1181,10 @@ export class DevOpsAgent {
           holdingAnswer: preNudgeSummary !== "",
         });
         if (gap === "restore") {
+          // Gate-agnostic on purpose: both gates hold their answer in the same slot, so this
+          // sentence has to be true of whichever one spent the round.
           logger.warn(
-            `[${threadId}] the log-gap round fetched nothing — keeping the pre-nudge answer ` +
+            `[${threadId}] the extra round fetched nothing — keeping the pre-nudge answer ` +
             `(${preNudgeSummary.length} chars) over the retry's ${summary.length}`
           );
           return done(preNudgeSummary);
@@ -1142,6 +1199,20 @@ export class DevOpsAgent {
           );
           await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
           continue;
+        }
+        // Second gate, same hold slot: only one nudge may be outstanding, so this is reached only
+        // when the log gap did not take the round. Evidence-driven, so it is safe in every mode —
+        // the trigger is a pull failure in tool output, not a guess about the question.
+        if (!imageGapNudged && !toolsDisabled && toolRounds > 0) {
+          const repo = imageGapRepo(summary, observedText(await this.memory.get(threadId)));
+          if (repo) {
+            imageGapNudged = true;
+            preNudgeSummary = summary;
+            toolRoundsAtNudge = toolRounds;
+            logger.info(`[${threadId}] answer names \`${repo}\` only as the image that failed to pull — one more round for the tag that works`);
+            await this.memory.append(threadId, { role: "user", content: IMAGE_GAP_NOTICE });
+            continue;
+          }
         }
         return done(summary);
       }
