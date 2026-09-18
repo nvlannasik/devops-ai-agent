@@ -57,6 +57,47 @@ function hook(task: Case, script: "setup.sh" | "cleanup.sh"): void {
 }
 
 /**
+ * Incident memory must start every attempt empty.
+ *
+ * Recall is cross-thread BY DESIGN — that is what it is for — so with the database on, attempt 2
+ * of a case reads attempt 1's incident back as a "Prior similar incident", and the score stops
+ * measuring the model and starts measuring the run order. Emptying it per attempt is what keeps
+ * the three attempts of a case independent, which is the whole basis of pass^k.
+ *
+ * This deliberately leaves the recall PATH unmeasured rather than measuring it by accident. A
+ * tier-D case that wants a populated table should seed it in its own `setup.sh`, where the prior
+ * incident is a fixture with known content — not a leftover whose text depends on what the model
+ * happened to say twenty minutes earlier.
+ *
+ * `schema_migrations` is excluded: emptying it makes the next `initialize()` re-run every
+ * migration against tables that already exist.
+ */
+async function resetIncidentMemory(): Promise<void> {
+  if (!process.env.DB_HOST) return; // memory disabled — nothing to reset, and no client to build
+  const { Pool } = await import("pg");
+  const pool = new Pool({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT ?? 5432),
+    user: process.env.DB_USERNAME, // DB_USERNAME, not DB_USER — config/index.ts reads that name
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+  });
+  try {
+    const { rows } = await pool.query<{ tablename: string }>(
+      "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'schema_migrations'"
+    );
+    const names = rows.map((r) => `"${r.tablename}"`).join(", ");
+    if (names) await pool.query(`${"TRUNCATE"} ${names} RESTART IDENTITY CASCADE`);
+  } catch (err) {
+    // Same reasoning as waitForIsolation: a reset that cannot run is a contaminated attempt worth
+    // saying so about, not a reason to end a five-hour run.
+    logger.warn(`[bench] could not reset incident memory: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+/**
  * Nothing from another case may be alive when this one starts.
  *
  * Every `cleanup.sh` deletes with `--wait=false`, which returns while the namespace is still
@@ -196,6 +237,7 @@ async function main(): Promise<void> {
         // harness hit a fault injector that could not fire, and the crash left its namespace
         // behind on the cluster.
         await waitForIsolation();
+        await resetIncidentMemory();
         hook(task, "setup.sh");
         if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
         ({ score, rca, proposal, proposalRaw, ungrounded } = await attempt(agent, llm, task, n));
