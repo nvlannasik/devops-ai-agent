@@ -300,3 +300,36 @@ test("the PromQL patterns only name metrics that exist in this cluster", () => {
     );
   }
 });
+
+/**
+ * The scope section decides before anything else is read, so a capability it does not admit is a
+ * capability that never gets reached.
+ *
+ * It used to enumerate the in-scope changes as "(restart, scale, image bump)". Measured live
+ * 2026-09-18, twice: "i want to delete service endpoint for devops agent redis" and "hapus
+ * service `devops-tools/devops-agent-redis`" were both answered with the out-of-scope
+ * boilerplate. `k8s_delete_orphan` was fully described 340 lines further down, under
+ * `## Execution & Remediation` — and the model never got there, because scope had already
+ * decided. Every guard behind the delete went untested because the request never reached one.
+ *
+ * Two statements about what this agent does, in two places, that disagreed. Same shape as the
+ * three action lists in `proposal.ts`, and pinned the same way.
+ */
+test("the scope section admits the changes the remediation section can propose", () => {
+  const prompt = buildStaticSystemPrompt();
+  const from = prompt.indexOf("## Scope of Work");
+  assert.ok(from >= 0, "the Scope of Work section is gone");
+  const scope = prompt.slice(from, prompt.indexOf("\n## ", from + 1));
+
+  assert.match(scope, /remov\w+|delet\w+/i, "scope never mentions removal, so a delete request reads as out of scope");
+  // The failure mode is an enumeration that looks exhaustive, so the fix has to say the opposite.
+  assert.match(scope, /any request to change the cluster is in scope/i);
+  // And it must point at the proposable list rather than duplicating it — two lists drift.
+  assert.match(scope, /## Execution & Remediation/);
+});
+
+test("the remediation section still names the delete action the scope section now admits", () => {
+  const prompt = buildStaticSystemPrompt();
+  assert.match(prompt, /`k8s_delete_orphan` removes ONE abandoned object/);
+  assert.match(prompt, /no delete for Secrets or PersistentVolumeClaims/i);
+});
