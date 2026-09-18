@@ -1286,9 +1286,14 @@ genuinely wedged process needs the probe result, which the payload does not carr
 
 ### `ready` is a snapshot, and a crash loop is ready part of the time (`replace-guard.ts`, `isServing`)
 
-The guard refused **nothing** across a 57-attempt run, having refused correctly in the runs before
-it. The wiring was fine and the pure functions were fine; what moved was WHEN the pods were
-sampled. Reproduced directly on the cluster:
+**Correction to the first version of this note, which said the guard "refused nothing across a
+57-attempt run".** It refused six times in that run. The zero came from grepping the console, and
+`[guard refused]` is written only into `proposalRaw` in the results JSON — it is never printed.
+The claim was an artefact of where it was looked for. What the run actually shows is an
+INTERMITTENT guard: it refused on A01, A09, B04, C02 and C08 and missed B04 #2 and C03 #1, which
+is the signature of a race rather than a dead code path.
+
+The race is real, and this is the reading that found it:
 
 ```
 settlement-worker-55f4d46d77-7c4zh   Running   READY=true   RESTARTS=2
@@ -1297,7 +1302,13 @@ settlement-worker-55f4d46d77-7c4zh   Running   READY=true   RESTARTS=2
 A CrashLoopBackOff pod reports phase `Running`, and for the three seconds its container is alive
 each cycle it also reports `ready: true`. Benchmark C03 and B04 run `sleep 3; exit 1`, so roughly
 a quarter of every early backoff window looks healthy. The guard's first line asked
-`mine.some((p) => p.ready)` and returned null, skipping all four rules.
+`mine.some((p) => p.ready)` and returned null, skipping all four rules — whenever the sample
+landed in that window, and only then.
+
+Scope, measured rather than assumed: `isServing` targets the two failures the race actually cost
+(B04 #2 and C03 #1). C02 #1 and A09 #2 were already refused and fail because the case expects a
+different action; A13 #2 is a proposal against a pod that genuinely is serving, where the guard is
+right to stay quiet; A07 #3 and C03 #3 propose `k8s_set_resources`, which this guard never covers.
 
 `isServing` is now `ready && restarts === 0` everywhere readiness is tested — the workload-wide
 early return, the sibling test, and both halves of the stuck-rollout grouping. A pod that has
