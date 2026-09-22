@@ -859,8 +859,9 @@ test("an [OFFER] that names no object is not an offer", () => {
   assert.equal(parseOffer("[OFFER] delete `devops-agent-redis`"), null);
 });
 
-test("stripOffer never empties a reply", () => {
-  assert.equal(stripOffer("[OFFER] delete `a/Service/b`"), "[OFFER] delete `a/Service/b`");
+// Verbatim live reply, 2026-09-22: the marker was the whole answer, and it reached Slack raw.
+test("a reply that is only the marker is restated, never posted raw or empty", () => {
+  assert.equal(stripOffer("[OFFER] delete `default/Service/unsueddd`"), "Proposed: delete `default/Service/unsueddd`.");
 });
 
 // The case that took four regex patches: bare name, "clean up", no verb the gate knows.

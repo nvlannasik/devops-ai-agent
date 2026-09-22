@@ -380,9 +380,19 @@ export function parseOffer(reply: string): string | null {
   return null;
 }
 
-/** The reply as Slack should see it. Thread memory keeps the marker; only the posted text loses it. */
-export const stripOffer = (reply: string): string =>
-  reply.replace(OFFER_LINE, "").replace(/\n{3,}/g, "\n\n").trim() || reply;
+/**
+ * The reply as Slack should see it. Thread memory keeps the marker; only the posted text loses it.
+ *
+ * A reply can be NOTHING but the marker — live 2026-09-22, "unsuedd itu bisa dihapus" was answered
+ * with the one line `[OFFER] delete \`default/Service/unsueddd\``. Slack rejects empty text, and
+ * falling back to the raw reply posted the marker itself, so the offer is restated in words.
+ */
+export function stripOffer(reply: string): string {
+  const text = reply.replace(OFFER_LINE, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (text) return text;
+  const offer = parseOffer(reply);
+  return offer ? `Proposed: ${offer}.` : reply;
+}
 
 /**
  * The prompt forbids promising a card, and measured live on 2026-09-22 the light route did it
