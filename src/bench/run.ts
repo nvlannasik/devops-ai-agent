@@ -186,7 +186,9 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // proposal and has to be scored as one. One call, not a per-guard check: which actions a
     // guard applies to is the guard's business, and the previous split let the two drift.
     if (proposal) {
-      const refusal = await agent.guardRefusalFor(proposal).catch(() => null);
+      const refusal =
+        (await agent.guardRefusalFor(proposal).catch(() => null)) ??
+        (await agent.imageRefusalFor(proposal, threadId, rca).catch(() => null));
       if (refusal) {
         proposalRaw = `${proposalRaw}\n[guard refused] ${refusal}`;
         proposal = null;

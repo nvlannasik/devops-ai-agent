@@ -224,6 +224,44 @@ export function orphanDeleteRefusal(proposal: Proposal, observed: string | null)
 }
 
 /**
+ * An image change must name an image something in this thread actually showed — a tool result,
+ * or the person asking.
+ *
+ * Live 2026-09-22, SampleAppHighLatency: a correct RCA (orders-api's response shape changed,
+ * checkout-gateway cannot parse it) became a GitOps PR card setting checkout-gateway to
+ * `registry.example.com/checkout-gateway:v1.2`. No tool had ever returned that registry; `v1.2` is
+ * the example in buildProposalPrompt's own text. The dry-run cannot catch it — writing a string
+ * into a values file is a perfectly valid operation — and a merged PR would have been an
+ * ImagePullBackOff.
+ *
+ * Grounded when the full image appears in the evidence, or when the user named the TAG in words
+ * ("change the tag to v1.3") on a repository the cluster already runs. `docker.io/` is dropped
+ * before comparing, because listings and people disagree about whether to write it. NOT skipped
+ * for a user request: a person who names an image passes through the user-text half of the rule.
+ */
+export function unseenImageRefusal(proposal: Proposal, observed: string | null, userText: string): string | null {
+  if (proposal.action !== "k8s_set_image") return null;
+  const image = String(proposal.toolParams.image ?? "");
+  if (!image) return null;
+  const bare = (v: string) => v.replace(/(^|[\s"'`(=])docker\.io\//g, "$1");
+  const seen = bare(`${observed ?? ""}\n${userText}`);
+  const target = bare(image);
+  if (seen.includes(target)) return null;
+
+  const colon = target.lastIndexOf(":");
+  if (colon > target.lastIndexOf("/")) {
+    const repo = target.slice(0, colon);
+    const tag = target.slice(colon + 1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (bare(observed ?? "").includes(repo) && new RegExp(`(^|[^\\w.-])${tag}($|[^\\w.-])`).test(userText)) return null;
+  }
+  return (
+    `Setting the image to \`${image}\` is refused: no tool result in this thread shows that image and nobody ` +
+    `asked for it by name, so it was invented rather than found. Name the exact image, or find the last ` +
+    `good one in the workload's rollout history.`
+  );
+}
+
+/**
  * Pulls `backupManifest` out of a `k8s_delete_orphan` result.
  *
  * Returns null on anything unexpected rather than throwing: this runs AFTER the object has
@@ -1768,6 +1806,14 @@ export class DevOpsAgent {
       return { refused: orphanRefused };
     }
 
+    // And for images: never a card for an image nothing in the thread showed. Not skipped for a
+    // user request either — a person who names the image satisfies it in their own words.
+    const imageRefused = await this.imageRefusalFor(proposal, opts.threadId, rca);
+    if (imageRefused) {
+      logger.info(`[remediation] image gate refused ${proposal.summary}: ${imageRefused}`);
+      return { refused: imageRefused };
+    }
+
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
     // server's namespace guardrails with zero side effects.
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
@@ -1817,6 +1863,16 @@ export class DevOpsAgent {
   private async orphanRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
     if (proposal.action !== "k8s_delete_orphan") return null;
     return orphanDeleteRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  /**
+   * Public because `bench/run.ts` applies it too. `rca` is the proposal context: on the mention
+   * path it opens with "User request: <text>", which is the only human-written part of it.
+   */
+  async imageRefusalFor(proposal: Proposal, threadId: string | undefined, rca: string): Promise<string | null> {
+    if (proposal.action !== "k8s_set_image") return null;
+    const userText = rca.match(/^User request: ([\s\S]*?)\n\nAgent reply:/)?.[1] ?? "";
+    return unseenImageRefusal(proposal, await this.threadEvidence(threadId), userText);
   }
 
   /** The thread's tool output for the grounding gates, or null when there is no thread at all. */
