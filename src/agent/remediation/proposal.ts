@@ -207,8 +207,12 @@ export function parseProposal(text: string): Proposal | null {
 // says as much), so it has to survive this gate even on a perfectly healthy cluster.
 // The Indonesian half matches STEMS with up to four leading characters, because the affixes
 // carry the request: "perbaiki" arrives as "diperbaiki", "ganti" as "mengganti".
+// delete/remove take their inflections too: this pattern also reads the agent's PREVIOUS reply
+// for the approval branch, and the agent offers removals as nouns — "safe to consider for
+// removal … Shall I prepare a deletion proposal?" (live, 2026-09-22) matched neither bare verb,
+// so the "yes please" that followed proposed nothing.
 const ACTION_INTENT =
-  /\b(restart|rollout|redeploy|deploy|scale|rollback|roll back|revert|delete|remove|patch|set|change|switch|update|upgrade|downgrade|increase|decrease|raise|lower|bump|resize|fix|apply|reconcile)\b|\b\w{0,4}(ganti|ubah|hapus|naik|turun|tambah|kurang|perbaik|kembali|nyala|matikan|terap|jalan)\w*/i;
+  /\b(restart|rollout|redeploy|deploy|scale|rollback|roll back|revert|delet(?:e[sd]?|ing|ion)|remov(?:e[sd]?|ing|al)|patch|set|change|switch|update|upgrade|downgrade|increase|decrease|raise|lower|bump|resize|fix|apply|reconcile)\b|\b\w{0,4}(ganti|ubah|hapus|naik|turun|tambah|kurang|perbaik|kembali|nyala|matikan|terap|jalan)\w*/i;
 
 // A clean bill of health mentions the same vocabulary a broken one does — the healthy reply
 // that motivated this gate says "no alerts firing" and "0 restarts in the last hour". Negated

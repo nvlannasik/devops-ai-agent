@@ -830,3 +830,13 @@ test("a bare unbackticked name is picked up by the approval branch on the next t
   assert.equal(next.propose, true, "the follow-up approval did not reach the proposal");
   assert.match(next.reason, /approved the change proposed in the previous turn/);
 });
+
+// Verbatim from the live thread, 2026-09-22: the offer arrived as "removal" / "deletion", not
+// "remove", and the fallback above silently never fired.
+test("an offer phrased as a noun ('deletion proposal') still opens the approval branch", () => {
+  const offer =
+    "The `devops-tools/devops-agent-redis` Service is unused (no endpoints) and marked as externally " +
+    "managed (`managedBy: none`), so it's safe to consider for removal. Since it's not declared by Helm " +
+    "or Flux, deletion won't be reverted by GitOps.\n\nShall I prepare a deletion proposal?";
+  assert.equal(worthProposing("yes please", "", false, offer).propose, true);
+});
