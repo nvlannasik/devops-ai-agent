@@ -34,7 +34,7 @@ import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./f
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
-import { noOpImageRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
+import { noOpImageRefusal, noOpResourcesRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -1981,7 +1981,27 @@ export class DevOpsAgent {
   async guardRefusalFor(proposal: Proposal): Promise<string | null> {
     if (REPLACEMENT_ACTIONS.has(proposal.action)) return this.replacementRefusalFor(proposal);
     if (proposal.action === "k8s_set_image") return this.noOpImageRefusalFor(proposal);
+    if (proposal.action === "k8s_set_resources") return this.noOpResourcesRefusalFor(proposal);
     return null;
+  }
+
+  /**
+   * Is this resources change proposing the numbers already configured? See `noop-guard.ts`.
+   *
+   * One `k8s_recommend_resources` call, narrowed to the workload. A read tool on purpose — the
+   * benchmark applies `guardRefusalFor` and never runs the write path, so a guard that needed the
+   * dry-run's `previousResources` would be invisible to the measurement that found this.
+   */
+  async noOpResourcesRefusalFor(proposal: Proposal): Promise<string | null> {
+    const namespace = proposal.toolParams.namespace;
+    if (typeof namespace !== "string" || !namespace) return null;
+    try {
+      const raw = await this.mcp.callTool("k8s_recommend_resources", { namespace, workload: proposal.name });
+      return noOpResourcesRefusal(proposal.action, proposal.toolParams, raw);
+    } catch (err) {
+      logger.debug(`[remediation] no-op resources guard could not read ${namespace}/${proposal.name}: ${errDetail(err)}`);
+      return null;
+    }
   }
 
   /**

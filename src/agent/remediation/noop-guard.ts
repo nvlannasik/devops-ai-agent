@@ -17,6 +17,8 @@
  * model's certainty: the value it proposes is the value already in the spec.
  */
 
+import { parseQuantity } from "../../utils/quantity/index.js";
+
 /** The `containers` entry of a `k8s_list_deployments` / `_statefulsets` / `_daemonsets` item. */
 interface WorkloadItem {
   name?: unknown;
@@ -73,5 +75,84 @@ export function noOpImageRefusal(
     `the pods and they would come up on the same image, against the same fault. If the image really is ` +
     `the problem, the fix names a DIFFERENT tag — the one that was running before, or one the evidence ` +
     `shows works. If it is not the problem, say what is, or that the cause could not be determined.`
+  );
+}
+
+/** One `k8s_recommend_resources` row: the CONFIGURED values, which is the half this guard needs. */
+interface Recommendation {
+  workload?: unknown;
+  container?: unknown;
+  current?: { cpuRequest?: unknown; memoryRequest?: unknown; cpuLimit?: unknown; memoryLimit?: unknown };
+}
+
+/** proposal field -> the key `k8s_recommend_resources` reports the configured value under. */
+const RESOURCE_FIELDS: ReadonlyArray<readonly [string, keyof NonNullable<Recommendation["current"]>]> = [
+  ["cpu_request", "cpuRequest"],
+  ["memory_request", "memoryRequest"],
+  ["cpu_limit", "cpuLimit"],
+  ["memory_limit", "memoryLimit"],
+];
+
+/**
+ * The same refusal one action along: a resources change that proposes the values already configured.
+ *
+ * Benchmark A05, 2026-09-23: a pod Pending because `cpu: 64` cannot be scheduled on a 12-core
+ * node, answered with `k8s_set_resources cpu_request=64` — the number that does not fit,
+ * proposed as the fix for not fitting. Scored a fail on `changed`, and as a card it would have
+ * been a rollout that reschedules the same unschedulable pod.
+ *
+ * Read from `k8s_recommend_resources` rather than the dry-run's `previousResources`, for one
+ * reason that decides it: the benchmark never runs the write path, so a guard behind the dry-run
+ * is a guard the benchmark cannot see. This one is a read tool and runs in `guardRefusalFor`,
+ * where the bench applies the same guards production does.
+ *
+ * Compared as quantities, so `1000m` and `1` are the same value and `64` and `64m` are not.
+ * Anything unreadable returns null: this may only ever ADD a refusal.
+ */
+export function noOpResourcesRefusal(
+  action: string,
+  params: Record<string, unknown>,
+  recommendations: string
+): string | null {
+  if (action !== "k8s_set_resources") return null;
+  const workload = typeof params.name === "string" ? params.name : "";
+  const container = typeof params.container === "string" ? params.container : "";
+  if (!workload) return null;
+
+  const start = recommendations.indexOf("[");
+  const end = recommendations.lastIndexOf("]");
+  if (start < 0 || end <= start) return null;
+  let items: unknown;
+  try {
+    items = JSON.parse(recommendations.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(items)) return null;
+
+  const rows = (items as Recommendation[]).filter(
+    (r) => r && r.workload === workload && (!container || r.container === container)
+  );
+  if (rows.length === 0) return null;
+
+  const same: string[] = [];
+  for (const [field, key] of RESOURCE_FIELDS) {
+    const proposed = params[field];
+    if (typeof proposed !== "string" || !proposed) continue;
+    const configured = rows.map((r) => r.current?.[key]).find((v) => typeof v === "string") as string | undefined;
+    if (configured === undefined) return null; // nothing to compare against — say nothing
+    const a = parseQuantity(proposed);
+    const b = parseQuantity(configured);
+    if (a === null || b === null || a !== b) return null; // a real change, or unreadable
+    same.push(`${field}=${proposed}`);
+  }
+  if (same.length === 0) return null;
+
+  return (
+    `every value in this proposal is the value \`${workload}\` is already configured with ` +
+    `(${same.join(", ")}), so the card would write the spec back to what it already says. If the ` +
+    `current size is the fault — a limit too low to run under, a request too large to schedule — the ` +
+    `fix names a DIFFERENT number, and \`k8s_recommend_resources\` is where that number comes from. ` +
+    `If the size is not the fault, say what is.`
   );
 }
