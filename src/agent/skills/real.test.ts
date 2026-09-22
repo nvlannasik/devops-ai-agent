@@ -345,5 +345,9 @@ test("the prompt never tells the model to promise a card it cannot see", () => {
   const prompt = buildStaticSystemPrompt();
   assert.doesNotMatch(prompt, /approval card for the action will follow/i);
   assert.match(prompt, /A card exists only if a `\[system note\]` says it was posted/);
-  assert.match(prompt, /never invent a rendering delay/i);
+  // Live 2026-09-22 after the first fix: "No approval card was posted ... This typically happens when
+  // ... there's a system delay" (an invented reason), and "please delete ..." answered with "you need to
+  // trigger the approval workflow by sending:" (the message already was the request; the card followed).
+  assert.match(prompt, /do not explain why/i);
+  assert.match(prompt, /A message that itself asks for a change IS that request/);
 });
