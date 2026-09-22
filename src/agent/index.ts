@@ -474,6 +474,45 @@ export function toolCallKey(name: string | undefined, input: unknown): string {
   return `${name ?? ""}\u0000${JSON.stringify(norm(input))}`;
 }
 
+/**
+ * The placeholders the prompt's example queries use — `{namespace="X", app="Y"}` — sent as if
+ * they were values.
+ *
+ * Live 2026-09-22 on the heavy route (gpt-5-nano), two CPU-throttling alerts in `sample-apps`:
+ * every Prometheus, Loki, k8s and tracing call went to namespace `X` / service `Y`. All came back
+ * empty, the model read that as "no pods found in namespace sample-apps", and the second run
+ * posted an approval card to restart `sample-apps/storefront` on it. The first run's RCA had
+ * already reached incident memory, so the second opened with "I know X" — recall taught it the
+ * placeholder was the namespace.
+ *
+ * Exact and safe to refuse: Kubernetes names are lowercase DNS-1123, so a bare `X` or `Y` can
+ * never be one, and no label value in this cluster is a single capital letter. Returns the
+ * offending fragment, or null.
+ */
+export function placeholderIn(input: unknown): string | null {
+  const walk = (v: unknown): string | null => {
+    if (typeof v === "string") {
+      if (/^[XY]$/.test(v)) return v;
+      return v.match(/[=~]\s*"[XY]"/)?.[0] ?? null;
+    }
+    if (v && typeof v === "object") {
+      for (const x of Object.values(v as Record<string, unknown>)) {
+        const hit = walk(x);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(input);
+}
+
+const PLACEHOLDER_REFUSAL = (hit: string) =>
+  `Error: \`${hit}\` is a placeholder copied from the prompt's example queries, not a value — ` +
+  `nothing in this cluster is called X or Y, so the call would return empty and prove nothing. ` +
+  `Re-issue it with the real namespace / workload / service named in the alert or the user's ` +
+  `message. A prior incident that mentions namespace "X" is a record of this same mistake, not ` +
+  `evidence of a namespace.`;
+
 // Loud on purpose. Handing back the same payload silently is what let the model try a third
 // spelling; it has to be told the result is a property of the data, not of how it asked.
 const REPEAT_NOTICE =
@@ -1493,6 +1532,11 @@ export class DevOpsAgent {
             tool_use_id: id,
             content: "Error: write tools require the human approval flow and cannot be called during an investigation.",
           };
+        }
+        const placeholder = placeholderIn(input);
+        if (placeholder) {
+          logger.warn(`[${threadId}] refused ${name}: placeholder ${placeholder} in its input`);
+          return { type: "tool_result" as const, tool_use_id: id, content: PLACEHOLDER_REFUSAL(placeholder) };
         }
         // Repeat suppression. The memo holds the PROMISE, not the settled value, so two
         // identical calls in the same parallel round collapse onto one request as well.
