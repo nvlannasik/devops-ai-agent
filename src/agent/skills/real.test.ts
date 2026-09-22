@@ -333,3 +333,17 @@ test("the remediation section still names the delete action the scope section no
   assert.match(prompt, /`k8s_delete_orphan` removes ONE abandoned object/);
   assert.match(prompt, /no delete for Secrets or PersistentVolumeClaims/i);
 });
+
+/**
+ * The model cannot see whether a card gets posted — that is decided after its reply, and it
+ * only learns the outcome from a `[system note]`. The prompt used to tell it to announce that
+ * "an approval card will follow", so when the gate proposed nothing the model kept promising.
+ * Live 2026-09-22: "An action card ... will be posted for your approval shortly", then, asked
+ * where it was, "sometimes there's a brief delay in rendering the card". No card ever existed.
+ */
+test("the prompt never tells the model to promise a card it cannot see", () => {
+  const prompt = buildStaticSystemPrompt();
+  assert.doesNotMatch(prompt, /approval card for the action will follow/i);
+  assert.match(prompt, /A card exists only if a `\[system note\]` says it was posted/);
+  assert.match(prompt, /never invent a rendering delay/i);
+});
