@@ -32,7 +32,7 @@ import {
 } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
-import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "./remediation/proposal.js";
+import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
@@ -1063,7 +1063,9 @@ export class DevOpsAgent {
           : `in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
             `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`)
       );
-      return text;
+      // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
+      // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
+      return stripOffer(text);
     };
     let totalUsage = zeroUsage();
 

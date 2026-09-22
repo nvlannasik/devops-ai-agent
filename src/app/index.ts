@@ -8,7 +8,7 @@ import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
-import { worthProposing } from "../agent/remediation/proposal.js";
+import { dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
@@ -295,6 +295,17 @@ export class SlackApp {
           logger.warn(`[slack] conversation-mode mention leaked RCA structure — reformatting (thread ${threadId})`);
           reply = await this.agent.reformatToConversation(reply).catch(() => reply);
         }
+        // The reply investigate() returned has the [OFFER] line stripped; memory still has it.
+        const offer = parseOffer(await this.agent.lastAssistantText(threadId).catch(() => ""));
+        // Not the prompt's job alone — see dropCardPromises. Conversation replies only: an RCA is
+        // parsed into Block Kit sections and a dropped sentence there would be a silent edit.
+        if (!isRcaResponse(reply)) {
+          const cleaned = dropCardPromises(reply);
+          if (cleaned.dropped > 0) {
+            logger.warn(`[slack] dropped ${cleaned.dropped} sentence(s) promising or excusing an approval card (thread ${threadId})`);
+            reply = cleaned.text;
+          }
+        }
         const isRca = isRcaResponse(reply);
         logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
         const footer = meta ? formatRunFooter(meta) : undefined;
@@ -338,12 +349,17 @@ export class SlackApp {
         // not over until its card is posted. withTrace so the proposal's own LLM call carries
         // the threadId, which as a detached call it never did — the one log line you needed to
         // join an orphan card back to its conversation was the one line that had no trace.
-        const gate = worthProposing(text, reply, isRca, previousReply);
+        const gate = worthProposing(text, reply, isRca, previousReply, offer);
         // Logged on BOTH branches now. Only the skip was logged before, so a card that should
         // never have been proposed left no trace of why it was — which is exactly what happened
         // on 2026-09-16, when a cleanup question produced a GitOps PR card and the log said
         // nothing at all about the decision.
-        logger.info(`[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}`);
+        // The checks ride on the skip line: that is the branch whose cause used to need a trip
+        // into Redis to find (2026-09-22). The propose branch already names its reason.
+        logger.info(
+          `[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}` +
+          (gate.propose ? "" : ` | ${explainGate(text, reply, previousReply, offer)}`)
+        );
         if (gate.propose) {
           await withTrace(threadId, () =>
             this.maybeProposeRemediation(
@@ -351,7 +367,8 @@ export class SlackApp {
               threadId,
               null,
               {},
-              `User request: ${text}\n\nAgent reply:\n${reply}`,
+              // The offer names the exact object; on a bare "ya" the user text names nothing.
+              `User request: ${text}\n\nAgent reply:\n${reply}${offer ? `\n\nAgent offered: ${offer}` : ""}`,
               // worthProposing already decided this; it is the only place that knows whether the
               // words came from a person or the fault vocabulary came from the agent's own answer.
               gate.byUser

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
@@ -839,4 +839,75 @@ test("an offer phrased as a noun ('deletion proposal') still opens the approval 
     "managed (`managedBy: none`), so it's safe to consider for removal. Since it's not declared by Helm " +
     "or Flux, deletion won't be reverted by GitOps.\n\nShall I prepare a deletion proposal?";
   assert.equal(worthProposing("yes please", "", false, offer).propose, true);
+});
+
+// --- [OFFER]: the agent's structured signal, so the gate stops guessing from prose ---
+
+const offered =
+  "The `devops-tools/devops-agent-redis` Service has no endpoints and is not managed by GitOps.\n\n" +
+  "[OFFER] delete `devops-tools/Service/devops-agent-redis`";
+
+test("an [OFFER] line is read, and stripped from what Slack sees", () => {
+  assert.equal(parseOffer(offered), "delete `devops-tools/Service/devops-agent-redis`");
+  assert.equal(stripOffer(offered), "The `devops-tools/devops-agent-redis` Service has no endpoints and is not managed by GitOps.");
+  // Small models bold labels; the marker must survive that.
+  assert.equal(parseOffer("ok\n**[OFFER]** restart `payments/Deployment/api`"), "restart `payments/Deployment/api`");
+});
+
+test("an [OFFER] that names no object is not an offer", () => {
+  assert.equal(parseOffer("[OFFER] clean up the unused stuff"), null);
+  assert.equal(parseOffer("[OFFER] delete `devops-agent-redis`"), null);
+});
+
+test("stripOffer never empties a reply", () => {
+  assert.equal(stripOffer("[OFFER] delete `a/Service/b`"), "[OFFER] delete `a/Service/b`");
+});
+
+// The case that took four regex patches: bare name, "clean up", no verb the gate knows.
+test("an offer proposes on the same turn, whatever words the user used", () => {
+  const g = worthProposing("i think we can clean up devops-agent-redis", stripOffer(offered), false, "", parseOffer(offered));
+  assert.equal(g.propose, true);
+  assert.equal(g.byUser, false, "the words are the model's, so the replacement guard must still apply");
+  assert.match(g.reason, /agent offered a change: delete `devops-tools\/Service\/devops-agent-redis`/);
+});
+
+test("no offer and no other signal still skips — the offer is additive", () => {
+  assert.equal(worthProposing("is there any unused resource that we can clean up?", "Found 37 candidates.", false, "", null).propose, false);
+});
+
+// --- card promises: verbatim from the live thread, 2026-09-22 ---
+
+test("a sentence promising a card is dropped", () => {
+  const live =
+    "The deletion of `devops-tools/devops-agent-redis` cannot be executed directly — it requires approval through the remediation workflow. " +
+    "An action card to remove this orphaned Service will be posted for your approval shortly.";
+  const r = dropCardPromises(live);
+  assert.equal(r.dropped, 1);
+  assert.doesNotMatch(r.text, /shortly/);
+  assert.match(r.text, /cannot be executed directly/);
+});
+
+test("an invented delay is dropped, the fact beside it is kept", () => {
+  const live =
+    "No approval card was posted for the deletion of `devops-tools/devops-agent-redis`. " +
+    "This typically happens when the action requires manual initiation or there's a system delay.";
+  const r = dropCardPromises(live);
+  assert.equal(r.text, "No approval card was posted for the deletion of `devops-tools/devops-agent-redis`.");
+  const r2 = dropCardPromises("The approval card should appear momentarily — sometimes there's a brief delay in rendering the card after the action is triggered.\n\nOk.");
+  assert.equal(r2.text, "Ok.");
+});
+
+test("a reply with no card talk passes through untouched", () => {
+  const plain = "• `payments/api` — 3/3 ready.\n• No restarts in the last hour.";
+  assert.deepEqual(dropCardPromises(plain), { text: plain, dropped: 0 });
+});
+
+// --- the log line that would have saved the trip into Redis ---
+
+test("explainGate shows which check failed and what the previous reply said", () => {
+  const prev = "...safe to consider for removal. Shall I prepare a deletion proposal?";
+  const line = explainGate("where the proposal?", "No card was posted.", prev, null);
+  assert.match(line, /approval=0/);
+  assert.match(line, /offer=0/);
+  assert.match(line, /prev="\.\.\.safe to consider for removal\. Shall I prepare a deletion proposal\?"/);
 });

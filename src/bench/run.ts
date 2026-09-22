@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
-import { worthProposing } from "../agent/remediation/proposal.js";
+import { parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { withRoute } from "../utils/trace/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
@@ -171,9 +171,10 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // The alert path proposes unconditionally — an alert firing IS the evidence. A mention is
     // gated by worthProposing, and skipping that here would spend a proposal call production
     // never makes: "write me a Python script" must reach the scorer with no proposal at all.
-    const gate = task.mode === "alert" ? { propose: true } : worthProposing(task.message!, rca, false, "");
+    const offer = parseOffer(await agent.lastAssistantText(threadId).catch(() => ""));
+    const gate = task.mode === "alert" ? { propose: true } : worthProposing(task.message!, rca, false, "", offer);
     const asked = gate.propose
-      ? await proposeWithRetry(task.groupLabels ?? {}, rca, async (prompt) =>
+      ? await proposeWithRetry(task.groupLabels ?? {}, offer ? `${rca}\n\nAgent offered: ${offer}` : rca, async (prompt) =>
           textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
         )
       : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };

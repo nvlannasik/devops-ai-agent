@@ -351,3 +351,10 @@ test("the prompt never tells the model to promise a card it cannot see", () => {
   assert.match(prompt, /do not explain why/i);
   assert.match(prompt, /A message that itself asks for a change IS that request/);
 });
+
+test("the prompt asks for the [OFFER] line the gate reads", () => {
+  const prompt = buildStaticSystemPrompt();
+  // Must match the shape parseOffer accepts: the marker, an action, a backticked ns/Kind/name.
+  assert.match(prompt, /\[OFFER\] <action> `namespace\/Kind\/name`/);
+  assert.match(prompt, /never make an offer as a question/i);
+});

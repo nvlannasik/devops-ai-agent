@@ -315,7 +315,8 @@ export function worthProposing(
   userText: string,
   reply: string,
   isRca: boolean,
-  previousReply = ""
+  previousReply = "",
+  offer: string | null = null
 ): { propose: boolean; reason: string; byUser: boolean } {
   // `byUser` is what separates "a person named this action" from "the agent's own answer carried
   // fault vocabulary". Only the first is a reason to skip the replacement guard, and this is the
@@ -328,6 +329,11 @@ export function worthProposing(
   if (CLEANUP_INTENT.test(userText) && NAMES_OBJECT.test(userText)) {
     return { propose: true, reason: "the user asked to clean up a named object", byUser: true };
   }
+  // The agent's own structured signal — see parseOffer. Not byUser: the words are the model's,
+  // so the replacement guard still applies.
+  if (offer) return { propose: true, reason: `the agent offered a change: ${offer}`, byUser: false };
+  // ponytail: regex fallback for a model that forgot the [OFFER] line. Delete once the marker is
+  // measured to hold on the light route.
   if (isApproval(userText) && ACTION_INTENT.test(previousReply)) {
     return { propose: true, reason: "the user approved the change proposed in the previous turn", byUser: true };
   }
@@ -350,6 +356,80 @@ export function worthProposing(
     return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
   }
   return { propose: false, reason: "read-only question, no fault evidence in the answer", byUser: false };
+}
+
+/**
+ * `[OFFER] <action> \`namespace/Kind/name\`` — the one line the agent ends a reply with when it
+ * puts ONE concrete change on the table (prompts/system.md, Execution & Remediation).
+ *
+ * It exists because every signal before it was a guess over prose. The gate matched verbs, and
+ * the prose kept finding new ways to say them: "clean up" (fb2ea94), then "removal" and
+ * "deletion" (c44f704) — four patches in one week, each for one wording. The model already knows
+ * what it is offering; this makes it say so in a shape code can read instead of inferring it.
+ *
+ * Emphasis is tolerated because small models bold anything that looks like a label. The target
+ * must be backticked and hold a slash (NAMES_OBJECT) — an offer that names no object is not one.
+ */
+const OFFER_LINE = /^[ \t]*[*_`]*\[OFFER\][*_`]*[ \t]*(.*)$/gim;
+
+export function parseOffer(reply: string): string | null {
+  for (const m of reply.matchAll(OFFER_LINE)) {
+    const line = m[1]!.trim();
+    if (NAMES_OBJECT.test(line)) return line;
+  }
+  return null;
+}
+
+/** The reply as Slack should see it. Thread memory keeps the marker; only the posted text loses it. */
+export const stripOffer = (reply: string): string =>
+  reply.replace(OFFER_LINE, "").replace(/\n{3,}/g, "\n\n").trim() || reply;
+
+/**
+ * The prompt forbids promising a card, and measured live on 2026-09-22 the light route did it
+ * anyway: "An action card ... will be posted for your approval shortly", then "sometimes there's
+ * a brief delay in rendering the card". The model cannot know either — the card is decided after
+ * its reply — so the sentence is dropped rather than trusted. A card that IS posted arrives as its
+ * own message; announcing it adds nothing.
+ *
+ * Sentence-level and conservative: a sentence goes only if it talks about a card AND predicts one
+ * or excuses its absence. "No approval card was posted" stays — that one is a fact.
+ */
+const CARD_WORD = /\b(card|approval workflow|remediation workflow)\b/i;
+const CARD_PROMISE =
+  /\b(will (?:be )?(?:posted|follow|appear|arrive|show)|should (?:appear|arrive|show)|shortly|momentarily|in a moment|(?:i'?ll|i will|let me) (?:open|post|create|raise|re-?initiate))\b/i;
+const DELAY_EXCUSE = /\b(?:system|rendering|brief|slight|short) delay\b|\bdelay in rendering\b|\bmanual initiation\b/i;
+
+export function dropCardPromises(reply: string): { text: string; dropped: number } {
+  let dropped = 0;
+  const text = reply.replace(/[^.!?\n]+[.!?]*/g, (s) => {
+    if ((CARD_WORD.test(s) && CARD_PROMISE.test(s)) || DELAY_EXCUSE.test(s)) {
+      dropped++;
+      return "";
+    }
+    return s;
+  });
+  const tidy = text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return dropped > 0 && tidy ? { text: tidy, dropped } : { text: reply, dropped: 0 };
+}
+
+/**
+ * Every check worthProposing makes, on one line — for the log, not for the decision.
+ *
+ * On 2026-09-22 the log said only "no proposal call — read-only question", and finding out WHY
+ * took a trip into Redis for the previous reply: it said "removal", and ACTION_INTENT wanted
+ * "remove". This line would have shown `prevIntent=0` and the words that failed to match.
+ */
+export function explainGate(userText: string, reply: string, previousReply: string, offer: string | null): string {
+  const b = (v: boolean) => (v ? 1 : 0);
+  const fault = reply.replace(NEGATED, " ").match(FAULT_EVIDENCE)?.[0];
+  const tail = previousReply.replace(/\s+/g, " ").trim().slice(-120);
+  return (
+    `intent=${b(ACTION_INTENT.test(userText))} cleanup=${b(CLEANUP_INTENT.test(userText))} ` +
+    `named=${b(NAMES_OBJECT.test(userText))} approval=${b(isApproval(userText))} ` +
+    `prevIntent=${b(ACTION_INTENT.test(previousReply))} offer=${offer ? JSON.stringify(offer) : 0} ` +
+    `fault=${fault ? JSON.stringify(fault) : 0} capacity=${b(CAPACITY_QUESTION.test(userText))} ` +
+    `prev="${tail.length === 120 ? "…" : ""}${tail}"`
+  );
 }
 
 /**
