@@ -8,7 +8,7 @@ import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
-import { dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
+import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
@@ -634,6 +634,7 @@ export class SlackApp {
         await this.agent.investigate(threadId, fullIssue, {
           mode: "alert",
           trigger: issueText,
+          namespace: labels.namespace,
           onProgress,
           onComplete: (m) => { alertMeta = m; },
         })
@@ -689,7 +690,15 @@ export class SlackApp {
       const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
       await this.warnIfUngrounded(channel, threadId, rca, issueText);
       await this.notifyIfLowConfidence(channel, threadId, rca);
-      if (incidentId) {
+      // The alert path is otherwise ungated — an alert firing IS the evidence. The one answer
+      // that cannot support a card is one that reached no conclusion and asked the human for the
+      // missing input: incident 143, 2026-09-22, "Could you provide the real `namespace` and
+      // `service/app` names to replace the placeholders X and Y?" — which still became a card
+      // proposing a rolling restart of a workload the run never looked at.
+      const question = answerAsksForInput(rca);
+      if (incidentId && question) {
+        logger.warn(`[remediation] no proposal call for thread ${threadId} — the answer asked for input instead of concluding: ${question}`);
+      } else if (incidentId) {
         await withTrace(threadId, () => this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext));
       }
     } catch (err) {

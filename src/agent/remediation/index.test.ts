@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate, answerAsksForInput } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
@@ -911,4 +911,21 @@ test("explainGate shows which check failed and what the previous reply said", ()
   assert.match(line, /approval=0/);
   assert.match(line, /offer=0/);
   assert.match(line, /prev="\.\.\.safe to consider for removal\. Shall I prepare a deletion proposal\?"/);
+});
+
+// --- an answer that asks for input is not a conclusion (incident 143, 2026-09-22) ---
+
+test("the verbatim question that became remediation 86 blocks the proposal", () => {
+  const live =
+    "Could you provide the real `namespace` and `service/app` names to replace the placeholders `X` and `Y` " +
+    "so I can re-run the batch queries for 5xx inbound/outbound errors and Loki logs?";
+  assert.match(answerAsksForInput(live) ?? "", /provide the real `namespace`/);
+});
+
+test("a real RCA still proposes, question mark or not", () => {
+  const rca =
+    "*📍 Root Cause*\n1. [Symptom] `sample-apps/checkout-gateway` p99 is 1.07s — _prometheus_query_.\n" +
+    "2. ← [why] orders-api response shape changed.\n\nIs a contract test worth adding here?";
+  assert.equal(answerAsksForInput(rca), null);
+  assert.equal(answerAsksForInput("No question at all, just findings about the namespace sample-apps."), null);
 });

@@ -359,6 +359,26 @@ export function worthProposing(
 }
 
 /**
+ * An answer that asked the human for the input it was already given, instead of concluding.
+ *
+ * Incident 143, 2026-09-22: the placeholder guard refused the model's `namespace="X"` calls, and
+ * the model replied to the ALERT with "Could you provide the real `namespace` and `service/app`
+ * names to replace the placeholders `X` and `Y`?". The alert path proposes unconditionally, so
+ * that question became remediation 86 — a rolling restart of a workload nothing had examined.
+ *
+ * Deliberately narrow: it must both ask a question and be about the missing identifiers. An RCA
+ * that ends with an open question about a cause still proposes.
+ */
+const ASKS_FOR_INPUT =
+  /\b(provide|supply|confirm|tell me|share|which)\b[^.?!\n]{0,80}\b(namespace|service|app|workload|placeholder)/i;
+
+export function answerAsksForInput(reply: string): string | null {
+  if (!reply.includes("?")) return null;
+  const sentence = reply.split(/(?<=[.?!])\s+/).find((s) => s.includes("?") && ASKS_FOR_INPUT.test(s));
+  return sentence ? sentence.trim().slice(0, 160) : null;
+}
+
+/**
  * `[OFFER] <action> \`namespace/Kind/name\`` — the one line the agent ends a reply with when it
  * puts ONE concrete change on the table (prompts/system.md, Execution & Remediation).
  *

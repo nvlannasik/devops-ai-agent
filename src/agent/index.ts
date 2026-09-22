@@ -544,12 +544,15 @@ export function placeholderIn(input: unknown): string | null {
   return walk(input);
 }
 
-const PLACEHOLDER_REFUSAL = (hit: string) =>
+const PLACEHOLDER_REFUSAL = (hit: string, namespace?: string) =>
   `Error: \`${hit}\` is a placeholder copied from the prompt's example queries, not a value — ` +
   `nothing in this cluster is called X or Y, so the call would return empty and prove nothing. ` +
-  `Re-issue it with the real namespace / workload / service named in the alert or the user's ` +
-  `message. A prior incident that mentions namespace "X" is a record of this same mistake, not ` +
-  `evidence of a namespace.`;
+  (namespace
+    ? `Re-issue it with namespace \`${namespace}\`, which is what this alert's labels say. Do NOT ask ` +
+      `the human which namespace to use — it is already in the alert in front of you.`
+    : `Re-issue it with the real namespace / workload / service named in the alert or the user's message. ` +
+      `Do NOT ask the human to supply it — read it from the message you were given.`) +
+  ` A prior incident that mentions namespace "X" is a record of this same mistake, not evidence of a namespace.`;
 
 // Loud on purpose. Handing back the same payload silently is what let the model try a third
 // spelling; it has to be told the result is a property of the data, not of how it asked.
@@ -651,6 +654,12 @@ export interface InvestigateOptions {
   deadline?: number;
   /** 0 = the lead investigation, 1 = a delegate. Only depth 0 is offered the delegate tool. */
   depth?: number;
+  /**
+   * The namespace the alert labels name, quoted back in the placeholder refusal.
+   * Telling the model to "use the real namespace" was not enough — on 2026-09-22 it answered the
+   * alert by asking the human which namespace to use. Naming it leaves nothing to ask.
+   */
+  namespace?: string;
   /**
    * Called once per tool round, before the tools run, with the round number and the tool
    * names that round will actually execute. Optional and fire-and-forget: the loop ignores
@@ -1425,7 +1434,7 @@ export class DevOpsAgent {
         );
 
         totalToolCalls += executable.length;
-        const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable) : [];
+        const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable, opts.namespace) : [];
         if (!sawLogLines) {
           const logIds = new Set(executable.filter((t) => LOG_TOOLS.has(t.name ?? "")).map((t) => t.id));
           sawLogLines = executed.some(
@@ -1538,7 +1547,7 @@ export class DevOpsAgent {
     );
   }
 
-  private async executeToolCalls(threadId: string, content: ContentBlock[]): Promise<ContentBlock[]> {
+  private async executeToolCalls(threadId: string, content: ContentBlock[], namespace?: string): Promise<ContentBlock[]> {
     const toolUses = content.filter((c) => c.type === "tool_use");
     const defs = this.mcp.getTools();
     // The MCP server's own tool names, which is what makes `run k8s_scale` distinguishable from
@@ -1574,7 +1583,7 @@ export class DevOpsAgent {
         const placeholder = placeholderIn(input);
         if (placeholder) {
           logger.warn(`[${threadId}] refused ${name}: placeholder ${placeholder} in its input`);
-          return { type: "tool_result" as const, tool_use_id: id, content: PLACEHOLDER_REFUSAL(placeholder) };
+          return { type: "tool_result" as const, tool_use_id: id, content: PLACEHOLDER_REFUSAL(placeholder, namespace) };
         }
         // Repeat suppression. The memo holds the PROMISE, not the settled value, so two
         // identical calls in the same parallel round collapse onto one request as well.
