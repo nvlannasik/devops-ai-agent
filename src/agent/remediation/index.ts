@@ -21,6 +21,27 @@ export class RemediationStore {
   // incidentId is null for mention-driven investigations (no alert labels → no incident
   // row); note: NULLs are distinct in the unique index, so the duplicate-card guard only
   // applies to alert-driven remediations — mention ones are explicitly human-triggered.
+  /**
+   * A card already waiting for a human, for this exact action and target — in ANY incident.
+   *
+   * `one_active_remediation` is unique on `incident_id`, which is the right guard for one alert
+   * investigated twice and no guard at all for the case measured on 2026-09-22: one armed fault
+   * tripped four rules, each became its own incident, and orders-api collected two identical
+   * "scale to 3 replicas" cards (85, 88) while checkout-gateway collected two identical restarts
+   * (86, 87). Every one of them was legal by incident. None was a second decision to make.
+   *
+   * Matched on `params.target`, written by all three store sites, so a GitOps PR card and a
+   * direct-patch card for the same workload still collide — the human sees one question either way.
+   */
+  async pendingFor(target: string): Promise<number | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(
+      `SELECT id FROM remediations WHERE status = 'proposed' AND params->>'target' = $1 ORDER BY id DESC LIMIT 1`,
+      [target]
+    );
+    return rows.length > 0 ? Number(rows[0].id) : null;
+  }
+
   async propose(incidentId: number | null, action: string, params: Record<string, unknown>): Promise<number | "duplicate" | null> {
     if (!this.pool) return null;
     try {

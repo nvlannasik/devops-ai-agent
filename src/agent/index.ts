@@ -223,6 +223,50 @@ export function orphanDeleteRefusal(proposal: Proposal, observed: string | null)
   );
 }
 
+/** What "the same card" means: the action and the object it acts on, never the parameters. */
+export const targetKey = (action: string, namespace: string, name: string): string =>
+  `${action}:${namespace}/${name}`.toLowerCase();
+
+/**
+ * Scaling OUT needs something in this thread to have measured the workload as saturated.
+ *
+ * Measured 2026-09-22, one armed `GATEWAY_TIMEOUT_MS`: four cards proposed more replicas for
+ * checkout-gateway and orders-api. The only throttling anywhere in that thread belonged to
+ * `loadgen`, which is the traffic generator. Latency and 5xx are what a dependency fault and a
+ * config fault look like too, and for those, replicas copy the fault rather than relieve it.
+ *
+ * Evidence is the thread's tool output: the workload's own name within 300 characters of a
+ * saturation word. Deliberately NOT a pod-state read — the guard that had to do that (events
+ * before `k8s_set_resources`) took benchmark A02 from 5/5 to 0 and was removed. This one reads
+ * what the investigation already gathered, or it refuses.
+ *
+ * Skipped for `replicas: 0` (the quarantine gate owns that one) and for a human's own request.
+ */
+const SATURATION =
+  /\b(throttl\w*|saturat\w*|cpu limit|memory limit|backlog|queue depth|oldest_job|not draining|pending pods?|unschedulable|hpa|maxreplicas|resource pressure|capacity)\b/i;
+
+export function scaleOutRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (proposal.action !== "k8s_scale") return null;
+  const replicas = proposal.toolParams.replicas;
+  if (typeof replicas !== "number" || replicas === 0) return null;
+  const target = `\`${proposal.namespace}/${proposal.name}\``;
+  const refusal =
+    `Scaling ${target} to ${replicas} is refused: nothing in this investigation measures that workload as ` +
+    `saturated — no throttling, queue backlog or scheduling pressure of its own. Latency and 5xx look the ` +
+    `same when the fault is in a dependency or in configuration, and replicas copy that fault instead of ` +
+    `relieving it. Measure the workload first, or fix what it is waiting on.`;
+  if (observed === null) return refusal;
+
+  // ponytail: line-scoped, because a character window is not proximity in tool output — the pod
+  // list that motivated this guard puts loadgen's throttling and orders-api's healthy row 40
+  // characters apart. A single-line JSON array holding both would still pass; widen only if that
+  // is ever observed, since the failure direction here is an extra refusal, not an extra card.
+  const name = proposal.name.toLowerCase();
+  return observed.split("\n").some((line) => line.toLowerCase().includes(name) && SATURATION.test(line))
+    ? null
+    : refusal;
+}
+
 /**
  * An image change must name an image something in this thread actually showed — a tool result,
  * or the person asking.
@@ -1815,6 +1859,23 @@ export class DevOpsAgent {
       return { refused: orphanRefused };
     }
 
+    // Replicas need a measurement of their own. Skipped for a user request, like the replacement
+    // guard: a person who asks for more replicas has placed the need themselves.
+    if (!opts.userRequested) {
+      const scaleRefused = scaleOutRefusal(proposal, await this.threadEvidence(opts.threadId));
+      if (scaleRefused) {
+        logger.info(`[remediation] scale gate refused ${proposal.summary}: ${scaleRefused}`);
+        return { refused: scaleRefused };
+      }
+    }
+
+    // One pending card per action+target, across incidents — see RemediationStore.pendingFor.
+    const pending = await this.remediations.pendingFor(targetKey(proposal.action, proposal.namespace, proposal.name)).catch(() => null);
+    if (pending !== null) {
+      logger.info(`[remediation] duplicate of pending card ${pending}: ${proposal.summary}`);
+      return { refused: `An approval card for this exact action on \`${proposal.namespace}/${proposal.name}\` is already waiting (remediation ${pending}). Approve or reject that one — a second card is the same decision twice.` };
+    }
+
     // And for images: never a card for an image nothing in the thread showed. Not skipped for a
     // user request either — a person who names the image satisfies it in their own words.
     const imageRefused = await this.imageRefusalFor(proposal, opts.threadId, rca);
@@ -1839,6 +1900,7 @@ export class DevOpsAgent {
     // store the exact tool params + display fields — execution replays params verbatim
     const id = await this.remediations.propose(incidentId, proposal.action, {
       ...proposal.toolParams,
+      target: targetKey(proposal.action, proposal.namespace, proposal.name),
       reason: proposal.reason,
       summary: proposal.summary,
     });
@@ -2028,6 +2090,7 @@ export class DevOpsAgent {
       pathPrefix, // replay the same overlay scope on open_pr
       path: payload.path,
       valuesKey: payload.valuesKey,
+      target: targetKey(proposal.action, proposal.namespace, proposal.name),
       reason: proposal.reason,
       summary,
     });
@@ -2076,6 +2139,7 @@ export class DevOpsAgent {
     );
     const id = await this.remediations.propose(incidentId, "flux_reconcile", {
       ...toolParams,
+      target: targetKey("flux_reconcile", target.namespace, target.name),
       reason: `cluster drifted from the GitOps repo: ${drift.valuesKey} is ${drift.gitValue} in ${drift.path}, cluster is running ${drift.clusterValue}`,
       summary,
     });
