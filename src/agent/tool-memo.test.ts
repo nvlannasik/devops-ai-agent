@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolCallKey } from "./index.js";
+import { toolCallKey, windowOf, memoCovers } from "./index.js";
 
 const same = (a: unknown, b: unknown, msg: string) =>
   assert.equal(toolCallKey("k8s_list_events", a), toolCallKey("k8s_list_events", b), msg);
@@ -43,4 +43,27 @@ test("null, undefined and a missing key are one thing", () => {
 test("arrays keep their order, because a tool's list arguments do", () => {
   same({ pods: ["a", "b"] }, { pods: ["a", "b"] }, "");
   differ({ pods: ["a", "b"] }, { pods: ["b", "a"] }, "array order was normalised away");
+});
+
+// --- window params: asking for more of the same thing, not for a different thing ---
+// Live 2026-09-22: k8s_get_pod_logs on one pod, four rounds — tail_lines 200, 10, 200, 200.
+// Four calls, ~90s each on the slow backend, for output the run already had.
+
+test("tail_lines and since_seconds are not part of a call's identity", () => {
+  const pod = { pod_name: "checkout-gateway-774f8b79dd-rzzvt", namespace: "sample-apps" };
+  same({ ...pod, tail_lines: 200 }, { ...pod, tail_lines: 10 }, "the tail size is a window, not a different call");
+  same({ ...pod, tail_lines: 200 }, { ...pod, tail_lines: 200, since_seconds: 1200 }, "so is the age");
+  differ({ ...pod, tail_lines: 200 }, { pod_name: "other-pod", namespace: "sample-apps", tail_lines: 200 }, "a different pod is a different call");
+});
+
+test("a narrower request is served from a wider result; a wider one is not", () => {
+  // 200 lines already fetched, 10 asked for: the tail of 200 contains the tail of 10
+  assert.equal(memoCovers(windowOf({ tail_lines: 200 }), windowOf({ tail_lines: 10 })), true);
+  // 10 fetched, 200 asked for: answering that from the memo would be ten lines called two hundred
+  assert.equal(memoCovers(windowOf({ tail_lines: 10 }), windowOf({ tail_lines: 200 })), false);
+  // every dimension has to cover
+  assert.equal(memoCovers(windowOf({ tail_lines: 200 }), windowOf({ tail_lines: 100, since_seconds: 3600 })), false);
+  assert.equal(memoCovers(windowOf({ tail_lines: 200, since_seconds: 3600 }), windowOf({ tail_lines: 100, since_seconds: 600 })), true);
+  // absent means the server's default, and a call that names nothing is covered by any result
+  assert.equal(memoCovers(windowOf({ tail_lines: 50 }), windowOf({})), true);
 });

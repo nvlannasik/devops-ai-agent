@@ -644,6 +644,31 @@ export const MAX_TRACKED_THREADS = 500;
  * the answer out early. Type-blind matching is what makes that a memo hit rather than a
  * second identical query.
  */
+/**
+ * Params that ask for MORE of the same thing rather than for a different thing.
+ *
+ * Live 2026-09-22, one thread: `k8s_get_pod_logs` on the same pod four rounds running —
+ * `tail_lines: 200`, then `10`, then `200`, then `200` again. Every one of them a fresh call,
+ * because the key includes the number, and every one of them ~90 seconds of a slow backend for
+ * output the run already had.
+ *
+ * So they come out of the key, and the memo carries the window it fetched instead: a narrower
+ * request is served from a wider result (the tail of 200 lines contains the tail of 10), a wider
+ * one re-runs. Keeping them IN the key is what made four rounds of the same read possible;
+ * ignoring them without checking coverage would answer "the last 200 lines" with ten of them.
+ */
+const WINDOW_PARAMS = ["tail_lines", "since_seconds", "limit"] as const;
+
+/** The size of what was asked for, in WINDOW_PARAMS order. Absent = the server's default, 0. */
+export function windowOf(input: unknown): number[] {
+  const o = (input ?? {}) as Record<string, unknown>;
+  return WINDOW_PARAMS.map((k) => (typeof o[k] === "number" ? (o[k] as number) : Number(o[k]) || 0));
+}
+
+/** Does a memoised result already contain what this call is asking for? */
+export const memoCovers = (cached: number[], asked: number[]): boolean =>
+  asked.every((v, i) => (cached[i] ?? 0) >= v);
+
 export function toolCallKey(name: string | undefined, input: unknown): string {
   const norm = (v: unknown): unknown => {
     if (v === null || v === undefined) return null;
@@ -657,7 +682,9 @@ export function toolCallKey(name: string | undefined, input: unknown): string {
     }
     return String(v);
   };
-  return `${name ?? ""}\u0000${JSON.stringify(norm(input))}`;
+  const rest = { ...((input ?? {}) as Record<string, unknown>) };
+  for (const k of WINDOW_PARAMS) delete rest[k];
+  return `${name ?? ""}\u0000${JSON.stringify(norm(rest))}`;
 }
 
 /**
@@ -1028,7 +1055,7 @@ export class DevOpsAgent {
   private readonly threadSkills: ThreadSkills = new Map();
   // threadId -> (tool call key -> in-flight or settled result). One entry per INVESTIGATION,
   // not per thread: a later turn must be free to re-fetch, because the cluster moved on.
-  private readonly toolMemo = new Map<string, Map<string, Promise<string>>>();
+  private readonly toolMemo = new Map<string, Map<string, { result: Promise<string>; window: number[] }>>();
   private budget: Budget;
 
   constructor() {
@@ -1746,10 +1773,11 @@ export class DevOpsAgent {
         // the investigation.
         const memo = this.toolMemo.get(threadId);
         const key = toolCallKey(name, input);
+        const asked = windowOf(input);
         const cached = memo?.get(key);
-        if (cached) {
+        if (cached && memoCovers(cached.window, asked)) {
           try {
-            const result = await cached;
+            const result = await cached.result;
             logger.info(`[${threadId}] ⟲ tool: ${name} repeat call — served from this investigation's memo (${result.length} chars), not re-run`);
             return { type: "tool_result" as const, tool_use_id: id, content: guard(REPEAT_NOTICE + result, name) };
           } catch {
@@ -1760,7 +1788,7 @@ export class DevOpsAgent {
         const start = Date.now();
         logger.info(`[${threadId}] → tool: ${name} input: ${truncate(JSON.stringify(input))}`);
         const pending = this.mcp.callTool(name!, input as Record<string, unknown>);
-        memo?.set(key, pending);
+        memo?.set(key, { result: pending, window: asked });
         try {
           const result = await pending;
           logger.info(`[${threadId}] ← tool: ${name} ok (${Date.now() - start}ms, ${result.length} chars)`);
