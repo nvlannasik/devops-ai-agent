@@ -333,3 +333,20 @@ test("prose naming a root cause is not an RCA", () => {
     assert.equal(isRcaResponse(reply), false, reply);
   }
 });
+
+// Live 2026-09-23 04:41: a 4961-character Evidence section, and Slack answered `invalid_blocks`
+// for the whole message — the RCA never reached the thread.
+test("a section over Slack's 3000-char limit is split, not dropped", () => {
+  const evidence = Array.from({ length: 90 }, (_, i) => `• [Fact ${i}] — _prometheus_query_ \`sample-apps/checkout-gateway\` p99 rose to 1.8s`).join("\n");
+  const rca =
+    "*🔴 Severity:* `Critical`\n\n*📍 Root Cause*\n1. [Symptom] latency\n\n*📊 Evidence*\n" + evidence + "\n\n*📈 Confidence:* `High`";
+  const blocks = buildRcaBlocks(rca);
+  const sections = blocks.filter((b) => b.type === "section");
+  assert.ok(sections.length >= 3, "the evidence section must have become more than one block");
+  for (const b of sections) {
+    const t = "text" in b && b.text && typeof b.text !== "string" ? b.text.text : "";
+    assert.ok(t.length <= 3000, `a section is still ${t.length} chars`);
+  }
+  // nothing silently lost: the last fact still ships
+  assert.ok(blocks.some((b) => JSON.stringify(b).includes("[Fact 89]")), "the tail of the evidence was dropped");
+});

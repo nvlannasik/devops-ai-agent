@@ -1,6 +1,7 @@
 import type { KnownBlock } from "@slack/types";
+import { splitForSlack } from "./split.js";
 
-type Block = KnownBlock;
+export type Block = KnownBlock;
 
 const SEVERITY_COLOR: Record<string, string> = {
   critical: "🔴", high: "🟠", medium: "🟡", low: "🟢",
@@ -63,8 +64,25 @@ function divider(): Block {
   return { type: "divider" };
 }
 
-function section(text: string): Block {
-  return { type: "section", text: { type: "mrkdwn", text } };
+/**
+ * Slack rejects a `section` whose text is over 3000 characters — the whole message, with
+ * `invalid_blocks`, so one long section costs the entire card.
+ *
+ * Live 2026-09-23 04:41: a seven-round investigation produced a 4961-character section and the
+ * RCA never reached Slack at all. The size was already in the log line beside it ("longest 4961
+ * chars"), added when a previous card-shaped failure went unexplained.
+ *
+ * Split rather than truncated: an RCA's long section is the evidence list, and dropping its tail
+ * silently is the same failure one step quieter. `splitForSlack` is fence-aware, so a code block
+ * spanning the cut is closed and reopened.
+ */
+const SLACK_SECTION_MAX = 2900;
+
+function section(text: string): Block[] {
+  return splitForSlack(text, SLACK_SECTION_MAX).map((part) => ({
+    type: "section",
+    text: { type: "mrkdwn", text: part },
+  }));
 }
 
 function header(text: string): Block {
@@ -209,7 +227,7 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   // renders — it just opens on Impact the way it used to.
   const tldr = extractSection(rcaText, "TL;DR");
   if (tldr) {
-    blocks.push(section(`*⚡ TL;DR*\n${tldr}`));
+    blocks.push(...section(`*⚡ TL;DR*\n${tldr}`));
     blocks.push(divider());
   }
 
@@ -218,13 +236,13 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   // waking someone for, and it used to sit second-to-last on the card.
   const impact = extractSection(rcaText, "Impact");
   if (impact) {
-    blocks.push(section(`*⚠️ Impact if Unresolved*\n${impact}`));
+    blocks.push(...section(`*⚠️ Impact if Unresolved*\n${impact}`));
   }
 
   // ── Recommended Actions ──────────────────────────────────────────────────
   const actions = extractSection(rcaText, "Recommended Actions");
   if (actions) {
-    blocks.push(section(`*🔧 Recommended Actions*\n${actions}`));
+    blocks.push(...section(`*🔧 Recommended Actions*\n${actions}`));
   }
 
   if (impact || actions) blocks.push(divider());
@@ -234,20 +252,20 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   // isRcaResponse, dashboard/rca.ts and extractRootCause all key on it.
   const rootCause = extractSection(rcaText, "Root Cause");
   if (rootCause) {
-    blocks.push(section(`*📍 Root Cause*\n${rootCause}`));
+    blocks.push(...section(`*📍 Root Cause*\n${rootCause}`));
     blocks.push(divider());
   }
 
   // ── Evidence ─────────────────────────────────────────────────────────────
   const evidence = extractSection(rcaText, "Evidence");
   if (evidence) {
-    blocks.push(section(`*📊 Evidence*\n${evidence}`));
+    blocks.push(...section(`*📊 Evidence*\n${evidence}`));
   }
 
   // ── Ruled Out ────────────────────────────────────────────────────────────
   const ruledOut = extractSection(rcaText, "Ruled Out");
   if (ruledOut) {
-    blocks.push(section(`*🚫 Ruled Out*\n${ruledOut}`));
+    blocks.push(...section(`*🚫 Ruled Out*\n${ruledOut}`));
   }
 
   if (evidence || ruledOut) blocks.push(divider());
@@ -261,12 +279,13 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
     const confText = explanation
       ? `*📈 Confidence:* \`${level}\` — ${explanation}`
       : `*📈 Confidence:* \`${level}\``;
-    blocks.push(section(confText));
+    blocks.push(...section(confText));
   }
 
-  // fallback: if parsing failed, return raw text as a single block
+  // fallback: if parsing failed, return the raw text — still split, since an unparsed RCA is the
+  // longest thing this function ever emits.
   if (blocks.length <= 2) {
-    return [section(rcaText)];
+    return section(rcaText);
   }
 
   if (footer) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: footer }] });

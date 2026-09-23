@@ -12,7 +12,7 @@ import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthPro
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
-import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter } from "../utils/slack/blocks.js";
+import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter, type Block } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
@@ -310,12 +310,7 @@ export class SlackApp {
         logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
         const footer = meta ? formatRunFooter(meta) : undefined;
         if (isRca) {
-          await client.chat.postMessage({
-            channel: event.channel,
-            thread_ts: threadId,
-            text: reply,
-            blocks: buildRcaBlocks(reply, footer),
-          });
+          await this.postRca(event.channel, threadId, reply, buildRcaBlocks(reply, footer));
         } else {
           // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
           // fence-safe, so displayed logs keep rendering as code blocks
@@ -382,6 +377,26 @@ export class SlackApp {
         this.semaphore.release();
       }
     });
+  }
+
+  /**
+   * Post an RCA as a Block Kit card, and never lose it to the card.
+   *
+   * Live 2026-09-23 04:41: a 4961-character section (Slack's limit is 3000) was answered with
+   * `invalid_blocks` for the WHOLE message, the exception unwound the background investigation,
+   * and seven LLM calls' worth of RCA reached nobody — the on-call thread showed the progress
+   * notice and then nothing. `buildRcaBlocks` splits sections now, which closes that cause; this
+   * closes the shape of it. A card is a rendering of the answer, and the answer is what matters.
+   */
+  private async postRca(channel: string, threadId: string, rca: string, blocks: Block[]): Promise<void> {
+    try {
+      await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks });
+    } catch (err) {
+      logger.error(`[slack] RCA card rejected for thread ${threadId}, posting as plain text: ${errDetail(err)}`);
+      for (const part of splitForSlack(rca)) {
+        await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: part, mrkdwn: true });
+      }
+    }
   }
 
   // `@agent learn` handler — see docs/DESIGN_oncall_feedback_learning.md.
@@ -670,7 +685,7 @@ export class SlackApp {
           `(${rcaBlocks.filter((b) => b.type === "divider").length} dividers, ` +
           `${rcaBlocks.filter((b) => b.type === "section").length} sections, longest ${longest} chars)`
         );
-        await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: rcaBlocks });
+        await this.postRca(channel, threadId, rca, rcaBlocks);
       } else {
         logger.info(`[slack] alert response without RCA structure (recurrence shortcut?) — posting as conversation (thread ${threadId})`);
         for (const part of splitForSlack(rca)) {
