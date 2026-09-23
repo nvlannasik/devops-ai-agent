@@ -2702,6 +2702,16 @@ export class DevOpsAgent {
   // LLM conversation — append them to thread memory so follow-ups stay coherent (the
   // model once promised "I'll open an approval card" right after the server refused one,
   // because it never saw the refusal).
+  /** Where the approval card landed — see RemediationStore.recordCard. */
+  async recordCardMessage(id: number, channel: string, ts: string): Promise<void> {
+    await this.remediations.recordCard(id, channel, ts);
+  }
+
+  /** Cards whose approval window passed without a click — see RemediationStore.expireStale. */
+  async expireStaleRemediations(): Promise<Array<{ id: number; channel: string | null; ts: string | null; summary: string }>> {
+    return this.remediations.expireStale();
+  }
+
   async noteInThread(threadId: string, note: string): Promise<void> {
     await this.memory.append(threadId, { role: "assistant", content: `[system note] ${note}` }).catch(() => {});
   }

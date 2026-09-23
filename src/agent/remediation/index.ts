@@ -70,6 +70,41 @@ export class RemediationStore {
     }
   }
 
+  /** Remember where the card was posted, so `expireStale` can close the message too. */
+  async recordCard(id: number, channel: string, ts: string): Promise<void> {
+    if (!this.pool) return;
+    await this.pool
+      .query(`UPDATE remediations SET card_channel = $2, card_ts = $3 WHERE id = $1`, [id, channel, ts])
+      .catch((e) => logger.error(`[remediation] could not record the card message for ${id}: ${e instanceof Error ? e.message : e}`));
+  }
+
+  /**
+   * Close out every card whose approval window has passed, and say where its message is.
+   *
+   * `claimForExecution` expires a card when somebody finally clicks it — which is exactly the
+   * card that does NOT need expiring, because a human is looking at it. The ones that matter are
+   * the ones nobody touched: they stay `proposed` for ever, they keep an Approve button that now
+   * refuses, and since 3f12910 they also block every later proposal for the same target.
+   *
+   * One UPDATE, so under multi-pod delivery exactly one replica gets each row and posts one
+   * message about it.
+   */
+  async expireStale(): Promise<Array<{ id: number; channel: string | null; ts: string | null; summary: string }>> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `UPDATE remediations
+            SET status = 'rejected', result = 'expired (approval window passed)'
+          WHERE status = 'proposed' AND created_at <= now() - interval '${EXPIRY_MINUTES} minutes'
+      RETURNING id, card_channel, card_ts, coalesce(params->>'summary', action) AS summary`
+      );
+      return rows.map((r) => ({ id: Number(r.id), channel: r.card_channel, ts: r.card_ts, summary: r.summary }));
+    } catch (err) {
+      logger.error(`[remediation] expiry sweep failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
+  }
+
   // Atomic approve+claim: proposed → executing in one statement, bounded by the expiry
   // window. 0 rows updated = someone else already handled it, or it expired.
   async claimForExecution(id: number, approvedBy: string): Promise<ClaimResult> {

@@ -945,3 +945,27 @@ test("pendingFor returns the card id when one is waiting", async () => {
   const pool = { query: async () => ({ rows: [{ id: "88" }] }) } as never;
   assert.equal(await new RemediationStore(pool).pendingFor("k8s_scale:sample-apps/orders-api"), 88);
 });
+
+// A card nobody clicks never leaves 'proposed': claimForExecution only expires the card somebody
+// finally pressed, which is the one a human is already looking at.
+test("expireStale closes past-window cards and says where their messages are", async () => {
+  let sql = "";
+  const pool = {
+    query: async (q: string) => {
+      sql = q;
+      return { rows: [{ id: "88", card_channel: "C09R0F6F891", card_ts: "1790138104.557769", summary: "scale `sample-apps/orders-api` → 3 replicas" }] };
+    },
+  } as never;
+  const rows = await new RemediationStore(pool).expireStale();
+  assert.match(sql, /SET status = 'rejected'/);
+  assert.match(sql, /WHERE status = 'proposed' AND created_at <= now\(\) - interval '15 minutes'/);
+  assert.deepEqual(rows, [{ id: 88, channel: "C09R0F6F891", ts: "1790138104.557769", summary: "scale `sample-apps/orders-api` → 3 replicas" }]);
+});
+
+test("expireStale survives a database that is down, and a card with no message recorded", async () => {
+  const broken = { query: async () => { throw new Error("connection refused"); } } as never;
+  assert.deepEqual(await new RemediationStore(broken).expireStale(), []);
+  assert.deepEqual(await new RemediationStore(null).expireStale(), []);
+  const noCard = { query: async () => ({ rows: [{ id: "7", card_channel: null, card_ts: null, summary: "restart `ns/w`" }] }) } as never;
+  assert.deepEqual(await new RemediationStore(noCard).expireStale(), [{ id: 7, channel: null, ts: null, summary: "restart `ns/w`" }]);
+});

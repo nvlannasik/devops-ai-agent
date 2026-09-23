@@ -763,12 +763,15 @@ export class SlackApp {
       // mention the approvers so the card actually notifies them (same list the buttons enforce)
       const approvers = config.slack.approverUsers.length > 0 ? config.slack.approverUsers : config.slack.oncallUsers;
       const gitOps = "gitOps" in proposed ? proposed.gitOps : undefined;
-      await this.app.client.chat.postMessage({
+      const card = await this.app.client.chat.postMessage({
         channel,
         thread_ts: threadId,
         text: `${gitOps ? "🔀 Proposed GitOps PR" : "🔧 Proposed remediation"}: ${proposed.proposal.summary} — approve or reject`,
         blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps),
       });
+      // The message id is known here and nowhere else until somebody clicks. Without it the
+      // expiry sweep can close the row but not the card, which is the half a human sees.
+      if (card.ts) await this.agent.recordCardMessage(proposed.id, channel, card.ts);
       logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
@@ -884,6 +887,22 @@ export class SlackApp {
       } catch (err) {
         logger.error(`[remediation] verification poll failed: ${errDetail(err)}`);
       }
+      // So does the approval-window sweep: a card nobody clicked keeps an Approve button that
+      // now refuses, and blocks later proposals for the same target (see pendingFor). Its own
+      // try, like the others — one failing edit must not stop the rest of the pass.
+      try {
+        for (const card of await this.agent.expireStaleRemediations()) {
+          logger.info(`[remediation] expired card ${card.id} — the approval window passed without a click`);
+          if (!card.channel || !card.ts) continue;
+          const text = `:hourglass: *Expired* — nobody approved this within the window, so it was closed: ${card.summary}. Nothing ran. Ask again if it still matters.`;
+          await this.app.client.chat
+            .update({ channel: card.channel, ts: card.ts, text, blocks: remediationStatusBlocks(text) })
+            .catch((e) => logger.error(`[remediation] could not close card ${card.id} in Slack: ${errDetail(e)}`));
+        }
+      } catch (err) {
+        logger.error(`[remediation] expiry sweep failed: ${errDetail(err)}`);
+      }
+
       // Missed-resolved reconciliation rides the same poller — same shape of work (ask
       // Postgres what is outstanding, ask the cluster, post the result) and no second timer.
       // Its own try: a Slack outage failing a verdict post must not also stop incidents from
