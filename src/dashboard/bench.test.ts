@@ -77,8 +77,8 @@ test("cases are ranked worst first, across every run", () => {
   );
   const rows = byCase(loadBenchHistory(20, p));
   assert.deepEqual(rows.map((r) => r.id), ["hard", "easy"]);
-  assert.deepEqual({ ...rows[0] }, { id: "hard", passed: 3, attempts: 10, runs: 2 });
-  assert.deepEqual({ ...rows[1] }, { id: "easy", passed: 10, attempts: 10, runs: 2 });
+  assert.deepEqual({ ...rows[0] }, { id: "hard", passed: 3, attempts: 10, runs: 2, excluded: 0 });
+  assert.deepEqual({ ...rows[1] }, { id: "easy", passed: 10, attempts: 10, runs: 2, excluded: 0 });
 });
 
 test("a tie between two cases still renders in a stable order", () => {
@@ -105,4 +105,38 @@ test("a run with no backends recorded is grouped, not dropped", () => {
   const rows = byConfig(loadBenchHistory(20, write(mk({ backends: null, marks: { a: "." } }))));
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.backends, "(unrecorded)");
+});
+
+// The 2026-09-11 run: three C03 attempts died with `429 You have no credits remaining`, and they
+// counted against the case for ever — the hardest case on the board, made to look worse by a
+// billing problem that was fixed the same day.
+test("attempts that threw are excluded from a case's lifetime rate, and counted separately", () => {
+  const history = [
+    {
+      at: "2026-09-11T09:07:00.000Z", attempts: 3, marks: { "C03-evidence-missing-no-logs": "xxx" },
+      failures: [1, 2, 3].map((attempt) => ({
+        case: "C03-evidence-missing-no-logs", attempt,
+        reasons: ["attempt threw: all LLM backends failed — 429 You have no credits remaining"],
+      })),
+    },
+    {
+      at: "2026-09-23T03:49:00.000Z", attempts: 3, marks: { "C03-evidence-missing-no-logs": ".xx" },
+      failures: [{ case: "C03-evidence-missing-no-logs", attempt: 2, reasons: ["proposed k8s_set_resources, but the correct answer is no proposal"] }],
+    },
+  ] as unknown as BenchRun[];
+
+  const [c03] = byCase(history);
+  assert.equal(c03!.attempts, 3, "only the run that actually ran counts");
+  assert.equal(c03!.passed, 1);
+  assert.equal(c03!.excluded, 3, "the three that never reached the model are reported, not hidden");
+  assert.equal(c03!.runs, 2, "both runs still touched this case");
+  // and the configuration rate agrees with it
+  assert.equal(byConfig(history)[0]!.attempts, 3);
+});
+
+test("a run with no failures at all is unaffected", () => {
+  const history = [{ at: "2026-09-23T03:49:00.000Z", attempts: 2, marks: { "A02-oomkilled-at-limit": ".." } }] as unknown as BenchRun[];
+  const [a02] = byCase(history);
+  assert.equal(a02!.attempts, 2);
+  assert.equal(a02!.excluded, 0);
 });

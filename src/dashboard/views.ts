@@ -1681,7 +1681,16 @@ function byCaseTable(history: BenchRun[]): string {
         `<tr role="row">` +
         cell("Case", `<code translate="no">${esc(r.id)}</code>`) +
         cell("Pass rate", rateBar(r.passed, r.attempts), "rate") +
-        cell("Attempts", `${fmtInt(r.passed)}/${fmtInt(r.attempts)}`, "num") +
+        cell(
+          "Attempts",
+          `${fmtInt(r.passed)}/${fmtInt(r.attempts)}` +
+            // Named, never silently dropped: a case whose credits ran out mid-run has a smaller
+            // denominator than its siblings, and the row has to say so or the comparison lies.
+            (r.excluded > 0
+              ? ` <span class="meta" title="attempts that failed before the model answered — a backend error, not the agent">+${fmtInt(r.excluded)} n/a</span>`
+              : ""),
+          "num"
+        ) +
         cell("Runs", fmtInt(r.runs), "num") +
         `</tr>`
     )

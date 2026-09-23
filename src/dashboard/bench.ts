@@ -10,6 +10,7 @@
 // is holding rather than what is on someone's disk.
 
 import { readFileSync } from "node:fs";
+import { thrownAttempts } from "../bench/store.js";
 import { join } from "node:path";
 import logger from "../utils/logger/index.js";
 
@@ -93,18 +94,41 @@ export interface CaseStat {
   passed: number;
   attempts: number;
   runs: number;
+  /** Attempts that died before the model answered — counted nowhere else, reported separately. */
+  excluded: number;
 }
+
+/**
+ * `case\u0000attempt` for every attempt that threw, so the rates below can leave them out.
+ *
+ * A run card already flags these (`thrownAttempts`), and the reason it gives applies with more
+ * force here: a 429 or an SQS timeout measures the backend, not the agent — but a run card is one
+ * moment, while these rates are permanent. C03 carried three `429 You have no credits remaining`
+ * attempts from 2026-09-11 in its lifetime pass rate, which made the hardest case on the board
+ * look worse than it is and kept saying so long after the credits were topped up.
+ *
+ * Excluded, not deleted: the count rides along, because "12/15, 3 never ran" and "12/15" are
+ * different statements and only one of them is true.
+ */
+const thrownKeys = (run: BenchRun): Set<string> =>
+  new Set(thrownAttempts(run.failures ?? []).map((t) => `${t.case}\u0000${t.attempt}`));
 
 export function byCase(history: BenchRun[]): CaseStat[] {
   const acc = new Map<string, CaseStat>();
   for (const run of history) {
+    const thrown = thrownKeys(run);
     for (const [id, marks] of Object.entries(run.marks ?? {})) {
-      const c = acc.get(id) ?? { id, passed: 0, attempts: 0, runs: 0 };
+      const c = acc.get(id) ?? { id, passed: 0, attempts: 0, runs: 0, excluded: 0 };
       c.runs += 1;
-      for (const m of marks) {
+      // The mark's position IS the attempt number — `.x.` is attempts 1, 2, 3 in order.
+      [...marks].forEach((m, i) => {
+        if (thrown.has(`${id}\u0000${i + 1}`)) {
+          c.excluded += 1;
+          return;
+        }
         c.attempts += 1;
         if (m !== "x") c.passed += 1;
-      }
+      });
       acc.set(id, c);
     }
   }
@@ -145,11 +169,15 @@ export function byConfig(history: BenchRun[]): ConfigStat[] {
     c.runs += 1;
     if (run.at > c.lastAt) c.lastAt = run.at;
     if (run.passHatK === 1) c.cleanRuns += 1;
-    for (const marks of Object.values(run.marks ?? {})) {
-      for (const m of marks) {
+    // Same exclusion as byCase, and for the same reason one level up: a configuration is not
+    // worse because its credits ran out mid-run.
+    const thrown = thrownKeys(run);
+    for (const [id, marks] of Object.entries(run.marks ?? {})) {
+      [...marks].forEach((m, i) => {
+        if (thrown.has(`${id}\u0000${i + 1}`)) return;
         c.attempts += 1;
         if (m !== "x") c.passed += 1;
-      }
+      });
     }
     acc.set(key, c);
   }
