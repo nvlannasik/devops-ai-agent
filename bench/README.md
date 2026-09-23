@@ -231,6 +231,22 @@ are not in the GitOps repo, so Flux will not fight them, and they are not in
 `ALLOWED_REMEDIATION_NAMESPACES`, so nothing could be executed against them even if a proposal
 were approved by hand.
 
+## What is kept, and what is not
+
+`bench/results/history.jsonl` is the permanent record and the only file here that git tracks
+(`.gitignore` excludes `bench/results/*` and negates that one line). It is what `/bench` reads and
+what `git log -p` can show a regression in, so it is never pruned.
+
+The per-run `<timestamp>.json` files hold every attempt's RCA, proposal and raw model output.
+They are local-only, they are large, and most of them come from `--filter` runs spent chasing one
+case for an hour. Retention, applied by hand when the directory gets noisy:
+
+- **keep** every full-suite run (≥ 10 cases) — those are the ones a number in `history.jsonl`
+  refers to, and the only ones worth re-reading months later;
+- **keep** the last few days of `--filter` runs, because that is the work in progress;
+- **archive the rest** into `bench/results/archive/*.tar.gz` rather than deleting: git cannot
+  bring these back, and 1 MB of them compresses to 220 KB.
+
 ## Reading the score
 
 `pass^k` — every attempt passed — is the number that decides whether this can be trusted on
