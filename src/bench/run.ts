@@ -195,7 +195,10 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
           // measures a prompt production does not send.
           task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply),
           async (prompt) =>
-          textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
+          textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>),
+          // Production steers on a refusal instead of stopping at one, so the measurement has to
+          // as well — the same guard, passed the same way. See guardRetryNotice.
+          (p) => agent.guardRefusalFor(p).catch(() => null),
         )
       : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };
     let proposalRaw = asked.raw;

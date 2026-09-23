@@ -1978,11 +1978,19 @@ export class DevOpsAgent {
     // Two calls at most, not one: proposeWithRetry re-asks once when the first answer named an
     // action it did not fill in, or answered null. See proposal.ts for why that is code here
     // rather than another paragraph in the prompt.
-    const { proposal, raw } = await proposeWithRetry(labels, rca, async (prompt) => {
-      const response = await withRoute("light", () => this.llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM));
-      this.recordUsage(null, response); // no Slack thread at this call site — never invent one
-      return this.extractText(response.content);
-    });
+    const { proposal, raw } = await proposeWithRetry(
+      labels,
+      rca,
+      async (prompt) => {
+        const response = await withRoute("light", () => this.llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM));
+        this.recordUsage(null, response); // no Slack thread at this call site — never invent one
+        return this.extractText(response.content);
+      },
+      // The replacement guard, early, so a refusal steers the proposal instead of ending it —
+      // see guardRetryNotice. Skipped for a user request on the same terms as the copy below,
+      // which still runs: this one only decides whether to spend the extra call.
+      opts.userRequested ? undefined : (p) => this.guardRefusalFor(p).catch(() => null),
+    );
     if (!proposal) {
       logger.info(`[remediation] no actionable proposal from model: ${truncate(raw, 200)}`);
       return null;

@@ -1949,6 +1949,20 @@ proposal meets them, because that order is load-bearing — each one assumes the
 | `offerMismatchRefusal` | a proposal that wandered off the `[OFFER]` the human agreed to | C09: offered `bench-c09/Service/bench-c09-cache`, proposed `default/unsueddd` |
 | `pendingFor` (duplicate target) | a second card for an action+target already awaiting a click, **within the approval window** | one armed fault tripped four rules and produced two identical scale cards and two identical restarts |
 
+**A refusal now steers the proposal instead of ending it** (`guardRetryNotice`, `proposeWithRetry`'s
+fourth argument). Every gate above answers "no", and until 2026-09-24 "no" was also the last word:
+the proposal call got one shot, and a refused shot meant no card. A02 attempt 3 is what that costs
+— the RCA said *"Increase the `api-server` memory limit from `128Mi` to `256Mi`"*, the proposal
+emitted `k8s_rollout_restart`, the replacement guard refused it correctly, and an incident whose
+repair the agent had already written down got nothing at all. So `guardRefusalFor` is passed into
+`proposeWithRetry` as well, and a refusal is re-asked once with the refusal quoted — it was written
+to be read, and this is the one moment the model is told something specific about its own answer.
+`{"action": null}` is restated as an acceptable reply, for the same reason `retryNotice` restates
+it. The caller's full chain still runs on whatever comes back, and a steer that proposes nothing
+hands the first proposal back, so the refusal a human reads is unchanged. The benchmark passes the
+same guard the same way (`bench/run.ts`): a measurement of a path production does not take measures
+nothing.
+
 Three things learned across all of them, worth more than any single gate:
 
 - **The signal is what the model SAYS it is doing, not the words it happens to use.** `worthProposing`
