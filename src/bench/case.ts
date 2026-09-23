@@ -63,6 +63,15 @@ export const CaseFile = z.object({
   mode: Mode.default("alert"),
   /** The Slack text, for a case that enters as a mention rather than as an Alertmanager group. */
   message: z.string().min(1).optional(),
+  /**
+   * A SECOND mention in the same thread, scored instead of the first.
+   *
+   * The gate's approval branch — "the agent put a change on the table, the human said ya" — lives
+   * across two turns, and the runner passed `previousReply: ""` to `worthProposing`, so it was the
+   * one path production has that the benchmark could not reach. It broke twice in a week
+   * (fb2ea94, c44f704) and both times the tests were green.
+   */
+  followUp: z.string().min(1).optional(),
   groupLabels: z.record(z.string(), z.string()).optional(),
   alerts: z.array(Alert).min(1).optional(),
   commonAnnotations: z.record(z.string(), z.string()).optional(),
@@ -74,7 +83,8 @@ export const CaseFile = z.object({
   .refine(
     (c) => (c.mode === "alert" ? !!c.alerts && !!c.groupLabels : !!c.message),
     "an alert case needs groupLabels + alerts; an investigation or conversation case needs message"
-  );
+  )
+  .refine((c) => !c.followUp || c.mode !== "alert", "followUp is a second mention; an alert group has no second turn");
 
 export type Case = z.infer<typeof CaseFile> & { dir: string };
 

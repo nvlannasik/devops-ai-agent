@@ -287,6 +287,32 @@ export function resourceFaultRefusal(proposal: Proposal, observed: string | null
   );
 }
 
+/**
+ * A proposal that wandered off its own offer.
+ *
+ * Bench case C09, attempt 1: the agent offered `[OFFER] delete
+ * \`bench-c09/Service/bench-c09-cache\`` — the object the human had just named — and the proposal
+ * call came back with `default/unsueddd`, a different orphan from the same cluster-wide scan.
+ * Grounded (a real object, in the tool output), refused by nothing, and not what anybody agreed
+ * to. The `[OFFER]` line exists precisely so the target stops being inferred from prose; letting
+ * the proposal disagree with it would put the guessing back one step later.
+ *
+ * Only when the offer names an object: an offer is free text otherwise, and this compares names.
+ */
+export function offerMismatchRefusal(proposal: Proposal, offer: string | null): string | null {
+  if (!offer) return null;
+  const named = offer.match(/`([^`\n]*\/[^`\n]*)`/)?.[1];
+  if (!named) return null;
+  const parts = named.toLowerCase().split("/").filter(Boolean);
+  const target = parts[parts.length - 1];
+  if (!target || target === proposal.name.toLowerCase()) return null;
+  return (
+    `the card would act on \`${proposal.namespace}/${proposal.name}\`, but what was offered and agreed to ` +
+    `was \`${named}\`. Propose the object that was actually discussed, or say why it is the wrong one — a ` +
+    `human approving "yes" is approving the thing they were shown.`
+  );
+}
+
 /** What "the same card" means: the action and the object it acts on, never the parameters. */
 export const targetKey = (action: string, namespace: string, name: string): string =>
   `${action}:${namespace}/${name}`.toLowerCase();
@@ -1920,7 +1946,7 @@ export class DevOpsAgent {
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
     labels: Record<string, string>,
     rca: string,
-    opts: { userRequested?: boolean; threadId?: string } = {}
+    opts: { userRequested?: boolean; threadId?: string; offer?: string | null } = {}
   ): Promise<
     | { id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } }
     | { refused: string }
@@ -1995,6 +2021,13 @@ export class DevOpsAgent {
     if (orphanRefused) {
       logger.info(`[remediation] orphan gate refused ${proposal.summary}: ${orphanRefused}`);
       return { refused: orphanRefused };
+    }
+
+    // The offer is what the human answered "yes" to — see offerMismatchRefusal.
+    const wrongTarget = offerMismatchRefusal(proposal, opts.offer ?? null);
+    if (wrongTarget) {
+      logger.info(`[remediation] offer gate refused ${proposal.summary}: ${wrongTarget}`);
+      return { refused: wrongTarget };
     }
 
     // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.

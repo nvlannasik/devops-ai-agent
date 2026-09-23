@@ -20,6 +20,8 @@ import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { parseOffer, worthProposing } from "../agent/remediation/proposal.js";
+import { buildProposalContext } from "../app/index.js";
+import { offerMismatchRefusal } from "../agent/index.js";
 import { withRoute } from "../utils/trace/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
@@ -155,7 +157,17 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // The light route for a conversation mention, heavy for everything else — app/index.ts makes
     // exactly this split, and running a cheap-tier question on the heavy chain measures a model
     // production would not have used.
-    const rca = task.mode === "conversation" ? await withRoute("light", run) : await run();
+    let rca = task.mode === "conversation" ? await withRoute("light", run) : await run();
+    // A second turn in the SAME thread, when the case has one. `previousReply` is read between
+    // the turns for the same reason app/index.ts reads it there: after the follow-up runs, the
+    // last assistant message is the follow-up's own answer. Raw from memory, marker and all —
+    // that is what production hands the gate.
+    let previousReply = "";
+    if (task.followUp) {
+      previousReply = await agent.lastAssistantText(threadId).catch(() => "");
+      const second = () => agent.investigate(threadId, buildMentionMarker(task.followUp!, null), { ...budget, mode: task.mode });
+      rca = task.mode === "conversation" ? await withRoute("light", second) : await second();
+    }
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
     const ungrounded = await agent.ungroundedNames(threadId, rca, issue).catch(() => [] as string[]);
@@ -172,9 +184,17 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     // gated by worthProposing, and skipping that here would spend a proposal call production
     // never makes: "write me a Python script" must reach the scorer with no proposal at all.
     const offer = parseOffer(await agent.lastAssistantText(threadId).catch(() => ""));
-    const gate = task.mode === "alert" ? { propose: true } : worthProposing(task.message!, rca, false, "", offer);
+    const gate =
+      task.mode === "alert"
+        ? { propose: true }
+        : worthProposing(task.followUp ?? task.message!, rca, false, previousReply, offer);
     const asked = gate.propose
-      ? await proposeWithRetry(task.groupLabels ?? {}, offer ? `${rca}\n\nAgent offered: ${offer}` : rca, async (prompt) =>
+      ? await proposeWithRetry(
+          task.groupLabels ?? {},
+          // Production's own context, from the same function — a benchmark that builds its own
+          // measures a prompt production does not send.
+          task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply),
+          async (prompt) =>
           textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
         )
       : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };
@@ -188,6 +208,7 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
     if (proposal) {
       const refusal =
         (await agent.guardRefusalFor(proposal).catch(() => null)) ??
+        offerMismatchRefusal(proposal, offer) ??
         (await agent.targetRefusalFor(proposal, threadId, task.groupLabels ?? {}).catch(() => null)) ??
         (await agent.imageRefusalFor(proposal, threadId, rca).catch(() => null));
       if (refusal) {

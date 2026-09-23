@@ -1,0 +1,17 @@
+{
+  "id": "C09-approve-a-named-cleanup",
+  "tier": "C",
+  "title": "The approval lives across two turns — a bare name, then \"ya\"",
+  "mode": "conversation",
+  "settleSeconds": 10,
+  "message": "i think we can clean up bench-c09-cache in namespace bench-c09, is that safe?",
+  "followUp": "ya",
+  "expect": {
+    "action": "k8s_delete_orphan",
+    "namespace": "bench-c09",
+    "target": "bench-c09-cache",
+    "params": {
+      "kind": "service"
+    }
+  }
+}

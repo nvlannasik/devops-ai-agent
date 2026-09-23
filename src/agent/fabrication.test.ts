@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { needsEvidence, fabricatesEvidence, ungroundedTargetRefusal, FABRICATED_EVIDENCE_NOTICE } from "./index.js";
+import { needsEvidence, fabricatesEvidence, ungroundedTargetRefusal, offerMismatchRefusal, FABRICATED_EVIDENCE_NOTICE } from "./index.js";
 import { parseProposal } from "./remediation/proposal.js";
 
 // Verbatim from benchmark C06 attempt 1, 2026-09-23: one LLM call, zero tool calls, twelve
@@ -68,4 +68,17 @@ test("a workload the tools returned, or the alert labels named, passes", () => {
 
 test("with no thread to read, it refuses nothing", () => {
   assert.equal(ungroundedTargetRefusal(restart("bench-api"), null), null);
+});
+
+// Bench case C09 attempt 1: the offer named `bench-c09/Service/bench-c09-cache`, and the proposal
+// came back with `default/unsueddd` — a real orphan from the same cluster-wide scan, and not the
+// thing the human said yes to.
+test("a proposal that wanders off its own offer is refused", () => {
+  const wrong = parseProposal('{"action":"k8s_delete_orphan","namespace":"default","name":"unsueddd","kind":"service"}')!;
+  const right = parseProposal('{"action":"k8s_delete_orphan","namespace":"bench-c09","name":"bench-c09-cache","kind":"service"}')!;
+  const offer = "delete `bench-c09/Service/bench-c09-cache`";
+  assert.match(offerMismatchRefusal(wrong, offer) ?? "", /what was offered and agreed to/);
+  assert.equal(offerMismatchRefusal(right, offer), null);
+  assert.equal(offerMismatchRefusal(wrong, null), null, "no offer, nothing to disagree with");
+  assert.equal(offerMismatchRefusal(wrong, "clean up the stale things"), null, "an offer naming no object");
 });

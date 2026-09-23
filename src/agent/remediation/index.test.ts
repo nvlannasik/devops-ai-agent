@@ -979,3 +979,12 @@ test("recordCard stores the thread as well as the message", async () => {
   await new RemediationStore(pool).recordCard(88, "C09R0F6F891", "1790138104.557769", "1790138100.111111");
   assert.deepEqual(args, [88, "C09R0F6F891", "1790138104.557769", "1790138100.111111"]);
 });
+
+// A03, one attempt in four: the RCA said "revert to the previously running tag" and named the
+// serving ReplicaSet's `nginx:alpine`, and the proposal answered {"action": null} anyway.
+test("the prompt says an older ReplicaSet's image IS the working image", () => {
+  const prompt = buildProposalPrompt({}, "rca");
+  assert.match(prompt, /OLDER OR STILL-SERVING ReplicaSet is running IS that working image/);
+  // and it must not have lost the rule that keeps a tag from being invented
+  assert.match(prompt, /NEVER invent a tag yourself/);
+});

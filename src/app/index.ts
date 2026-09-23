@@ -20,6 +20,28 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 
+/**
+ * What the proposal call is asked to act on: this turn, plus the turn that set it up.
+ *
+ * An approval turn is two sentences long — "ya", and an offer — while everything that justifies
+ * the action was said the turn before. Measured on bench case C09: the agent answered "ya" with
+ * nothing but its `[OFFER]` line, the proposal call saw one sentence naming a Service, and it
+ * answered {"action": null} — the findings behind the offer (no endpoints, nothing declares it)
+ * were one turn back.
+ *
+ * Truncated rather than whole: `buildProposalPrompt` keeps the TAIL of what it is given, because
+ * Recommended Actions live there, so an unbounded history would push this turn out of the window
+ * it reads.
+ */
+const PREVIOUS_TURN_CHARS = 1500;
+
+export function buildProposalContext(userText: string, reply: string, offer: string | null, previousReply: string): string {
+  const prior = previousReply.trim()
+    ? `Previous turn — the agent's own findings, which this request is answering:\n${truncate(previousReply.trim(), PREVIOUS_TURN_CHARS)}\n\n`
+    : "";
+  return `${prior}User request: ${userText}\n\nAgent reply:\n${reply}${offer ? `\n\nAgent offered: ${offer}` : ""}`;
+}
+
 // How many ungrounded names the thread warning lists before it summarises the rest. A wall of
 // them says the same thing as five of them — the answer is not standing on its evidence.
 const UNGROUNDED_SHOWN = 5;
@@ -362,11 +384,13 @@ export class SlackApp {
               threadId,
               null,
               {},
-              // The offer names the exact object; on a bare "ya" the user text names nothing.
-              `User request: ${text}\n\nAgent reply:\n${reply}${offer ? `\n\nAgent offered: ${offer}` : ""}`,
+              // The offer names the exact object; on a bare "ya" the user text names nothing, and
+              // the evidence is a turn back — see buildProposalContext.
+              buildProposalContext(text, reply, offer, previousReply),
               // worthProposing already decided this; it is the only place that knows whether the
               // words came from a person or the fault vocabulary came from the agent's own answer.
-              gate.byUser
+              gate.byUser,
+              offer
             )
           );
         }
@@ -741,12 +765,15 @@ export class SlackApp {
     rca: string,
     // The human named the action, rather than the model reaching for one. Skips the replacement
     // guard only — every other check, including the dry-run and the approval click, still runs.
-    userRequested = false
+    userRequested = false,
+    // What the agent put on the table this turn, when it used the `[OFFER]` line. The proposal
+    // may not wander off it — see offerMismatchRefusal.
+    offer: string | null = null
   ): Promise<void> {
     try {
       // threadId: the quarantine gate reads this thread's tool results for the idle measurement
       // a scale-to-zero has to stand on. Both call sites already have it.
-      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId });
+      const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId, offer });
       if (!proposed) return; // no write tools / no confident proposal / already active
       if ("refused" in proposed) {
         // the model wanted to act but the MCP server refused (GitOps guard, blocked

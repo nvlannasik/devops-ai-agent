@@ -512,6 +512,7 @@ export function buildProposalPrompt(labels: Record<string, string>, rca: string)
     "   — ONLY when the spec is correct and the running process is not: the evidence shows a fault that a fresh identical pod would not reproduce\n" +
     '2. {"action":"k8s_set_image","namespace":"...","workload":"...","kind":"...","container":"...","image":"registry/repo:tag","reason":"..."}\n' +
     "   — when the RCA evidence shows the current image is wrong/nonexistent AND names a working image (e.g. the previously running tag), OR the user explicitly requested a specific image/tag. NEVER invent a tag yourself\n" +
+    "   — an image an OLDER OR STILL-SERVING ReplicaSet is running IS that working image: if the evidence names one, propose it. Answering null while the evidence holds the tag that works leaves a broken rollout in place for want of naming it\n" +
     '3. {"action":"k8s_set_resources","namespace":"...","workload":"...","kind":"...","container":"...","memory_limit":"1Gi",...,"reason":"..."}\n' +
     "   — ONLY for OOMKilled / resource-exhaustion RCAs, or a Pending pod whose scheduler message says the REQUEST is larger than any node can satisfy (\"Insufficient cpu\"/\"Insufficient memory\") — that request is the fault and lowering it is the fix; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
     // The fallacy three benchmark C03 attempts wrote almost word for word — "memory limit not

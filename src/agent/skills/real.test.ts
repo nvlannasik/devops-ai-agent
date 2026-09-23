@@ -358,3 +358,9 @@ test("the prompt asks for the [OFFER] line the gate reads", () => {
   assert.match(prompt, /\[OFFER\] <action> `namespace\/Kind\/name`/);
   assert.match(prompt, /never make an offer as a question/i);
 });
+
+test("the prompt forbids substituting a near-match for the object asked about", () => {
+  const prompt = buildStaticSystemPrompt();
+  assert.match(prompt, /Never substitute a near-match/i);
+  assert.match(prompt, /capped per kind/i);
+});
