@@ -1433,6 +1433,22 @@ tool's empty shape. An empty Loki envelope measures ~35 characters and a `previo
 hundreds; parsing properly would mean tracking three response formats from another repo, and being
 wrong costs one extra LLM call.
 
+**The gate's last clause needed a backstop of its own** (`capConfidence`, `agent/confidence/`).
+`LOG_GAP_NOTICE` ends with "lower the Confidence only if your conclusion actually depends on
+them", and bench case C03 — a container that logs nothing, by construction — answered correctly
+and then rated itself `Confidence: High` in two of its last six attempts. Same move as every other
+rule in this file: the prompt keeps the nuance, the code settles the contradiction. It runs in
+`done()`, the single exit, so the alert path and a mention both pass through it.
+
+Two conditions, each excluding a different false positive. The ANSWER has to say the log source
+yielded nothing — not that the logs were CLEAN, because "no error logs were found" on a healthy
+workload is the complete answer the notice explicitly blesses, and its confidence is earned. And
+no log tool may have returned lines this run: an answer that misdescribes logs it DID read is a
+different bug, and capping it would hide that bug behind a plausible-looking Medium. The cap is
+Medium rather than Low because Low pages the on-call (`notifyIfLowConfidence`), and a missing log
+is not by itself a reason to wake someone. The explanation on the line is replaced along with the
+level — the reasoning that argued for High does not argue for Medium.
+
 ## LLM Providers
 
 | `LLM_PROVIDER` | Class | Notes |

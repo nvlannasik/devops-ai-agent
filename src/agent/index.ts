@@ -31,6 +31,7 @@ import {
   withDelegateTool,
 } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
+import { capConfidence } from "./confidence/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
@@ -1350,9 +1351,13 @@ export class DevOpsAgent {
           : `in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
             `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`)
       );
+      // An answer that says it could not read the logs cannot also be highly confident — see
+      // capConfidence. Here, so the alert path and a mention both pass through it.
+      const { text: rated, capped } = capConfidence(text, sawLogLines);
+      if (capped) logger.info(`[${threadId}] capped Confidence: High → Medium — the answer reports no logs`);
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      return stripOffer(text);
+      return stripOffer(rated);
     };
     let totalUsage = zeroUsage();
 
