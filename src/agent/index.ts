@@ -19,7 +19,7 @@ import { resolveBudget } from "./context/resolve-budget.js";
 import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type Skill, type SkillRegistry } from "./skills/index.js";
 import { namespacesOf, outOfScope } from "./scope/index.js";
-import { groundingGaps, observedText } from "./grounding/index.js";
+import { citedNames, groundingGaps, observedText } from "./grounding/index.js";
 import { flagInjection } from "./injection/index.js";
 import {
   DELEGATE_TOOL,
@@ -223,6 +223,38 @@ export function orphanDeleteRefusal(proposal: Proposal, observed: string | null)
   );
 }
 
+/**
+ * A card for a workload nothing ever saw.
+ *
+ * `groundingGaps` catches an invented name in the RCA TEXT and posts a warning beside it. The
+ * proposal is the same invention one step further on, where it stops being a sentence and becomes
+ * a button. Benchmark C06, 2026-09-23, all three attempts: the model answered "check the logs for
+ * api" with a fabricated deployment `bench-api` — the namespace holds `api-gateway`,
+ * `payments-api` and `api-worker` — and proposed a rolling restart of it. The dry-run would have
+ * refused that one (no such object), but only after the model had been told its target was real
+ * by everything upstream, and a NAME THAT RESOLVES is the dangerous version: `orders-api` for
+ * `orders-api-svc` is a real object and the wrong one.
+ *
+ * Grounded means the workload's name appears in this thread's tool output, or in the alert labels
+ * that named the subject in the first place. Fails open on a run with no thread at all.
+ */
+export function ungroundedTargetRefusal(
+  proposal: Proposal,
+  observed: string | null,
+  labels: Record<string, string> = {}
+): string | null {
+  if (observed === null) return null;
+  const name = proposal.name.toLowerCase();
+  if (!name) return null;
+  if (observed.toLowerCase().includes(name)) return null;
+  if (Object.values(labels).some((v) => typeof v === "string" && v.toLowerCase().includes(name))) return null;
+  return (
+    `\`${proposal.namespace}/${proposal.name}\` appears in no tool result from this investigation and in ` +
+    `no alert label, so the target was written rather than found. Name a workload that showed up in what ` +
+    `you actually read — if the request named something ambiguous, list the candidates and ask which one.`
+  );
+}
+
 /** What "the same card" means: the action and the object it acts on, never the parameters. */
 export const targetKey = (action: string, namespace: string, name: string): string =>
   `${action}:${namespace}/${name}`.toLowerCase();
@@ -401,14 +433,54 @@ export const NO_EVIDENCE_NOTICE =
   "failing. If what you find contradicts the answer you just wrote, the answer was wrong and the " +
   "evidence wins. Say what you actually read.]";
 
+export const FABRICATED_EVIDENCE_NOTICE =
+  "[FABRICATED EVIDENCE — the answer you just wrote quotes log lines or cluster output, and you " +
+  "have not called a single tool this run. Nothing in it was read from the cluster; you wrote what " +
+  "such output usually looks like. Delete it. Call the tools for what you were asked about, and " +
+  "answer only from what comes back — quoting a timestamp, a pod name or a JSON field you did not " +
+  "receive is the one thing that makes every other answer unusable. If the request is ambiguous " +
+  "(a name matching many workloads), ask which one instead of picking one and inventing its logs.]";
+
+/**
+ * The other half, and the reason conversation mode cannot simply be added above.
+ *
+ * Benchmark C06, three attempts out of three, 2026-09-23: "check the logs for api in namespace
+ * bench-c06" was answered in ONE LLM call with zero tool calls — and the answer carried a fenced
+ * block of twelve invented log lines, with timestamps, JSON fields and a pod name, for a workload
+ * `bench-api` that does not exist. Nothing in the loop objected: the fan-out guard never ran
+ * (no tool call to cap), `needsEvidence` skips conversation mode, and `logGapAction` requires a
+ * tool round before it will nudge.
+ *
+ * So the trigger is not the mode, it is the CLAIM: an answer that presents tool output it never
+ * fetched. C07's correct tool-free refusal ("that's outside what I do") carries no such block and
+ * stays untouched.
+ *
+ * Two shapes, because the same run produced both. Attempt 1 quoted twelve invented log lines in a
+ * fence. Re-run after the first fix, the fence held only a LogQL query — and the answer still
+ * asserted `bench-api`, a workload it had never looked up. With ZERO tool calls behind it, any
+ * resource name the answer cites is by definition ungrounded: there is no tool result it could
+ * have come from. `citedNames` is the same extractor `groundingGaps` uses, so the rule agrees with
+ * the warning the run already posts instead of having its own idea of what a name is.
+ *
+ * C07's correct tool-free refusal cites nothing and quotes nothing, so it stays untouched.
+ */
+const FABRICATED_EVIDENCE =
+  /```[\s\S]{0,4000}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|"level"\s*:|"msg"\s*:|\blevel=(?:error|warn|info)\b|\b(?:CrashLoopBackOff|OOMKilled|ImagePullBackOff)\b)/i;
+
+export const fabricatesEvidence = (answer: string): boolean =>
+  FABRICATED_EVIDENCE.test(answer) || citedNames(answer).length > 0;
+
 /** Pure so it can be tested; the loop has no seam for the branch it guards. */
 export function needsEvidence(s: {
   mode: RunMode;
   toolRounds: number;
   nudged: boolean;
   toolsDisabled: boolean;
+  /** The answer just written, for the fabrication branch. Absent = the alert-mode rule only. */
+  answer?: string;
 }): boolean {
-  return s.mode === "alert" && s.toolRounds === 0 && !s.nudged && !s.toolsDisabled;
+  if (s.nudged || s.toolsDisabled || s.toolRounds > 0) return false;
+  return s.mode === "alert" || fabricatesEvidence(s.answer ?? "");
 }
 
 export interface LogGapState {
@@ -1339,12 +1411,18 @@ export class DevOpsAgent {
         }
         // Before every other gate: an alert answered with no tool call at all has not been
         // investigated, and whatever the other gates would ask about is downstream of that.
-        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled })) {
+        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled, answer: summary })) {
           noEvidenceNudged = true;
           preNudgeSummary = summary;
           toolRoundsAtNudge = toolRounds;
-          logger.warn(`[${threadId}] answered an alert with zero tool calls — one more round to go and look`);
-          await this.memory.append(threadId, { role: "user", content: NO_EVIDENCE_NOTICE });
+          logger.warn(
+            `[${threadId}] answered with zero tool calls — one more round to go and look` +
+            (mode === "alert" ? "" : " (the answer presented tool output it never fetched)")
+          );
+          await this.memory.append(threadId, {
+            role: "user",
+            content: mode === "alert" ? NO_EVIDENCE_NOTICE : FABRICATED_EVIDENCE_NOTICE,
+          });
           continue;
         }
         // The last gate before an answer leaves — see logGapAction for all three outcomes.
@@ -1859,6 +1937,13 @@ export class DevOpsAgent {
       return { refused: orphanRefused };
     }
 
+    // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.
+    const targetRefused = ungroundedTargetRefusal(proposal, await this.threadEvidence(opts.threadId), labels);
+    if (targetRefused) {
+      logger.info(`[remediation] target gate refused ${proposal.summary}: ${targetRefused}`);
+      return { refused: targetRefused };
+    }
+
     // Replicas need a measurement of their own. Skipped for a user request, like the replacement
     // guard: a person who asks for more replicas has placed the need themselves.
     if (!opts.userRequested) {
@@ -1934,6 +2019,11 @@ export class DevOpsAgent {
   private async orphanRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
     if (proposal.action !== "k8s_delete_orphan") return null;
     return orphanDeleteRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  /** Public because `bench/run.ts` applies it too — see ungroundedTargetRefusal. */
+  async targetRefusalFor(proposal: Proposal, threadId: string | undefined, labels: Record<string, string> = {}): Promise<string | null> {
+    return ungroundedTargetRefusal(proposal, await this.threadEvidence(threadId), labels);
   }
 
   /**
