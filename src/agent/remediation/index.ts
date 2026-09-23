@@ -5,7 +5,7 @@ import logger from "../../utils/logger/index.js";
 // the idempotency lock: status flips are atomic UPDATE ... WHERE status=... — under
 // multi-pod delivery or a double-click, exactly one caller wins.
 
-const EXPIRY_MINUTES = 15; // approval window — checked at click time, not post time
+const EXPIRY_MINUTES = 15; // approval window — checked at click time, and by pendingFor
 
 export type ClaimResult =
   | { action: string; params: Record<string, unknown> }
@@ -32,11 +32,22 @@ export class RemediationStore {
    *
    * Matched on `params.target`, written by all three store sites, so a GitOps PR card and a
    * direct-patch card for the same workload still collide — the human sees one question either way.
+   *
+   * WITHIN THE APPROVAL WINDOW, and that clause is the whole difference between a guard and a
+   * deadlock. `status` only leaves `proposed` when somebody clicks: `claimForExecution` marks a
+   * late click `rejected (expired)`, so a card nobody ever touched stays `proposed` forever. Left
+   * unbounded, this query would let five stale cards from 2026-09-22 block every future proposal
+   * for those workloads — permanently, and silently, since the refusal names a card whose buttons
+   * no longer do anything. A card past its window is not a decision anyone still has to make.
    */
   async pendingFor(target: string): Promise<number | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
-      `SELECT id FROM remediations WHERE status = 'proposed' AND params->>'target' = $1 ORDER BY id DESC LIMIT 1`,
+      `SELECT id FROM remediations
+        WHERE status = 'proposed'
+          AND params->>'target' = $1
+          AND created_at > now() - interval '${EXPIRY_MINUTES} minutes'
+        ORDER BY id DESC LIMIT 1`,
       [target]
     );
     return rows.length > 0 ? Number(rows[0].id) : null;

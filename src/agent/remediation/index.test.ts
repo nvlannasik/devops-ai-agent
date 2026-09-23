@@ -929,3 +929,19 @@ test("a real RCA still proposes, question mark or not", () => {
   assert.equal(answerAsksForInput(rca), null);
   assert.equal(answerAsksForInput("No question at all, just findings about the namespace sample-apps."), null);
 });
+
+// The clause that separates a duplicate guard from a deadlock: `status` only leaves 'proposed'
+// when somebody clicks, so a card nobody touched stays 'proposed' for ever.
+test("pendingFor only counts cards still inside the approval window", async () => {
+  let sql = "";
+  const pool = { query: async (q: string) => { sql = q; return { rows: [] }; } } as never;
+  await new RemediationStore(pool).pendingFor("k8s_scale:sample-apps/orders-api");
+  assert.match(sql, /status = 'proposed'/);
+  assert.match(sql, /created_at > now\(\) - interval '15 minutes'/);
+  assert.equal(await new RemediationStore(null).pendingFor("x"), null);
+});
+
+test("pendingFor returns the card id when one is waiting", async () => {
+  const pool = { query: async () => ({ rows: [{ id: "88" }] }) } as never;
+  assert.equal(await new RemediationStore(pool).pendingFor("k8s_scale:sample-apps/orders-api"), 88);
+});
