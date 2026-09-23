@@ -255,6 +255,38 @@ export function ungroundedTargetRefusal(
   );
 }
 
+/**
+ * Resizing needs a fault that resizing addresses, read from the cluster.
+ *
+ * On the 2026-09-23 run `k8s_set_resources` was the model's default reach when it could not place
+ * a cause: A01 (a missing ConfigMap key), B04 (a wrong DATABASE_URL), C03 (a container that
+ * crashes logging nothing), C08 (an injected log line) — four proposals to resize four workloads
+ * whose faults are not size. Each would reach a human as a card to approve.
+ *
+ * A guard of this shape existed once and was measured OUT: it required the namespace's EVENTS to
+ * name a resource fault, and A02 went from 5/5 to 0, because a real OOMKill lives in the
+ * container's `lastState.terminated.reason` and a pod settled into CrashLoopBackOff need not have
+ * an event for it at all. This reads the whole of what the investigation gathered instead of one
+ * tool's output, which is the difference the old note asks for — and it is measured the same way
+ * before it is trusted.
+ *
+ * Fails open with no thread to read. Skipped for a human's own request, like the replacement guard.
+ */
+const RESOURCE_FAULT =
+  /\b(oomkill\w*|out of memory|exit code 137|memory limit|memory pressure|cpu pressure|throttl\w*|insufficient (?:cpu|memory)|evicted|didn'?t have free ports|nodes are available|over.?provision\w*|under.?provision\w*|no_requests|oom_risk|cpu_throttled)\b/i;
+
+export function resourceFaultRefusal(proposal: Proposal, observed: string | null): string | null {
+  if (proposal.action !== "k8s_set_resources") return null;
+  if (observed === null || RESOURCE_FAULT.test(observed)) return null;
+  return (
+    `resizing \`${proposal.namespace}/${proposal.name}\` is refused: nothing this investigation read ` +
+    `shows a fault that a different request or limit would address — no OOMKill, no throttling, no ` +
+    `scheduling pressure. A container that crashes on its config, a wrong connection string and an ` +
+    `unreadable log all survive a resize unchanged. Name the fault you did find, or say it could not ` +
+    `be determined.`
+  );
+}
+
 /** What "the same card" means: the action and the object it acts on, never the parameters. */
 export const targetKey = (action: string, namespace: string, name: string): string =>
   `${action}:${namespace}/${name}`.toLowerCase();
@@ -2023,7 +2055,8 @@ export class DevOpsAgent {
 
   /** Public because `bench/run.ts` applies it too — see ungroundedTargetRefusal. */
   async targetRefusalFor(proposal: Proposal, threadId: string | undefined, labels: Record<string, string> = {}): Promise<string | null> {
-    return ungroundedTargetRefusal(proposal, await this.threadEvidence(threadId), labels);
+    const observed = await this.threadEvidence(threadId);
+    return ungroundedTargetRefusal(proposal, observed, labels) ?? resourceFaultRefusal(proposal, observed);
   }
 
   /**
