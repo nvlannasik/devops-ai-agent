@@ -10,7 +10,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 16 (A01–A10, A13, B04, C01–C03, C08) |
+| cases | 42, tiers A–F | 20 (A01–A10, A13, B04, C01–C03, C05–C09) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -63,6 +63,10 @@ uses — `buildGroupAlertText()`, the same function the webhook calls.
   "tier": "A",
   "title": "OOMKilled at the limit",
   "settleSeconds": 15,                // after setup, before investigating
+  // mode "conversation"/"investigation" cases carry `message` instead of an alert group, and may
+  // add `followUp`: a SECOND mention in the same thread, scored instead of the first. That is the
+  // only way to reach the gate's approval branch — "the agent offered, the human said ya" — which
+  // lives across two turns and broke twice in a week while every unit test stayed green (C09).
   "groupLabels": { "alertname": "PodOOMKilled", "namespace": "bench-a02", "severity": "warning" },
   "alerts": [{ "labels": { ... }, "annotations": { ... } }],
   "expect": {
@@ -117,6 +121,18 @@ builds the agent, and stops at the MCP connection. That is the whole list.
 them: Slack, Postgres, Redis, SQS, `MCP_ENABLE_WRITE_TOOLS`, `ALLOWED_REMEDIATION_NAMESPACES`.
 Those are for the tiers scored through `proposeRemediation()`; this runner calls
 `buildProposalPrompt` + `parseProposal` directly, so read tools are enough.
+
+**Postgres is optional and never optional-by-accident.** With `DB_HOST` set, every attempt starts
+by TRUNCATE-ing every table in that database (`resetIncidentMemory`) so recall cannot carry attempt
+1 into attempt 2 — point it at a database of its own, never at the one production writes to.
+
+**The guards run here too**, or the score would be of a proposal production never cards:
+`guardRefusalFor` (replacement, no-op image, no-op resources), then `targetRefusalFor` (a target
+absent from every tool result; a resize with no resource fault in the evidence), then
+`offerMismatchRefusal` and `imageRefusalFor`. A refusal is scored exactly as "no proposal",
+because that is the outcome a human sees. What is NOT reachable from here: the mandatory dry-run,
+the quarantine and orphan grounding gates, the duplicate-target gate and the approval-window
+sweep — all of those live behind `proposeRemediation()` and its database.
 
 Nothing here provisions a cluster, on purpose. A harness that can reach for a cluster you did
 not name is a harness that can inject a fault into one.

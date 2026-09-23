@@ -1900,6 +1900,14 @@ the fact, and a guard that needs pod state to be correct is a bigger thing than 
 it was aimed at. `guardRefusalFor()` stays as the one call both production and `bench/run.ts` make,
 so a future guard lands in one place.
 
+**The successor, 2026-09-23 — `resourceFaultRefusal`, kept because it measured.** Same question,
+different source: it reads everything the investigation gathered (`threadEvidence`) instead of the
+namespace's events, which is exactly what the paragraph above asks for. Measured on the seven cases
+that could move, one attempt each: 7/7, with A02 (`OOMKilled` in `lastState`), A05 (`0/3 nodes ...
+Insufficient cpu`) and C02 proposing untouched, and A01 refused BY the guard. The claim stops there
+on purpose — B04, C03 and C08 passed that run too, but for reasons of their own, and a guard
+credited with a pass it did not cause is how the first version survived long enough to break A02.
+
 **Also in `parseProposal`: `namespace` / `workload` / `pod` / `container` are lowercased.**
 Benchmark A09 proposed `web-Frontend` against a Deployment called `web-frontend` — a correct fix
 refused over the F. Kubernetes has no object whose name contains an uppercase letter (DNS-1123
@@ -1907,3 +1915,35 @@ everywhere), so the case is never information, always damage. Same move as the `
 directly above it. **`image` is deliberately excluded**: a registry path is lowercase by Docker's
 rules, but a tag may legitimately carry uppercase (`v1.2-RC1`), and lowercasing it points the
 rollout at an image that does not exist.
+
+## The gate chain, after 2026-09-22/23
+
+Two days of live threads and two benchmark runs added eight gates. They are listed in the order a
+proposal meets them, because that order is load-bearing — each one assumes the ones before it ran.
+
+| Gate | Refuses | Measured on |
+|---|---|---|
+| `placeholderIn` (in `executeToolCalls`, before the call) | a tool call carrying the prompt's example `X` / `Y` as a value | two CPU-throttling alerts answered entirely against namespace `X`, then recalled into the next run as "I know X" |
+| `needsEvidence` + `fabricatesEvidence` | an answer with ZERO tool calls that quotes output or cites a resource name | C06, 0/3 → 2/3: twelve invented log lines, then (after the first fix) an invented workload with a LogQL query |
+| `answerAsksForInput` | a card from an answer that asked the human for the input it already had | incident 143: "Could you provide the real `namespace`…" became a restart card |
+| `guardRefusalFor` | a replacement that rebuilds the same pod; an image or a resize that writes back the current value | C03 (image), A05 (`cpu_request=64` for a pod that cannot be scheduled at 64) |
+| `resourceFaultRefusal` | a resize with no OOM / throttling / scheduling pressure anywhere in the evidence | 7/7, see the section above |
+| `scaleOutRefusal` | more replicas for a workload nothing measured as saturated | four cards proposing replicas while the only throttling belonged to `loadgen`, the load generator |
+| `ungroundedTargetRefusal` | a target absent from every tool result AND from the alert labels | C06's `bench-api`, a deployment that does not exist |
+| `offerMismatchRefusal` | a proposal that wandered off the `[OFFER]` the human agreed to | C09: offered `bench-c09/Service/bench-c09-cache`, proposed `default/unsueddd` |
+| `pendingFor` (duplicate target) | a second card for an action+target already awaiting a click, **within the approval window** | one armed fault tripped four rules and produced two identical scale cards and two identical restarts |
+
+Three things learned across all of them, worth more than any single gate:
+
+- **The signal is what the model SAYS it is doing, not the words it happens to use.** `worthProposing`
+  was a verb list over prose and took four patches in one week, one per wording ("clean up", then
+  "removal", then "deletion"). The `[OFFER]` line ended that: the model states its offer in a shape
+  code can read, `parseOffer` reads it from thread memory, and `stripOffer` keeps it out of Slack.
+- **A guard's evidence must come from where the fact is written**, and it has to be measured before
+  it is trusted. Both halves are in the `guardRefusalFor` section above, from opposite directions.
+- **A gate that never expires is a deadlock.** `pendingFor` shipped matching every `proposed` row;
+  a card only leaves that status when somebody CLICKS, so five untouched cards would have blocked
+  their targets for ever. The approval window is now in the query, and `expireStale()` closes the
+  row, the Slack message (`card_channel`/`card_ts`, migration 009) and the thread note
+  (`card_thread_ts`, migration 010) — because the loop is told lifecycle facts or it keeps saying
+  a card is pending.
