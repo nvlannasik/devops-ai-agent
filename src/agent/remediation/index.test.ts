@@ -953,19 +953,29 @@ test("expireStale closes past-window cards and says where their messages are", a
   const pool = {
     query: async (q: string) => {
       sql = q;
-      return { rows: [{ id: "88", card_channel: "C09R0F6F891", card_ts: "1790138104.557769", summary: "scale `sample-apps/orders-api` → 3 replicas" }] };
+      return { rows: [{ id: "88", card_channel: "C09R0F6F891", card_ts: "1790138104.557769", card_thread_ts: "1790138100.111111", summary: "scale `sample-apps/orders-api` → 3 replicas" }] };
     },
   } as never;
   const rows = await new RemediationStore(pool).expireStale();
   assert.match(sql, /SET status = 'rejected'/);
   assert.match(sql, /WHERE status = 'proposed' AND created_at <= now\(\) - interval '15 minutes'/);
-  assert.deepEqual(rows, [{ id: 88, channel: "C09R0F6F891", ts: "1790138104.557769", summary: "scale `sample-apps/orders-api` → 3 replicas" }]);
+  assert.deepEqual(rows, [{
+    id: 88, channel: "C09R0F6F891", ts: "1790138104.557769", threadTs: "1790138100.111111",
+    summary: "scale `sample-apps/orders-api` → 3 replicas",
+  }]);
 });
 
 test("expireStale survives a database that is down, and a card with no message recorded", async () => {
   const broken = { query: async () => { throw new Error("connection refused"); } } as never;
   assert.deepEqual(await new RemediationStore(broken).expireStale(), []);
   assert.deepEqual(await new RemediationStore(null).expireStale(), []);
-  const noCard = { query: async () => ({ rows: [{ id: "7", card_channel: null, card_ts: null, summary: "restart `ns/w`" }] }) } as never;
-  assert.deepEqual(await new RemediationStore(noCard).expireStale(), [{ id: 7, channel: null, ts: null, summary: "restart `ns/w`" }]);
+  const noCard = { query: async () => ({ rows: [{ id: "7", card_channel: null, card_ts: null, card_thread_ts: null, summary: "restart `ns/w`" }] }) } as never;
+  assert.deepEqual(await new RemediationStore(noCard).expireStale(), [{ id: 7, channel: null, ts: null, threadTs: null, summary: "restart `ns/w`" }]);
+});
+
+test("recordCard stores the thread as well as the message", async () => {
+  let args: unknown[] = [];
+  const pool = { query: async (_q: string, a: unknown[]) => { args = a; return { rows: [] }; } } as never;
+  await new RemediationStore(pool).recordCard(88, "C09R0F6F891", "1790138104.557769", "1790138100.111111");
+  assert.deepEqual(args, [88, "C09R0F6F891", "1790138104.557769", "1790138100.111111"]);
 });

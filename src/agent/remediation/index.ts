@@ -70,11 +70,11 @@ export class RemediationStore {
     }
   }
 
-  /** Remember where the card was posted, so `expireStale` can close the message too. */
-  async recordCard(id: number, channel: string, ts: string): Promise<void> {
+  /** Remember where the card was posted, so `expireStale` can close the message and tell the thread. */
+  async recordCard(id: number, channel: string, ts: string, threadTs: string): Promise<void> {
     if (!this.pool) return;
     await this.pool
-      .query(`UPDATE remediations SET card_channel = $2, card_ts = $3 WHERE id = $1`, [id, channel, ts])
+      .query(`UPDATE remediations SET card_channel = $2, card_ts = $3, card_thread_ts = $4 WHERE id = $1`, [id, channel, ts, threadTs])
       .catch((e) => logger.error(`[remediation] could not record the card message for ${id}: ${e instanceof Error ? e.message : e}`));
   }
 
@@ -89,16 +89,22 @@ export class RemediationStore {
    * One UPDATE, so under multi-pod delivery exactly one replica gets each row and posts one
    * message about it.
    */
-  async expireStale(): Promise<Array<{ id: number; channel: string | null; ts: string | null; summary: string }>> {
+  async expireStale(): Promise<Array<{ id: number; channel: string | null; ts: string | null; threadTs: string | null; summary: string }>> {
     if (!this.pool) return [];
     try {
       const { rows } = await this.pool.query(
         `UPDATE remediations
             SET status = 'rejected', result = 'expired (approval window passed)'
           WHERE status = 'proposed' AND created_at <= now() - interval '${EXPIRY_MINUTES} minutes'
-      RETURNING id, card_channel, card_ts, coalesce(params->>'summary', action) AS summary`
+      RETURNING id, card_channel, card_ts, card_thread_ts, coalesce(params->>'summary', action) AS summary`
       );
-      return rows.map((r) => ({ id: Number(r.id), channel: r.card_channel, ts: r.card_ts, summary: r.summary }));
+      return rows.map((r) => ({
+        id: Number(r.id),
+        channel: r.card_channel,
+        ts: r.card_ts,
+        threadTs: r.card_thread_ts,
+        summary: r.summary,
+      }));
     } catch (err) {
       logger.error(`[remediation] expiry sweep failed: ${err instanceof Error ? err.message : err}`);
       return [];

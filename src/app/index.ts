@@ -771,7 +771,7 @@ export class SlackApp {
       });
       // The message id is known here and nowhere else until somebody clicks. Without it the
       // expiry sweep can close the row but not the card, which is the half a human sees.
-      if (card.ts) await this.agent.recordCardMessage(proposed.id, channel, card.ts);
+      if (card.ts) await this.agent.recordCardMessage(proposed.id, channel, card.ts, threadId);
       logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
@@ -893,6 +893,15 @@ export class SlackApp {
       try {
         for (const card of await this.agent.expireStaleRemediations()) {
           logger.info(`[remediation] expired card ${card.id} — the approval window passed without a click`);
+          // The agent is told too, for the same reason a refusal is: the loop never sees a
+          // lifecycle event, so without this a "what happened to that card?" is answered from the
+          // last thing it knew — that one was posted and a human had to click it.
+          if (card.threadTs) {
+            await this.agent.noteInThread(
+              card.threadTs,
+              `The approval card for "${card.summary}" EXPIRED — nobody clicked within the window and nothing ran. It is closed; do not say it is still pending. If the change still matters it has to be proposed again.`
+            );
+          }
           if (!card.channel || !card.ts) continue;
           const text = `:hourglass: *Expired* — nobody approved this within the window, so it was closed: ${card.summary}. Nothing ran. Ask again if it still matters.`;
           await this.app.client.chat

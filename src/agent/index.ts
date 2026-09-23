@@ -2703,12 +2703,12 @@ export class DevOpsAgent {
   // model once promised "I'll open an approval card" right after the server refused one,
   // because it never saw the refusal).
   /** Where the approval card landed — see RemediationStore.recordCard. */
-  async recordCardMessage(id: number, channel: string, ts: string): Promise<void> {
-    await this.remediations.recordCard(id, channel, ts);
+  async recordCardMessage(id: number, channel: string, ts: string, threadTs: string): Promise<void> {
+    await this.remediations.recordCard(id, channel, ts, threadTs);
   }
 
   /** Cards whose approval window passed without a click — see RemediationStore.expireStale. */
-  async expireStaleRemediations(): Promise<Array<{ id: number; channel: string | null; ts: string | null; summary: string }>> {
+  async expireStaleRemediations(): Promise<Array<{ id: number; channel: string | null; ts: string | null; threadTs: string | null; summary: string }>> {
     return this.remediations.expireStale();
   }
 
