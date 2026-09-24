@@ -55,6 +55,22 @@ test("no skill is always-on, and none matches the mode tag by accident", () => {
 // recalled, as `critical`. parseSeverity/parseConfidence are the exact readers that ran on
 // that output, so pointing them at the shipped template is the check: a template that still
 // parses as a real level is a template a model can copy into a real incident row.
+// B04, twice on 2026-09-24: `|~ "(panic|OOM|fatal|exception)"` against a container whose line was
+// `FATAL: DATABASE_URL is not set, refusing to start`. Correct selector, correct window, zero rows
+// — `|~` is case-sensitive, and LogQL reports no match as an empty result rather than an error. An
+// empty Loki result is indistinguishable from "this workload logs nothing", which is how a broken
+// filter reaches an RCA as a finding. The prompt showed `(?i)` in two examples and the model
+// dropped it, so the examples are pinned now: a shipped filter without it is the template for the
+// next dropped flag.
+test("every LogQL line filter in the shipped prompts is case-insensitive", () => {
+  const texts = [buildStaticSystemPrompt(), ...loadSkills(resolveSkillsDir()).all().map((s) => s.body)];
+  for (const text of texts) {
+    for (const m of text.matchAll(/\|~\s*"([^"]*)"/g)) {
+      assert.ok(m[1].startsWith("(?i)"), `line filter without (?i): |~ "${m[1]}"`);
+    }
+  }
+});
+
 // Four of the real failures in the 2026-09-24 run were an Immediate line the proposal step could
 // do nothing with: "add one or more worker nodes" (A05), "change to a valid image tag" naming no
 // tag (A03), "monitor memory pressure" (C02). That step reads this line and nothing else, so each

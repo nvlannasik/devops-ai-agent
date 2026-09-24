@@ -273,6 +273,7 @@ sum by (msg) (count_over_time({namespace="X"} | json | level = "error" [5m]))
 sum by (namespace, service, pod) (rate({namespace="X"} | json | msg = "unhandled route error" [5m]))
 
 # Stack traces / panics (substring match on the raw line — works even when the line is not JSON)
+# `(?i)` is not decoration — see the rule under the block.
 {namespace="X"} |~ "(?i)exception|panic|fatal|traceback"
 
 # Timeout / connection errors
@@ -281,6 +282,20 @@ sum by (namespace, service, pod) (rate({namespace="X"} | json | msg = "unhandled
 # Just the message, without the JSON envelope, when you want to SHOW lines to a human
 {namespace="X"} | json | level = "error" | line_format "{{.msg}}"
 ```
+
+**Two rules about line filters, and both exist because breaking them returns ZERO ROWS rather than
+an error.** An empty Loki result is indistinguishable from "this workload logs nothing", so a bad
+filter does not look like a bug — it looks like a finding, and it gets written into an RCA as one.
+
+1. **`|~` is case-sensitive. Always write `(?i)`.** Measured on 2026-09-24: the agent line-filtered
+   for `panic|OOM|fatal|exception` against a container whose line was
+   `FATAL: DATABASE_URL is not set, refusing to start` — and got nothing, twice, from a query whose
+   selector was correct and whose window covered the crash. `FATAL`, `ERROR`, `WARN` and `Exception`
+   in caps are the norm, not the exception.
+2. **Do not put a keyword filter on your FIRST query for a workload.** Ask
+   `{namespace="X", app="Y"}` with a `limit` and READ what comes back. You are looking for a line
+   you have not seen yet, so filtering for the words you expect can only remove it. Filter on the
+   second query, once the shape of the output is known.
 
 ### Tracing (distributed traces — the third pillar after metrics & logs)
 Use for latency, timeout, and cross-service "where is the time going?" questions — metrics tell you a service is slow, traces tell you which span/downstream is to blame.
