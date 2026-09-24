@@ -33,6 +33,8 @@ import {
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { stripTemplateEcho } from "./template-echo/index.js";
+import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
+import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
@@ -1261,6 +1263,7 @@ export class DevOpsAgent {
     let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
     let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves every gate
     let noEvidenceNudged = false; // same, for NO_EVIDENCE_NOTICE
+    let rcaGapNudged = false;   // same, for an RCA that stopped before the template did
     // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
     // produces no new evidence cannot downgrade an answer that was already complete.
     let preNudgeSummary = "";
@@ -1575,6 +1578,30 @@ export class DevOpsAgent {
             await this.memory.append(threadId, { role: "user", content: IMAGE_GAP_NOTICE });
             continue;
           }
+        }
+        // Third gate, same hold slot, and the only one that does NOT want another tool round —
+        // see rca-completeness. The investigation is over; what is missing is writing. So it is
+        // not gated on `toolsDisabled`: a tool-free turn is exactly the turn it asks for.
+        if (!rcaGapNudged && mode === "alert" && isRcaResponse(summary)) {
+          const missing = rcaGaps(summary);
+          if (missing.length > 0) {
+            rcaGapNudged = true;
+            preNudgeSummary = summary;
+            toolRoundsAtNudge = toolRounds;
+            logger.info(`[${threadId}] RCA is missing ${missing.join(", ")} — one more round to complete it`);
+            await this.memory.append(threadId, { role: "user", content: rcaGapNotice(missing) });
+            continue;
+          }
+        }
+        // The completion round replaces what it was given, so it can lose as well as gain. The
+        // other gates decide that on whether the extra round ran any tools; this one can compare
+        // the thing itself, which is the better test when it is available.
+        if (rcaGapNudged && preNudgeSummary !== "" && rcaGaps(summary).length > rcaGaps(preNudgeSummary).length) {
+          logger.warn(
+            `[${threadId}] the completion round came back with more missing than it was given ` +
+            `(${rcaGaps(summary).join(", ")}) — keeping the earlier answer`
+          );
+          return done(preNudgeSummary);
         }
         return done(summary);
       }
