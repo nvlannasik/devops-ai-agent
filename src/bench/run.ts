@@ -213,6 +213,7 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
         (await agent.guardRefusalFor(proposal).catch(() => null)) ??
         offerMismatchRefusal(proposal, offer) ??
         (await agent.targetRefusalFor(proposal, threadId, task.groupLabels ?? {}).catch(() => null)) ??
+        (await agent.scaleRefusalFor(proposal, threadId).catch(() => null)) ??
         (await agent.imageRefusalFor(proposal, threadId, rca).catch(() => null));
       if (refusal) {
         proposalRaw = `${proposalRaw}\n[guard refused] ${refusal}`;

@@ -2063,7 +2063,7 @@ export class DevOpsAgent {
     // Replicas need a measurement of their own. Skipped for a user request, like the replacement
     // guard: a person who asks for more replicas has placed the need themselves.
     if (!opts.userRequested) {
-      const scaleRefused = scaleOutRefusal(proposal, await this.threadEvidence(opts.threadId));
+      const scaleRefused = await this.scaleRefusalFor(proposal, opts.threadId);
       if (scaleRefused) {
         logger.info(`[remediation] scale gate refused ${proposal.summary}: ${scaleRefused}`);
         return { refused: scaleRefused };
@@ -2141,6 +2141,16 @@ export class DevOpsAgent {
   async targetRefusalFor(proposal: Proposal, threadId: string | undefined, labels: Record<string, string> = {}): Promise<string | null> {
     const observed = await this.threadEvidence(threadId);
     return ungroundedTargetRefusal(proposal, observed, labels) ?? resourceFaultRefusal(proposal, observed);
+  }
+
+  /**
+   * Public because `bench/run.ts` applies it too — and it did not, which is how C08 came to be
+   * scored on a proposal production would have refused. The benchmark's chain is meant to end
+   * where a human would either see a card or not; a guard missing from it makes the measurement
+   * kinder than the system it measures.
+   */
+  async scaleRefusalFor(proposal: Proposal, threadId: string | undefined): Promise<string | null> {
+    return scaleOutRefusal(proposal, await this.threadEvidence(threadId));
   }
 
   /**

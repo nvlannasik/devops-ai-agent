@@ -129,8 +129,13 @@ by TRUNCATE-ing every table in that database (`resetIncidentMemory`) so recall c
 **The guards run here too**, or the score would be of a proposal production never cards:
 `guardRefusalFor` (replacement, no-op image, no-op resources), then `targetRefusalFor` (a target
 absent from every tool result; a resize with no resource fault in the evidence), then
-`offerMismatchRefusal` and `imageRefusalFor`. A refusal is scored exactly as "no proposal",
-because that is the outcome a human sees. What is NOT reachable from here: the mandatory dry-run,
+`offerMismatchRefusal`, `scaleRefusalFor` and `imageRefusalFor`. A refusal is scored exactly as
+"no proposal", because that is the outcome a human sees. `scaleRefusalFor` was missing from this
+chain until 2026-09-24, and C08 is what found it: a planted log line produced a `k8s_scale`
+proposal the benchmark scored as a card, while production would have refused it for want of any
+saturation measurement. A guard missing here makes the measurement kinder than the system it
+measures, which is the one direction a benchmark must never be wrong in.
+What is NOT reachable from here: the mandatory dry-run,
 the quarantine and orphan grounding gates, the duplicate-target gate and the approval-window
 sweep — all of those live behind `proposeRemediation()` and its database.
 
