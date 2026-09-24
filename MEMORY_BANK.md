@@ -1949,19 +1949,23 @@ proposal meets them, because that order is load-bearing — each one assumes the
 | `offerMismatchRefusal` | a proposal that wandered off the `[OFFER]` the human agreed to | C09: offered `bench-c09/Service/bench-c09-cache`, proposed `default/unsueddd` |
 | `pendingFor` (duplicate target) | a second card for an action+target already awaiting a click, **within the approval window** | one armed fault tripped four rules and produced two identical scale cards and two identical restarts |
 
-**A refusal now steers the proposal instead of ending it** (`guardRetryNotice`, `proposeWithRetry`'s
-fourth argument). Every gate above answers "no", and until 2026-09-24 "no" was also the last word:
-the proposal call got one shot, and a refused shot meant no card. A02 attempt 3 is what that costs
-— the RCA said *"Increase the `api-server` memory limit from `128Mi` to `256Mi`"*, the proposal
-emitted `k8s_rollout_restart`, the replacement guard refused it correctly, and an incident whose
-repair the agent had already written down got nothing at all. So `guardRefusalFor` is passed into
-`proposeWithRetry` as well, and a refusal is re-asked once with the refusal quoted — it was written
-to be read, and this is the one moment the model is told something specific about its own answer.
-`{"action": null}` is restated as an acceptable reply, for the same reason `retryNotice` restates
-it. The caller's full chain still runs on whatever comes back, and a steer that proposes nothing
-hands the first proposal back, so the refusal a human reads is unchanged. The benchmark passes the
-same guard the same way (`bench/run.ts`): a measurement of a path production does not take measures
-nothing.
+**A refusal steering the proposal was tried, measured, and removed** (`guardRetryNotice`, a fourth
+argument to `proposeWithRetry`; lived 2026-09-24, gone the same day). The idea was sound on paper
+and the motivating case was real: A02 attempt 3's RCA said *"Increase the `api-server` memory limit
+from `128Mi` to `256Mi`"*, the proposal emitted `k8s_rollout_restart`, the replacement guard refused
+it correctly, and an incident whose repair was already written down got no card. So a refusal
+re-asked once with the refusal quoted, since it is written to be read.
+
+Across two runs it fired **ten times and changed nothing**. Every firing ended in no proposal —
+which is what the caller's chain produced anyway, because it refuses the first proposal when the
+steer yields nothing usable. It never once converted a refusal into a correct card, and it never
+fired on A02, the case it was written for: that case's improvement came from the RCA rule instead.
+Ten extra LLM calls for no movement in either direction.
+
+Same outcome, same method, as the event-reading resource guard recorded under `guardRefusalFor`
+above: measure the thing before keeping it. Worth knowing if the idea returns — the ceiling is not
+the notice's wording, it is that a model which chose the wrong action once will usually choose
+`{"action": null}` on the re-ask, and null is where the refusal already was.
 
 Three things learned across all of them, worth more than any single gate:
 

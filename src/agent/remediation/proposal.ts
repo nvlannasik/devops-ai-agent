@@ -627,55 +627,14 @@ export function retryNotice(raw: string): string {
 export async function proposeWithRetry(
   labels: Record<string, string>,
   rca: string,
-  ask: (prompt: string) => Promise<string>,
-  refusalFor?: (proposal: Proposal) => Promise<string | null>
+  ask: (prompt: string) => Promise<string>
 ): Promise<{ proposal: Proposal | null; raw: string }> {
   const prompt = buildProposalPrompt(labels, rca);
   const first = await ask(prompt);
-  let parsed = parseProposal(first);
-  let raw = first;
+  const parsed = parseProposal(first);
+  if (parsed) return { proposal: parsed, raw: first };
 
-  if (!parsed) {
-    const second = await ask(`${prompt}\n\n${retryNotice(first)}`);
-    parsed = parseProposal(second);
-    if (!parsed) return { proposal: null, raw: `${first}\n[retry] ${second}` };
-    raw = second;
-  }
-
-  if (!refusalFor) return { proposal: parsed, raw };
-  const refusal = await refusalFor(parsed);
-  if (!refusal) return { proposal: parsed, raw };
-
-  const steered = await ask(`${prompt}\n\n${guardRetryNotice(refusal)}`);
-  const second = parseProposal(steered);
-  // No second proposal means nothing changed: hand back the first, so the caller's own guard
-  // chain refuses it with the same sentence it would have used and the human still reads why.
-  return second ? { proposal: second, raw: steered } : { proposal: parsed, raw: `${raw}\n[steer] ${steered}` };
-}
-
-/**
- * A guard refusal used to end the proposal — at the one moment the model is being told something
- * concrete about its own answer.
- *
- * Measured on benchmark A02 (2026-09-23, attempt 3): the RCA said *"Increase the `api-server`
- * memory limit from `128Mi` to `256Mi`"* — the exact shape of action 3, values and all — and the
- * proposal call emitted `k8s_rollout_restart` instead. The replacement guard refused it
- * correctly, and that was the end of it: no card, for an incident whose fix the agent had already
- * written down a paragraph earlier. The parse-failure retry beside this one has always existed
- * for a strictly smaller problem — a well-formed intent with empty fields.
- *
- * The refusal text carries its own reasoning (that is exactly who `replace-guard.ts` writes it
- * for), so it is quoted rather than summarised. `{"action": null}` is restated as an acceptable
- * answer for the same reason `retryNotice` restates it: a model told only that it was wrong will
- * reach for a different wrong action rather than stop.
- */
-export function guardRetryNotice(refusal: string): string {
-  return (
-    `RETRY — a safety check refused your proposal, and the check is not negotiable:\n"${refusal}"\n\n` +
-    `Re-read the Recommended Actions in the context above. If they name a concrete change one of ` +
-    `the actions performs — a resource value, an image tag that was running before, a replica ` +
-    `count — emit that action now, with every value taken from the context. If nothing in the ` +
-    `list repairs this fault, answer {"action": null}: that is a correct outcome of this check, ` +
-    `and a second proposal the same refusal applies to is not.`
-  );
+  const second = await ask(`${prompt}\n\n${retryNotice(first)}`);
+  const retried = parseProposal(second);
+  return retried ? { proposal: retried, raw: second } : { proposal: null, raw: `${first}\n[retry] ${second}` };
 }

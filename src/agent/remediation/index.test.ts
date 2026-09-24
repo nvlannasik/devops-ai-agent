@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, guardRetryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate, answerAsksForInput } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate, answerAsksForInput } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
@@ -451,66 +451,6 @@ test("a self-contradicting answer is re-asked once and the second answer wins", 
   assert.match(prompts[1], /named `k8s_set_resources`/);
   assert.equal(proposal?.toolParams.cpu_request, "250m");
   assert.equal(raw, answers[1]); // the discarded first answer is not kept once one parses
-});
-
-// A02 attempt 3, 2026-09-23: the RCA named the fix ("increase the memory limit from 128Mi to
-// 256Mi") and the proposal call reached for a restart. The guard refused it and that was the end
-// — no card, for a fault whose repair was already written down a paragraph earlier.
-test("a refused proposal is steered once, and the steered one wins", async () => {
-  const answers = [
-    '{"action":"k8s_rollout_restart","namespace":"bench-a02","workload":"backend-api","kind":"deployment","reason":"restart to restore service"}',
-    '{"action":"k8s_set_resources","namespace":"bench-a02","workload":"backend-api","kind":"deployment","container":"api-server","memory_limit":"256Mi","reason":"OOMKilled at the 128Mi limit"}',
-  ];
-  const prompts: string[] = [];
-  const { proposal, raw } = await proposeWithRetry(
-    {},
-    "an RCA",
-    async (p) => {
-      prompts.push(p);
-      return answers[prompts.length - 1];
-    },
-    async () => "a rolling restart rebuilds these pods from the same spec",
-  );
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[1], /a safety check refused your proposal/);
-  assert.match(prompts[1], /rebuilds these pods from the same spec/); // quoted, not summarised
-  assert.equal(proposal?.action, "k8s_set_resources");
-  assert.equal(proposal?.toolParams.memory_limit, "256Mi");
-  assert.equal(raw, answers[1]);
-});
-
-test("a proposal no guard objects to costs no extra call", async () => {
-  let n = 0;
-  const { proposal } = await proposeWithRetry(
-    {},
-    "an RCA",
-    async () => {
-      n++;
-      return '{"action":"k8s_scale","namespace":"shop","workload":"web","kind":"deployment","replicas":3,"reason":"load"}';
-    },
-    async () => null,
-  );
-  assert.equal(n, 1);
-  assert.equal(proposal?.action, "k8s_scale");
-});
-
-// The steer is one more chance, not a way around the guard: the caller's own chain runs again on
-// whatever comes back, and it must still have something to run on.
-test("a steer that proposes nothing leaves the refused proposal for the caller to refuse", async () => {
-  const answers = [
-    '{"action":"k8s_rollout_restart","namespace":"ns","workload":"w","kind":"deployment","reason":"gesture"}',
-    '{"action": null}',
-  ];
-  let n = 0;
-  const { proposal, raw } = await proposeWithRetry({}, "an RCA", async () => answers[n++], async () => "refused");
-  assert.equal(n, 2); // never a third
-  assert.equal(proposal?.action, "k8s_rollout_restart");
-  assert.match(raw, /\[steer\]/);
-});
-
-test("null is offered as an answer, so a refusal does not just move the model to another wrong action", () => {
-  assert.match(guardRetryNotice("refused"), /\{"action": null\}/);
-  assert.match(guardRetryNotice("refused"), /a correct outcome of this check/);
 });
 
 test("two failures keep both texts — the pair is the diagnosis", async () => {
