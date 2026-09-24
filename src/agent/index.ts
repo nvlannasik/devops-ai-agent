@@ -32,6 +32,7 @@ import {
 } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
+import { stripTemplateEcho } from "./template-echo/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
@@ -1365,9 +1366,14 @@ export class DevOpsAgent {
           `[${threadId}] Confidence: High kept — sawLogLines=${sawLogLines} admitsLogGap=${admitsLogGap(text)}`
         );
       }
+      // A placeholder the model labelled instead of filling — see stripTemplateEcho. Done here
+      // rather than in the Slack renderer: the same text reaches Postgres and the next
+      // investigation's recall block, and "[Symptom]" is no more readable in either of those.
+      const { text: filled, dropped } = stripTemplateEcho(rated);
+      if (dropped > 0) logger.info(`[${threadId}] dropped ${dropped} echoed template placeholder(s) from the answer`);
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      return stripOffer(rated);
+      return stripOffer(filled);
     };
     let totalUsage = zeroUsage();
 

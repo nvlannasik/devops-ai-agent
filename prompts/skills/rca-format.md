@@ -85,18 +85,22 @@ contained to it and why.]
 *📍 Root Cause*
 [The causal chain, one numbered step per link — see "Causal Chain" in the system prompt. Step 1 is
 the symptom the alert fired on. Each step after it answers *why the step above happened* and ends
-with the tool output that proves it. Stop at the first link you cannot support and mark that line
-⛔, naming what would extend the chain. Do not invent the next link to make the list longer.]
-1. [Symptom] — _tool_name_ `namespace/resource`
-2. ← [why step 1 happened] — _tool_name_ `namespace/resource`
-3. ← [why step 2 happened] — _tool_name_ `namespace/resource`
-4. ⛔ [what you cannot see from here, and what access would show it]
+with the tool output that proves it. Do not invent the next link to make the list longer.
+The bold labels — *Symptom:*, *Because:*, *Not visible from here:* — are OUTPUT: write them exactly
+as they appear. Everything in [square brackets] is a slot you replace, and no bracket may survive
+into your answer.
+The ⛔ line is where the chain stops and it is the LAST line of this section: it carries no number,
+and nothing follows it. If every link is supported, end at the last numbered step and omit it.]
+1. *Symptom:* [what the alert fired on, as a fact] — _tool_name_ `namespace/resource`
+2. *Because:* [why step 1 happened] — _tool_name_ `namespace/resource`
+3. *Because:* [why step 2 happened] — _tool_name_ `namespace/resource`
+⛔ *Not visible from here:* [what you cannot see, and the access that would show it]
 
 *📊 Evidence*
-• [Fact 1] — _tool_name_ `namespace/resource`
-• [Fact 2] — _tool_name_ `namespace/resource`
+• *Fact:* [what the tool output shows, in its own numbers and names] — _tool_name_ `namespace/resource`
+• *Fact:* [another one] — _tool_name_ `namespace/resource`
 
 *🚫 Ruled Out*
-• [Hypothesis 1] — [specific reason from tool result]
+• [what you considered] — [the tool result that excludes it]
 
 *📈 Confidence:* `[level]` — [one sentence: which evidence supports this and what would raise it]
