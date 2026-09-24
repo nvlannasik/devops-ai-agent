@@ -2,6 +2,34 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { leaksRcaStructure, buildRcaBlocks, extractSection, isRcaResponse, formatRunFooter, formatDuration } from "./blocks.js";
 
+// Reported from a live card: Impact ran straight into Recommended Actions, and Evidence into
+// Ruled Out, while every other boundary carried a rule. Both pairs shared one divider because the
+// guard against a dangling rule was written per PAIR rather than per section.
+test("every section on the card is separated from the next by a divider", () => {
+  const rca =
+    "*🔴 Severity:* `Critical`\n\n" +
+    "*⚡ TL;DR*\n`shop/api` is down.\n\n" +
+    "*⚠️ Impact if Unresolved*\ncheckout fails for everyone.\n\n" +
+    "*🔧 Recommended Actions*\n1. *Immediate:* restore `shop/api`\n\n" +
+    "*📍 Root Cause*\n1. *Symptom:* OOMKilled — _k8s_describe_pod_ `shop/api-7d9f`\n\n" +
+    "*📊 Evidence*\n• *Fact:* restarts=5 — _k8s_list_pods_ `shop/api-7d9f`\n• *Fact:* limit is `128Mi` — _k8s_get_resource_ `shop/api`\n\n" +
+    "*🚫 Ruled Out*\n• node pressure — every other pod is Ready\n\n" +
+    "*📈 Confidence:* `High` — two sources agree";
+
+  const types = buildRcaBlocks(rca, "alertname").map((b) => b.type);
+  // Walk the body and assert no two content blocks touch. The Evidence heading and its table are
+  // the one deliberate pair — a table carries no title of its own.
+  const body = types[types.length - 1] === "context" ? types.slice(0, -1) : types;
+  for (let i = 1; i < body.length; i++) {
+    const pair = `${body[i - 1]}+${body[i]}`;
+    if (pair === "section+table") continue; // the heading and the table it announces
+    assert.ok(
+      body[i] === "divider" || body[i - 1] === "divider",
+      `two blocks touch with no divider between them: ${pair} at ${i} in [${body.join(", ")}]`,
+    );
+  }
+});
+
 test("partial RCA leak (plan + impact + confidence, no Severity) is detected", () => {
   const reply =
     "Here's what I found:\n- image: controller:v1.15.1\n" +

@@ -232,21 +232,29 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
     blocks.push(divider());
   }
 
+  // ── One divider per section, and the rule is the point ───────────────────
+  // Impact and Recommended Actions used to share one, and so did Evidence and Ruled Out —
+  // `if (impact || actions) push(divider())`, which is the shape you write to stop a divider
+  // dangling when one of a pair is absent. The missing rule BETWEEN them was a side effect of
+  // that guard, not a decision to group them, and it was noticed as exactly that: two sections
+  // running together while their neighbours were separated. Pushing the divider inside each
+  // `if` solves the dangling case too, and it cannot drift back.
+  //
   // ── Impact ───────────────────────────────────────────────────────────────
   // Above the actions, not below them: impact is what decides whether the actions are worth
   // waking someone for, and it used to sit second-to-last on the card.
   const impact = extractSection(rcaText, "Impact");
   if (impact) {
     blocks.push(...section(`*⚠️ Impact if Unresolved*\n${impact}`));
+    blocks.push(divider());
   }
 
   // ── Recommended Actions ──────────────────────────────────────────────────
   const actions = extractSection(rcaText, "Recommended Actions");
   if (actions) {
     blocks.push(...section(`*🔧 Recommended Actions*\n${actions}`));
+    blocks.push(divider());
   }
-
-  if (impact || actions) blocks.push(divider());
 
   // ── Root Cause ───────────────────────────────────────────────────────────
   // A numbered causal chain now rather than a paragraph, but the label is unchanged on purpose:
@@ -270,15 +278,15 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
     } else {
       blocks.push(...section(`*📊 Evidence*\n${evidence}`));
     }
+    blocks.push(divider());
   }
 
   // ── Ruled Out ────────────────────────────────────────────────────────────
   const ruledOut = extractSection(rcaText, "Ruled Out");
   if (ruledOut) {
     blocks.push(...section(`*🚫 Ruled Out*\n${ruledOut}`));
+    blocks.push(divider());
   }
-
-  if (evidence || ruledOut) blocks.push(divider());
 
 
   // ── Confidence ────────────────────────────────────────────────────────────
