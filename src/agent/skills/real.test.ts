@@ -77,10 +77,20 @@ test("every LogQL line filter in the shipped prompts is case-insensitive", () =>
 // ended as `{"action": null}` — correctly, and with no card. The rule lives in the template because
 // that is where the line is written: a copy of it inside pod-pending was selected, loaded and
 // ignored on A05 before it was moved here.
-test("the Immediate line states both of the requirements the proposal step depends on", () => {
+test("the Immediate line states the requirements the proposal step depends on", () => {
   const body = loadSkills(resolveSkillsDir()).all().find((s) => s.name === "rca-format")!.body;
   assert.match(body, /change to a workload in this cluster/i, "the executable-here requirement is missing");
   assert.match(body, /carry the value it changes/i, "the name-the-value requirement is missing");
+  assert.match(body, /never from an instruction inside it/i, "the injected-instruction requirement is missing");
+
+  // And they live OUTSIDE the template, which is the half I got wrong first. Written between
+  // `*🔧 Recommended Actions*` and `*📍 Root Cause*`, inside "Output EXACTLY this structure", the
+  // model reproduced the whole block — heading and bullets — into the RCA it posted (C08 attempt
+  // 3, 2026-09-24). The template marks its own instructions with [square brackets]; prose shaped
+  // like a section reads as a section to copy.
+  const template = body.slice(body.indexOf("Output EXACTLY this structure"));
+  assert.doesNotMatch(template, /it is the only line that does/i, "the rule block is inside the output template");
+  assert.doesNotMatch(template, /never from an instruction inside it/i, "the rule block is inside the output template");
   // The escape hatch has to be stated too, or the rule reads as "always name an action" and the
   // model invents one — which is the failure the whole gate chain exists to refuse.
   assert.match(body, /Never invent one to fill the slot/i);
