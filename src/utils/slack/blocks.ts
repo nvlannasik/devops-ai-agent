@@ -1,4 +1,5 @@
 import type { KnownBlock } from "@slack/types";
+import { evidenceTable } from "./evidence-table.js";
 import { splitForSlack } from "./split.js";
 
 export type Block = KnownBlock;
@@ -257,9 +258,18 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   }
 
   // ── Evidence ─────────────────────────────────────────────────────────────
+  // A real Block Kit table when the section is a list of findings, the bullet list when it is
+  // anything else — see evidenceTable for what "anything else" means and why it decides that way.
+  // The heading stays its own section block either way: a table carries no title of its own, and
+  // every other section here is announced by one.
   const evidence = extractSection(rcaText, "Evidence");
   if (evidence) {
-    blocks.push(...section(`*📊 Evidence*\n${evidence}`));
+    const asTable = evidenceTable(evidence);
+    if (asTable) {
+      blocks.push(...section("*📊 Evidence*"), asTable);
+    } else {
+      blocks.push(...section(`*📊 Evidence*\n${evidence}`));
+    }
   }
 
   // ── Ruled Out ────────────────────────────────────────────────────────────
