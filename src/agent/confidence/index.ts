@@ -52,9 +52,15 @@ const HIGH_LINE = /^(.*?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*[`*]?\s*\[?)
 
 const CAPPED_REASON = "the answer states the logs behind it were not available";
 
+/**
+ * Does the answer say the log source yielded nothing? Exported for the diagnostic at the call
+ * site, not for callers to reach their own verdict with.
+ */
+export const admitsLogGap = (answer: string): boolean => EVIDENCE_GAP.some((re) => re.test(answer));
+
 export function capConfidence(answer: string, sawLogLines: boolean): { text: string; capped: boolean } {
   if (sawLogLines) return { text: answer, capped: false };
   if (parseConfidence(answer) !== "high") return { text: answer, capped: false };
-  if (!EVIDENCE_GAP.some((re) => re.test(answer))) return { text: answer, capped: false };
+  if (!admitsLogGap(answer)) return { text: answer, capped: false };
   return { text: answer.replace(HIGH_LINE, `$1Medium$2 — ${CAPPED_REASON}`), capped: true };
 }

@@ -31,7 +31,7 @@ import {
   withDelegateTool,
 } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
-import { capConfidence } from "./confidence/index.js";
+import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
@@ -1354,7 +1354,17 @@ export class DevOpsAgent {
       // An answer that says it could not read the logs cannot also be highly confident — see
       // capConfidence. Here, so the alert path and a mention both pass through it.
       const { text: rated, capped } = capConfidence(text, sawLogLines);
-      if (capped) logger.info(`[${threadId}] capped Confidence: High → Medium — the answer reports no logs`);
+      if (capped) {
+        logger.info(`[${threadId}] capped Confidence: High → Medium — the answer reports no logs`);
+      } else if (parseConfidence(text) === "high") {
+        // Bench C03 attempt 1, 2026-09-24: every log result came back under LOG_RESULT_MIN_CHARS,
+        // and the stored answer matches admitsLogGap when tested offline — both conditions looked
+        // met, and the cap still declined. The artifacts could not say which input differed,
+        // because neither was ever written down. One line, only on a High rating, settles the next.
+        logger.info(
+          `[${threadId}] Confidence: High kept — sawLogLines=${sawLogLines} admitsLogGap=${admitsLogGap(text)}`
+        );
+      }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
       return stripOffer(rated);

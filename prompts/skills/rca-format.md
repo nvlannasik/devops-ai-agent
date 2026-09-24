@@ -58,6 +58,21 @@ contained to it and why.]
 2. *Short-term:* [Fix within hours/days]
 3. *Long-term:* [Architectural or process change to prevent recurrence]
 
+**The Immediate line has two hard requirements, and it is the only line that does.** A separate
+step reads it and nothing else to decide whether a human is offered an approval button, so a
+sentence that fails either requirement ends the incident with no action offered at all.
+- **It must be a change to a workload in this cluster** — its image, its resource values, its
+  replica count, a restart, a pod delete, a reconcile. Adding a node, enabling the autoscaler,
+  rebalancing workloads, profiling the application and "monitor it for a while" are all reasonable
+  things for a human to do, and none of them can be executed from here; they belong under
+  Short-term or Long-term. If nothing in that list repairs this fault, say so plainly in one line —
+  that is a complete Immediate, and far better than naming something nobody here can act on.
+- **It must carry the value it changes.** "Change to a valid image tag" is not an action, it is a
+  category; "set `web` to `nginx:alpine`, the tag the previous ReplicaSet is still serving" is one.
+  The same holds for memory, CPU and replicas: the number belongs on the line, taken from the
+  evidence you read. Never invent one to fill the slot — if the evidence does not contain the
+  value, the honest Immediate is naming what to read next in order to get it.
+
 *📍 Root Cause*
 [The causal chain, one numbered step per link — see "Causal Chain" in the system prompt. Step 1 is
 the symptom the alert fired on. Each step after it answers *why the step above happened* and ends

@@ -55,6 +55,21 @@ test("no skill is always-on, and none matches the mode tag by accident", () => {
 // recalled, as `critical`. parseSeverity/parseConfidence are the exact readers that ran on
 // that output, so pointing them at the shipped template is the check: a template that still
 // parses as a real level is a template a model can copy into a real incident row.
+// Four of the real failures in the 2026-09-24 run were an Immediate line the proposal step could
+// do nothing with: "add one or more worker nodes" (A05), "change to a valid image tag" naming no
+// tag (A03), "monitor memory pressure" (C02). That step reads this line and nothing else, so each
+// ended as `{"action": null}` — correctly, and with no card. The rule lives in the template because
+// that is where the line is written: a copy of it inside pod-pending was selected, loaded and
+// ignored on A05 before it was moved here.
+test("the Immediate line states both of the requirements the proposal step depends on", () => {
+  const body = loadSkills(resolveSkillsDir()).all().find((s) => s.name === "rca-format")!.body;
+  assert.match(body, /change to a workload in this cluster/i, "the executable-here requirement is missing");
+  assert.match(body, /carry the value it changes/i, "the name-the-value requirement is missing");
+  // The escape hatch has to be stated too, or the rule reads as "always name an action" and the
+  // model invents one — which is the failure the whole gate chain exists to refuse.
+  assert.match(body, /Never invent one to fill the slot/i);
+});
+
 // extractSection ends a section on a HARDCODED set of emoji. A template section whose emoji is
 // missing from that set is invisible as a boundary: the section above it silently absorbs the
 // rest of the RCA, Slack renders one giant block, and nothing throws. So derive the sections
