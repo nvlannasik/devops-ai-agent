@@ -29,6 +29,13 @@ export interface BenchRun {
   /** case id -> one character per attempt, in order: "." pass, "x" fail. */
   marks: Record<string, string>;
   failures: Array<{ case: string; attempt: number; reasons: string[] }>;
+  /**
+   * The `--filter` the run was launched with — null for a whole-suite run, a regex for a spot
+   * check. It decides which views may read the run, and that split is the whole point of keeping
+   * it: a subset's pass@1 answers a different question from a suite's and belongs in neither the
+   * run list nor the leaderboard, while its per-case attempts are as real as any other's.
+   */
+  filter: string | null;
 }
 
 const HISTORY = join(process.cwd(), "bench", "results", "history.jsonl");
@@ -68,6 +75,7 @@ export function loadBenchHistory(limit = 20, path = HISTORY): BenchRun[] {
         axes: (r.axes && typeof r.axes === "object" ? r.axes : {}) as Record<string, [number, number]>,
         marks: (r.marks && typeof r.marks === "object" ? r.marks : {}) as Record<string, string>,
         failures: Array.isArray(r.failures) ? (r.failures as BenchRun["failures"]) : [],
+        filter: str(r.filter), // absent on every line written before 2026-09-24 — those are suite runs
       });
     } catch {
       logger.warn("[dashboard] skipped an unparseable line in the benchmark history");
@@ -159,9 +167,18 @@ export interface ConfigStat {
   lastAt: string;
 }
 
+/** Whole-suite runs only — the two views that compare runs to each other may read no other kind. */
+export const suiteRuns = (history: BenchRun[]): BenchRun[] => history.filter((r) => !r.filter);
+
+/** The subset runs, newest first, for the one view that exists to show them. */
+export const spotChecks = (history: BenchRun[]): BenchRun[] => history.filter((r) => !!r.filter);
+
 export function byConfig(history: BenchRun[]): ConfigStat[] {
   const acc = new Map<string, ConfigStat>();
-  for (const run of history) {
+  // A configuration's rate is compared against another configuration's, so every run behind it
+  // has to have faced the same cases. `cleanRuns` says it louder: pass^k over two easy cases is
+  // not the same achievement as pass^k over twenty.
+  for (const run of suiteRuns(history)) {
     const key = run.backends ?? "(unrecorded)";
     const c = acc.get(key) ?? {
       backends: key, provider: run.provider, runs: 0, passed: 0, attempts: 0, cleanRuns: 0, lastAt: run.at,

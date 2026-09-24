@@ -8,7 +8,7 @@ import { NAV_COUNT_CAP } from "./queries.js";
 import type {
   FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
 } from "./queries.js";
-import { byCase, byConfig, type BenchRun } from "./bench.js";
+import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
 import { SESSION_TTL_MS } from "./auth.js";
 import { rowId } from "./topology.js";
@@ -1699,6 +1699,38 @@ function byCaseTable(history: BenchRun[]): string {
     ${table(headers("Case", "Pass rate", ["Attempts", "num"], ["Runs", "num"]), body, "pairs", "bench-table")}`;
 }
 
+/**
+ * The subset runs — which the leaderboard and the run list both decline for the same reason, a
+ * subset's pass@1 not being comparable to a suite's, and which still have to be visible somewhere
+ * or `--filter` measures something nobody can find afterwards.
+ *
+ * Deliberately the smallest thing that answers "what did that spot check say": when, what it
+ * covered, how many attempts passed. No pass@1, no pass^k, no rate bar — the bar is the visual the
+ * comparable tables own, and lending it here is exactly what would make these rows read as their
+ * peers. The filter is printed verbatim because it IS the scope: `^(B04|C08)` says more than
+ * "2 cases", and it is what someone would paste to run it again.
+ */
+function spotCheckTable(history: BenchRun[]): string {
+  const rows = spotChecks(history);
+  if (rows.length === 0) return "";
+  const body = rows
+    .map((r) => {
+      const marks = Object.values(r.marks ?? {}).join("");
+      const passed = [...marks].filter((m) => m !== "x").length;
+      return (
+        `<tr role="row">` +
+        cell("When", timeTag(r.at)) +
+        cell("Scope", `<code translate="no">${esc(r.filter ?? "")}</code>`) +
+        cell("Cases", fmtInt(r.cases), "num") +
+        cell("Attempts", `${fmtInt(passed)}/${fmtInt(marks.length)}`, "num") +
+        `</tr>`
+      );
+    })
+    .join("");
+  return `${section(ICON.bench, "Spot checks", '<span class="meta">subset runs — counted by case above, never compared as scores</span>')}
+    ${table(headers("When", "Scope", ["Cases", "num"], ["Attempts", "num"]), body, "pairs", "bench-table")}`;
+}
+
 function byConfigTable(history: BenchRun[]): string {
   const rows = byConfig(history);
   if (rows.length === 0) return "";
@@ -1727,8 +1759,12 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
   // that depends on someone else having sorted is a heading that will one day be wrong — the
   // first render of this page had them oldest-first while the label claimed otherwise.
   const runs = [...input].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  // The cards below are whole-suite runs only. A subset run's card would carry a pass@1 over two
+  // cases beside one over twenty and invite the comparison the numbers cannot bear; the spot-check
+  // table states the same run in the terms it can actually be read in.
+  const cards = suiteRuns(runs);
   const body =
-    runs.length === 0
+    cards.length === 0
       ? `<div class="card">
            <p class="meta">No benchmark runs stored yet.</p>
            <p class="meta">Runs are written by <code translate="no">npm run bench</code>, which appends a
@@ -1736,7 +1772,7 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
              that file out of the image, so a score recorded after this pod was built appears on the next
              build. See <code translate="no">bench/README.md</code>.</p>
          </div>`
-      : runs.map(benchRunCard).join("");
+      : cards.map(benchRunCard).join("");
 
   return layout(
     "Benchmark",
@@ -1755,6 +1791,7 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
        evidence grounding, and the facts the RCA text has to state. A run showing 100% is silent
        about the other three.</p>
      ${byCaseTable(runs)}
+     ${spotCheckTable(runs)}
      ${byConfigTable(runs)}
      ${section(ICON.overview, "Runs", '<span class="meta">newest first</span>')}
      ${body}

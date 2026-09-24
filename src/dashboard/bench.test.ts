@@ -59,7 +59,7 @@ test("the cap applies to the newest, not the oldest", () => {
 
 // ---- aggregation ----------------------------------------------------------------------------
 
-import { byCase, byConfig } from "./bench.js";
+import { byCase, byConfig, spotChecks, suiteRuns } from "./bench.js";
 
 const mk = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
@@ -132,6 +132,37 @@ test("attempts that threw are excluded from a case's lifetime rate, and counted 
   assert.equal(c03!.runs, 2, "both runs still touched this case");
   // and the configuration rate agrees with it
   assert.equal(byConfig(history)[0]!.attempts, 3);
+});
+
+// A subset run's pass@1 is not comparable to a suite's, and the first answer to that was to not
+// record it at all — which also threw away six real attempts of B04 and C08 on 2026-09-24. The
+// split is per VIEW now: the leaderboard compares runs, so it may read whole-suite ones only; the
+// per-case rate asks what a case has ever been given, and a filtered attempt is as real as any.
+test("a spot check counts toward its cases and never toward the leaderboard", () => {
+  const history = [
+    { at: "2026-09-23T03:49:00.000Z", attempts: 3, backends: "cfg", marks: { B04: "xxx" }, filter: null },
+    { at: "2026-09-24T09:29:00.000Z", attempts: 3, backends: "cfg", marks: { B04: ".x." }, filter: "^(B04|C08)" },
+  ] as unknown as BenchRun[];
+
+  const [b04] = byCase(history);
+  assert.equal(b04!.attempts, 6, "the spot check's attempts count for the case");
+  assert.equal(b04!.passed, 2);
+  assert.equal(b04!.runs, 2);
+
+  const cfg = byConfig(history);
+  assert.equal(cfg[0]!.attempts, 3, "the leaderboard sees the suite run only");
+  assert.equal(cfg[0]!.passed, 0);
+
+  assert.deepEqual(suiteRuns(history).map((r) => r.at), ["2026-09-23T03:49:00.000Z"]);
+  assert.deepEqual(spotChecks(history).map((r) => r.filter), ["^(B04|C08)"]);
+});
+
+// Every line written before the field existed is a whole-suite run, and reading them as spot
+// checks would empty the leaderboard of its entire history in one deploy.
+test("a history line with no filter field is a suite run", () => {
+  const rows = loadBenchHistory(20, write(mk({ marks: { a: "." } })));
+  assert.equal(rows[0]!.filter, null);
+  assert.equal(suiteRuns(rows).length, 1);
 });
 
 test("a run with no failures at all is unaffected", () => {

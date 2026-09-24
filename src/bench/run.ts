@@ -325,24 +325,23 @@ async function main(): Promise<void> {
   // second manual step is a score that stops being recorded the first busy week.
   const history = join(RESULTS_DIR, "history.jsonl");
   // A FILTERED run is a spot check, not a score. `--filter '^A08'` measures one case against one
-  // fix; it says nothing about the agent, and the file it was landing in is the one the dashboard
-  // reads. Measured on this file: 16 lines, 3 of them whole-suite runs — the page showed 20
+  // fix, and its pass@1 is not comparable to a suite's. Measured back when that was handled by
+  // not writing the line at all: 16 lines, 3 of them whole-suite runs — the page showed 20
   // newest and was 80% spot checks, with the only three comparable numbers buried among them.
   //
-  // So the default is inverted for a filtered run: the terminal output and the transcript beside
-  // it are its home, and `--record` opts one in when a subset really is the measurement you want
-  // kept. `--no-push` still means "keep nothing", for either kind.
-  const spotCheck = !!filterArg && !has("record");
-  if (spotCheck) {
-    console.log(`--filter ${filterArg}: spot check, not recorded (pass --record to keep it)`);
-  } else if (has("no-push")) {
+  // Dropping the line fixed the burial and lost the attempts with it: B04 and C08 were measured
+  // six times on 2026-09-24 and the per-case table, which has no comparability problem, never
+  // saw them. The line is written either way now and carries `filter`, and the dashboard decides
+  // per view — out of the run list and the leaderboard, into the per-case rates. `--no-push`
+  // still means "keep nothing", for either kind.
+  if (has("no-push")) {
     // Skips the APPEND too, not just the push. The only reason to pass this is that the run is
     // not one you want kept — a dry run with a deliberately unusable key, a half-finished case.
     // Recording it and leaving it uncommitted just moves the cleanup to whoever commits next,
     // which is how a 0% from a bad API key ended up in this file's own history.
     console.log("--no-push: this run was not recorded");
   } else {
-    appendHistory(history, { meta, rates, axes, runs });
+    appendHistory(history, { meta, rates, axes, runs, filter: filterArg ?? null });
     console.log(`history line appended: ${history}`);
     publishHistory(history);
   }

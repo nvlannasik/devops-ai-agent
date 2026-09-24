@@ -108,6 +108,16 @@ export function appendHistory(
     rates: { tasks: number; k: number; pass1: number; passK: number; passHatK: number };
     axes: Record<string, [number, number]>;
     runs: TaskRun[];
+    /**
+     * The `--filter` this run was launched with, or null for a whole-suite run.
+     *
+     * Recorded rather than used to decide whether to record at all. A subset's pass@1 is not
+     * comparable to a suite's and must stay out of the run list and the leaderboard — but its
+     * ATTEMPTS are real, and dropping the line cost the per-case table six attempts of B04 and
+     * C08 on 2026-09-24. One field lets the dashboard answer both questions; the old
+     * all-or-nothing could only answer one.
+     */
+    filter?: string | null;
   }
 ): void {
   // `marks` and `failures` are the two parts of the transcript small enough to keep. A run's
@@ -147,6 +157,7 @@ export function appendHistory(
     axes: input.axes,
     marks,
     failures,
+    ...(input.filter ? { filter: input.filter } : {}),
   });
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, line + "\n");
