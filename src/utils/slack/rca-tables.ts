@@ -52,29 +52,73 @@ export function toSpans(text: string): Span[] {
 }
 
 /**
- * The source suffix the template asks for: ` — _tool_name_ \`namespace/resource\``.
+ * The source suffix: ` — _tool_name_ …`, where the Source column is the tool name and EVERYTHING
+ * after it.
  *
  * Anchored on the tool name CONTAINING an underscore, which every tool on this server does
  * (`k8s_*`, `prometheus_query`, `loki_query_range`). A finding routinely ends in a backticked
  * value of its own, so splitting on the last dash would put half the sentence in the Source
- * column; requiring the snake_case shape is what tells the two apart.
+ * column; requiring the snake_case shape right after the dash is what tells the two apart.
+ *
+ * The first version also demanded the line END with the tool name plus optional backticked
+ * resources, and that was written from the template rather than from what the model writes.
+ * Measured on incidents 168 and 169 (2026-09-25), every one of these is real and none of them
+ * matched — so all four of 169's findings came back sourceless and the whole section fell back
+ * to a bullet list:
+ *
+ *     — _k8s_get_pod_logs_ `storefront-7ff755c7dd-kpl8z` in `sample-apps`
+ *     — _k8s_list_events_ results
+ *     — _prometheus_query_ results from prior batch
+ *     — _k8s_get_pod_logs_ `namespace="sample-apps"`, pod `checkout-gateway-774f8b79dd-lwhs4`
+ *     — _functions.k8s_get_endpoints_ and _functions.k8s_list_ingresses_ (from prior fetch)
+ *
+ * Hence `.*$`: the discriminator is what follows the dash, not what ends the line. Dots are
+ * allowed inside the name for the last of those — the model prefixes `functions.` sometimes.
  */
-const SOURCE = /\s+[—–]\s+(_?[a-z][a-z0-9]*(?:_[a-z0-9]+)+_?)((?:\s+`[^`]+`)*)\s*$/i;
+const SOURCE = /\s+[—–]\s+(_?[a-z][a-z0-9.]*(?:_[a-z0-9.]+)+_?\b.*)$/i;
 
 const BULLET = /^[ \t]*(?:[•*\-–]|\d+\.)[ \t]*/;
+
+/**
+ * One ITEM per row, not one line per row.
+ *
+ * Measured on incident 168 (2026-09-25): the model wrote a multi-line Immediate, its detail
+ * carried on two indented sub-bullets underneath, and each of those became a row of its own with
+ * an empty first column.
+ *
+ * INDENTATION decides, not the marker — the first attempt said "unmarked lines are continuations"
+ * and those sub-bullets are marked, just nested. A line starts a new item only when it is marked
+ * AND sits no deeper than the item it would follow; everything else belongs to the item above.
+ *
+ * The FIRST line opens an item whether or not it is marked: a section that opens without a bullet
+ * is still opening one, and dropping it would lose the finding rather than its shape.
+ */
+function items(text: string): string[] {
+  const out: string[] = [];
+  let openedAt = 0; // indent of the line that opened the current item
+  for (const raw of text.split("\n")) {
+    if (raw.trim() === "") continue;
+    const indent = raw.length - raw.trimStart().length;
+    const text_ = raw.replace(BULLET, "").trim();
+    if (out.length === 0 || (BULLET.test(raw) && indent <= openedAt)) {
+      out.push(text_);
+      openedAt = indent;
+    } else {
+      out[out.length - 1] += ` ${text_}`;
+    }
+  }
+  return out;
+}
 
 const cell = (text: string): KnownBlock =>
   ({ type: "rich_text", elements: [{ type: "rich_text_section", elements: toSpans(text) }] }) as KnownBlock;
 
 /** Rows as (finding, source) pairs; a line with no recognisable source keeps an empty Source. */
 export function evidenceRows(evidence: string): Array<[string, string]> {
-  return evidence
-    .split("\n")
-    .map((l) => l.replace(BULLET, "").trim())
-    .filter((l) => l !== "")
+  return items(evidence)
     .map((line): [string, string] => {
       const m = line.match(SOURCE);
-      return m ? [line.slice(0, m.index).trim(), `${m[1]}${m[2]}`.trim()] : [line, ""];
+      return m ? [line.slice(0, m.index).trim(), m[1].trim()] : [line, ""];
     });
 }
 
@@ -122,10 +166,7 @@ const RUNG = /^\*{0,2}\s*(Immediate|Short[-\s]?term|Long[-\s]?term)\s*:?\s*\*{0,
 
 /** Rows as (rung, action). A line with no recognisable rung keeps the whole text as the action. */
 export function actionRows(actions: string): Array<[string, string]> {
-  return actions
-    .split("\n")
-    .map((l) => l.replace(BULLET, "").trim())
-    .filter((l) => l !== "")
+  return items(actions)
     .map((line): [string, string] => {
       const m = line.match(RUNG);
       // Title-cased from the match rather than echoed: the model writes "short-term", "Short Term"

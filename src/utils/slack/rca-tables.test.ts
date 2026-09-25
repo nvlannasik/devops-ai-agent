@@ -117,3 +117,57 @@ test("a section with no rungs at all keeps the numbered list", () => {
   assert.equal(actionsTable("Restart the deployment and then watch it.\nEscalate if it recurs."), null);
   assert.equal(actionsTable("1. *Immediate:* the only one"), null, "a single row");
 });
+
+// ---- shapes taken from live RCAs, not from the template ---------------------------------------
+
+// Incidents 168 and 169, 2026-09-25. The first SOURCE pattern demanded the line end on the tool
+// name plus optional backticked resources; not one of these does, so 169's four findings all came
+// back sourceless and the section fell back to a bullet list. Written from the template rather
+// than from what the model writes — the mistake this file now carries a test against.
+test("the source is the tool name and everything after it", () => {
+  const live: Array<[string, string]> = [
+    ["_k8s_get_pod_logs_ `storefront-7ff755c7dd-kpl8z` in `sample-apps`", "trailing prose after the resource"],
+    ["_k8s_list_events_ results", "a bare word after the tool"],
+    ["_prometheus_query_ results from prior batch", "a phrase after the tool"],
+    ["_k8s_get_pod_logs_ `namespace=\"sample-apps\"`, pod `checkout-gateway-774f8b79dd-lwhs4`", "two resources, comma between"],
+    ["_functions.k8s_get_endpoints_ and _functions.k8s_list_ingresses_ (from prior fetch)", "a dotted name and two tools"],
+  ];
+  for (const [source, why] of live) {
+    const [[finding, got]] = evidenceRows(`• *Fact:* the thing happened — ${source}`);
+    assert.equal(finding, "*Fact:* the thing happened", why);
+    assert.equal(got, source, why);
+  }
+});
+
+// Incident 168: a multi-line Immediate whose detail continued on two indented sub-bullets. Each
+// became a row of its own with an empty When.
+test("a multi-line item is one row, not one row per line", () => {
+  const rows = actionRows(
+    "1. *Immediate:* fetch the logs for the downstream path:\n" +
+      "   - `k8s_get_pod_logs` on `sample-apps/checkout-gateway-774f8b79dd-lwhs4`\n" +
+      "   - `k8s_get_pod_logs` on the `orders-api` pod\n" +
+      "2. *Short-term:* verify the response contract",
+  );
+  assert.equal(rows.length, 2, `expected two rungs, got ${rows.length}: ${JSON.stringify(rows)}`);
+  assert.equal(rows[0][0], "Immediate");
+  assert.match(rows[0][1], /^fetch the logs for the downstream path: `k8s_get_pod_logs` on `sample-apps\//);
+  assert.match(rows[0][1], /orders-api` pod$/, "the second sub-bullet is folded in too");
+  assert.deepEqual(rows[1], ["Short-term", "verify the response contract"]);
+});
+
+test("a continuation line folds into the finding above it", () => {
+  const rows = evidenceRows(
+    "• *Fact:* the gateway cannot read the response — _k8s_get_pod_logs_ `ns/gw`\n" +
+      "  and the same trace repeats every 30s\n" +
+      "• *Fact:* the second one — _k8s_list_events_ results",
+  );
+  assert.equal(rows.length, 2);
+  assert.match(rows[0][1], /and the same trace repeats every 30s$/);
+});
+
+// The Source column is built from one capture group now; a stale second one would have written
+// the string "undefined" into every cell.
+test("no cell ever contains the word undefined", () => {
+  const rows = evidenceRows("• a — _k8s_list_pods_ `ns/p`\n• b — _k8s_list_events_ results");
+  for (const [f, s] of rows) assert.doesNotMatch(`${f}|${s}`, /undefined/);
+});

@@ -704,10 +704,16 @@ export class SlackApp {
             return t && typeof t !== "string" ? t.text.length : 0;
           })
         );
+        // Tables are counted for the same reason the rest of this line exists. Evidence and
+        // Recommended Actions fall back to a list whenever their shape is not the one the table
+        // reader expects, and "some cards have tables and some do not" had to be worked out by
+        // subtracting dividers and sections from the block count — the answer was in the card all
+        // along and the log was not carrying it.
         logger.info(
           `[slack] RCA card: ${rcaBlocks.length} blocks ` +
           `(${rcaBlocks.filter((b) => b.type === "divider").length} dividers, ` +
-          `${rcaBlocks.filter((b) => b.type === "section").length} sections, longest ${longest} chars)`
+          `${rcaBlocks.filter((b) => b.type === "section").length} sections, ` +
+          `${rcaBlocks.filter((b) => b.type === "table").length} tables, longest ${longest} chars)`
         );
         await this.postRca(channel, threadId, rca, rcaBlocks);
       } else {
