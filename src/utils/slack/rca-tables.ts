@@ -1,5 +1,6 @@
 /**
- * The Evidence section as a Block Kit `table`, which Slack renders with real columns.
+ * The RCA sections that are really lists, as Block Kit `table`s — Evidence and Recommended
+ * Actions. Slack renders them with real columns.
  *
  * Verified before it was built, by posting one to the alert channel on 2026-09-25: the API accepts
  * it (`ok: true`, not `invalid_blocks`) and the client draws a bordered two-column table with
@@ -102,6 +103,61 @@ export function evidenceTable(evidence: string): KnownBlock | null {
         { type: "raw_text", text: "Source" },
       ],
       ...rows.map(([finding, source]) => [cell(finding), cell(source)]),
+    ],
+  } as KnownBlock;
+}
+
+/**
+ * Recommended Actions as `When | Action`.
+ *
+ * A better fit for a table than Evidence, because the first column is a closed vocabulary rather
+ * than free text: the template asks for exactly `*Immediate:*`, `*Short-term:*` and `*Long-term:*`,
+ * in that order. So the rung a reader is looking for stops being something they parse out of a
+ * sentence and becomes a column they scan.
+ *
+ * Immediate is the one the remediation step reads — see the Immediate rules in rca-format.md —
+ * which is another reason to give it a cell of its own rather than leave it inside a numbered line.
+ */
+const RUNG = /^\*{0,2}\s*(Immediate|Short[-\s]?term|Long[-\s]?term)\s*:?\s*\*{0,2}\s*:?\s*/i;
+
+/** Rows as (rung, action). A line with no recognisable rung keeps the whole text as the action. */
+export function actionRows(actions: string): Array<[string, string]> {
+  return actions
+    .split("\n")
+    .map((l) => l.replace(BULLET, "").trim())
+    .filter((l) => l !== "")
+    .map((line): [string, string] => {
+      const m = line.match(RUNG);
+      // Title-cased from the match rather than echoed: the model writes "short-term", "Short Term"
+      // and "Short-term", and three spellings down one column is what a table is supposed to fix.
+      return m ? [rung(m[1]), line.slice(m[0].length).trim()] : ["", line];
+    });
+}
+
+const rung = (raw: string): string => {
+  const k = raw.toLowerCase().replace(/[\s-]/g, "");
+  return k === "immediate" ? "Immediate" : k === "shortterm" ? "Short-term" : "Long-term";
+};
+
+export function actionsTable(actions: string): KnownBlock | null {
+  const rows = actionRows(actions);
+  if (rows.length < 2 || rows.length > MAX_ROWS) return null;
+  if (rows.some(([w, a]) => w.length > MAX_CELL_CHARS || a.length > MAX_CELL_CHARS)) return null;
+  // No rung anywhere means the model wrote prose or its own headings, and a When column would be
+  // an empty stripe down the card. The numbered list renders that as it is.
+  if (rows.every(([w]) => w === "")) return null;
+
+  return {
+    type: "table",
+    // The rung column is never longer than "Short-term", so wrapping it can only break that word
+    // across two lines. The action is a sentence and must wrap.
+    column_settings: [{ is_wrapped: false }, { is_wrapped: true }],
+    rows: [
+      [
+        { type: "raw_text", text: "When" },
+        { type: "raw_text", text: "Action" },
+      ],
+      ...rows.map(([when, action]) => [cell(when), cell(action)]),
     ],
   } as KnownBlock;
 }

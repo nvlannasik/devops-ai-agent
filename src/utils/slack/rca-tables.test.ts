@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evidenceRows, evidenceTable, toSpans } from "./evidence-table.js";
+import { evidenceRows, evidenceTable, toSpans } from "./rca-tables.js";
 
 const EVIDENCE =
   "• *Fact:* container `api` was OOMKilled at its `128Mi` limit — _k8s_describe_pod_ `shop/api-7d9f-x2k`\n" +
@@ -68,4 +68,52 @@ test("anything that is not a list of findings keeps the bullet list", () => {
     null,
     "an oversized cell",
   );
+});
+
+// ---- Recommended Actions ---------------------------------------------------------------------
+
+import { actionRows, actionsTable } from "./rca-tables.js";
+
+const ACTIONS =
+  "1. *Immediate:* set `gateway` to `ghcr.io/shop/checkout:1.8.2`, the tag the previous ReplicaSet is serving\n" +
+  "2. *Short-term:* add a smoke test on the checkout path\n" +
+  "3. *Long-term:* require an image-exists check in CI";
+
+test("the rung becomes its own column and leaves the action text behind", () => {
+  assert.deepEqual(actionRows(ACTIONS), [
+    ["Immediate", "set `gateway` to `ghcr.io/shop/checkout:1.8.2`, the tag the previous ReplicaSet is serving"],
+    ["Short-term", "add a smoke test on the checkout path"],
+    ["Long-term", "require an image-exists check in CI"],
+  ]);
+});
+
+// Three spellings down one column is the thing a table is supposed to fix, and the model writes
+// all three.
+test("the rung is normalised, not echoed", () => {
+  const rows = actionRows("1. *short term:* a\n2. Short-Term: b\n3. **SHORT-TERM:** c");
+  assert.deepEqual(rows.map(([w]) => w), ["Short-term", "Short-term", "Short-term"]);
+});
+
+test("a line with no rung keeps its text and an empty When", () => {
+  assert.deepEqual(actionRows("1. *Immediate:* restart it\n2. then watch the dashboard for an hour"), [
+    ["Immediate", "restart it"],
+    ["", "then watch the dashboard for an hour"],
+  ]);
+});
+
+test("the table is When plus Action, with only the action column wrapped", () => {
+  const table = actionsTable(ACTIONS) as unknown as { type: string; rows: unknown[][]; column_settings: unknown[] };
+  assert.equal(table.type, "table");
+  assert.equal(table.rows.length, 4, "header plus three rungs");
+  assert.deepEqual(table.rows[0], [
+    { type: "raw_text", text: "When" },
+    { type: "raw_text", text: "Action" },
+  ]);
+  // "Short-term" is the longest value this column can hold, so wrapping it can only break the word.
+  assert.deepEqual(table.column_settings, [{ is_wrapped: false }, { is_wrapped: true }]);
+});
+
+test("a section with no rungs at all keeps the numbered list", () => {
+  assert.equal(actionsTable("Restart the deployment and then watch it.\nEscalate if it recurs."), null);
+  assert.equal(actionsTable("1. *Immediate:* the only one"), null, "a single row");
 });

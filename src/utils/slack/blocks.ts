@@ -1,5 +1,5 @@
 import type { KnownBlock } from "@slack/types";
-import { evidenceTable } from "./evidence-table.js";
+import { actionsTable, evidenceTable } from "./rca-tables.js";
 import { splitForSlack } from "./split.js";
 
 export type Block = KnownBlock;
@@ -250,9 +250,16 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   }
 
   // ── Recommended Actions ──────────────────────────────────────────────────
+  // `When | Action`, on the same terms as Evidence below: a table when the section really is the
+  // three-rung ladder the template asks for, the numbered list when it is anything else.
   const actions = extractSection(rcaText, "Recommended Actions");
   if (actions) {
-    blocks.push(...section(`*🔧 Recommended Actions*\n${actions}`));
+    const asTable = actionsTable(actions);
+    if (asTable) {
+      blocks.push(...section("*🔧 Recommended Actions*"), asTable);
+    } else {
+      blocks.push(...section(`*🔧 Recommended Actions*\n${actions}`));
+    }
     blocks.push(divider());
   }
 
