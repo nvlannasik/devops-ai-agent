@@ -171,3 +171,39 @@ test("no cell ever contains the word undefined", () => {
   const rows = evidenceRows("• a — _k8s_list_pods_ `ns/p`\n• b — _k8s_list_events_ results");
   for (const [f, s] of rows) assert.doesNotMatch(`${f}|${s}`, /undefined/);
 });
+
+// ---- the one that took a card down -----------------------------------------------------------
+
+// Live 2026-09-25: one Evidence line among five carried no recognisable source, its Source cell
+// went out empty, and Slack answered `invalid_blocks` — which costs the WHOLE message, so two
+// complete RCAs were posted as plain text. The guards refused a table only when EVERY source was
+// missing; one missing source passed all of them.
+const cellsOf = (table) =>
+  table.rows.flatMap((row) =>
+    row.map((c) => (c.type === "raw_text" ? c.text : c.elements.flatMap((e) => e.elements).map((e) => e.text).join("")))
+  );
+
+test("a missing source never reaches Slack as an empty cell", () => {
+  const table = evidenceTable(
+    "• *Fact:* the first one — _k8s_list_pods_ `ns/p`\n" +
+      "• *Fact:* the second one has no source at all\n" +
+      "• *Fact:* the third one — _k8s_list_events_ results",
+  );
+  assert.ok(table, "a table with one sourceless row is still a table");
+  const empty = cellsOf(table).filter((t) => t.trim() === "");
+  assert.deepEqual(empty, [], "every cell carries text");
+});
+
+test("a missing rung never reaches Slack as an empty cell either", () => {
+  const table = actionsTable("1. *Immediate:* do the thing\n2. then keep watching it\n3. *Long-term:* fix the cause");
+  assert.ok(table);
+  assert.deepEqual(cellsOf(table).filter((t) => t.trim() === ""), []);
+});
+
+// Both builders answer the same question the same way, and the rejection is expensive enough that
+// the fill and the refusal both stay.
+test("no span is ever empty, whatever the markup", () => {
+  for (const input of ["", "   ", "``", "**", "__", "`a`", "*b*"]) {
+    for (const span of toSpans(input)) assert.notEqual(span.text, "", JSON.stringify(input));
+  }
+});

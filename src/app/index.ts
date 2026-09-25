@@ -416,6 +416,28 @@ export class SlackApp {
     try {
       await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks });
     } catch (err) {
+      // One retry without the tables before the card is given up entirely.
+      //
+      // The tables are the newest and least settled thing in this message, and on 2026-09-25 a
+      // single empty cell in one of them cost two complete RCAs their card — Slack answers
+      // `invalid_blocks` for the WHOLE message, so a defect confined to one block was paid for by
+      // every other block in it. That asymmetry is what this closes: a table bug should cost the
+      // table.
+      //
+      // Only attempted when there IS a table to drop, and the plain-text path stays underneath for
+      // everything else — a section over the limit, a lone surrogate, an outage at Slack.
+      const withoutTables = blocks.filter((b) => b.type !== "table");
+      if (withoutTables.length < blocks.length) {
+        try {
+          await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: withoutTables });
+          logger.warn(
+            `[slack] RCA card rejected for thread ${threadId} WITH tables, posted without them: ${errDetail(err)}`
+          );
+          return;
+        } catch (second) {
+          logger.error(`[slack] RCA card rejected for thread ${threadId} without tables too: ${errDetail(second)}`);
+        }
+      }
       logger.error(`[slack] RCA card rejected for thread ${threadId}, posting as plain text: ${errDetail(err)}`);
       for (const part of splitForSlack(rca)) {
         await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: part, mrkdwn: true });

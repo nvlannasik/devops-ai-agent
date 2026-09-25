@@ -48,7 +48,9 @@ export function toSpans(text: string): Span[] {
       }
     }
   }
-  return out.length > 0 ? out : [{ type: "text", text }];
+  // Never an empty span: Slack rejects one, and the rejection costs the whole message.
+  const kept = out.filter((sp) => sp.text !== "");
+  return kept.length > 0 ? kept : [{ type: "text", text: text === "" ? "—" : text }];
 }
 
 /**
@@ -110,8 +112,33 @@ function items(text: string): string[] {
   return out;
 }
 
+/**
+ * An empty cell is not a cosmetic problem: Slack rejects a rich_text element carrying no text,
+ * with `invalid_blocks`, and that error costs the WHOLE message — the card is discarded and the
+ * RCA goes out as plain text.
+ *
+ * Live 2026-09-25: one Evidence line carried no recognisable source, its Source cell came back
+ * empty, and two RCAs were posted as plain text because of it. The guards below only refused a
+ * table where EVERY source was missing; one missing source among five passed all of them and then
+ * took the card down.
+ *
+ * The placeholder says the cell is empty rather than pretending otherwise, and `hasEmptyCell`
+ * checks again at the end of each builder — a fill and a check are not redundant when being wrong
+ * costs the whole answer.
+ */
+const EMPTY = "—";
+
+const cellText = (text: string): string => (text.trim() === "" ? EMPTY : text.trim());
+
 const cell = (text: string): KnownBlock =>
-  ({ type: "rich_text", elements: [{ type: "rich_text_section", elements: toSpans(text) }] }) as KnownBlock;
+  ({
+    type: "rich_text",
+    elements: [{ type: "rich_text_section", elements: toSpans(cellText(text)) }],
+  }) as KnownBlock;
+
+/** Could any cell still reach Slack empty? The last line of defence before the card is built. */
+const hasEmptyCell = (rows: Array<[string, string]>): boolean =>
+  rows.some(([a, b]) => cellText(a) === "" || cellText(b) === "");
 
 /** Rows as (finding, source) pairs; a line with no recognisable source keeps an empty Source. */
 export function evidenceRows(evidence: string): Array<[string, string]> {
@@ -135,6 +162,7 @@ export function evidenceTable(evidence: string): KnownBlock | null {
   // the model rewrote. The bullet list renders that honestly; a table would invent a column and
   // then leave it blank down the page.
   if (rows.every(([, s]) => s === "")) return null;
+  if (hasEmptyCell(rows)) return null;
 
   return {
     type: "table",
@@ -187,6 +215,7 @@ export function actionsTable(actions: string): KnownBlock | null {
   // No rung anywhere means the model wrote prose or its own headings, and a When column would be
   // an empty stripe down the card. The numbered list renders that as it is.
   if (rows.every(([w]) => w === "")) return null;
+  if (hasEmptyCell(rows)) return null;
 
   return {
     type: "table",
