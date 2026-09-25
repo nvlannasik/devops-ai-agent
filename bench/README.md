@@ -238,9 +238,22 @@ were approved by hand.
 
 ## What is kept, and what is not
 
-`bench/results/history.jsonl` is the permanent record and the only file here that git tracks
-(`.gitignore` excludes `bench/results/*` and negates that one line). It is what `/bench` reads and
+`bench/results/history.jsonl` is the permanent record and one of two files here that git tracks
+(`.gitignore` excludes `bench/results/*` and negates them by name). It is what `/bench` reads and
 what `git log -p` can show a regression in, so it is never pruned.
+
+**`history-archive.jsonl` holds runs that measured a different SUITE.** The per-case rate asks "of
+everything this case has ever been given, how much did it get right", and that question only means
+something while the cases are the same ones. On 2026-09-26 the seven runs of 8–11 September — 2, 6
+and 16 cases, from when the suite was still being built — were moved there, leaving the 19- and
+20-case runs behind.
+
+Moved, not deleted, and tracked by git for the same reason the live file is: a regression is only
+ever visible against what came before, and an archive git does not keep is a deletion with extra
+steps. Note what it does NOT fix — the kept runs still span every gate added in that window, so a
+case can sit at 31% while passing 3/3 on today's build. If the question is "does this work now",
+the answer is a fresh run, not more archiving. C03 is exactly that case: its rate FELL when the
+older runs left, because the runs it passed were the old ones.
 
 The per-run `<timestamp>.json` files hold every attempt's RCA, proposal and raw model output.
 They are local-only, they are large, and most of them come from `--filter` runs spent chasing one

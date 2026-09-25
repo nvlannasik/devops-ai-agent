@@ -158,3 +158,8 @@ bench/results/*
 # `git log -p bench/results/history.jsonl` shows when the number moved and what moved with it.
 # The transcripts beside it stay ignored — one run is tens of kilobytes of RCA text.
 !bench/results/history.jsonl
+# Runs that measured a DIFFERENT suite, moved out of the live history so the per-case rates
+# describe the cases as they exist now. Tracked, not ignored: an archive git does not keep is a
+# deletion with extra steps, and the whole reason to move these rather than drop them is that a
+# regression is only ever visible against what came before.
+!bench/results/history-archive.jsonl
