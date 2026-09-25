@@ -380,6 +380,49 @@ got a blank-response fallback. Chain of defenses:
 - Regex handles `Critical` and `[Critical]` (LLM sometimes adds brackets)
 - `buildRcaBlocks(text)` — parses RCA text into Slack Block Kit blocks
 - Fallback: if parsing fails (blocks <= 2), returns single section block with raw text
+- **One divider per section, pushed inside each section's own `if`.** Impact and Recommended
+  Actions used to share one, and so did Evidence and Ruled Out — `if (impact || actions)
+  push(divider())`, the shape you write to stop a rule dangling when one of a pair is absent. The
+  missing rule BETWEEN them was a side effect of that guard, not a decision to group them, and it
+  was noticed as exactly that. `blocks.test.ts` walks the rendered list and asserts no two content
+  blocks touch; `section+table` is the one exempt pair, because a table carries no title of its own.
+
+### Evidence and Recommended Actions are Block Kit `table`s (`utils/slack/rca-tables.ts`)
+
+Slack's `table` block is real and in `@slack/types` — `rows` (max 100 × 20 cells), `column_settings`
+with `align` and `is_wrapped`. Verified before anything was built, by posting one to the alert
+channel: the API accepts it and the client draws a bordered two-column table with inline code intact
+in the cells. **Cells are `rich_text`, not `raw_text`**, and that is not a style choice: a resource
+name has to keep its code style because `groundingGaps` harvests candidate names from exactly those
+backticks. `is_wrapped` defaults to FALSE, which turns a sentence-length finding into a sideways
+scroll on a phone — both builders set it explicitly.
+
+Evidence splits on the tool-name suffix, Actions on the rung (`Immediate` / `Short-term` /
+`Long-term`, normalised rather than echoed — the model writes all three spellings). Both return
+`null` and leave the bullet list when the section is not the shape they read.
+
+**Three things this cost, all worth keeping:**
+
+1. **The reader was written from the template instead of from real RCAs.** The source pattern
+   demanded the line END on the tool name plus optional backticked resources; real suffixes are
+   `— _k8s_list_events_ results`, `— _prometheus_query_ results from prior batch`,
+   `` — _k8s_get_pod_logs_ `ns/pod` in `sample-apps` ``. All four of one incident's findings failed
+   it and the section fell back. The discriminator is what FOLLOWS the dash, not what ends the line.
+2. **One item is not one line.** A multi-line `*Immediate:*` continued on two indented sub-bullets,
+   and each became a row with an empty first column. Items split on INDENTATION, not on the marker —
+   the first attempt said "unmarked lines are continuations" and those sub-bullets are marked, just
+   nested.
+3. **An empty cell costs the WHOLE message.** Slack rejects a `rich_text` element with no text, and
+   `invalid_blocks` fails the entire `chat.postMessage` — two complete RCAs went out as plain text
+   because one Evidence line among five had no recognisable source. The guards only refused a table
+   where EVERY source was missing. Now: a blank cell becomes an em dash, `toSpans` never returns an
+   empty span, and both builders refuse a table that still holds one. Three layers, not redundant
+   when being wrong costs the answer.
+
+**`postRca` retries once WITHOUT the tables before giving up the card.** Slack fails the whole
+message for one bad block, so a defect in the newest and least settled part of the card was paid for
+by every other part of it. A table bug should cost the table; the plain-text path stays underneath
+for a section over the limit, a lone surrogate, or an outage at Slack.
 
 ### MCP Client Reconnect
 - Exponential backoff: 1s → 2s → 4s → 8s → 16s (max 5 retries)
@@ -1448,6 +1491,56 @@ different bug, and capping it would hide that bug behind a plausible-looking Med
 Medium rather than Low because Low pages the on-call (`notifyIfLowConfidence`), and a missing log
 is not by itself a reason to wake someone. The explanation on the line is replaced along with the
 level — the reasoning that argued for High does not argue for Medium.
+
+### The RCA-completeness gate — an answer that stops before the template does (`agent/rca-completeness/`)
+
+Reported as "why is the RCA incomplete, and why Unknown Severity". Both were one fact: the answer
+began at `*📍 Root Cause*` with no severity line, so the card's `⚪ Unknown Severity Incident`
+fallback rendered correctly over an input that was missing its header. Postgres said the same from
+the other side — incidents 160, 162 and 163 stored `confidence = unknown`, no Confidence section to
+parse. Three of six answers in that burst were partial.
+
+Three explanations were tested and all three failed, which is why this is a gate and not a prompt
+edit. **Not truncation:** every final answer ended `stop=end_turn`, never `max_tokens`. **Not the
+iteration ceiling:** one partial answer took three LLM calls and hit nothing. **Not playbook
+crowding:** a complete answer and a partial one loaded the identical `[pod-not-ready, rca-format]`.
+The model stopped early having spent its output budget reasoning — the partial answers carry the
+LARGER token counts, which is the opposite of the intuition.
+
+`REQUIRED` is three entries and each earns its place by having a consumer that breaks without it:
+**Severity** (the card header, `incidents.severity`), **Recommended Actions** (the remediation step
+reads the Immediate line and nothing else), **Confidence** (the on-call page on Low,
+`incidents.confidence`). Taste is not a reason to spend an LLM call. Confidence is tested with
+`parseConfidence` rather than `extractSection`: its bold closes mid-line exactly like Severity's, so
+the section reader returns `""` for a well-formed line — the test suite caught that on the first run.
+
+The notice names each missing section AND the consumer that breaks without it, and says the reply
+REPLACES rather than appends: a model that returns only the two it forgot would leave the RCA
+shorter than it started.
+
+### A shared hold slot has to say WHO is holding (`heldBy`, not `holdingAnswer`)
+
+The gate above was hung on the same hold slot as the log-gap and image-gap nudges, and that is how a
+correct answer came to be thrown away. Measured 2026-09-25, twice in one burst:
+
+```
+the extra round fetched nothing — keeping the pre-nudge answer (4650 chars) over the retry's 5656
+```
+
+The completion round returned 5656 characters carrying all eight sections — confirmed out of thread
+memory — and `logGapAction`'s restore discarded it for the four-section answer it had replaced.
+
+The restore test is "the extra round ran no tools, so it learned nothing". That is true of a nudge
+that asked the model to go and FETCH something, and it is the exact opposite of the completeness
+gate, whose notice says the investigation is over and the answer has to be rewritten — so a
+**successful** round of it calls no tools by design and is indistinguishable from a failed one. The
+invariant was already written down one section up ("this sentence has to be true of whichever one
+spent the round"); the new gate was one it is not true of.
+
+`holdingAnswer: boolean` is now `heldBy: "tools" | "rca" | null`. Putting it in the TYPE rather than
+fixing the call site is the point: a boolean could not express the difference, which is why the bug
+was available to write. Pinned by `log-gap.test.ts`, "a rewrite the completeness gate asked for is
+never restored away".
 
 ## LLM Providers
 
