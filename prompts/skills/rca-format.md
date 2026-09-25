@@ -100,6 +100,14 @@ and nothing follows it. If every link is supported, end at the last numbered ste
 • *Fact:* [what the tool output shows, in its own numbers and names] — _tool_name_ `namespace/resource`
 • *Fact:* [another one] — _tool_name_ `namespace/resource`
 
+[After the dash goes the TOOL YOU CALLED, named exactly as the tool list names it —
+`_k8s_list_events_`, `_prometheus_query_`, `_loki_query_range_` — and then the namespace and
+resource it was called on. It is a citation, not a category. Measured 2026-09-25: one RCA cited
+"— Prometheus", "— Kubernetes events", "— Kubernetes logs" and "— Kubernetes Deployments/
+ReplicaSets" on all five of its findings. Those name the product, not the call, and they leave a
+reader unable to re-run the one query a number came from. If a fact did not come from a tool, it
+is not a Fact: write Hypothesis and give the reasoning instead.]
+
 *🚫 Ruled Out*
 • [what you considered] — [the tool result that excludes it]
 
