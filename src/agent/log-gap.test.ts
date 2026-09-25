@@ -62,7 +62,7 @@ const ripe = (over: Partial<LogGapState> = {}): LogGapState => ({
   toolsDisabled: false,
   toolRounds: 1,
   toolRoundsAtNudge: -1,
-  holdingAnswer: false,
+  heldBy: null,
   ...over,
 });
 
@@ -89,17 +89,27 @@ test("the nudge is spent once, and never with no tool round behind it or tools a
 // The half that was missing: the nudge REPLACES the answer it interrupted, so a retry that
 // gathered nothing must not be allowed to.
 test("a nudge round that ran no tools gives the first answer back", () => {
-  const held = ripe({ nudged: true, holdingAnswer: true, toolRoundsAtNudge: 1, toolRounds: 1 });
+  const held = ripe({ nudged: true, heldBy: "tools", toolRoundsAtNudge: 1, toolRounds: 1 });
   assert.equal(logGapAction(held), "restore");
 });
 
 test("a nudge round that DID fetch logs keeps its own answer", () => {
   const fetched = ripe({
     nudged: true,
-    holdingAnswer: true,
+    heldBy: "tools",
     toolRoundsAtNudge: 1,
     toolRounds: 2,
     sawLogLines: true,
   });
   assert.equal(logGapAction(fetched), "answer");
+});
+
+// 2026-09-25, twice in one alert burst: the RCA-completeness gate asked for a tool-free rewrite,
+// got back a 5656-character answer carrying all eight sections, and this restore threw it away
+// for the 4650-character four-section answer it replaced. The two gates share a hold slot, and a
+// boolean could not say that one of them WANTS its extra round to call nothing. The type says it
+// now, and this is the case that has to stay true.
+test("a rewrite the completeness gate asked for is never restored away", () => {
+  const rewritten = ripe({ nudged: true, heldBy: "rca", toolRoundsAtNudge: 1, toolRounds: 1 });
+  assert.equal(logGapAction(rewritten), "answer");
 });

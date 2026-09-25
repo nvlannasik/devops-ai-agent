@@ -555,8 +555,17 @@ export interface LogGapState {
   toolRounds: number;
   /** toolRounds at the moment the nudge fired; -1 while it has not. */
   toolRoundsAtNudge: number;
-  /** Is an answer from before the nudge being held? */
-  holdingAnswer: boolean;
+  /**
+   * WHICH gate is holding an answer from before its nudge — not merely that one is.
+   *
+   * It was a boolean, and that is how a correct answer came to be thrown away. `"tools"` is a
+   * nudge that asked the model to go and FETCH something (the log gap, the image gap), so an
+   * extra round with no tool calls means it learned nothing and the earlier answer stands.
+   * `"rca"` is the completeness gate, whose request is the opposite — the investigation is over,
+   * rewrite what you wrote — so its successful round has no tool calls by design and this test
+   * must not see it. A boolean could not tell the two apart; the type now makes the caller say.
+   */
+  heldBy: "tools" | "rca" | null;
 }
 
 /**
@@ -575,7 +584,16 @@ export interface LogGapState {
  * kebelakang ini?" has no affected pod whose container logs could answer it.
  */
 export function logGapAction(s: LogGapState): "answer" | "nudge" | "restore" {
-  if (s.holdingAnswer && s.toolRounds === s.toolRoundsAtNudge) return "restore";
+  // `holdingAnswer` means a TOOL-SEEKING gate is holding one. The test below — the extra round
+  // ran no tools, so it learned nothing — is true only of a nudge that asked for a fetch, and the
+  // RCA-completeness gate asks for the opposite: the investigation is over and the answer has to
+  // be rewritten. A successful round of that gate therefore looks exactly like a failed one here.
+  //
+  // Measured 2026-09-25, twice in one burst: the completion round returned a 5656-character RCA
+  // carrying all eight sections, and this line threw it away for the 4650-character four-section
+  // answer it had replaced — "keeping the pre-nudge answer (4650 chars) over the retry's 5656".
+  // The caller no longer reports that gate's hold here; see `heldBy` in the loop.
+  if (s.heldBy === "tools" && s.toolRounds === s.toolRoundsAtNudge) return "restore";
   if (
     s.mode === "alert" &&
     s.demandsLogs &&
@@ -1264,6 +1282,10 @@ export class DevOpsAgent {
     let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves every gate
     let noEvidenceNudged = false; // same, for NO_EVIDENCE_NOTICE
     let rcaGapNudged = false;   // same, for an RCA that stopped before the template did
+    // WHICH gate is holding an answer, not merely that one is. The log-gap restore test reads
+    // "the extra round ran no tools" as failure, which is true of a nudge that asked for a fetch
+    // and false of the RCA-completeness one, whose whole request is a tool-free rewrite.
+    let heldBy: "tools" | "rca" | null = null;
     // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
     // produces no new evidence cannot downgrade an answer that was already complete.
     let preNudgeSummary = "";
@@ -1543,7 +1565,7 @@ export class DevOpsAgent {
           toolsDisabled,
           toolRounds,
           toolRoundsAtNudge,
-          holdingAnswer: preNudgeSummary !== "",
+          heldBy,
         });
         if (gap === "restore") {
           // Gate-agnostic on purpose: both gates hold their answer in the same slot, so this
@@ -1557,6 +1579,7 @@ export class DevOpsAgent {
         if (gap === "nudge") {
           logGapNudged = true;
           preNudgeSummary = summary;
+          heldBy = "tools";
           toolRoundsAtNudge = toolRounds;
           logger.info(
             `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
@@ -1573,6 +1596,7 @@ export class DevOpsAgent {
           if (repo) {
             imageGapNudged = true;
             preNudgeSummary = summary;
+            heldBy = "tools";
             toolRoundsAtNudge = toolRounds;
             logger.info(`[${threadId}] answer names \`${repo}\` only as the image that failed to pull — one more round for the tag that works`);
             await this.memory.append(threadId, { role: "user", content: IMAGE_GAP_NOTICE });
@@ -1587,6 +1611,7 @@ export class DevOpsAgent {
           if (missing.length > 0) {
             rcaGapNudged = true;
             preNudgeSummary = summary;
+            heldBy = "rca";
             toolRoundsAtNudge = toolRounds;
             logger.info(`[${threadId}] RCA is missing ${missing.join(", ")} — one more round to complete it`);
             await this.memory.append(threadId, { role: "user", content: rcaGapNotice(missing) });
