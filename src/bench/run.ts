@@ -138,7 +138,12 @@ async function waitForIsolation(timeoutMs = 180_000): Promise<void> {
 const textOf = (content: Array<{ type: string; text?: string }>): string =>
   content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
 
-async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClient>, task: Case, n: number): Promise<{ score: Score; rca: string; proposal: Proposal | null; proposalRaw: string; ungrounded: string[] }> {
+async function attempt(
+  agent: DevOpsAgent,
+  llm: ReturnType<typeof createLLMClient>,
+  task: Case,
+  n: number
+): Promise<{ score: Score; rca: string; proposal: Proposal | null; proposalRaw: string; proposalContext: string; ungrounded: string[] }> {
   // A fresh thread per attempt. Sharing one would let attempt 2 read attempt 1's conclusion out
   // of conversation memory and score the memory rather than the model.
   const threadId = `bench-${task.id}-${n}-${Date.now()}`;
@@ -188,12 +193,19 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
       task.mode === "alert"
         ? { propose: true }
         : worthProposing(task.followUp ?? task.message!, rca, false, previousReply, offer);
+    // Hoisted out of the call so it can be RECORDED. "No proposal" is unreadable without the text
+    // the model was refusing to act on: C10 attempt 2 on 2026-09-26 answered {"action": null}
+    // twice with a correct `[OFFER]` line, a scan that had run, and no guard firing, and settling
+    // why cost a re-run — because the one thing not written down anywhere was the prompt's own
+    // evidence. `reasons` said "no proposal", which is the label, not the record.
+    const proposalContext =
+      // Production's own context, from the same function — a benchmark that builds its own
+      // measures a prompt production does not send.
+      task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply);
     const asked = gate.propose
       ? await proposeWithRetry(
           task.groupLabels ?? {},
-          // Production's own context, from the same function — a benchmark that builds its own
-          // measures a prompt production does not send.
-          task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply),
+          proposalContext,
           async (prompt) =>
           textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
         )
@@ -222,13 +234,14 @@ async function attempt(agent: DevOpsAgent, llm: ReturnType<typeof createLLMClien
       rca,
       proposal,
       proposalRaw,
+      proposalContext,
       ungrounded,
     };
   } catch (err) {
     // A crashed attempt is a failed attempt, not a crashed run: the other tasks still have
     // something to say, and hiding this one behind an exception would inflate every rate.
     const msg = err instanceof Error ? err.message : String(err);
-    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null, proposalRaw: "", ungrounded: [] };
+    return { score: { pass: false, reasons: [`attempt threw: ${msg}`] }, rca: "", proposal: null, proposalRaw: "", proposalContext: "", ungrounded: [] };
   } finally {
     await agent.clearThread(threadId).catch(() => {});
   }
@@ -256,6 +269,7 @@ async function main(): Promise<void> {
       let rca = "";
       let proposal: Proposal | null = null;
       let proposalRaw = "";
+      let proposalContext = "";
       let ungrounded: string[] = [];
       try {
         // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
@@ -266,7 +280,7 @@ async function main(): Promise<void> {
         await resetIncidentMemory();
         hook(task, "setup.sh");
         if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
-        ({ score, rca, proposal, proposalRaw, ungrounded } = await attempt(agent, llm, task, n));
+        ({ score, rca, proposal, proposalRaw, proposalContext, ungrounded } = await attempt(agent, llm, task, n));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
@@ -275,7 +289,7 @@ async function main(): Promise<void> {
       }
       logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
       scores.push(score);
-      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, rca });
+      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, proposalContext, rca });
     }
     runs.push({ task: task.id, attempts: scores });
   }
