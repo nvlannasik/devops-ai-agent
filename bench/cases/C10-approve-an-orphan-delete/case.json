@@ -1,0 +1,18 @@
+{
+  "id": "C10-approve-an-orphan-delete",
+  "tier": "C",
+  "title": "The orphan-delete path — the one action with no undo from the cluster",
+  "mode": "conversation",
+  "settleSeconds": 10,
+  "disabled": true,
+  "message": "i think we can clean up bench-c10-cache in namespace bench-c10, is that safe?",
+  "followUp": "ya",
+  "expect": {
+    "action": "k8s_delete_orphan",
+    "namespace": "bench-c10",
+    "target": "bench-c10-cache",
+    "params": {
+      "kind": "service"
+    }
+  }
+}
