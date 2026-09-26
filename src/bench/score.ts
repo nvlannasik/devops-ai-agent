@@ -118,6 +118,19 @@ const withoutRuledOut = (rca: string): string => {
 };
 
 /**
+ * Is the phrase at `at` being DENIED rather than asserted? `withoutRuledOut` already removes the
+ * section where rejected hypotheses live, but a correct RCA also denies inline, and a `mustNot`
+ * pattern cannot tell the difference. Measured on A09, 2026-09-27: the causal chain read "This is a
+ * stalled rollout, not a full outage." — exactly the conclusion the case asks for — and failed on
+ * `full outage`, which that pattern exists to forbid.
+ *
+ * Only a negator IMMEDIATELY before the phrase (an article between them at most). A wider window
+ * would start forgiving real assertions — "not just slow, it is a full outage" must still fail.
+ */
+const NEGATOR = /\b(?:not|no|never|isn't|wasn't|bukan|tidak|tanpa)\s+(?:(?:a|an|the|sebuah)\s+)?$/i;
+const negated = (text: string, at: number): boolean => NEGATOR.test(text.slice(Math.max(0, at - 24), at));
+
+/**
  * The RCA-text axis. Absent spec -> passes and declares NO axis, so a case that does not use it
  * leaves the tally alone rather than padding it with free points.
  *
@@ -132,7 +145,7 @@ export function scoreRca(spec: Expectation["rca"], rca: string): Score {
     if (!new RegExp(src, "i").test(rca)) reasons.push(`RCA never says /${src}/i — the fact this case turns on`);
   }
   for (const src of spec.mustNot ?? []) {
-    const hit = new RegExp(src, "i").exec(asserted);
+    const hit = [...asserted.matchAll(new RegExp(src, "gi"))].find((m) => !negated(asserted, m.index ?? 0));
     if (hit) reasons.push(`RCA says ${JSON.stringify(hit[0])}, which /${src}/i forbids for this case`);
   }
   return { pass: reasons.length === 0, reasons, axes: { rca: reasons.length === 0 } };

@@ -253,3 +253,20 @@ test("mustNot ignores the Ruled Out section — that is where a hypothesis goes 
   const claimed = rca.replace("matches no node.", "matches no node, and there is Insufficient CPU across all nodes.");
   assert.equal(scoreRca(spec, claimed).pass, false);
 });
+
+// --- a denied phrase is not an asserted one ---
+// Verbatim from A09 attempt 1, 2026-09-27: the right conclusion, failed on the words it denied.
+test("mustNot ignores a phrase the RCA explicitly denies, and still catches the real assertion", () => {
+  const spec = { mustNot: ["(total|complete|full)[- ]?(outage|down)|layanan (mati|down) total|semua pod (mati|gagal)"] };
+  const denied =
+    "*Because:* The OLD ReplicaSet `web-frontend-f5497dbc7` still has 3/3 ready pods, so traffic is still served " +
+    "by the old version while the new version fails to start. This is a stalled rollout, not a full outage.";
+  assert.equal(scoreRca(spec, denied).pass, true);
+  assert.equal(scoreRca(spec, "Ini bukan layanan mati total — ReplicaSet lama masih melayani.").pass, true);
+
+  // A wider window would forgive these, which is exactly why it is not wider.
+  assert.equal(scoreRca(spec, "This is not just slow — it is a full outage.").pass, false);
+  assert.equal(scoreRca(spec, "Every replica is gone: full outage.").pass, false);
+  // One denied mention does not launder a second, asserted one.
+  assert.equal(scoreRca(spec, "Not a full outage at first; by 10:05 it was a total outage.").pass, false);
+});
