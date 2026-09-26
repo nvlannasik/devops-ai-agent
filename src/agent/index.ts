@@ -33,6 +33,7 @@ import {
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { stripTemplateEcho } from "./template-echo/index.js";
+import { stripFabricatedNote } from "./fabricated-note/index.js";
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
@@ -1412,9 +1413,21 @@ export class DevOpsAgent {
       // investigation's recall block, and "[Symptom]" is no more readable in either of those.
       const { text: filled, dropped } = stripTemplateEcho(rated);
       if (dropped > 0) logger.info(`[${threadId}] dropped ${dropped} echoed template placeholder(s) from the answer`);
+      // A `[system note]` the MODEL wrote — see stripFabricatedNote. Here rather than in the Slack
+      // renderer for two reasons: the same text is what the proposal step reads as its evidence, and
+      // a fabricated "already executed" is exactly what makes it answer {"action": null}; and it
+      // also reaches Postgres and the next investigation's recall, where a false lifecycle fact is
+      // worse than an unreadable one. Logged at warn, not info: every other scrubber here is fixing
+      // formatting, this one caught the answer claiming work it never did.
+      const { text: honest, dropped: notes } = stripFabricatedNote(filled);
+      if (notes > 0) {
+        logger.warn(
+          `[${threadId}] dropped ${notes} fabricated [system note] line(s) — the answer claimed an execution that never happened`
+        );
+      }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      return stripOffer(filled);
+      return stripOffer(honest);
     };
     let totalUsage = zeroUsage();
 
