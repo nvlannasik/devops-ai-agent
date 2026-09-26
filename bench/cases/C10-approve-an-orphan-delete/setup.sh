@@ -5,16 +5,22 @@
 # under MIN_ORPHAN_AGE_DAYS (14), and Kubernetes owns creationTimestamp, so a fixture cannot age
 # itself. The floor is configurable now, and this case is the reason it is.
 #
-# DISABLED until two things are true, and the second is the one that bites:
+# ENABLED 2026-09-26, once both of its preconditions were verified against the running server.
+# If this case ever fails with the agent quoting an age rule back, re-check them in this order —
+# the second is the one that bites:
 #
 #   1. The MCP server runs with MIN_ORPHAN_AGE_DAYS=0. Its boot log says so — it warns on every
-#      start for as long as the floor stays lowered.
+#      start for as long as the floor stays lowered. (Verified: the warning fired.)
 #   2. The MCP server has been ROLLED OUT since its tool description was derived from that config
 #      (devops-mcp-server d67a0f7). The benchmark never reaches the server's write path, so what
 #      decides this case is what the model BELIEVES, and it believes the tool description. A server
 #      enforcing 0 while its description still reads "younger than 14 days" reproduces the
-#      2026-09-24 result exactly: the agent declines and quotes the rule back. Check for the
-#      phrase "no minimum age on this server right now".
+#      2026-09-24 result exactly: the agent declines and quotes the rule back. Grep the live tool
+#      list for "no minimum age on this server right now" — measured 1 occurrence of the new text
+#      and 0 of the old on pod devops-mcp-server-fdc988ff5-2cwzr.
+#
+# And if this case is ever disabled again, restore MIN_ORPHAN_AGE_DAYS to 14: bench and production
+# share one server, so a floor lowered for a run stays lowered until somebody puts it back.
 #
 # What it measures, given the bench cannot reach the write path: that a named orphan, approved
 # across two turns, produces a `k8s_delete_orphan` proposal at all. That path failed silently once
