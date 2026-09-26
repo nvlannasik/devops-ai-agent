@@ -373,15 +373,31 @@ export function scaleOutRefusal(proposal: Proposal, observed: string | null): st
  * ImagePullBackOff.
  *
  * Grounded when the full image appears in the evidence, or when the user named the TAG in words
- * ("change the tag to v1.3") on a repository the cluster already runs. `docker.io/` is dropped
- * before comparing, because listings and people disagree about whether to write it. NOT skipped
- * for a user request: a person who names an image passes through the user-text half of the rule.
+ * ("change the tag to v1.3") on a repository the cluster already runs. The Docker Hub prefixes are
+ * dropped before comparing, because listings and people disagree about whether to write them. NOT
+ * skipped for a user request: a person who names an image passes through the user-text half of the
+ * rule.
  */
 export function unseenImageRefusal(proposal: Proposal, observed: string | null, userText: string): string | null {
   if (proposal.action !== "k8s_set_image") return null;
   const image = String(proposal.toolParams.image ?? "");
   if (!image) return null;
-  const bare = (v: string) => v.replace(/(^|[\s"'`(=])docker\.io\//g, "$1");
+  // `library/` matters as much as `docker.io/`, and leaving it out cost a benchmark case a pass.
+  // Measured A03 attempt 2, 2026-09-25: a tool result showed `nginx:alpine`, the model correctly
+  // found it and wrote the canonical long form `docker.io/library/nginx:alpine`, and this guard
+  // refused it as invented — because dropping only `docker.io/` leaves `library/nginx` to be
+  // matched against a `nginx` that was genuinely observed. The more correctly the model spelled a
+  // Docker Hub official image, the more certainly it was refused, which made ImagePullBackOff on an
+  // official image — the single most common incident in this cluster — unfixable by the agent.
+  //
+  // Both passes are anchored on a delimiter, so a registry path that merely CONTAINS the segment
+  // (`myregistry.com/library/foo`) is untouched: there the `library/` follows a `/`, which is not in
+  // the character class. Order matters — the combined prefix has to go first, or `docker.io/library/x`
+  // would only lose its front half and still fail to match.
+  const bare = (v: string) =>
+    v
+      .replace(/(^|[\s"'`(=])(?:(?:index\.)?docker\.io\/)?library\//g, "$1")
+      .replace(/(^|[\s"'`(=])(?:index\.)?docker\.io\//g, "$1");
   const seen = bare(`${observed ?? ""}\n${userText}`);
   const target = bare(image);
   if (seen.includes(target)) return null;
