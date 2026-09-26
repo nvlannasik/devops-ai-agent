@@ -988,3 +988,18 @@ test("the prompt says an older ReplicaSet's image IS the working image", () => {
   // and it must not have lost the rule that keeps a tag from being invented
   assert.match(prompt, /NEVER invent a tag yourself/);
 });
+
+// --- an approved offer is a request, and it does not reopen the exceptions ---
+// Bench C09 attempt 3, 2026-09-25: the agent offered the restart, the user said "ya", and the
+// proposal call — reading "no active issue to clear" from the agent's previous turn — answered null
+// twice. The user's original suggestion is not in the approval turn's context, so the approval of
+// the offer has to count as the request itself.
+test("the proposal prompt treats an approved [OFFER] as an explicit request, before the 6/7 exception", async () => {
+  const { buildProposalPrompt } = await import("./proposal.js");
+  const p = buildProposalPrompt({}, "User request: ya\n\nAgent offered: restart `bench-c09/Deployment/bench-c09-web`");
+  const clause = p.indexOf("An `Agent offered:` line that the user then approves");
+  const exception = p.indexOf("Actions 6 and 7 are the exception");
+  assert.ok(clause > 0, "the approval clause is in the prompt");
+  assert.ok(exception > clause, "the quarantine/delete exception still follows it, so an approval cannot bypass it");
+  assert.match(p.slice(clause, exception), /looks healthy/);
+});

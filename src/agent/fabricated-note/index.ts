@@ -42,10 +42,11 @@
  * marker case is decidable with certainty, and it is the one that also fools the proposal step,
  * because the marker is what the prompt told the model to believe.
  *
- * ponytail: known ceiling — thread memory keeps the RAW reply (that is how `parseOffer` still finds
- * the `[OFFER]` line `done()` strips), so a fabricated note survives in history and a later turn can
- * read it back as a lifecycle fact. Fixing that means giving history entries provenance, not a wider
- * regex here. Nothing measured yet turns on it; revisit when a multi-turn case does.
+ * History gets the same treatment — see `historyContent`. The first version of this module left
+ * thread memory holding the raw reply and called that a ceiling needing provenance on history
+ * entries. It did not: the only thing memory must keep raw is the `[OFFER]` line (`parseOffer` reads
+ * it back from there), and this module never touches that line. The system's own notes arrive by a
+ * separate append (`noteInThread`), never inside a model reply, so nothing real is lost.
  */
 
 // The marker as a model writes it — bold, backticked or bare — and the rest of that line with it.
@@ -78,4 +79,25 @@ export function stripFabricatedNote(reply: string): { text: string; dropped: num
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { text: tidy || NOT_EXECUTED_NOTICE, dropped };
+}
+
+/**
+ * A model reply as thread memory should keep it: every text block scrubbed, everything else as is.
+ *
+ * Memory is what the NEXT turn reads, and `prompts/system.md` tells the model that a `[system note]`
+ * in the conversation is a lifecycle fact. A fabricated one left in history is therefore worse than
+ * the one that reached Slack — it is believed again on every later turn, and `lastAssistantText`
+ * hands it to the proposal step as `previousReply`, where "already executed" suppresses the card a
+ * second time. `tool_use` blocks are untouched: they are the other half of a tool_result pair, and
+ * altering one is an API 400.
+ */
+export function historyContent<B extends { type: string; text?: string }>(blocks: B[]): { blocks: B[]; dropped: number } {
+  let dropped = 0;
+  const out = blocks.map((b) => {
+    if (b.type !== "text" || !b.text) return b;
+    const r = stripFabricatedNote(b.text);
+    dropped += r.dropped;
+    return r.dropped ? { ...b, text: r.text } : b;
+  });
+  return { blocks: dropped ? out : blocks, dropped };
 }

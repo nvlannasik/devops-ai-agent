@@ -33,7 +33,7 @@ import {
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { stripTemplateEcho } from "./template-echo/index.js";
-import { stripFabricatedNote } from "./fabricated-note/index.js";
+import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js";
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
@@ -141,12 +141,25 @@ export const TIME_BUDGET_NOTICE = `[TIME BUDGET REACHED — ${FINAL_TURN_INSTRUC
 export const LOG_TOOLS: ReadonlySet<string> = new Set(["k8s_get_pod_logs", "loki_query", "loki_query_range"]);
 
 /**
- * ponytail: a length threshold, not a parse. An empty Loki response is a JSON envelope around an
- * empty array and lands around 35 characters (measured); a `previous: true` log fetch of a dead
- * container is hundreds. Parsing each tool's own empty shape would mean tracking three response
- * formats from another repo, and the cost of being wrong here is one extra LLM call.
+ * ponytail: a length threshold, not a parse. An empty Loki response used to be a JSON envelope
+ * around an empty array, ~35 characters (measured); a `previous: true` log fetch of a dead container
+ * is hundreds. Parsing each tool's own empty shape would mean tracking three response formats from
+ * another repo.
  */
 const LOG_RESULT_MIN_CHARS = 200;
+
+// The one empty shape that IS tracked, because it defeats the threshold above. Since devops-mcp-server
+// explains an empty Loki answer — pipeline dead, namespace silent, or filter matched nothing — that
+// answer runs to 350-500 characters while holding no line at all. By length alone it would count as
+// "saw log lines", and the cost is no longer one extra LLM call: the log-gap gate would stay silent
+// and capConfidence would stop capping, on exactly the investigations where the logs were missing.
+// The marker is a cross-repo contract (explainEmptyLogs in devops-mcp-server/src/utils/loki); a
+// regex rather than JSON.parse, because the injection frame can append text after the JSON.
+const NO_LOG_LINES = /"noLogLines"\s*:\s*true/;
+
+/** Did a log tool's result actually carry log lines? Exported for the test. */
+export const returnedLogLines = (content: string): boolean =>
+  content.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(content);
 
 export const LOG_GAP_NOTICE =
   "[EVIDENCE GAP — the playbook for this alert reads the container's own logs, and no log query has " +
@@ -165,7 +178,25 @@ export const LOG_GAP_NOTICE =
 
 /** Does any loaded playbook name a log tool? Read from the body, so a new playbook gets this free. */
 export const demandsLogs = (skills: readonly Skill[]): boolean =>
-  skills.some((s) => [...LOG_TOOLS].some((t) => s.body.includes(t)));
+  skills.some((s) => !isShapeSkill(s) && [...LOG_TOOLS].some((t) => s.body.includes(t)));
+
+/**
+ * A skill triggered by the MODE tag (`rca-format`, `when: mode:(alert|investigation)`) describes the
+ * SHAPE of an answer, never what evidence a fault needs — so a log tool named inside it, even as an
+ * example, must not arm the log-gap gate.
+ *
+ * It did, for a day and a half. Commit 8d48af8 (2026-09-25) added `_loki_query_range_` to
+ * rca-format's citation rule as an example of naming the tool you called. rca-format rides EVERY
+ * alert, and demandsLogs is a substring test over playbook bodies, so from then on every alert
+ * "demanded logs" — including a Pending pod and an ImagePullBackOff, whose containers never started
+ * and CANNOT have logs. Measured in the 2026-09-25 full run: the model wrote a complete RCA, was
+ * nudged to fetch logs, fetched nothing (there was nothing), and its short reply to the nudge
+ * ("I pulled the logs for the affected pod as requested…") replaced the RCA — because the extra
+ * round had run tools, the restore rule did not apply. Six attempts across A04, A05, A06 and A09
+ * ended on such a stub; A05 and A09 lost their proposal to it, since the proposal step reads only
+ * the final text. Nothing logged an error: a prompt edit had silently moved a code gate.
+ */
+const isShapeSkill = (s: Skill): boolean => s.when !== "always" && s.when.source.startsWith("mode:");
 
 /**
  * The idle-evidence test for a scale-to-zero, as a pure function so it can be tested without a
@@ -1536,7 +1567,9 @@ export class DevOpsAgent {
         logger.debug(`[${threadId}] LLM responded in ${llmMs}ms, stop_reason: ${response.stopReason}`);
       }
 
-      await this.memory.append(threadId, { role: "assistant", content: response.content });
+      // Scrubbed of any [system note] the model wrote itself — see historyContent. Only memory: the
+      // reply this turn returns goes through done(), which scrubs and logs it for Slack.
+      await this.memory.append(threadId, { role: "assistant", content: historyContent(response.content).blocks });
 
       if (response.stopReason === "end_turn" || response.stopReason === "max_tokens") {
         const summary = this.extractText(response.content);
@@ -1747,7 +1780,7 @@ export class DevOpsAgent {
         if (!sawLogLines) {
           const logIds = new Set(executable.filter((t) => LOG_TOOLS.has(t.name ?? "")).map((t) => t.id));
           sawLogLines = executed.some(
-            (r) => r.type === "tool_result" && logIds.has(r.tool_use_id) && String(r.content ?? "").length >= LOG_RESULT_MIN_CHARS
+            (r) => r.type === "tool_result" && logIds.has(r.tool_use_id) && returnedLogLines(String(r.content ?? ""))
           );
         }
         const trimmedResults = sanitizeContentBlocks([...executed, ...delegateResults, ...refusals]);

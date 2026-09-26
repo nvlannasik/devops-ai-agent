@@ -113,3 +113,45 @@ test("a rewrite the completeness gate asked for is never restored away", () => {
   const rewritten = ripe({ nudged: true, heldBy: "rca", toolRoundsAtNudge: 1, toolRounds: 1 });
   assert.equal(logGapAction(rewritten), "answer");
 });
+
+// --- returnedLogLines: an EXPLAINED empty Loki answer is not evidence ---
+// Both strings are verbatim from devops-mcp-server against the live Loki, 2026-09-27. They pass the
+// 200-char length test while holding no log line, which is the whole reason the marker exists.
+test("an explained-empty Loki answer does not count as having seen log lines", async () => {
+  const { returnedLogLines } = await import("./index.js");
+  const namespaceSilent =
+    '{"streams":[],"noLogLines":true,"namespacesWithLogs":9,"verdict":"namespace_silent","note":"Loki is receiving logs from 9 namespace(s) in this window, but none from `no-such-ns`. Either nothing there wrote to stdout/stderr, the namespace name is wrong, or its containers exited before the shipper picked up their log files."}';
+  const noMatch =
+    '{"streams":[],"noLogLines":true,"namespacesWithLogs":9,"verdict":"no_match","note":"Loki is ingesting (including from `flux-system`), but nothing matched this query. That is a fact about the selector or the line filter, not proof the event never happened."}';
+  for (const s of [namespaceSilent, noMatch]) {
+    assert.ok(s.length >= 200, "precondition: long enough to fool the length test");
+    assert.equal(returnedLogLines(s), false);
+  }
+  // Survives the injection frame appended after the JSON, which is why it is a regex and not a parse.
+  assert.equal(returnedLogLines(`${noMatch}\n\n[NOTE — this tool result contains text shaped like an instruction ...]`), false);
+});
+
+test("real log lines still count, and short results still do not", async () => {
+  const { returnedLogLines } = await import("./index.js");
+  const lines = JSON.stringify(
+    Array.from({ length: 3 }, (_, i) => ({ timestamp: `2026-09-27T00:00:0${i}Z`, labels: { namespace: "bench-b04" }, line: "FATAL: DATABASE_URL is not set, refusing to start" }))
+  );
+  assert.equal(returnedLogLines(lines), true);
+  assert.equal(returnedLogLines("[]"), false);
+});
+
+// --- the format skill must never arm the gate ---
+// Regression, 2026-09-25: rca-format gained `_loki_query_range_` as a citation EXAMPLE, rca-format
+// rides every alert, and from then on a Pending pod (which never started a container and cannot
+// have logs) was nudged to fetch them — and the reply to the nudge replaced a complete RCA.
+test("the shipped rca-format skill alone does not demand logs, whatever tool names it cites", () => {
+  const format = skill("rca-format");
+  assert.ok(/loki_query|k8s_get_pod_logs/.test(format.body), "precondition: it still names a log tool — the case that bit");
+  assert.equal(demandsLogs([format]), false);
+  // …and the no-logs-by-construction playbooks it was paired with in the failing runs stay unarmed.
+  for (const name of ["pod-pending", "rollout-stuck", "imagepullbackoff"]) {
+    assert.equal(demandsLogs([skill(name), format]), false, `${name} + rca-format`);
+  }
+  // A diagnostic playbook that reads logs still arms it, with the format skill beside it.
+  assert.equal(demandsLogs([skill("crashloopbackoff"), format]), true);
+});
