@@ -504,7 +504,7 @@ when the env var is set; unset = open + a **startup warning** (backward-compat, 
 
 ### LLM Output Tokens / Model
 - `MAX_TOKENS` env (default `8096`) caps output for the **claude + openai-compatible** paths (`config.llm.maxTokens`); was hardcoded in `claude.ts` and entirely missing in `openai-compatible.ts` (so it used the provider default and could truncate).
-- `CLAUDE_MODEL` default is `claude-opus-4-8` (latest opus tier). SQS path's model + token limit live in **llm-worker**, not here — don't push them from the agent (two sources of truth).
+- `CLAUDE_MODEL` default is `claude-opus-5-5` (latest opus tier). It always thinks — `thinking` cannot be disabled and `budget_tokens` is a 400 — so `LLM_EFFORT` (`low`…`max`, default `medium`) is the only control, and `MAX_TOKENS` now bounds thinking **plus** the answer. Thinking blocks must ride back into the next request whole: append `response.content` as received, never rebuild an assistant turn by filtering block types, or the tool loop 400s at round 2. SQS path's model + token limit live in **llm-worker**, not here — don't push them from the agent (two sources of truth).
 
 ### Incident Memory (durable, `agent/incidents/index.ts`)
 - **Purpose:** learn from past RCAs — recall prior resolved incidents for the same `(alertname, namespace)` and inject a compact digest into the prompt so recurring incidents aren't re-diagnosed cold.

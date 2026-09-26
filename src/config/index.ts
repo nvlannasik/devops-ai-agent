@@ -60,7 +60,15 @@ export const config = {
     routerCooloffMs: parseInt(process.env.LLM_ROUTER_COOLOFF_SECONDS ?? "120") * 1000,
     claude: {
       apiKey: process.env.ANTHROPIC_API_KEY!,
-      model: process.env.CLAUDE_MODEL ?? "claude-opus-4-8",
+      model: process.env.CLAUDE_MODEL ?? "claude-opus-5-5",
+      // Opus 5.5 thinks on every request and there is no way to turn that off — `effort` is the
+      // only control, and MAX_TOKENS is a ceiling on thinking PLUS answer. That is the familiar
+      // "reasoning model spends its whole budget thinking and returns nothing" failure (see the
+      // stop=max_tokens branch in agent/index.ts), now reachable on the Claude path too. Unset
+      // means the model's own default (`medium`); turn it down if 8096 starts coming back empty.
+      // LLM_EFFORT, not CLAUDE_EFFORT: the Claude Code harness exports CLAUDE_EFFORT into every
+      // shell it opens, so that name makes `npm run dev` inherit the operator's editor setting.
+      effort: process.env.LLM_EFFORT as "low" | "medium" | "high" | "xhigh" | "max" | undefined,
     },
     openaiCompatible: {
       baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL,

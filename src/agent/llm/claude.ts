@@ -9,6 +9,7 @@ export interface ClaudeOptions {
   apiKey?: string;
   model?: string;
   maxTokens?: number;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export class ClaudeClient implements LLMClient {
@@ -19,11 +20,15 @@ export class ClaudeClient implements LLMClient {
   // suits the second makes the first spend its whole budget thinking and return nothing.
   // resolve-budget.ts sizes the output reserve from the LARGEST of these.
   readonly maxTokens: number;
+  // Opus 5.5 and later think on every request; effort is the only dial for how much of
+  // maxTokens that costs. Undefined = send nothing and let the model use its own default.
+  private readonly effort?: ClaudeOptions["effort"];
 
   constructor(opts: ClaudeOptions = {}) {
     this.client = new Anthropic({ apiKey: opts.apiKey ?? config.llm.claude.apiKey });
     this.model = opts.model ?? config.llm.claude.model;
     this.maxTokens = opts.maxTokens ?? config.llm.maxTokens;
+    this.effort = opts.effort ?? config.llm.claude.effort;
   }
 
   async chat(rawMessages: Message[], tools: ToolDefinition[], rawSystemPrompt: string): Promise<LLMResponse> {
@@ -33,6 +38,7 @@ export class ClaudeClient implements LLMClient {
     const response = await this.client.messages.create({
       model: this.model,
       max_tokens: this.maxTokens,
+      ...(this.effort && { output_config: { effort: this.effort } }),
       // system prompt as a cacheable block — large static content, stable across iterations
       system: [
         {

@@ -23,7 +23,17 @@ export interface Message {
 }
 
 export interface ContentBlock {
-  type: "text" | "tool_use" | "tool_result";
+  /**
+   * `thinking` is Claude's, from Opus 5.5 on: thinking runs on every request there and cannot be
+   * switched off, so an assistant turn can open with one or more thinking blocks. They must ride
+   * back into the next request complete and in order — the API rejects an edited, reordered or
+   * partially dropped set with a 400, which in a tool loop means every investigation dies at
+   * round 2. So the rule for the whole agent is: append `response.content` whole, never rebuild
+   * an assistant message by filtering block types. Reading by type is fine; that is what the
+   * `.filter(c => c.type === "tool_use")` sites do. At the default display the `thinking` field
+   * is empty and only `signature` carries weight, so there is nothing here worth logging.
+   */
+  type: "text" | "tool_use" | "tool_result" | "thinking";
   /**
    * A reasoning model's own thinking, carried back verbatim on the NEXT request.
    * DeepSeek's thinking mode rejects a follow-up that drops it:

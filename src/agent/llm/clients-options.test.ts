@@ -40,3 +40,29 @@ test("each client carries its own output ceiling", () => {
   // omitted = the global, which is what every existing deployment gets
   assert.equal(new ClaudeClient({ apiKey: "k", model: "m" }).maxTokens, config.llm.maxTokens);
 });
+
+// Effort is the only thinking control on Opus 5.5+ and it fails silently in both directions: a
+// misspelled key sends nothing and the model just runs at its default forever, and a key sent
+// with an undefined value is a 400. So assert the wire, not the field.
+const captureRequest = async (opts: ConstructorParameters<typeof ClaudeClient>[0]) => {
+  const c = new ClaudeClient(opts);
+  let sent: Record<string, unknown> = {};
+  (c as unknown as { client: { messages: { create: unknown } } }).client.messages.create = async (
+    params: Record<string, unknown>,
+  ) => {
+    sent = params;
+    return { content: [], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+  };
+  await c.chat([{ role: "user", content: "hi" }], [], "sys");
+  return sent;
+};
+
+test("effort rides to the wire as output_config", async () => {
+  const sent = await captureRequest({ apiKey: "k", model: "claude-opus-5-5", effort: "low" });
+  assert.deepEqual(sent.output_config, { effort: "low" });
+});
+
+test("no effort means no output_config at all, not an undefined one", async () => {
+  const sent = await captureRequest({ apiKey: "k", model: "claude-opus-5-5" });
+  assert.ok(!("output_config" in sent));
+});

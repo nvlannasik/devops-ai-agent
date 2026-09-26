@@ -64,8 +64,9 @@ Covered areas, grouped:
 | `SLACK_APPROVER_USERS` | User IDs allowed to approve/reject remediations (falls back to `SLACK_ONCALL_USERS`; both empty = anyone, with a log warning) | optional |
 | `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` / `router` (see [LLM Router](#llm-router)) | `claude` |
 | `ANTHROPIC_API_KEY` | Required if claude | — |
-| `CLAUDE_MODEL` | | `claude-opus-4-8` |
-| `MAX_TOKENS` | Output token ceiling (claude + openai-compatible) | `8096` |
+| `CLAUDE_MODEL` | | `claude-opus-5-5` |
+| `LLM_EFFORT` | Thinking effort on Opus 5.5+ (`low`…`max`). The only dial for how much of `MAX_TOKENS` goes to thinking rather than the answer. Not `CLAUDE_EFFORT` — the Claude Code harness owns that name | model default (`medium`) |
+| `MAX_TOKENS` | Output token ceiling (claude + openai-compatible). On Opus 5.5+ this covers thinking **plus** the answer | `8096` |
 | `OPENAI_COMPATIBLE_BASE_URL` | Required if openai-compatible | — |
 | `OPENAI_COMPATIBLE_API_KEY` | | — |
 | `OPENAI_COMPATIBLE_MODEL` | | `gpt-4` |
@@ -276,7 +277,7 @@ inventing new key names, and `_KEY` can come from a Secret while the rest come f
 ```
 LLM_BACKEND_1_NAME=local           LLM_BACKEND_2_NAME=opus
 LLM_BACKEND_1_KIND=private-llm     LLM_BACKEND_2_KIND=claude
-                                   LLM_BACKEND_2_MODEL=claude-opus-4-8
+                                   LLM_BACKEND_2_MODEL=claude-opus-5-5
                                    LLM_BACKEND_2_KEY=sk-ant-...
 
 LLM_ROUTE_LIGHT=local              # optional
