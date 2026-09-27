@@ -21,7 +21,6 @@ import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { buildProposalContext } from "../app/index.js";
-import { offerMismatchRefusal } from "../agent/index.js";
 import { withRoute } from "../utils/trace/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal } from "../agent/remediation/proposal.js";
@@ -202,33 +201,27 @@ async function attempt(
       // Production's own context, from the same function — a benchmark that builds its own
       // measures a prompt production does not send.
       task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply);
+    // The gates run inside proposeRemediation, which this runner deliberately skips — so it passes
+    // production's own chain, agent.refusalFor, to proposeWithRetry exactly as proposeRemediation
+    // does. That gets the bench the same refusals AND the same one re-ask after a refusal. A
+    // refusal the re-ask cannot get past means no approval card, which is scored as no proposal;
+    // `raw` carries every attempt and every "[<gate> refused]" line for the diagnosis.
+    //
+    // This used to be a hand-rebuilt copy of the chain, and it had drifted: no quarantine gate, no
+    // orphan gate, and no user-request exemption, so it applied the replacement guard to a restart
+    // the user had asked for. `byUser` is the flag production reads for that exemption.
+    const userRequested = "byUser" in gate && gate.byUser;
     const asked = gate.propose
       ? await proposeWithRetry(
           task.groupLabels ?? {},
           proposalContext,
           async (prompt) =>
-          textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>)
+            textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>),
+          (p) => agent.refusalFor(p, { userRequested, threadId, offer, labels: task.groupLabels ?? {}, rca }).catch(() => null)
         )
       : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };
-    let proposalRaw = asked.raw;
-    let proposal = asked.proposal;
-    // The guards run inside proposeRemediation, which this runner deliberately skips — so they
-    // are applied here through the agent's own method. Without them the bench would score a card
-    // production never posts: a refusal means no approval card, which is the same outcome as no
-    // proposal and has to be scored as one. One call, not a per-guard check: which actions a
-    // guard applies to is the guard's business, and the previous split let the two drift.
-    if (proposal) {
-      const refusal =
-        (await agent.guardRefusalFor(proposal).catch(() => null)) ??
-        offerMismatchRefusal(proposal, offer) ??
-        (await agent.targetRefusalFor(proposal, threadId, task.groupLabels ?? {}).catch(() => null)) ??
-        (await agent.scaleRefusalFor(proposal, threadId).catch(() => null)) ??
-        (await agent.imageRefusalFor(proposal, threadId, rca).catch(() => null));
-      if (refusal) {
-        proposalRaw = `${proposalRaw}\n[guard refused] ${refusal}`;
-        proposal = null;
-      }
-    }
+    const proposalRaw = asked.raw;
+    const proposal = asked.proposal;
     return {
       score: combine(scoreProposal(task.expect, proposal, proposalRaw), scoreGrounding(ungrounded), scoreRca(task.expect.rca, rca)),
       rca,

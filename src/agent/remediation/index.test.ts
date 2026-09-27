@@ -1003,3 +1003,50 @@ test("the proposal prompt treats an approved [OFFER] as an explicit request, bef
   assert.ok(exception > clause, "the quarantine/delete exception still follows it, so an approval cannot bypass it");
   assert.match(p.slice(clause, exception), /looks healthy/);
 });
+
+// --- a refusal is re-asked once, with its reason, and the gate judges the answer again ---
+// A09 attempt 2, 2026-09-27: a restart for a rollout stuck on a bad image tag, refused correctly by
+// the replacement guard — and then no card at all, because a refusal could only subtract.
+const restart = '{"action":"k8s_rollout_restart","namespace":"bench-a09","workload":"web-frontend","kind":"deployment"}';
+const rollback = '{"action":"k8s_set_image","namespace":"bench-a09","workload":"web-frontend","kind":"deployment","container":"web","image":"nginx:alpine"}';
+const refuseRestarts = async (p: { action: string }) =>
+  p.action === "k8s_rollout_restart" ? { gate: "replacement guard", reason: "a rolling restart re-applies the same spec" } : null;
+
+test("a refused proposal gets one re-ask carrying the refusal, and the revision is kept", async () => {
+  const prompts: string[] = [];
+  const answers = [restart, rollback];
+  const r = await proposeWithRetry({}, "an RCA", async (p) => (prompts.push(p), answers.shift()!), refuseRestarts);
+  assert.equal(r.proposal?.action, "k8s_set_image");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /a rolling restart re-applies the same spec/, "the reason goes back verbatim");
+  assert.match(r.raw, /\[replacement guard refused\][\s\S]*\[re-ask\]/);
+  assert.equal(r.refused, undefined);
+});
+
+test("declining after being told why returns the FIRST refusal — the one a human is owed", async () => {
+  const answers = [restart, '{"action": null}'];
+  const r = await proposeWithRetry({}, "an RCA", async () => answers.shift()!, refuseRestarts);
+  assert.equal(r.proposal, null);
+  assert.equal(r.refused, "a rolling restart re-applies the same spec");
+});
+
+test("the gate judges the revision too, so a re-ask can never smuggle a proposal past it", async () => {
+  const answers = [restart, restart];
+  const r = await proposeWithRetry({}, "an RCA", async () => answers.shift()!, refuseRestarts);
+  assert.equal(r.proposal, null);
+  assert.match(r.raw, /\[replacement guard refused\][\s\S]*\[re-ask\][\s\S]*\[replacement guard refused\]/);
+});
+
+test("three calls at most: an unparseable answer, its retry, and one refusal re-ask", async () => {
+  let calls = 0;
+  const answers = ["I would restart it", restart, restart, rollback];
+  await proposeWithRetry({}, "an RCA", async () => (calls++, answers.shift()!), refuseRestarts);
+  assert.equal(calls, 3);
+});
+
+test("without a refuse hook nothing changes — no extra call on a proposal a gate would have refused", async () => {
+  let calls = 0;
+  const r = await proposeWithRetry({}, "an RCA", async () => (calls++, restart));
+  assert.equal(r.proposal?.action, "k8s_rollout_restart");
+  assert.equal(calls, 1);
+});

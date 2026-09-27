@@ -615,26 +615,73 @@ export function retryNotice(raw: string): string {
   );
 }
 
+/** A gate's verdict on a proposal: which gate, and the sentence it would show a human. */
+export interface Refusal {
+  gate: string;
+  reason: string;
+}
+
 /**
- * The proposal call, both attempts. `ask` is the caller's one LLM round-trip returning plain text
- * — the agent's routes it through the light chain and records usage, the benchmark's does not, and
- * neither concern belongs in here.
+ * The re-ask after a gate refused a proposal. The refusal text is already written for a human —
+ * "a rolling restart re-applies the same spec … the old ReplicaSet still serves traffic" — and it is
+ * exactly the fact the model was missing, so it goes back verbatim.
  *
- * The raw text of BOTH attempts is returned when it still fails, because the pair is the
- * diagnosis: "named an action twice and never filled it" and "held null under a re-ask" need
- * different fixes, and one text can only show one of them.
+ * Measured before this existed (2026-09-27, A09 attempt 2): the model proposed a restart for a
+ * rollout stuck on a nonexistent image tag, the replacement guard refused it correctly, and the
+ * incident got no card at all — the guard could only subtract. The spec clause names the most
+ * common wrong turn, a gesture at pods for a fault that lives in the manifest.
+ */
+export function refusalNotice(p: Proposal, r: Refusal): string {
+  return (
+    `Your previous answer proposed ${p.summary}. It was refused before reaching a human, for this reason:\n${r.reason}\n` +
+    "Answer again with ONE proposal that addresses what the refusal says — when the fault lives in the spec (an image " +
+    "tag that does not exist, a wrong value), the fix is changing that value to one the context shows working, not " +
+    'restarting or deleting pods — or {"action": null} if nothing on the list fits. Never propose the refused action again.'
+  );
+}
+
+/**
+ * The proposal call. `ask` is the caller's one LLM round-trip returning plain text — the agent's
+ * routes it through the light chain and records usage, the benchmark's does not, and neither
+ * concern belongs in here.
+ *
+ * Up to three calls, each for a different failure: an answer that does not parse gets one re-ask
+ * (retryNotice); a parsed answer a gate refuses gets one re-ask carrying the refusal (refusalNotice).
+ * `refuse` is the gate chain itself — DevOpsAgent.refusalFor, the same function for production and
+ * the benchmark — and it judges the second answer too, so the re-ask can never smuggle a proposal
+ * past a gate. Without `refuse` the behaviour is exactly what it was before refusals were re-asked.
+ *
+ * The raw text of every attempt is returned when it still fails, because the sequence is the
+ * diagnosis: "named an action twice and never filled it", "held null under a re-ask" and "was told
+ * why and proposed the same thing" need different fixes, and one text can only show one of them.
  */
 export async function proposeWithRetry(
   labels: Record<string, string>,
   rca: string,
-  ask: (prompt: string) => Promise<string>
-): Promise<{ proposal: Proposal | null; raw: string }> {
+  ask: (prompt: string) => Promise<string>,
+  refuse?: (p: Proposal) => Promise<Refusal | null>
+): Promise<{ proposal: Proposal | null; raw: string; refused?: string }> {
   const prompt = buildProposalPrompt(labels, rca);
   const first = await ask(prompt);
-  const parsed = parseProposal(first);
-  if (parsed) return { proposal: parsed, raw: first };
+  let proposal = parseProposal(first);
+  let raw = first;
+  if (!proposal) {
+    const second = await ask(`${prompt}\n\n${retryNotice(first)}`);
+    proposal = parseProposal(second);
+    if (!proposal) return { proposal: null, raw: `${first}\n[retry] ${second}` };
+    raw = second;
+  }
+  if (!refuse) return { proposal, raw };
 
-  const second = await ask(`${prompt}\n\n${retryNotice(first)}`);
-  const retried = parseProposal(second);
-  return retried ? { proposal: retried, raw: second } : { proposal: null, raw: `${first}\n[retry] ${second}` };
+  const refusal = await refuse(proposal);
+  if (!refusal) return { proposal, raw };
+  const again = await ask(`${prompt}\n\n${refusalNotice(proposal, refusal)}`);
+  const trail = `${raw}\n[${refusal.gate} refused] ${refusal.reason}\n[re-ask] ${again}`;
+  const revised = parseProposal(again);
+  // Declining after being told why is a legitimate answer, and the FIRST refusal is then the one a
+  // human is owed — it explains why there is no card.
+  if (!revised) return { proposal: null, raw: trail, refused: refusal.reason };
+  const second = await refuse(revised);
+  if (second) return { proposal: null, raw: `${trail}\n[${second.gate} refused] ${second.reason}`, refused: second.reason };
+  return { proposal: revised, raw: trail };
 }

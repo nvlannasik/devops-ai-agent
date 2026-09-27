@@ -37,7 +37,7 @@ import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js"
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
-import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal } from "./remediation/proposal.js";
+import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
@@ -2108,93 +2108,44 @@ export class DevOpsAgent {
     // Two calls at most, not one: proposeWithRetry re-asks once when the first answer named an
     // action it did not fill in, or answered null. See proposal.ts for why that is code here
     // rather than another paragraph in the prompt.
-    const { proposal, raw } = await proposeWithRetry(labels, rca, async (prompt) => {
-      const response = await withRoute("light", () => this.llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM));
-      this.recordUsage(null, response); // no Slack thread at this call site — never invent one
-      return this.extractText(response.content);
-    });
+    // Every gate that can refuse a proposal lives in refusalFor — ONE chain, shared with the
+    // benchmark — and it runs inside proposeWithRetry, so a refusal gets one re-ask carrying its
+    // reason instead of ending the incident's only chance at a card. See refusalNotice.
+    const ctx = { userRequested: opts.userRequested, threadId: opts.threadId, offer: opts.offer ?? null, labels, rca };
+    const { proposal, raw, refused } = await proposeWithRetry(
+      labels,
+      rca,
+      async (prompt) => {
+        const response = await withRoute("light", () => this.llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM));
+        this.recordUsage(null, response); // no Slack thread at this call site — never invent one
+        return this.extractText(response.content);
+      },
+      async (p) => {
+        const r = await this.refusalFor(p, ctx);
+        if (r) logger.info(`[remediation] ${r.gate} refused ${p.summary}: ${r.reason}`);
+        return r;
+      }
+    );
     if (!proposal) {
+      // A refusal the re-ask could not get past: the model DID want to act, and the human
+      // deserves to know why there is no card.
+      if (refused) return { refused };
       logger.info(`[remediation] no actionable proposal from model: ${truncate(raw, 200)}`);
       return null;
     }
+    if (raw.includes("\n[re-ask] ")) logger.info(`[remediation] refusal re-asked; the model revised to ${proposal.summary}`);
     // the specific proposed action must actually be registered on the server
     if (!this.mcp.getTools().some((t) => t.name === proposal.action)) {
       logger.info(`[remediation] proposed action ${proposal.action} is not registered on the MCP server`);
       return null;
     }
 
-    // The replacement guard, before the dry-run: a restart or a delete against a fault that
-    // lives in the spec is a change the MCP server will happily validate, because there is
-    // nothing wrong with it as an operation — it just cannot work. See replace-guard.ts for why
-    // this is code and not another paragraph in the prompt.
-    //
-    // Skipped when the human asked for the action in words. The guard exists to stop the MODEL
-    // reaching for a gesture when it cannot place a fault; a person who types "restart the
-    // payments deployment" has placed it themselves and may know something the pod list does not
-    // show. Their request is already sufficient evidence per buildProposalPrompt.
-    if (!opts.userRequested) {
-      const refusal = await this.guardRefusalFor(proposal);
-      if (refusal) {
-        logger.info(`[remediation] replacement guard refused ${proposal.summary}: ${refusal}`);
-        return { refused: refusal };
-      }
-    }
-
-    // The quarantine gate, and unlike the replacement guard it is NOT skipped for a user
-    // request. "Delete the unused mongodb endpoint" is exactly the sentence that produces a
-    // quarantine proposal, and the user saying it is not evidence that the workload is idle —
-    // they are asking BECAUSE they are unsure. Measurement is the only thing that settles it,
-    // and this is where we insist on having done it.
-    const idleRefusal = await this.quarantineRefusalFor(proposal, opts.threadId);
-    if (idleRefusal) {
-      logger.info(`[remediation] quarantine gate refused ${proposal.summary}: ${idleRefusal}`);
-      return { refused: idleRefusal };
-    }
-
-    // Same rule, same reason, for the one action that cannot be undone from the cluster.
-    const orphanRefused = await this.orphanRefusalFor(proposal, opts.threadId);
-    if (orphanRefused) {
-      logger.info(`[remediation] orphan gate refused ${proposal.summary}: ${orphanRefused}`);
-      return { refused: orphanRefused };
-    }
-
-    // The offer is what the human answered "yes" to — see offerMismatchRefusal.
-    const wrongTarget = offerMismatchRefusal(proposal, opts.offer ?? null);
-    if (wrongTarget) {
-      logger.info(`[remediation] offer gate refused ${proposal.summary}: ${wrongTarget}`);
-      return { refused: wrongTarget };
-    }
-
-    // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.
-    const targetRefused = ungroundedTargetRefusal(proposal, await this.threadEvidence(opts.threadId), labels);
-    if (targetRefused) {
-      logger.info(`[remediation] target gate refused ${proposal.summary}: ${targetRefused}`);
-      return { refused: targetRefused };
-    }
-
-    // Replicas need a measurement of their own. Skipped for a user request, like the replacement
-    // guard: a person who asks for more replicas has placed the need themselves.
-    if (!opts.userRequested) {
-      const scaleRefused = await this.scaleRefusalFor(proposal, opts.threadId);
-      if (scaleRefused) {
-        logger.info(`[remediation] scale gate refused ${proposal.summary}: ${scaleRefused}`);
-        return { refused: scaleRefused };
-      }
-    }
-
     // One pending card per action+target, across incidents — see RemediationStore.pendingFor.
+    // Not in refusalFor: it is a fact about the store, and no re-ask can change it.
     const pending = await this.remediations.pendingFor(targetKey(proposal.action, proposal.namespace, proposal.name)).catch(() => null);
     if (pending !== null) {
       logger.info(`[remediation] duplicate of pending card ${pending}: ${proposal.summary}`);
       return { refused: `An approval card for this exact action on \`${proposal.namespace}/${proposal.name}\` is already waiting (remediation ${pending}). Approve or reject that one — a second card is the same decision twice.` };
-    }
-
-    // And for images: never a card for an image nothing in the thread showed. Not skipped for a
-    // user request either — a person who names the image satisfies it in their own words.
-    const imageRefused = await this.imageRefusalFor(proposal, opts.threadId, rca);
-    if (imageRefused) {
-      logger.info(`[remediation] image gate refused ${proposal.summary}: ${imageRefused}`);
-      return { refused: imageRefused };
     }
 
     // Mandatory dry-run before any card — validates the target AND exercises the MCP
@@ -2247,6 +2198,72 @@ export class DevOpsAgent {
   private async orphanRefusalFor(proposal: Proposal, threadId?: string): Promise<string | null> {
     if (proposal.action !== "k8s_delete_orphan") return null;
     return orphanDeleteRefusal(proposal, await this.threadEvidence(threadId));
+  }
+
+  /**
+   * Every gate that can refuse a proposal before the dry-run, in production's order — ONE chain,
+   * called by proposeRemediation and by the benchmark alike.
+   *
+   * The benchmark used to rebuild this chain from the individual gates, and it had drifted exactly
+   * the way its own comment warned: no quarantine gate, no orphan gate, and neither user-request
+   * exemption — so it could score a card production would never post, and refuse one it would.
+   * The duplicate-card check and the dry-run stay in proposeRemediation: one is a fact about the
+   * store, the other about the live cluster, and a re-ask can change neither.
+   *
+   * The gate names are the words the log has always used ("[remediation] <gate> refused …"), so a
+   * grep written before this function existed still finds every refusal.
+   */
+  async refusalFor(
+    proposal: Proposal,
+    ctx: { userRequested?: boolean; threadId?: string; offer: string | null; labels: Record<string, string>; rca: string }
+  ): Promise<Refusal | null> {
+    // The replacement guard, before the dry-run: a restart or a delete against a fault that
+    // lives in the spec is a change the MCP server will happily validate, because there is
+    // nothing wrong with it as an operation — it just cannot work. See replace-guard.ts for why
+    // this is code and not another paragraph in the prompt.
+    //
+    // Skipped when the human asked for the action in words. The guard exists to stop the MODEL
+    // reaching for a gesture when it cannot place a fault; a person who types "restart the
+    // payments deployment" has placed it themselves and may know something the pod list does not
+    // show. Their request is already sufficient evidence per buildProposalPrompt.
+    if (!ctx.userRequested) {
+      const replaced = await this.guardRefusalFor(proposal);
+      if (replaced) return { gate: "replacement guard", reason: replaced };
+    }
+
+    // The quarantine gate, and unlike the replacement guard it is NOT skipped for a user
+    // request. "Delete the unused mongodb endpoint" is exactly the sentence that produces a
+    // quarantine proposal, and the user saying it is not evidence that the workload is idle —
+    // they are asking BECAUSE they are unsure. Measurement is the only thing that settles it,
+    // and this is where we insist on having done it.
+    const idle = await this.quarantineRefusalFor(proposal, ctx.threadId);
+    if (idle) return { gate: "quarantine gate", reason: idle };
+
+    // Same rule, same reason, for the one action that cannot be undone from the cluster.
+    const orphan = await this.orphanRefusalFor(proposal, ctx.threadId);
+    if (orphan) return { gate: "orphan gate", reason: orphan };
+
+    // The offer is what the human answered "yes" to — see offerMismatchRefusal.
+    const wrongTarget = offerMismatchRefusal(proposal, ctx.offer);
+    if (wrongTarget) return { gate: "offer gate", reason: wrongTarget };
+
+    // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.
+    const target = ungroundedTargetRefusal(proposal, await this.threadEvidence(ctx.threadId), ctx.labels);
+    if (target) return { gate: "target gate", reason: target };
+
+    // Replicas need a measurement of their own. Skipped for a user request, like the replacement
+    // guard: a person who asks for more replicas has placed the need themselves.
+    if (!ctx.userRequested) {
+      const scale = await this.scaleRefusalFor(proposal, ctx.threadId);
+      if (scale) return { gate: "scale gate", reason: scale };
+    }
+
+    // And for images: never a card for an image nothing in the thread showed. Not skipped for a
+    // user request either — a person who names the image satisfies it in their own words.
+    const image = await this.imageRefusalFor(proposal, ctx.threadId, ctx.rca);
+    if (image) return { gate: "image gate", reason: image };
+
+    return null;
   }
 
   /** Public because `bench/run.ts` applies it too — see ungroundedTargetRefusal. */
