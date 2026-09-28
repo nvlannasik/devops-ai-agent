@@ -1001,8 +1001,13 @@ export function selectForThread(
   if (overflow.length > 0) {
     logger.info(`[${threadId}] skills over the cap, not loaded: ${overflow.join(", ")}`);
   }
-  const merged = selected.length > 0 ? [...known, ...selected].slice(0, MAX_THREAD_SKILLS) : known;
-  const capped = [...known, ...selected].length - merged.length;
+  // The cap counts PLAYBOOKS. A shape skill (rca-format) is the answer's format, not a failure mode
+  // competing for a place — it used to take one of the five, and the cap was hit in 13 of 22
+  // threads on 2026-09-28 with four playbooks loaded.
+  const all = [...known, ...selected];
+  let playbooks = 0;
+  const merged = all.filter((s) => isShapeSkill(s) || ++playbooks <= MAX_THREAD_SKILLS);
+  const capped = all.length - merged.length;
   if (capped > 0) {
     logger.info(`[${threadId}] ${capped} skill(s) past the per-thread cap of ${MAX_THREAD_SKILLS}, not loaded`);
   }

@@ -652,6 +652,9 @@ against Prometheus; the faults were in the triggers and three facts. Method wort
   as "no permissions". `gitops-drift` said Flux never reverts without drift detection; 8 releases
   here have `driftDetection: enabled`, so a drift that persists means reconciliation is stuck.
   `high-error-rate` used `|= "error"` (case-sensitive) — `real.test.ts` now rejects `|=`.
+- **The cap counts playbooks only.** `rca-format` (a shape skill) used to take one of the
+  `MAX_THREAD_SKILLS` slots; `selectForThread` now lets `isShapeSkill` ride outside it, so an alert
+  thread carries five playbooks plus the format.
 
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,

@@ -72,6 +72,20 @@ test("the per-thread skill set is capped, earliest wins", () => {
   assert.deepEqual(final.slice(0, first.length), first, "the alert's own playbooks were evicted by later ones");
 });
 
+// rca-format rides every alert, and it used to take one of the five slots: measured 2026-09-28,
+// the cap was hit in 13 of 22 threads with four playbooks loaded, not five. The format is the
+// answer's shape, not a failure mode competing with the others for a place.
+test("the output format rides outside the cap — five playbooks, plus the format", () => {
+  const tracked: ThreadSkills = new Map();
+  selectForThread(registry, tracked, "T1", `${ALERT}pod api-7f is OOMKilled`);
+  for (const t of ["ImagePullBackOff", "PersistentVolumeClaim is Pending", "503 service unavailable", "p99 latency", "rollout not progressing"]) {
+    selectForThread(registry, tracked, "T1", t);
+  }
+  const names = tracked.get("T1")!.map((s) => s.name);
+  assert.ok(names.includes("rca-format"), "the format was evicted");
+  assert.equal(names.filter((n) => n !== "rca-format").length, MAX_THREAD_SKILLS, names.join(", "));
+});
+
 test("evidenceTexts reads tool results and skips everything else", () => {
   const blocks = [
     { type: "tool_result" as const, tool_use_id: "1", content: "Error: ImagePullBackOff" },
@@ -127,7 +141,7 @@ test("a new turn ages out all but the most recent playbooks", () => {
     selectForThread(registry, tracked, "T1", `${ALERT}${t}`);
   }
   const before = tracked.get("T1")!.map((s) => s.name);
-  assert.equal(before.length, MAX_THREAD_SKILLS, "the cap was not reached, so there is nothing to decay");
+  assert.equal(before.filter((n) => n !== "rca-format").length, MAX_THREAD_SKILLS, "the cap was not reached, so there is nothing to decay");
 
   const dropped = decayThreadSkills(tracked, "T1");
   const kept = tracked.get("T1")!.map((s) => s.name);
