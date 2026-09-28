@@ -15,7 +15,7 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
 - Test: `npm test` (`node:test` + tsx, zero extra deps)
 - Dev: `npm run dev`
 - DB migrate: `npm run migrate` (dev) / `npm run migrate:prod` (prod)
-- **Node 24 required.** Default shell node is v14 — use `~/.nvm/versions/node/v24.16.0/bin` on the PATH.
+- **Node 24 required.**
 
 ## Conventions
 - TypeScript ESM (NodeNext). Test files `*.test.ts` are excluded from the build.
