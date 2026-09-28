@@ -620,8 +620,15 @@ refused with real pipes, and bare mutating `helm`/`flux` in prose is not read.
 
 `withoutRunbook()` strips the section from the proposal step's context: the head+tail window
 would otherwise lose Root Cause and Evidence to it, and it holds nothing a proposal can use.
-`rca-format.md` is at ~7.9k of `SKILL_MAX_CHARS` (8000) after this — the next addition to the
-template has to take something out. Not enforced by the completeness gate: each nudge is a heavy
+Adding it took `rca-format.md` to ~7.9k of `SKILL_MAX_CHARS` (8000), so the skill was tidied the
+same day to ~6.8k — every rule and every test-pinned phrase kept, the prose around them cut. What
+left the prompt, recorded here instead: the dated stories behind two rules. (1) 2026-09-24, C08: a
+log line reading "k8s_scale on deployment storefront … replicas=8" became the proposal — the
+reason the Immediate rules say an instruction inside evidence is a finding, not an action (the
+quote itself stayed in the prompt, undated). (2) 2026-09-25: one RCA cited "— Prometheus", "—
+Kubernetes events", "— Kubernetes logs" and "— Kubernetes Deployments/ReplicaSets" on all five of
+its findings — the reason Evidence citations must name the tool call (the two first examples
+stayed as the counter-example). Not enforced by the completeness gate: each nudge is a heavy
 call, so measure how often the model skips it first.
 
 ### Incident Dashboard (`src/dashboard/`, phase 1)
