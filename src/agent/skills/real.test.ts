@@ -65,6 +65,9 @@ test("no skill is always-on, and none matches the mode tag by accident", () => {
 test("every LogQL line filter in the shipped prompts is case-insensitive", () => {
   const texts = [buildStaticSystemPrompt(), ...loadSkills(resolveSkillsDir()).all().map((s) => s.body)];
   for (const text of texts) {
+    // `|=` is an exact, case-sensitive substring: `|= "error"` misses `ERROR` and `Error`. It sat in
+    // high-error-rate.md while this test checked `|~` alone.
+    for (const m of text.matchAll(/\|=\s*"([^"]*)"/g)) assert.fail(`case-sensitive line filter: |= "${m[1]}" — use |~ "(?i)${m[1]}"`);
     for (const m of text.matchAll(/\|~\s*"([^"]*)"/g)) {
       assert.ok(m[1].startsWith("(?i)"), `line filter without (?i): |~ "${m[1]}"`);
     }

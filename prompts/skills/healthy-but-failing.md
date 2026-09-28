@@ -1,7 +1,7 @@
 ---
 name: healthy-but-failing
 description: The service that paged looks fine — the work one hop away is not happening
-when: upstream|downstream|dependency|peer|queue|not draining|backlog|unprocessed|never settled|stopped answering|target ?down|cannot scrape|stale
+when: upstream|downstream|dependency|peer|queue|not draining|backlog|unprocessed|never settled|stopped answering|target ?down|cannot scrape|stale|stall
 ---
 
 The thing that pages is not always the thing that is broken, and in this class it usually is not. Every probe passes, every pod is Ready, the dashboard is green — and orders are accepted and never settled, or a call to a peer times out, or a process stays up and stops serving. **Do not close this because the workload is healthy.** Healthy is the finding, not the reassurance.

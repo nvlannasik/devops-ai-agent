@@ -631,6 +631,28 @@ its findings — the reason Evidence citations must name the tool call (the two 
 stayed as the counter-example). Not enforced by the completeness gate: each nudge is a heavy
 call, so measure how often the model skips it first.
 
+### Skill audit — routes measured against the cluster's own alert rules (`skills/routing.test.ts`) — 2026-09-28
+Every tool name and parameter the skills cite resolved against the MCP server, and every metric
+against Prometheus; the faults were in the triggers and three facts. Method worth reusing: run the
+35 real alert rules (gitops repo) and the bench fixtures through `registry.select`, and run every
+`when` regex over the tool results still in Redis to see which WORD loaded each skill.
+
+- **Wrong routes:** `WorkerNodeIsNotReady` → pod-not-ready (`node ?not ?ready` never matched
+  "Node `x` is not ready"); `KubernetesStatefulSetDown` and `LogShipperStalled` → rollout-stuck (the
+  word "rollout" in "no rollout in progress" and "rollout restart ds/fluentbit");
+  `KubernetesPersistentVolumeFillingUp` → pvc-pending, a binding playbook for a space fault — hence
+  the new `volume-filling-up`; "the database is unreachable" → node-pressure. And B04, the case
+  multi-pod-one-cause exists for, never selected it: the group text says "Affected pods (8)".
+- **Slots spent on noise from tool output** (cap of 5 hit in 13 of 22 threads): `group` 11×
+  (`"group":"apps"`), `redis` 7× and `cert-manager` 4× (namespace names in cluster-wide listings).
+  Triggers now name the alert or the failure (`RedisDown`, `ECONNREFUSED …:6379`, `CertManager…`),
+  not the component.
+- **Facts:** `forbidden` taught `system:serviceaccount:ns:name` while `k8s_get_sa_permissions` takes
+  `serviceaccount` + `namespace` (default `default`) — the full string matches no binding and reads
+  as "no permissions". `gitops-drift` said Flux never reverts without drift detection; 8 releases
+  here have `driftDetection: enabled`, so a drift that persists means reconciliation is stuck.
+  `high-error-rate` used `|= "error"` (case-sensitive) — `real.test.ts` now rejects `|=`.
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:

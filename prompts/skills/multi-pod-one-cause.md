@@ -1,7 +1,7 @@
 ---
 name: multi-pod-one-cause
 description: More than one pod broken at once — settle whether it is one cause or many before writing anything
-when: pods are|multiple pods|several pods|all pods|both pods|[0-9]+ pods|semua pod|beberapa pod|banyak pod|group|grouped
+when: pods are|multiple pods|several pods|all pods|both pods|[0-9]+ pods|semua pod|beberapa pod|banyak pod|affected pods \((?:[2-9]|\d{2,})\)
 ---
 
 When MORE than one pod is failing, the first question is not "why is this pod broken" — it is

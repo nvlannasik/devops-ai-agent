@@ -1,7 +1,7 @@
 ---
 name: rollout-stuck
 description: A deployment whose new ReplicaSet never becomes ready
-when: rollout|progressdeadline|replicas ?mismatch|not progressing
+when: rollout ?(is ?)?stuck|rollout[^\n]{0,30}(stalled|not progressing|timed out)|progressdeadline|timed out progressing|replicas ?mismatch|not progressing
 ---
 
 1. k8s_get_rollout_status — desired vs updated/ready/available; `complete: false` + a condition like Progressing=False `ProgressDeadlineExceeded` confirms a stalled rollout

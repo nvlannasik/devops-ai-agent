@@ -1,7 +1,7 @@
 ---
 name: cert-expiry
 description: A TLS certificate that expired or stopped renewing — cert-manager states the reason, the symptom does not
-when: certificate|cert-manager|x509|expired|expiry|renew|notAfter|acme|letsencrypt|issuer|tls (cert|secret)|sertifikat|kadaluarsa|kedaluwarsa
+when: certificate|certmanager|x509|expired|expiry|renew|notAfter|acme|letsencrypt|issuer|tls (cert|secret)|sertifikat|kadaluarsa|kedaluwarsa
 ---
 
 An expired certificate reaches you as something else: a 502 behind the ingress, `x509:

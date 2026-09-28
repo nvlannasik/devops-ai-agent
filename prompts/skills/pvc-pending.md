@@ -1,7 +1,7 @@
 ---
 name: pvc-pending
 description: A claim that never binds
-when: pvc|persistentvolume|volume|storageclass
+when: unbound|not bound|(pvc|persistentvolumeclaim)[^\n]{0,40}pending|pending[^\n]{0,40}(pvc|claim)|storageclass|waitforfirstconsumer|provisioningfailed|failed to provision
 ---
 
 1. k8s_list_pvcs — confirm the claim is Pending (not Bound)

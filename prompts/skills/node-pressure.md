@@ -1,7 +1,7 @@
 ---
 name: node-pressure
 description: A node under memory, disk or PID pressure — the pod that dies is rarely the pod that caused it
-when: memorypressure|diskpressure|pidpressure|node ?not ?ready|nodenotready|evicted|eviction|kubelet|node pressure|unreachable|disk full|node down
+when: memorypressure|diskpressure|pidpressure|node ?(is ?)?not ?ready|node\b[^\n]{0,40}\bis not ready|nodenotready|evicted|eviction|kubelet|node pressure|node\.kubernetes\.io/unreachable|node (is )?unreachable|disk full|node down
 ---
 
 The eviction victim is chosen by QoS and overage, not by blame. A `BestEffort` pod with no

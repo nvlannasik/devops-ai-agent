@@ -1,7 +1,7 @@
 ---
 name: datastore-down
 description: Postgres or Redis unreachable, refusing connections, or evicting what it holds
-when: postgres|pg_up|redis|maxclients|max_connections|datastore|database is down|db down|deadlock|idle in transaction|evicting keys
+when: postgres(ql)? ?(is ?)?(down|exporter)|postgres(ql)?(down|connections|deadlocks|idleintransaction)|redis ?(is ?)?(down|exporter)|redis(down|evictingkeys|rejectingconnections)|pg_up|redis_up|maxclients|max_connections|too many (clients|connections)|datastore|database (is )?(down|unreachable)|db down|deadlock|idle in transaction|evicting keys|(refused|unreachable|timed? ?out)[^\n]{0,60}(postgres|redis|:5432|:6379)|(postgres|redis|:5432|:6379)[^\n]{0,60}(refused|unreachable|timed? ?out)
 ---
 
 These are not ordinary workloads. Postgres holds the **incident memory** and Redis holds the **conversation cache** — when they go, your own recall goes with them, and an investigation that reads "no prior similar incidents" is reading an empty database rather than a quiet history. Say so in the answer when either is implicated: the absence of recall is a consequence of this incident, not evidence about it.
