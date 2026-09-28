@@ -56,7 +56,7 @@ export function extractSection(text: string, label: string): string {
   //
   // dashboard/rca.ts parses the same text and is not affected: it trims each line first.
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*[ \\t]*\\n([\\s\\S]*?)(?=\\n[ \\t]*\\*[🔴🟠🟡🟢⚡📍📊🚫🔧⚠️📈][^*]*\\*|$)`, "i");
+  const pattern = new RegExp(`\\*[^*]*${escaped}[^*]*\\*[ \\t]*\\n([\\s\\S]*?)(?=\\n[ \\t]*\\*[🔴🟠🟡🟢⚡📍📊🚫🔧🧭⚠️📈][^*]*\\*|$)`, "i");
   const match = text.match(pattern);
   return match ? match[1].trim() : "";
 }
@@ -260,6 +260,15 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
     } else {
       blocks.push(...section(`*🔧 Recommended Actions*\n${actions}`));
     }
+    blocks.push(divider());
+  }
+
+  // ── Runbook ──────────────────────────────────────────────────────────────
+  // The "how" under the actions: read-only commands to verify and confirm. Filtered to read verbs
+  // before it gets here — see agent/runbook. Prose, never a table: its commands live in fences.
+  const runbook = extractSection(rcaText, "Runbook");
+  if (runbook) {
+    blocks.push(...section(`*🧭 Runbook*\n${runbook}`));
     blocks.push(divider());
   }
 

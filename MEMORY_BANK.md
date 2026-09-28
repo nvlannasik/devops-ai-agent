@@ -597,6 +597,33 @@ making the dead-column guard check both sides. **The agent-builder / private-llm
 nothing** — the flow is a bare transport with no `system` field, so the whole contract travels
 in `input_value` from this repo; that is exactly what keeping the flow empty bought.
 
+### The Runbook — read-only commands in the RCA (`agent/runbook/`) — 2026-09-28
+`*🧭 Runbook*` sits right after Recommended Actions: *Verify* (read-only commands that confirm the
+fault), *Fix* (no command — the Immediate change and where it happens: the approval card, or the
+file and values key in the GitOps repo), *Confirm* (read-only commands that show recovery). Asked
+for by the operator: prose recommendations left them translating "check the previous container's
+logs" into a command at 3am.
+
+**It relaxes `NEVER paste kubectl` for reads only, and the mutating half stays forbidden on
+purpose.** A pasted `kubectl set image` skips the whitelist, the dry-run, the human click and the
+audit row, and on a Flux-managed workload it is reverted on the next reconcile. It is also the one
+path by which a planted log line would reach a human terminal under our name.
+
+`stripMutatingCommands()` runs in `done()` beside `stripFabricatedNote` and filters ONLY the
+Runbook section against an allowlist of read verbs. Fail closed: an unknown verb, an unknown flag
+ahead of the verb (`kubectl --request-timeout get delete ns prod` runs `delete`), any `;`, `&&`,
+`$(`, redirect, or a pipe into anything but grep/head/tail/jq/sort/uniq/wc drops the line. The
+verb is found by tokens, not regex — `kubectl -n get delete ns prod` passes a naive regex because
+`-n` looks optional. Scoped to the section so a command quoted under Evidence stays quotable
+(C08). Known ceiling, marked `ponytail:` in the module: a quoted `|` inside a jq/grep argument is
+refused with real pipes, and bare mutating `helm`/`flux` in prose is not read.
+
+`withoutRunbook()` strips the section from the proposal step's context: the head+tail window
+would otherwise lose Root Cause and Evidence to it, and it holds nothing a proposal can use.
+`rca-format.md` is at ~7.9k of `SKILL_MAX_CHARS` (8000) after this — the next addition to the
+template has to take something out. Not enforced by the completeness gate: each nudge is a heavy
+call, so measure how often the model skips it first.
+
 ### Incident Dashboard (`src/dashboard/`, phase 1)
 Read-only, server-rendered, second HTTP listener in the agent process (`DASHBOARD_PORT`,
 default 3001, off unless `DASHBOARD_ENABLED=true`). Design:

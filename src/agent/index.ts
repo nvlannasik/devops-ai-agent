@@ -34,6 +34,7 @@ import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./f
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { stripTemplateEcho } from "./template-echo/index.js";
 import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js";
+import { stripMutatingCommands } from "./runbook/index.js";
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
@@ -1466,9 +1467,15 @@ export class DevOpsAgent {
           `[${threadId}] dropped ${notes} fabricated [system note] line(s) — the answer claimed an execution that never happened`
         );
       }
+      // A Runbook command that would CHANGE something — see agent/runbook. Warn, like the note
+      // above: the answer handed a human a command that skips the approval card.
+      const { text: readOnly, dropped: commands } = stripMutatingCommands(honest);
+      if (commands.length > 0) {
+        logger.warn(`[${threadId}] dropped ${commands.length} non-read-only Runbook line(s): ${truncate(commands.join(" | "), 300)}`);
+      }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      return stripOffer(honest);
+      return stripOffer(readOnly);
     };
     let totalUsage = zeroUsage();
 

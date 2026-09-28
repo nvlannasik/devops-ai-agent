@@ -4,6 +4,7 @@
 // MCP server (namespace allowlist + K8s dry-run). A bad proposal = no card = no execution.
 
 import { z } from "zod";
+import { withoutRunbook } from "../runbook/index.js";
 
 export interface Proposal {
   action: string;
@@ -488,7 +489,8 @@ export const PROPOSABLE_ACTIONS = [
 export const PROPOSAL_SYSTEM =
   "You propose Kubernetes remediation actions after an incident investigation. Output ONLY a JSON object, no prose.";
 
-export function buildProposalPrompt(labels: Record<string, string>, rca: string): string {
+export function buildProposalPrompt(labels: Record<string, string>, full: string): string {
+  const rca = withoutRunbook(full);
   // head+tail, not head-only: long RCAs put the concrete fix in Recommended Actions at
   // the END — a head-only slice cut it off and the model proposed nothing
   const ctx = rca.length <= 4000 ? rca : `${rca.slice(0, 2500)}\n...[truncated]...\n${rca.slice(-1500)}`;

@@ -112,6 +112,22 @@ test("TL;DR stops at the next section instead of swallowing it", () => {
   assert.doesNotMatch(tldr, /Impact if Unresolved/);
 });
 
+const WITH_RUNBOOK = NEW_FORMAT.replace(
+  "1. *Immediate:* roll back\n",
+  "1. *Immediate:* roll back\n\n*\u{1F9ED} Runbook*\n1. *Verify:*\n```\nkubectl -n sample-apps get pods\n```\n"
+);
+
+test("the runbook renders right after the actions, and the actions do not swallow it", () => {
+  const t = titles(WITH_RUNBOOK);
+  assert.deepEqual(t.slice(t.indexOf("*\u{1F527} Recommended Actions*"), t.indexOf("*\u{1F4CD} Root Cause*") + 1), [
+    "*\u{1F527} Recommended Actions*",
+    "*\u{1F9ED} Runbook*",
+    "*\u{1F4CD} Root Cause*",
+  ]);
+  assert.doesNotMatch(extractSection(WITH_RUNBOOK, "Recommended Actions"), /Runbook|kubectl/);
+  assert.match(extractSection(WITH_RUNBOOK, "Runbook"), /```\nkubectl -n sample-apps get pods\n```/);
+});
+
 test("the causal chain survives extraction as numbered steps, stop marker included", () => {
   const chain = extractSection(NEW_FORMAT, "Root Cause");
   assert.equal(chain.split("\n").length, 3);
