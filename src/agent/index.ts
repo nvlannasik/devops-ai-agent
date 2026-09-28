@@ -2267,8 +2267,17 @@ export class DevOpsAgent {
     if (wrongTarget) return { gate: "offer gate", reason: wrongTarget };
 
     // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.
-    const target = ungroundedTargetRefusal(proposal, await this.threadEvidence(ctx.threadId), ctx.labels);
+    const evidence = await this.threadEvidence(ctx.threadId);
+    const target = ungroundedTargetRefusal(proposal, evidence, ctx.labels);
     if (target) return { gate: "target gate", reason: target };
+
+    // A resize needs a fault a resize can fix — see resourceFaultRefusal. It lived only in the
+    // bench's half of the chain and was lost when the two were merged; A01 re-proposed a resize
+    // for a missing ConfigMap key on 2026-09-28. Skipped for a user request, like the replacement guard.
+    if (!ctx.userRequested) {
+      const size = resourceFaultRefusal(proposal, evidence);
+      if (size) return { gate: "resource-fault gate", reason: size };
+    }
 
     // Replicas need a measurement of their own. Skipped for a user request, like the replacement
     // guard: a person who asks for more replicas has placed the need themselves.
@@ -2283,12 +2292,6 @@ export class DevOpsAgent {
     if (image) return { gate: "image gate", reason: image };
 
     return null;
-  }
-
-  /** Public because `bench/run.ts` applies it too — see ungroundedTargetRefusal. */
-  async targetRefusalFor(proposal: Proposal, threadId: string | undefined, labels: Record<string, string> = {}): Promise<string | null> {
-    const observed = await this.threadEvidence(threadId);
-    return ungroundedTargetRefusal(proposal, observed, labels) ?? resourceFaultRefusal(proposal, observed);
   }
 
   /**

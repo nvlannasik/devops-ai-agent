@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resourceFaultRefusal } from "./index.js";
+import { DevOpsAgent, resourceFaultRefusal } from "./index.js";
 import { parseProposal } from "./remediation/proposal.js";
 
 const resize = (ns: string, workload: string) =>
@@ -36,4 +36,33 @@ test("it fails open, and only judges resize proposals", () => {
   assert.equal(resourceFaultRefusal(resize("ns", "w"), null), null, "no thread to read");
   const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"ns","workload":"w"}')!;
   assert.equal(resourceFaultRefusal(restart, configKeyMissing), null);
+});
+
+// The gate above was measured in on A01 (88b5d2d) and then dropped from the chain when production
+// and the bench were merged into refusalFor (b7b18e5): production had never called it, the bench's
+// targetRefusalFor had, and the merge kept production's half. Live 2026-09-28, A01 again: the
+// re-ask answered a missing ConfigMap key with a resize, and only the namespace allowlist stopped
+// it. So this pins the WIRING, through refusalFor itself, with every other gate stubbed open.
+const chainWith = (evidence: string) =>
+  ({
+    guardRefusalFor: async () => null,
+    quarantineRefusalFor: async () => null,
+    orphanRefusalFor: async () => null,
+    scaleRefusalFor: async () => null,
+    imageRefusalFor: async () => null,
+    threadEvidence: async () => evidence,
+  }) as unknown as DevOpsAgent;
+
+test("refusalFor runs the resource-fault gate", async () => {
+  const r = await DevOpsAgent.prototype.refusalFor.call(chainWith(configKeyMissing), resize("bench-a01", "payments-api"), {
+    threadId: "t", offer: null, labels: { namespace: "bench-a01" }, rca: "",
+  });
+  assert.match(r?.reason ?? "", /no OOMKill, no throttling/);
+});
+
+test("a human's own request for a resize is not second-guessed by it", async () => {
+  const r = await DevOpsAgent.prototype.refusalFor.call(chainWith(configKeyMissing), resize("bench-a01", "payments-api"), {
+    userRequested: true, threadId: "t", offer: null, labels: { namespace: "bench-a01" }, rca: "",
+  });
+  assert.equal(r, null);
 });
