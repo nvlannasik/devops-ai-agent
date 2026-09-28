@@ -50,6 +50,9 @@ const TOOLS: Record<string, { flags: Set<string>; reads: (verb: string, sub?: st
 // What a read may be piped into. No sed/awk: both can execute.
 const FILTERS = new Set(["grep", "egrep", "head", "tail", "jq", "sort", "uniq", "wc", "less", "column"]);
 const CHAINING = /;|&&|\|\||\$\(|`|[<>]/;
+const MARKER_ONLY = /^\s*```\w*\s*$/;
+// "2. Fix: …", "• …", "*Confirm:* …" — a Runbook step, i.e. prose, wherever the fences left it.
+const STEP = /^(?:\d+\.\s|[•-]\s|\*[^*\n]+:\*)/;
 
 export function readOnlyCommand(line: string): boolean {
   const cmd = line.trim().replace(/^\$\s+/, "");
@@ -95,23 +98,32 @@ export function stripMutatingCommands(answer: string): { text: string; dropped: 
   const kept = answer
     .slice(at.start, at.end)
     .split("\n")
-    .filter((line) => {
-      const fences = (line.match(/```/g) ?? []).length;
-      let bad: boolean;
-      if (fences > 0) {
-        // "```bash" opens a block; "```kubectl get pods```" is a block on one line.
-        const inside = line.replace(/```\w*/g, "").trim();
-        bad = inside !== "" && !readOnlyCommand(inside);
-        if (fences % 2 === 1) inFence = !inFence;
-      } else if (inFence) {
-        const t = line.trim();
-        bad = t !== "" && !t.startsWith("#") && !readOnlyCommand(t);
-      } else {
-        bad = commandsInProse(line).some((c) => !readOnlyCommand(c));
+    .map((line): string | null => {
+      // Only a line that is NOTHING but a marker may carry a language tag ("```bash"). Anywhere
+      // else the word after ``` is content: bench-a02's first live Runbook wrote every command as
+      // "```kubectl describe …```", and a tag-stripping regex read `kubectl` as the language.
+      if (MARKER_ONLY.test(line)) {
+        inFence = !inFence;
+        return line;
       }
-      if (bad) dropped.push(line.trim());
-      return !bad;
+      const fences = (line.match(/```/g) ?? []).length;
+      const fenced = inFence || fences > 0;
+      if (fences % 2 === 1) inFence = !inFence;
+      const content = line.replaceAll("```", "").trim().replace(/^\$\s+/, "");
+
+      let bad: boolean;
+      if (/^(kubectl|helm|flux)\b/.test(content)) bad = !readOnlyCommand(content);
+      // Fenced and not a command we know: refused, so `curl … | sh` cannot pass as prose. A step
+      // line is exempt — the same Runbook left a stray opener that put its Fix and Confirm steps
+      // "inside" a fence the model never meant to open.
+      else if (fenced && content !== "" && !content.startsWith("#") && !STEP.test(content)) bad = true;
+      else bad = commandsInProse(line).some((c) => !readOnlyCommand(c));
+
+      if (!bad) return line;
+      dropped.push(line.trim());
+      return fences % 2 === 1 ? "```" : null; // keep the fences balanced
     })
+    .filter((line): line is string => line !== null)
     .join("\n")
     .replace(/```\w*\n```/g, "")
     .replace(/\n{3,}/g, "\n\n");
