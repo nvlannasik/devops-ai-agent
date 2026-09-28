@@ -1453,7 +1453,8 @@ So the rule moved into code, which is the same move `worthProposing`, the namesp
 the log fan-out cap already made. Before the final answer leaves `runInvestigation`: if a selected
 playbook names a log tool and no log tool has RETURNED anything, the run is given one more round
 and told exactly what to fetch. Once per investigation, never when `toolsDisabled` (the ceiling
-notices own that turn), and never on the first round.
+notices own that turn), never when fewer than two calls are left (`noToolRoundLeft` — see bug 26),
+and never on the first round.
 
 **"Did we call a log tool" is the wrong test, and A13 is why.** That case *did* call
 `loki_query_range` — with a `level="error"` filter against output that is not JSON — got an empty
@@ -1808,6 +1809,7 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 23. **`rca-format` was `when: always`, so the RCA template argued with conversation mode** — it was injected into every casual mention alongside the `[USER MESSAGE — … Do NOT use the RCA incident format]` marker, in the same message, and the small model sided with the skill. It now keys on `mode:(alert|investigation)` via the tag `runInvestigation` prepends to the trigger. A mode-keyed skill bypasses `MAX_MATCHED_SKILLS` — otherwise it scores one hit, ties with three playbooks and loses the `localeCompare` tiebreak to `pod-pending`, leaving an alert answered in no output format at all.
 24. **A complete RCA with no Severity line was posted as plain text** — `isRcaResponse` required severity AND Root Cause. 2026-09-15 16:52: a 4200-char RCA with a numbered causal chain, Evidence and Recommended Actions went to Slack with no header, no dividers, no sections, and nothing saying the card had been skipped. Severity is now optional when a second template heading is present; `buildRcaBlocks` already rendered the missing value as `⚪ Unknown Severity Incident`.
 25. **`Investigation complete` was logged before the run finished** — it sat above the log-gap gate, so a nudged run logged completion and then kept going (twice in one thread, 2026-09-15). Moved into `done()`, the single exit, which also gives the deadline and out-of-steps paths a completion line they never had. That line now says `not reported by <backend>` instead of printing `in=0 out=0 cache_read=0` for the agent-builder/Langflow path, which reports no token counts at all — the zeros read as "prompt caching is broken" for weeks.
+26. **Every delegate returned "ran out of steps" instead of its verdict** — a fetch-seeking nudge (evidence, log gap, image gap) costs two calls, the fetch and the answer, but `forcedFinalAnswer` is only consulted after a tool round. With `SUBAGENT_MAX_ITERATIONS=3` (2026-09-28, five of five delegates) call #2 wrote a `SUPPORTED`/`UNPROVEN` verdict, the log-gap gate nudged, call #3 fetched, the `while` ended with no answer turn, and the lead got 156 chars of apology while the held verdict was dropped. The fetch gates now read `noToolRoundLeft()` (tools off OR `iterations >= maxIterations - 1`) in place of `toolsDisabled`, and the RCA-completeness gate needs `iterations < maxIterations` — its rewrite turn has to exist too. Pinned in `final-answer.test.ts`.
 
 ## Observability
 - `logger` (`utils/logger/index.ts`) exports **`errDetail(err)`** — `${err}` in a template prints only `Error: message` and drops every frame. Use `errDetail` in catch blocks; `format.errors({stack:true})` handles Errors logged directly.

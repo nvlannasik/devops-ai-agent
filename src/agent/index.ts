@@ -724,6 +724,16 @@ export function forcedFinalAnswer(state: {
   return null;
 }
 
+/**
+ * Whether a gate that asks for a FETCH (evidence, log gap, image gap) must stand down. Such a
+ * nudge costs two calls — the fetch, then the answer — and `forcedFinalAnswer` is consulted only
+ * after a tool round, so a nudge on the second-to-last call spent the answer turn on the fetch and
+ * the loop fell out into the apology, discarding the answer the gate was holding. Measured
+ * 2026-09-28 with SUBAGENT_MAX_ITERATIONS=3: five of five delegates.
+ */
+export const noToolRoundLeft = (s: { toolsDisabled: boolean; iterations: number; maxIterations: number }): boolean =>
+  s.toolsDisabled || s.iterations >= s.maxIterations - 1;
+
 // Per-thread skill sets live in memory, like ConversationMemory's rcaThreads. Bounded so a
 // long-running pod cannot accumulate one entry per thread it has ever seen; eviction is
 // insertion-order, and a thread that outlives its entry simply re-selects from its next message.
@@ -1604,7 +1614,8 @@ export class DevOpsAgent {
         }
         // Before every other gate: an alert answered with no tool call at all has not been
         // investigated, and whatever the other gates would ask about is downstream of that.
-        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled, answer: summary })) {
+        const noFetch = noToolRoundLeft({ toolsDisabled, iterations, maxIterations });
+        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled: noFetch, answer: summary })) {
           noEvidenceNudged = true;
           preNudgeSummary = summary;
           toolRoundsAtNudge = toolRounds;
@@ -1624,7 +1635,7 @@ export class DevOpsAgent {
           demandsLogs: demandsLogs(skills),
           sawLogLines,
           nudged: logGapNudged,
-          toolsDisabled,
+          toolsDisabled: noFetch,
           toolRounds,
           toolRoundsAtNudge,
           heldBy,
@@ -1653,7 +1664,7 @@ export class DevOpsAgent {
         // Second gate, same hold slot: only one nudge may be outstanding, so this is reached only
         // when the log gap did not take the round. Evidence-driven, so it is safe in every mode —
         // the trigger is a pull failure in tool output, not a guess about the question.
-        if (!imageGapNudged && !toolsDisabled && toolRounds > 0) {
+        if (!imageGapNudged && !noFetch && toolRounds > 0) {
           const repo = imageGapRepo(summary, observedText(await this.memory.get(threadId)));
           if (repo) {
             imageGapNudged = true;
@@ -1667,8 +1678,9 @@ export class DevOpsAgent {
         }
         // Third gate, same hold slot, and the only one that does NOT want another tool round —
         // see rca-completeness. The investigation is over; what is missing is writing. So it is
-        // not gated on `toolsDisabled`: a tool-free turn is exactly the turn it asks for.
-        if (!rcaGapNudged && mode === "alert" && isRcaResponse(summary)) {
+        // not gated on `toolsDisabled`: a tool-free turn is exactly the turn it asks for. It still
+        // needs a call left to spend it on — on the last one the nudge fell out into the apology.
+        if (!rcaGapNudged && iterations < maxIterations && mode === "alert" && isRcaResponse(summary)) {
           const missing = rcaGaps(summary);
           if (missing.length > 0) {
             rcaGapNudged = true;

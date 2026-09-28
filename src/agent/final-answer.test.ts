@@ -5,6 +5,7 @@ import {
   forcedFinalAnswer,
   ITERATION_CEILING_NOTICE,
   MAX_ITERATIONS,
+  noToolRoundLeft,
   TIME_BUDGET_NOTICE,
   TOOL_BUDGET_NOTICE,
 } from "./index.js";
@@ -182,4 +183,13 @@ test("time left keeps a run going — the clause must not fire on its own", () =
     null,
     "a fresh alert run was forced to answer"
   );
+});
+
+// Measured 2026-09-28, SUBAGENT_MAX_ITERATIONS=3: five of five delegates answered on call #2, the
+// log-gap gate asked for a fetch, call #3 fetched, and the loop fell out with no answer turn —
+// 156 chars of "ran out of steps" returned in place of the verdict call #2 had already written.
+test("a tool-seeking nudge is refused when the fetch would spend the answer turn", () => {
+  assert.equal(noToolRoundLeft({ toolsDisabled: false, iterations: 2, maxIterations: 3 }), true);
+  assert.equal(noToolRoundLeft({ toolsDisabled: false, iterations: 1, maxIterations: 3 }), false);
+  assert.equal(noToolRoundLeft({ toolsDisabled: true, iterations: 1, maxIterations: 3 }), true);
 });
