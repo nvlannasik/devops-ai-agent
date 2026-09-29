@@ -23,7 +23,7 @@ export function buildRemediationCard(
   // GitOps variant: the dry-run summary is a unified diff — render it in a ```diff block and
   // name the target file/values-key; a direct remediation shows the compact validation inline.
   const detail = gitOps
-    ? `🔀 *Proposed GitOps PR* — ${p.summary}\n` +
+    ? `🔀 *Remediation needed (GitOps PR)* — ${p.summary}\n` +
       `*Why:* ${p.reason}\n` +
       `*HelmRelease:* \`${gitOps.helmRelease.namespace}/${gitOps.helmRelease.name}\` · *File:* \`${gitOps.path}\` · *Key:* \`${gitOps.valuesKey}\`\n` +
       "```diff\n" +
@@ -31,7 +31,7 @@ export function buildRemediationCard(
       "\n```" +
       "\n_Approve opens a PR; merge applies it (Flux syncs after merge)._" +
       mentions
-    : `🔧 *Proposed remediation* — ${p.summary}\n` +
+    : `🔧 *Remediation needed* — ${p.summary}\n` +
       `*Why:* ${p.reason}\n` +
       `*Dry-run:* ✅ \`${dryRunSummary.slice(0, 400)}\`` +
       mentions;

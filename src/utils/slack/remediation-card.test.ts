@@ -18,7 +18,10 @@ const text = (blocks: ReturnType<typeof buildRemediationCard>) =>
 test("direct remediation card shows the compact dry-run inline (no diff block)", () => {
   const blocks = buildRemediationCard(1, proposal, "validated (nothing was changed)", ["U1"]);
   const t = text(blocks);
-  assert.match(t, /Proposed remediation/);
+  // A card is only ever posted for a change that passed every gate and the dry-run, so it says
+  // what it is: remediation is needed, and here is the one to approve (2026-09-29).
+  assert.match(t, /\*Remediation needed\* — set image/);
+  assert.doesNotMatch(t, /Proposed remediation/);
   assert.doesNotMatch(t, /```diff/);
   assert.match(t, /<@U1>/); // approver mentioned
 });
@@ -31,7 +34,7 @@ test("GitOps PR card renders a diff block + the target file/key", () => {
     helmRelease: { name: "ingress-nginx", namespace: "nginx-ingress" },
   });
   const t = text(blocks);
-  assert.match(t, /Proposed GitOps PR/);
+  assert.match(t, /\*Remediation needed \(GitOps PR\)\*/);
   assert.match(t, /diff/); // fenced diff block
   assert.match(t, /apps\/base\/release.yaml/);
   assert.match(t, /Approve opens a PR/);

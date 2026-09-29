@@ -846,8 +846,17 @@ export class SlackApp {
       const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId, offer });
       if (!proposed) return; // no write tools / no confident proposal / already active
       if ("refused" in proposed) {
-        // the model wanted to act but the MCP server refused (GitOps guard, blocked
-        // namespace, bad target) — surface the reason instead of failing silently
+        // Posted only when a HUMAN asked for the change: then the refusal is the answer to their
+        // request. When the MODEL proposed it — the alert path, an RCA, an [OFFER] nobody has said
+        // yes to yet — the refusal is the gates overruling the model, and posting it put a
+        // paragraph about an image the model invented into every on-call thread (three
+        // checkout-gateway incidents, 2026-09-29). Logged instead, and noted for the agent below
+        // either way, so a follow-up question is still answered truthfully.
+        if (!userRequested) {
+          logger.info(`[remediation] refusal not posted (the model's proposal, not a request): ${truncate(proposed.refused, 200)}`);
+          await this.agent.noteInThread(threadId, `Remediation was REFUSED by the server: ${truncate(proposed.refused, 300)} — do not promise an approval card for this action again; explain the refusal if asked.`);
+          return;
+        }
         await this.app.client.chat.postMessage({
           channel,
           thread_ts: threadId,
@@ -863,7 +872,7 @@ export class SlackApp {
       const card = await this.app.client.chat.postMessage({
         channel,
         thread_ts: threadId,
-        text: `${gitOps ? "🔀 Proposed GitOps PR" : "🔧 Proposed remediation"}: ${proposed.proposal.summary} — approve or reject`,
+        text: `🔧 Remediation needed${gitOps ? " (GitOps PR)" : ""}: ${proposed.proposal.summary} — approve or reject`,
         blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps),
       });
       // The message id is known here and nowhere else until somebody clicks. Without it the
