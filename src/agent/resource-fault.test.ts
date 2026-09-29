@@ -66,3 +66,21 @@ test("a human's own request for a resize is not second-guessed by it", async () 
   });
   assert.equal(r, null);
 });
+
+// Measured 2026-09-29 (bench on private-llm-agus): A07 proposed a resize for a pod stuck on an
+// unbound PVC, 2 of 3 attempts, and the gate passed it. `nodes are available` was one of the
+// "resource fault" words — and every FailedScheduling message opens with "0/3 nodes are
+// available:", whatever the reason. Only the reason decides; a resize fixes exactly one of them.
+test("a pod that cannot schedule for a reason that is not size is not a resource fault", () => {
+  const unboundPvc =
+    "warning failedscheduling 0/3 nodes are available: pod has unbound immediate persistentvolumeclaims. " +
+    "preemption: 0/3 nodes are available: 3 preemption is not helpful for scheduling.";
+  const selector = "warning failedscheduling 0/3 nodes are available: 3 node(s) didn't match pod's node affinity/selector.";
+  assert.match(resourceFaultRefusal(resize("bench-a07", "ledger"), unboundPvc) ?? "", /no scheduling pressure/, "A07: unbound PVC");
+  assert.match(resourceFaultRefusal(resize("bench-a06", "api"), selector) ?? "", /no scheduling pressure/, "A06: node selector");
+  assert.equal(
+    resourceFaultRefusal(resize("bench-a05", "orders-api"), "warning failedscheduling 0/3 nodes are available: 3 insufficient cpu."),
+    null,
+    "A05: insufficient cpu IS the resource fault"
+  );
+});

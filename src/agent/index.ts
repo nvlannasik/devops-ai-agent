@@ -309,8 +309,12 @@ export function ungroundedTargetRefusal(
  *
  * Fails open with no thread to read. Skipped for a human's own request, like the replacement guard.
  */
+// NOT `nodes are available`: every FailedScheduling message opens with "0/3 nodes are available:",
+// whatever the reason, so that phrase made an unbound PVC and a node-selector mismatch count as
+// resource faults — A07 carded a resize for a claim that never bound (bench, 2026-09-29). The
+// reason that a resize fixes, `insufficient cpu|memory`, is matched on its own.
 const RESOURCE_FAULT =
-  /\b(oomkill\w*|out of memory|exit code 137|memory limit|memory pressure|cpu pressure|throttl\w*|insufficient (?:cpu|memory)|evicted|didn'?t have free ports|nodes are available|over.?provision\w*|under.?provision\w*|no_requests|oom_risk|cpu_throttled)\b/i;
+  /\b(oomkill\w*|out of memory|exit code 137|memory limit|memory pressure|cpu pressure|throttl\w*|insufficient (?:cpu|memory)|evicted|didn'?t have free ports|over.?provision\w*|under.?provision\w*|no_requests|oom_risk|cpu_throttled)\b/i;
 
 export function resourceFaultRefusal(proposal: Proposal, observed: string | null): string | null {
   if (proposal.action !== "k8s_set_resources") return null;
