@@ -173,3 +173,16 @@ test("a failed log call is not log lines, however long its error", async () => {
   assert.equal(returnedLogLines(`[repeat call] You already ran this exact tool.\n\n${upstream}`), false, "a memoised failure");
   assert.equal(returnedLogLines('{"logs":"' + "2026-09-29T03:01:16Z worker starting batch 42\\n".repeat(6) + '"}'), true, "real lines still count");
 });
+
+// Bench C03 attempt 1, 2026-09-29 — and, it turns out, the 2026-09-24 "cap still declined" nobody
+// could explain. After the log-gap nudge the model repeated a k8s_get_pod_logs call; the memo
+// served the same 126-char empty result behind REPEAT_NOTICE, the notice alone is ~300 chars, and
+// the length test counted our own sentence as log lines. sawLogLines went true and High stood.
+test("a memoised result is measured without the repeat notice in front of it", async () => {
+  const { returnedLogLines, REPEAT_NOTICE } = await import("./index.js");
+  const empty = '{"logs":"","container":"worker","note":"the previous instance wrote nothing to stdout or stderr"}';
+  assert.ok(empty.length < 200 && (REPEAT_NOTICE + empty).length >= 200, "the notice must be what crosses the threshold");
+  assert.equal(returnedLogLines(REPEAT_NOTICE + empty), false);
+  const lines = '{"logs":"' + "2026-09-29T03:01:16Z worker starting batch 42\\n".repeat(6) + '"}';
+  assert.equal(returnedLogLines(REPEAT_NOTICE + lines), true, "a memoised result WITH lines still counts");
+});

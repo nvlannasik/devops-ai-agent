@@ -162,13 +162,20 @@ const NO_LOG_LINES = /"noLogLines"\s*:\s*true/;
 // server's `Error: …` and the SDK's `MCP error -32602: …` for an input the schema refused. Either
 // clears LOG_RESULT_MIN_CHARS easily — a zod rejection of loki `start`/`end` sent as numbers is 435
 // chars (bench C03, 2026-09-29) — and counted as "saw log lines": the log-gap gate went silent and
-// capConfidence passed a High the answer itself said the logs could not support. A memoised
-// failure arrives behind REPEAT_NOTICE, hence the optional first paragraph.
-const TOOL_ERROR = /^(?:\[repeat call\][^\n]*\n\n)?\s*(?:Error:|MCP error\b)/;
+// capConfidence passed a High the answer itself said the logs could not support.
+const TOOL_ERROR = /^\s*(?:Error:|MCP error\b)/;
+
+// A memoised result arrives behind REPEAT_NOTICE, and the notice is OUR sentence, ~300 chars of
+// it. Measured with it, a 126-char empty pod-log result crossed the threshold on its repeat and
+// flipped sawLogLines after the log-gap nudge (bench C03, 2026-09-29) — which is also what the
+// unexplained "cap still declined" of 2026-09-24 was. The result is measured, never the notice.
+const REPEAT_PREFIX = /^\[repeat call\][^\n]*\n\n/;
 
 /** Did a log tool's result actually carry log lines? Exported for the test. */
-export const returnedLogLines = (content: string): boolean =>
-  content.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(content) && !TOOL_ERROR.test(content);
+export const returnedLogLines = (content: string): boolean => {
+  const result = content.replace(REPEAT_PREFIX, "");
+  return result.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(result) && !TOOL_ERROR.test(result);
+};
 
 export const LOG_GAP_NOTICE =
   "[EVIDENCE GAP — the playbook for this alert reads the container's own logs, and no log query has " +
@@ -876,7 +883,7 @@ const PLACEHOLDER_REFUSAL = (hit: string, namespace?: string) =>
 
 // Loud on purpose. Handing back the same payload silently is what let the model try a third
 // spelling; it has to be told the result is a property of the data, not of how it asked.
-const REPEAT_NOTICE =
+export const REPEAT_NOTICE =
   "[repeat call] You already ran this exact tool with these exact arguments in this " +
   "investigation. The result below is that same result — calling it again, or with the " +
   "arguments spelled differently, returns this. If it is empty, the data does not exist: " +
@@ -1489,6 +1496,8 @@ export class DevOpsAgent {
         // and the stored answer matches admitsLogGap when tested offline — both conditions looked
         // met, and the cap still declined. The artifacts could not say which input differed,
         // because neither was ever written down. One line, only on a High rating, settles the next.
+        // Settled 2026-09-29 by this very line (sawLogLines=true): a memoised repeat call, measured
+        // WITH its repeat notice — see REPEAT_PREFIX.
         logger.info(
           `[${threadId}] Confidence: High kept — sawLogLines=${sawLogLines} admitsLogGap=${admitsLogGap(text)}`
         );
