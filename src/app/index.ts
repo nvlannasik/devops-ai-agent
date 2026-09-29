@@ -142,6 +142,9 @@ const RESTART_NOTICE: Record<Accepted["kind"], string> = {
   alert: "⚠️ I restarted before this investigation finished, so no RCA was posted. Mention me in this thread to investigate it again.",
 };
 
+/** What `markResolved` matches an incident on: alertname + namespace. */
+const incidentKey = (labels: Record<string, string>): string => `${labels.alertname ?? ""}\u0000${labels.namespace ?? ""}`;
+
 export class SlackApp {
   private app: App;
   private agent: DevOpsAgent;
@@ -149,6 +152,8 @@ export class SlackApp {
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private readonly threadQueue = new ThreadQueue();
   private readonly inFlight = new InFlightWork<Accepted>();
+  /** Alert threads whose incident is not stored yet, and a resolve that arrived for one meanwhile — see handleResolvedAlert. */
+  private readonly unstored = new Map<string, { key: string; resolved?: AlertItem[] }>();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -650,6 +655,7 @@ export class SlackApp {
     );
     // Same queue as the mentions: a repeat alert on a thread someone is already talking in
     // must not interleave with that conversation.
+    this.unstored.set(threadId, { key: incidentKey(groupLabels) });
     void this.inFlight.track(
       { channel, threadTs: threadId, kind: "alert" },
       this.threadQueue.run(threadId, () =>
@@ -667,21 +673,48 @@ export class SlackApp {
       await this.dedup.clear(groupLabels);
       const thread = await this.agent.resolveIncident(groupLabels);
       if (!thread) {
+        // The incident row is written when the RCA is, minutes after the alert. Live 2026-09-29:
+        // both alerts resolved at 14:05 mid-investigation, found nothing to mark, and sat open
+        // until the reconciler closed them at 14:18 — saying the webhook "never arrived".
+        const pending = [...this.unstored.values()].find((p) => p.key === incidentKey(groupLabels));
+        if (pending) {
+          pending.resolved = resolved;
+          logger.info(`[slack] resolved alert ${alertName} arrived before its investigation finished — closing the incident once it is stored`);
+          return;
+        }
         logger.debug(`[slack] resolved alert ${alertName} has no stored unresolved incident — dedup cleared only`);
         return;
       }
-      const ends = resolved.map((a) => a.endsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
-      const endedAt = ends.length > 0 ? ` at \`${new Date(Math.max(...ends)).toISOString()}\`` : "";
-      const ns = groupLabels.namespace ? ` in \`${groupLabels.namespace}\`` : "";
-      await this.app.client.chat.postMessage({
-        channel: thread.channel,
-        thread_ts: thread.threadTs,
-        text: `✅ *Alert resolved* — ${alertName}${ns}${endedAt}. If a manual fix did it, react :${config.slack.learnReaction}: on the message describing it (or mention me with \`learn\`) so I remember.`,
-        mrkdwn: true,
-      });
+      await this.postResolved(thread, groupLabels, resolved);
       logger.info(`[slack] alert resolved: ${alertName} — thread updated, incident marked, dedup cleared`);
     } catch (err) {
       logger.error(`[slack] resolved-alert handling failed for ${alertName}: ${errDetail(err)}`);
+    }
+  }
+
+  private async postResolved(thread: { channel: string; threadTs: string }, groupLabels: Record<string, string>, resolved: AlertItem[]): Promise<void> {
+    const ends = resolved.map((a) => a.endsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
+    const endedAt = ends.length > 0 ? ` at \`${new Date(Math.max(...ends)).toISOString()}\`` : "";
+    const ns = groupLabels.namespace ? ` in \`${groupLabels.namespace}\`` : "";
+    await this.app.client.chat.postMessage({
+      channel: thread.channel,
+      thread_ts: thread.threadTs,
+      text: `✅ *Alert resolved* — ${groupLabels.alertname ?? "Unknown"}${ns}${endedAt}. If a manual fix did it, react :${config.slack.learnReaction}: on the message describing it (or mention me with \`learn\`) so I remember.`,
+      mrkdwn: true,
+    });
+  }
+
+  /** The other half of handleResolvedAlert's early branch: the incident exists now, so close it. */
+  private async closeIfResolvedEarly(threadId: string, labels: Record<string, string>): Promise<void> {
+    const early = this.unstored.get(threadId)?.resolved;
+    if (!early) return;
+    try {
+      const thread = await this.agent.resolveIncident(labels);
+      if (!thread) return;
+      await this.postResolved(thread, labels, early);
+      logger.info(`[slack] alert resolved: ${labels.alertname} — closed on store (the resolve arrived mid-investigation)`);
+    } catch (err) {
+      logger.error(`[slack] closing early-resolved incident failed for thread ${threadId}: ${errDetail(err)}`);
     }
   }
 
@@ -810,6 +843,7 @@ export class SlackApp {
       } else if (incidentId) {
         await withTrace(threadId, () => this.maybeProposeRemediation(channel, threadId, incidentId, labels, proposalContext));
       }
+      if (incidentId) await this.closeIfResolvedEarly(threadId, labels);
     } catch (err) {
       logger.error(`[slack] background investigation failed for thread ${threadId}: ${errDetail(err)}`);
       await this.app.client.chat
@@ -821,6 +855,7 @@ export class SlackApp {
         })
         .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${errDetail(e)}`));
     } finally {
+      this.unstored.delete(threadId);
       this.semaphore.release();
     }
   }

@@ -206,3 +206,14 @@ test("delete_pod sees a flapping sibling as no sibling at all", () => {
     /no healthy sibling|all 2 pods are unready/
   );
 });
+
+// Live 2026-09-29: checkout-gateway was 1/1 Ready with 3 restarts from hours earlier, and the
+// refusal said "all 1 pod(s) … are still unready". The refusal stands (a restarted pod is not
+// counted as serving — see isServing), but its reason now goes into the thread's memory and the
+// model repeats it, so it has to say what the pod actually looked like.
+test("a restarted pod that reads ready is not described as unready", () => {
+  const r = restart("checkout-gateway", [pod("checkout-gateway-774f8b79dd-lwhs4", true, 3)]) ?? "";
+  assert.match(r, /already done that 3 time\(s\)/);
+  assert.doesNotMatch(r, /unready/);
+  assert.match(r, /1 of 1 pod\(s\) of `checkout-gateway` read as ready/);
+});

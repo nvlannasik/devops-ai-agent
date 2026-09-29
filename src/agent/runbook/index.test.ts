@@ -140,3 +140,25 @@ test("the proposal step never sees the runbook", () => {
   assert.match(out, /Immediate:\* rolling restart/);
   assert.match(out, /Evidence/);
 });
+
+// Live 2026-09-29, thread 1790690402.513759: the Runbook listed the agent's own tool calls. A
+// human cannot type them, so they go the same way as a mutating command, and the kubectl beside
+// them stays.
+test("the agent's own tool calls are not Runbook commands", () => {
+  const { text, dropped } = stripMutatingCommands(
+    rca(
+      [
+        "1. *Confirm:* is orders-api serving?",
+        "```",
+        "k8s_get_endpoints  namespace=sample-apps  service=orders-api",
+        "k8s_get_rollout_status  namespace=sample-apps  name=orders-api  kind=deployment",
+        "kubectl get endpoints orders-api -n sample-apps",
+        "```",
+      ].join("\n")
+    )
+  );
+  assert.equal(dropped.length, 2, dropped.join(" | "));
+  const runbook = extractSection(text, "Runbook")!;
+  assert.doesNotMatch(runbook, /k8s_get_/);
+  assert.match(runbook, /kubectl get endpoints orders-api -n sample-apps/);
+});

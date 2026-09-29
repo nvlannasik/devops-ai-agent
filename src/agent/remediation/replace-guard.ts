@@ -220,11 +220,19 @@ export function replacementRefusal(
     // Two ways the evidence can already show that a fresh identical pod does not come up healthy.
     const restarts = mine.reduce((n, p) => n + p.restarts, 0);
     if (mine.every((p) => p.restarts > 0)) {
+      // Worded from the pods as read: a restarted pod can read ready (it recovered, or a crash
+      // loop was sampled between crashes — see isServing), and this sentence goes into the
+      // thread's memory, where "still unready" about a 1/1 Ready pod was repeated as fact.
+      const ready = mine.filter((p) => p.ready).length;
       return (
         `a rolling restart rebuilds these pods from the same spec, and the kubelet has already done ` +
-        `that ${restarts} time(s) — all ${mine.length} pod(s) of \`${name}\` are still unready. The fault ` +
-        `survives a fresh identical pod, so it is in the spec (config, image, limits, probe) and a restart ` +
-        `cannot reach it.`
+        `that ${restarts} time(s) — ` +
+        (ready === 0
+          ? `all ${mine.length} pod(s) of \`${name}\` are still unready. The fault survives a fresh identical ` +
+            `pod, so it is in the spec (config, image, limits, probe) and a restart cannot reach it.`
+          : `${ready} of ${mine.length} pod(s) of \`${name}\` read as ready now, which a recovered pod and a ` +
+            `crash loop between crashes both show. Either way a restart repeats what already ran: it repairs ` +
+            `nothing on a recovered pod, and a crash loop's fault is in the spec (config, image, limits, probe).`)
       );
     }
     // Never even started. A pod that has not reached Running has failed BEFORE its process — it

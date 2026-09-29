@@ -186,3 +186,41 @@ test("a memoised result is measured without the repeat notice in front of it", a
   const lines = '{"logs":"' + "2026-09-29T03:01:16Z worker starting batch 42\\n".repeat(6) + '"}';
   assert.equal(returnedLogLines(REPEAT_NOTICE + lines), true, "a memoised result WITH lines still counts");
 });
+
+// --- a delegate's log lines are the parent's evidence too (live, 2026-09-29) ---
+// Thread 1790690405.435999: delegate sub-2 read 273K chars of Loki and quoted the 502s, and the
+// parent was still nudged for "no log lines", because it only counted its own calls.
+test("a delegate's memo counts its log lines, and only its successful log calls", async () => {
+  const { memoSawLogLines, toolCallKey } = await import("./index.js");
+  const lines = '{"streams":[{"values":[' + '["1","checkout-gateway returned 502: upstream_unreadable"],'.repeat(6) + '["2","x"]]}]}';
+  const memo = (entries: Array<[string, string]>) =>
+    new Map(entries.map(([name, result]) => [toolCallKey(name, { namespace: "sample-apps" }), { result: Promise.resolve(result) }]));
+
+  assert.equal(await memoSawLogLines(memo([["loki_query_range", lines]])), true);
+  assert.equal(await memoSawLogLines(memo([["k8s_list_events", lines]])), false, "a non-log tool is not log evidence, however long");
+  assert.equal(await memoSawLogLines(memo([["loki_query_range", '{"streams":[],"noLogLines":true,"note":"x"}']])), false);
+  assert.equal(await memoSawLogLines(undefined), false, "a delegate whose memo is gone saw nothing we can vouch for");
+  const failed = new Map([[toolCallKey("k8s_get_pod_logs", {}), { result: Promise.reject(new Error("boom")) }]]);
+  assert.equal(await memoSawLogLines(failed), false, "a rejected call is not evidence and must not throw");
+});
+
+// --- a nudge's retry must not cost the answer an RCA it already had (live, 2026-09-29) ---
+test("an RCA replaced by a non-RCA after a nudge is kept; every other shape is not", async () => {
+  const { nudgeLostRca } = await import("./index.js");
+  const { isRcaResponse } = await import("../utils/slack/blocks.js");
+  const rca = "*🔴 Severity:* `critical`\n\n*⚡ TL;DR*\n- orders-api is unreadable upstream\n\n*🎯 Root Cause*\norders-api returns 502";
+  const dump = 'Here are the last 10 log lines from the affected pod, as requested:\n\n```\n{"level":"info"}\n```';
+  assert.ok(isRcaResponse(rca) && !isRcaResponse(dump), "fixtures must sit on either side of the RCA test");
+
+  assert.equal(nudgeLostRca({ mode: "alert", heldBy: "tools", before: rca, after: dump }), true, "the live case");
+  assert.equal(nudgeLostRca({ mode: "alert", heldBy: "rca", before: rca, after: dump }), true);
+  assert.equal(nudgeLostRca({ mode: "alert", heldBy: "tools", before: rca, after: rca + "\nmore evidence" }), false, "an RCA for an RCA is the point of the round");
+  assert.equal(nudgeLostRca({ mode: "alert", heldBy: "tools", before: dump, after: dump }), false, "nothing to keep");
+  assert.equal(nudgeLostRca({ mode: "alert", heldBy: null, before: rca, after: dump }), false, "the zero-evidence nudge's answer is not worth keeping");
+  assert.equal(nudgeLostRca({ mode: "conversation", heldBy: "tools", before: rca, after: dump }), false, "a conversation has no RCA to lose");
+});
+
+test("the notice says it is not itself a request to show logs", () => {
+  assert.match(LOG_GAP_NOTICE, /not a request to show logs/);
+  assert.match(LOG_GAP_NOTICE, /complete answer again, in the same format/);
+});

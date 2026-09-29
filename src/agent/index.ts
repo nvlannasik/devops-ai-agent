@@ -177,6 +177,33 @@ export const returnedLogLines = (content: string): boolean => {
   return result.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(result) && !TOOL_ERROR.test(result);
 };
 
+/**
+ * Did any log call in a delegate's tool memo return lines? How a delegate's evidence reaches its
+ * parent's log-gap gate: the parent only ever saw its own calls, so on 2026-09-29 (thread
+ * 1790690405.435999) a delegate had read 273K chars of Loki and quoted the 502s, and the parent
+ * was still nudged for "no log lines" — the round that cost it its RCA (see nudgeLostRca). The
+ * memo holds raw results and successes only, keyed `${name}\u0000…` by toolCallKey.
+ */
+export async function memoSawLogLines(memo: ReadonlyMap<string, { result: Promise<string> }> | undefined): Promise<boolean> {
+  for (const [key, { result }] of memo ?? []) {
+    if (LOG_TOOLS.has(key.split("\u0000")[0]) && returnedLogLines(await result.catch(() => ""))) return true;
+  }
+  return false;
+}
+
+/**
+ * Did the round a nudge bought turn a finished RCA into something that is not one?
+ *
+ * The retry REPLACES the answer it interrupted. Live 2026-09-29 (thread 1790690405.435999): the
+ * log-gap round fetched the logs and then answered "Here are the last 10 log lines from the
+ * affected pod, as requested" — it read the notice as the request — and a complete RCA reached
+ * Slack as a chat message with no card. The restore rule only catches a round that fetched
+ * nothing; this one compares the answers. Not for the zero-tool-call nudge (heldBy null): the
+ * answer that one interrupted had no evidence behind it, so it is not worth keeping.
+ */
+export const nudgeLostRca = (s: { mode: string; heldBy: "tools" | "rca" | null; before: string; after: string }): boolean =>
+  s.mode === "alert" && s.heldBy !== null && isRcaResponse(s.before) && !isRcaResponse(s.after);
+
 export const LOG_GAP_NOTICE =
   "[EVIDENCE GAP — the playbook for this alert reads the container's own logs, and no log query has " +
   "returned any lines yet. Before you answer, call `k8s_get_pod_logs` (tail_lines: 200) on an affected " +
@@ -190,7 +217,8 @@ export const LOG_GAP_NOTICE =
   "unavailable after that, say so explicitly in the answer and state what it leaves unconfirmed — and " +
   "lower the Confidence only if your conclusion actually depends on them. Finding a healthy workload " +
   "and quiet logs is a complete answer, not a thin one. Do not recommend that a human run a log query " +
-  "you can run yourself.]";
+  "you can run yourself. This notice is not a request to show logs: once you have read them, answer " +
+  "with your complete answer again, in the same format, with the log lines as its evidence.]";
 
 /** Does any loaded playbook name a log tool? Read from the body, so a new playbook gets this free. */
 export const demandsLogs = (skills: readonly Skill[]): boolean =>
@@ -1519,11 +1547,14 @@ export class DevOpsAgent {
           `[${threadId}] dropped ${notes} fabricated [system note] line(s) — the answer claimed an execution that never happened`
         );
       }
-      // A Runbook command that would CHANGE something — see agent/runbook. Warn, like the note
-      // above: the answer handed a human a command that skips the approval card.
+      // A Runbook command that would CHANGE something, or is not a command a human can run (our own
+      // tool calls, 2026-09-29) — see agent/runbook. Warn, like the note above.
       const { text: readOnly, dropped: commands } = stripMutatingCommands(honest);
       if (commands.length > 0) {
-        logger.warn(`[${threadId}] dropped ${commands.length} non-read-only Runbook line(s): ${truncate(commands.join(" | "), 300)}`);
+        logger.warn(
+          `[${threadId}] dropped ${commands.length} Runbook line(s) that are not a read-only kubectl/helm/flux command: ` +
+          truncate(commands.join(" | "), 300)
+        );
       }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
@@ -1720,6 +1751,13 @@ export class DevOpsAgent {
           await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
           continue;
         }
+        if (nudgeLostRca({ mode, heldBy, before: preNudgeSummary, after: summary })) {
+          logger.warn(
+            `[${threadId}] the extra round replaced an RCA with something that is not one ` +
+            `("${truncate(summary, 80)}") — keeping the RCA`
+          );
+          return done(preNudgeSummary);
+        }
         // Second gate, same hold slot: only one nudge may be outstanding, so this is reached only
         // when the log gap did not take the round. Evidence-driven, so it is safe in every mode —
         // the trigger is a pull failure in tool output, not a guess about the question.
@@ -1800,7 +1838,9 @@ export class DevOpsAgent {
               `${config.subagents.maxFanout} — ${overflow.length} refused`
             );
           }
-          delegateResults = [...(await this.runDelegates(threadId, run, deadline)), ...overflow];
+          const delegated = await this.runDelegates(threadId, run, deadline);
+          delegateResults = [...delegated.results, ...overflow];
+          if (delegated.sawLogLines) sawLogLines = true;
         }
 
         if (maxToolRounds !== Infinity) {
@@ -1911,12 +1951,17 @@ export class DevOpsAgent {
    * around the entry points, and a child waiting on a permit its own parent is holding is a
    * deadlock at MAX_CONCURRENT_INVESTIGATIONS.
    */
-  private async runDelegates(threadId: string, calls: ContentBlock[], parentDeadline: number): Promise<ContentBlock[]> {
+  private async runDelegates(
+    threadId: string,
+    calls: ContentBlock[],
+    parentDeadline: number
+  ): Promise<{ results: ContentBlock[]; sawLogLines: boolean }> {
     const cutoff = childDeadline(parentDeadline);
     const block = (id: string | undefined, content: string): ContentBlock =>
       ({ type: "tool_result" as const, tool_use_id: id, content });
+    let sawLogLines = false; // any delegate's log call returned lines — see memoSawLogLines
 
-    return Promise.all(
+    const results = await Promise.all(
       calls.map(async (call, i) => {
         const hypothesis = hypothesisOf(call);
         if (!hypothesis) {
@@ -1944,6 +1989,8 @@ export class DevOpsAgent {
             trigger: hypothesis,
           });
           logger.info(`[${threadId}] ← delegate ${sub} ok (${Date.now() - start}ms, ${findings.length} chars)`);
+          // Read before `finally` drops the memo.
+          if (await memoSawLogLines(this.toolMemo.get(sub))) sawLogLines = true;
           return block(call.id, `[delegate: ${hypothesis}]\n${findings}`);
         } catch (e) {
           logger.error(`[${threadId}] ← delegate ${sub} failed (${Date.now() - start}ms): ${errDetail(e)}`);
@@ -1958,6 +2005,7 @@ export class DevOpsAgent {
         }
       })
     );
+    return { results, sawLogLines };
   }
 
   private async executeToolCalls(threadId: string, content: ContentBlock[], namespace?: string): Promise<ContentBlock[]> {
