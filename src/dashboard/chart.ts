@@ -28,6 +28,11 @@ export interface Point {
 // week in progress, and it is the column a reader looks at first.
 const THIN_EVERY = 2;
 
+// Past this many periods the labels cannot all fit even at full width: a 30-day window is 31
+// points since empty days are drawn as zero rather than skipped. A dense axis hides every second
+// label at every width and keeps only every fourth at the narrow step (data-thin4).
+const DENSE_AFTER = 16;
+
 // Two decimals in the path data. The plot is at most ~900px wide, so a hundredth of a percent is
 // a tenth of a pixel — past this the digits are markup weight buying sub-pixel precision.
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -99,10 +104,13 @@ export function lineChart(points: Point[], opts: { label?: string } = {}): strin
           );
         })();
 
+  const dense = points.length > DENSE_AFTER;
   const ticks = points
     .map((p, i) => {
-      const thin = (last - i) % THIN_EVERY === 0 ? "" : ` data-thin`;
-      return `<span class="chart-tick"${thin}>${esc(p.label)}</span>`;
+      const k = last - i;
+      const thin = k % THIN_EVERY === 0 ? "" : ` data-thin`;
+      const thin4 = dense && k % THIN_EVERY === 0 && k % (THIN_EVERY * 2) !== 0 ? ` data-thin4` : "";
+      return `<span class="chart-tick"${thin}${thin4}>${esc(p.label)}</span>`;
     })
     .join("");
 
@@ -113,7 +121,7 @@ export function lineChart(points: Point[], opts: { label?: string } = {}): strin
   return (
     `<figure class="chart" style="--n:${points.length}">` +
     `<div class="chart-plot" role="img" aria-label="${esc(`${chartLabel}: ${readOut}`)}">${line}${cols}</div>` +
-    `<div class="chart-axis" aria-hidden="true">${ticks}</div>` +
+    `<div class="chart-axis"${dense ? " data-dense" : ""} aria-hidden="true">${ticks}</div>` +
     `<figcaption class="chart-caption">${caption}</figcaption>` +
     `</figure>`
   );

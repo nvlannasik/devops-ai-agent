@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inlineMrkdwn, parseRca, renderRca } from "./rca.js";
+import { incidentSummary, inlineMrkdwn, parseRca, renderRca } from "./rca.js";
 
 // The shape prompts/system.md asks the model for, verbatim down to the emoji and the em
 // dashes ("labels must match precisely for rendering"). The structural assertions below all
@@ -507,4 +507,37 @@ test("a value that legitimately ends in a bracket keeps it", () => {
   ].join("\n");
   const conf = parseRca(rca)?.fields.find((f) => f.label === "Confidence");
   assert.equal(conf?.value, "High [see runbook]");
+});
+
+// The incident lists showed `root_cause` whole: since the Root Cause became a numbered causal
+// chain (2026-09-02) that is every step, every citation and the mrkdwn markers, escaped — one
+// row 300px tall reading "1. *Symptom:* … — _k8s_describe_pod_ `ns/pod` 2. *Because:* …". A list
+// row wants the SYMPTOM: the first step, without its label or its citation. Verbatim from the
+// dev cluster's incidents 196 and 195, 2026-09-28.
+test("a causal chain summarises to its first step, label and citation dropped", () => {
+  const chain =
+    "1. *Symptom:* CrashLoopBackOff on container `api` in `bench-a01/payments-api-c5ccb5f74-w46rd` — evidenced by 5 restarts " +
+    "and Terminated: Error (exit 1) in the pod description — _Kubernetes_ `bench-a01/payments-api-c5ccb5f74-w46rd` / `api` container\n" +
+    "2. *Because:* The application startup failed due to a missing DB_HOST configuration — _Kubernetes logs_ for container `api`\n" +
+    "⛔ *Not visible from here:* The actual DB host value";
+  const out = incidentSummary(chain);
+  assert.equal(
+    out,
+    'CrashLoopBackOff on container <code translate="no">api</code> in <code translate="no">bench-a01/payments-api-c5ccb5f74-w46rd</code> — ' +
+      "evidenced by 5 restarts and Terminated: Error (exit 1) in the pod description"
+  );
+});
+
+test("the unbolded form and a chain flattened onto one line summarise the same way", () => {
+  const out = incidentSummary(
+    "1. Symptom: CrashLoop due to OOMKilled in pod `bench-a02/backend-api-6bf8dbdf65-fjb6r` (container `api-server`) — _k8s_describe_pod_ " +
+      "2. Because: The container memory limit is 128Mi — _prometheus_query_"
+  );
+  assert.match(out, /^CrashLoop due to OOMKilled in pod <code/);
+  assert.doesNotMatch(out, /Because|Symptom|k8s_describe_pod|prometheus_query/);
+});
+
+test("a root cause written as prose is kept, and still escaped", () => {
+  assert.equal(incidentSummary("timing."), "timing.");
+  assert.equal(incidentSummary("the <script> tag is text"), "the &lt;script&gt; tag is text");
 });

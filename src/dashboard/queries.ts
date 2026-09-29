@@ -256,10 +256,18 @@ export class DashboardQueries {
         // text arguments, so the statement stays a constant. ORDER BY the truncated timestamp
         // rather than the formatted label: "HH24:00" sorts 00:00 before 23:00, which would put
         // midnight at the left edge of a window that started at noon.
-        `SELECT to_char(date_trunc($2, created_at), $3) AS label,
-                date_trunc($2, created_at) AS bucket,
-                count(*)::int AS n
-           FROM incidents WHERE created_at >= now() - $1::interval
+        //
+        // Every bucket in the window, not only the ones something fired in: grouping the incidents
+        // alone skipped empty days, so the axis ran 09-04 → 09-07 → 09-09 as if adjacent and the
+        // line drew a slope across three quiet days (2026-09-28). generate_series supplies the
+        // buckets; the LEFT JOIN counts zero where nothing matched.
+        `SELECT to_char(b.bucket, $3) AS label,
+                b.bucket,
+                count(i.id)::int AS n
+           FROM generate_series(date_trunc($2, now() - $1::interval), date_trunc($2, now()),
+                                ('1 ' || $2)::interval) AS b(bucket)
+           LEFT JOIN incidents i
+             ON date_trunc($2, i.created_at) = b.bucket AND i.created_at >= now() - $1::interval
           GROUP BY 1, 2 ORDER BY 2 LIMIT ${SERIES_LIMIT}`,
         [W, spec.bucket, spec.labelFormat]
       ),

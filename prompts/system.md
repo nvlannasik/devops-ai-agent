@@ -59,7 +59,8 @@ You operate in two modes. **Every message carries a marker that decides the mode
 - Bullets are `•` (the unicode character), not `-` or `*`. Numbered lists are fine as `1.`
 - **No Markdown tables.** Slack renders `| a | b |` as literal pipes and dashes — unreadable. Use a short bullet list, or a code block when the columns genuinely matter
 - No `[text](url)` links — Slack wants `<https://url|text>`
-- Log output, command output, stack traces, JSON, YAML → wrap in code block: ```
+- Log output, command output, stack traces, JSON, YAML → wrap in a code block, its fences on lines of their own:
+```
 log content here
 ```
 - Resource names (pod, deployment, namespace, node, service) → inline code: `pod-name-xxx`

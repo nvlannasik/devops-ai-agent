@@ -1795,6 +1795,9 @@ test("the remediation tile reports what the cluster did, not what the API return
   // 3 recovered of 10 that reached a verdict — not 9 of 10 calls that returned 200
   assert.match(html, />Remediation verified<\/span>[\s\S]*?<dd>30%/);
   assert.match(html, /9 of 10 calls succeeded/);
+  // The sub-line has to name the percentage's own denominator first. With only the call count
+  // under it, 89% sat above "14 of 14 calls succeeded" and read as a sum that did not add up.
+  assert.match(html, /3 of 10 recovered · 9 of 10 calls succeeded/);
   assert.doesNotMatch(html, /Remediation applied/, "the old label described the wrong measurement");
 });
 

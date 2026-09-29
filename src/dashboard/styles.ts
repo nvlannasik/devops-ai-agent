@@ -924,6 +924,20 @@ tbody td:first-child {
 [data-tone="info"]     { --spine: var(--mark-info);     --tint: var(--tint-info);     --ink: var(--info); }
 [data-tone="ok"]       { --spine: var(--mark-ok);       --tint: var(--tint-ok);       --ink: var(--ok); }
 td .sub { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 2px; overflow-wrap: anywhere; }
+/* An incident row's summary is the symptom (incidentSummary in rca.ts), and it is a preview, not
+   the finding: two lines, then the row ends. Unclamped, one causal chain made a row 300px tall. */
+td .summary {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden;
+}
+/* A namespace is a label, and bench-a01 broken at its hyphen reads as two of them. The card
+   layout below already says the same thing for phones. */
+td.ns { white-space: nowrap; }
+/* A skill's trigger is a regex: one long token with nowhere a line may break, so it may break
+   anywhere — otherwise it claims the table's width and pushes the skill's name and description
+   into a sliver. The size is a figure and a unit, and never splits between them. */
+td.trigger code { overflow-wrap: anywhere; }
+td.size { white-space: nowrap; }
 /* The alert name is the row's only target, and at 15px/1.55 its line box is 23px — a whisker
    under the 24px a finger needs. Padding on an inline element grows the hit area without
    touching the line box, so the row stays exactly as tall as it looks. */
@@ -1332,6 +1346,10 @@ form.signout button {
   scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
 }
 .rca-code code { font-size: inherit; }
+/* A Runbook writes one command per fence, so a step's commands arrive as a run of blocks. Drawn
+   apart, they read as unrelated excerpts; joined, they read as one terminal session. */
+.rca-code:has(+ .rca-code) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.rca-code + .rca-code { margin-top: 0; padding-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 /* One line of the excerpt, one block (rca.ts emits them). A blank line inside a stack trace
    has no text to give it height, so it needs a floor or the trace closes up by a line. */
 .rca-code span { display: block; min-height: 1lh; }
@@ -1361,7 +1379,10 @@ form.signout button {
    Action column leaves. It was handed 73px, which is narrower than the word "Immediate" and
    printed it as "Immedia/te". A dozen characters is what those two words need; a leading
    column holding sentences is far past that and never sees this declaration do anything. */
-.rca td.primary { min-width: 12ch; }
+/* content-box: the floor is for the WORD. Under the global border-box, the cell's 35px of
+   padding came out of those 12ch and "Immediate" still broke as "Immediat/e" (measured 2026-09-28:
+   a 104px cell, a 69px line). */
+.rca td.primary { min-width: 12ch; box-sizing: content-box; }
 /* "Cells wrap by default" is only true of prose. What the model actually puts in an evidence
    cell is a metric selector, an image digest, a pod name — one token of 60-90 characters with
    nothing in it a line may break at. A cell like that does not widen its column here, because
@@ -1683,6 +1704,11 @@ form.signout button {
      an axis reading 05-1 06-0 06-2, which is worse than showing no axis at all. */
   .chart-tick { overflow: visible; }
 }
+/* A dense series (chart.ts, DENSE_AFTER) has more periods than even a full-width axis can name:
+   every second label goes at every width, and at the narrow step only every fourth survives. */
+.chart-axis[data-dense] .chart-tick[data-thin] { visibility: hidden; }
+.chart-axis[data-dense] .chart-tick { overflow: visible; }
+@container chart (max-width: 26rem) { .chart-axis[data-dense] .chart-tick[data-thin4] { visibility: hidden; } }
 
 /* ---------- donut ---------- */
 /* The ring and its legend, side by side, collapsing to stacked when the panel is narrow. The

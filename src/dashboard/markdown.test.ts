@@ -90,3 +90,21 @@ test("the shipped prompt and every skill render to balanced markup", async () =>
     assert.doesNotMatch(html, /<script|onerror=|javascript:/i, `${file.pathname}`);
   }
 });
+
+// A fence opened at the END of a line is not a fence, so its closing ``` two lines later opens
+// one instead — and that block ran to the next bare fence 120 lines down. Live on /prompt,
+// 2026-09-28: `### Loki — LogQL Patterns` and every rule under it rendered as one monospace
+// block, 9133px wide on a phone. A section heading can only be inside a code block by accident.
+test("no code block in a shipped prompt has swallowed a section heading", async () => {
+  const dir = new URL("../../prompts/", import.meta.url);
+  const files = [new URL("system.md", dir)];
+  for (const f of await readdir(new URL("skills/", dir))) {
+    if (f.endsWith(".md")) files.push(new URL(`skills/${f}`, dir));
+  }
+  for (const file of files) {
+    const html = renderMarkdown(await readFile(file, "utf8"));
+    for (const [, body] of html.matchAll(/<pre class="md-code"><code[^>]*>([\s\S]*?)<\/code><\/pre>/g)) {
+      assert.doesNotMatch(body!, /^#{2,6} \S/m, `${file.pathname.split("/").pop()}: a heading inside a code block`);
+    }
+  }
+});

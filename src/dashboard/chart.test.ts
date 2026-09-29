@@ -213,3 +213,24 @@ test("the donut's classes all exist in the stylesheet", () => {
     assert.ok(STYLES.includes(`.${cls}`), `.${cls} is emitted but never styled`);
   }
 });
+
+// A 30-day window is 31 points once empty days are drawn as zero (they used to be skipped, so
+// 09-04 sat beside 09-07 as if adjacent). 31 dates do not fit a desktop axis at full size:
+// every second label goes at every width, every fourth survives the narrow step, and the
+// newest period is never the one hidden.
+test("a dense series names every second period, and the newest always", () => {
+  const points = Array.from({ length: 31 }, (_, i) => ({ label: `d${i}`, value: i % 3 }));
+  const html = lineChart(points);
+  assert.match(html, /<div class="chart-axis" data-dense/);
+  const ticks = [...html.matchAll(/<span class="chart-tick"([^>]*)>(d\d+)<\/span>/g)];
+  assert.equal(ticks.length, 31);
+  const shownWide = ticks.filter(([, attrs]) => !attrs.includes("data-thin ") && !/data-thin(?!4)/.test(attrs));
+  assert.equal(shownWide.length, 16);
+  assert.equal(ticks.at(-1)![1], "", "the newest period carries no thinning mark");
+  const shownNarrow = ticks.filter(([, attrs]) => attrs === "");
+  assert.equal(shownNarrow.length, 8);
+});
+
+test("a short series is not marked dense", () => {
+  assert.doesNotMatch(lineChart([{ label: "a", value: 1 }, { label: "b", value: 2 }]), /data-dense|data-thin4/);
+});

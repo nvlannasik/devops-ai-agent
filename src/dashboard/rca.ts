@@ -266,6 +266,24 @@ export function inlineMrkdwn(raw: string): string {
     .join("");
 }
 
+/**
+ * One line for an incident LIST, as HTML. `root_cause` has been a numbered causal chain since
+ * 2026-09-02, and the lists printed it whole — every step, every citation, every mrkdwn marker,
+ * escaped into one 300px row. A list row wants the symptom: step 1, without its number, its
+ * label or its `— _tool_ `ns/res`` citation. Prose from before the chain is kept whole; the
+ * stylesheet clamps both to two lines.
+ */
+export function incidentSummary(rootCause: string): string {
+  const text = rootCause.trim();
+  if (!/^1\.\s/.test(text)) return inlineMrkdwn(text);
+  const step = text
+    .split(/\n|\s(?=\d+\.\s)/)[0]!
+    .replace(/^1\.\s*/, "")
+    .replace(/^\*?(?:Symptom|Because):\*?\s*/i, "")
+    .replace(/\s+[—–]\s+_[^\n]*$/, "");
+  return inlineMrkdwn(step.trim());
+}
+
 // The italic rule is bounded on both sides on purpose. Half the identifiers on this page are
 // snake_case, and an unbounded /_(.+?)_/ turns `k8s_list_pods` into k8s<em>list</em>pods.
 // Requiring whitespace or an opening bracket before the marker, and whitespace, punctuation

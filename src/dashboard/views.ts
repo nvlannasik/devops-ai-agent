@@ -1,5 +1,5 @@
 import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
-import { renderRca } from "./rca.js";
+import { incidentSummary, renderRca } from "./rca.js";
 import { donutChart, lineChart } from "./chart.js";
 import { STYLES } from "./styles.js";
 import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
@@ -501,7 +501,7 @@ function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date = new D
       (r) => `<tr role="row"${toneAttr(r.severity)}>
       <td role="cell" class="when">${timeTag(r.created_at, now)}</td>
       <td role="cell" class="primary"><a href="/incidents/${esc(r.id)}">${breakable(r.alertname)}</a>${
-        r.root_cause ? `<div class="sub">${esc(r.root_cause)}</div>` : ""
+        r.root_cause ? `<div class="sub summary">${incidentSummary(r.root_cause)}</div>` : ""
       }</td>
       <td role="cell" class="ns mono" translate="no">${esc(r.namespace ?? "—")}</td>
       <td role="cell" class="sev">${severityBadge(r.severity)}</td>
@@ -684,7 +684,7 @@ export function overviewPage(
          },
          {
            icon: ICON.wrench, label: "Remediation verified", value: fmtPct(recovered, verdicts),
-           sub: `${fmtInt(o.remediationSucceeded)} of ${fmtInt(remediationTotal)} calls succeeded`,
+           sub: `${fmtInt(recovered)} of ${fmtInt(verdicts)} recovered · ${fmtInt(o.remediationSucceeded)} of ${fmtInt(remediationTotal)} calls succeeded`,
            // A single remediation that left the workload worse outranks whatever the percentage
            // says. The tone is what makes the tile impossible to skim past; the count is in the
            // outcomes panel below.
@@ -1336,19 +1336,27 @@ function skillRows(skills: ContextView["skills"]): string {
   // running agent always has skills. An "empty" table here would be a state the process cannot
   // reach — do not add one later.
   return table(
-    headers("Skill", "When", "Size", "Description"),
+    headers("Skill", "When", "Size"),
     skills
       .map((s) =>
         `<tr role="row">` +
         // The name is the link, not a "view" column: it is what the reader is already looking
         // at, and a row whose target is named twice reads as two destinations. `skillHref`
         // encodes because nothing here may assume the loader's name rule still holds.
-        cell("Skill", `<a href="${esc(skillHref(s.name))}"><code translate="no">${esc(s.name)}</code></a>`, "primary") +
+        // The description rides under the name, the way an incident's summary rides under its
+        // alert. As a fourth column it was the one a person reads and the one the table cut off:
+        // the `when` regexes are long unbroken tokens, they took the width, and the description
+        // sat past the frame's right edge behind a scroll nothing pointed at (2026-09-28).
+        cell(
+          "Skill",
+          `<a href="${esc(skillHref(s.name))}"><code translate="no">${esc(s.name)}</code></a>` +
+            `<div class="sub">${esc(s.description)}</div>`,
+          "primary"
+        ) +
         cell("When", s.when === "always"
           ? `<span class="badge">ALWAYS</span>`
-          : `<code translate="no">${esc(s.when)}</code>`) +
-        cell("Size", `${fmtInt(s.chars)} chars`) +
-        cell("Description", esc(s.description)) +
+          : `<code translate="no">${esc(s.when)}</code>`, "trigger") +
+        cell("Size", `${fmtInt(s.chars)} chars`, "size") +
         `</tr>`
       )
       .join(""),
