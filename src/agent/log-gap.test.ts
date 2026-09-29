@@ -155,3 +155,21 @@ test("the shipped rca-format skill alone does not demand logs, whatever tool nam
   // A diagnostic playbook that reads logs still arms it, with the format skill beside it.
   assert.equal(demandsLogs([skill("crashloopbackoff"), format]), true);
 });
+
+// Bench C03, 2026-09-29, attempt 3: the model sent loki_query_range `start`/`end` as epoch numbers,
+// the MCP SDK refused the input with a 435-char zod report, and that report counted as "saw log
+// lines" — length was the only test. The log-gap gate went silent and capConfidence let
+// "Confidence: High" stand on an answer that itself said no logs were retrieved.
+test("a failed log call is not log lines, however long its error", async () => {
+  const { returnedLogLines } = await import("./index.js");
+  const zod =
+    'MCP error -32602: Input validation error: Invalid arguments for tool loki_query_range: [\n  {\n    "code": "invalid_type",\n' +
+    '    "expected": "string",\n    "received": "number",\n    "path": [\n      "start"\n    ],\n    "message": "Expected string, received number"\n  },\n' +
+    '  {\n    "code": "invalid_type",\n    "expected": "string",\n    "received": "number",\n    "path": [\n      "end"\n    ],\n    "message": "Expected string, received number"\n  }\n]';
+  const upstream = "Error: Failed to get logs for pod settlement-worker-55f4d46d77-4wzdr: " + "previous terminated container \"worker\" not found ".repeat(4);
+  assert.ok(zod.length >= 200 && upstream.length >= 200, "the fixtures must clear the length threshold, or this proves nothing");
+  assert.equal(returnedLogLines(zod), false, "SDK input rejection");
+  assert.equal(returnedLogLines(upstream), false, "MCP server Error:");
+  assert.equal(returnedLogLines(`[repeat call] You already ran this exact tool.\n\n${upstream}`), false, "a memoised failure");
+  assert.equal(returnedLogLines('{"logs":"' + "2026-09-29T03:01:16Z worker starting batch 42\\n".repeat(6) + '"}'), true, "real lines still count");
+});

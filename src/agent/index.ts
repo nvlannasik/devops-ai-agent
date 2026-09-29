@@ -158,9 +158,17 @@ const LOG_RESULT_MIN_CHARS = 200;
 // regex rather than JSON.parse, because the injection frame can append text after the JSON.
 const NO_LOG_LINES = /"noLogLines"\s*:\s*true/;
 
+// An error is not a log, and both ways a failed call reaches here open with a marker: the MCP
+// server's `Error: …` and the SDK's `MCP error -32602: …` for an input the schema refused. Either
+// clears LOG_RESULT_MIN_CHARS easily — a zod rejection of loki `start`/`end` sent as numbers is 435
+// chars (bench C03, 2026-09-29) — and counted as "saw log lines": the log-gap gate went silent and
+// capConfidence passed a High the answer itself said the logs could not support. A memoised
+// failure arrives behind REPEAT_NOTICE, hence the optional first paragraph.
+const TOOL_ERROR = /^(?:\[repeat call\][^\n]*\n\n)?\s*(?:Error:|MCP error\b)/;
+
 /** Did a log tool's result actually carry log lines? Exported for the test. */
 export const returnedLogLines = (content: string): boolean =>
-  content.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(content);
+  content.length >= LOG_RESULT_MIN_CHARS && !NO_LOG_LINES.test(content) && !TOOL_ERROR.test(content);
 
 export const LOG_GAP_NOTICE =
   "[EVIDENCE GAP — the playbook for this alert reads the container's own logs, and no log query has " +
@@ -275,6 +283,30 @@ export function orphanDeleteRefusal(proposal: Proposal, observed: string | null)
  * Grounded means the workload's name appears in this thread's tool output, or in the alert labels
  * that named the subject in the first place. Fails open on a run with no thread at all.
  */
+// Kubernetes' pod-template-hash alphabet (rand.SafeEncodeString: no vowels, no 0, 1 or 3).
+const TEMPLATE_HASH = /-([bcdfghjklmnpqrstvwxz2456789]{6,10})$/;
+
+/**
+ * A ReplicaSet's name given as a Deployment's. The grounding rule below lets a Deployment be seen
+ * through its pods' prefix, and a ReplicaSet's name is a longer prefix of the same pods — so live on
+ * 2026-09-28 (A01) a resize of deployment `payments-api-c5ccb5f74` passed as grounded, and in an
+ * allowed namespace the dry-run would have answered it with NotFound. The pods tell them apart: a
+ * ReplicaSet's are its name plus FIVE characters; a Deployment's carry the template hash first.
+ */
+function replicaSetAsDeployment(proposal: Proposal, name: string, observed: string): string | null {
+  if (String(proposal.toolParams.kind ?? "deployment").toLowerCase() !== "deployment") return null;
+  const hash = TEMPLATE_HASH.exec(name);
+  if (!hash) return null;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`${escaped}-[a-z0-9]{5}(?![a-z0-9])`).test(observed)) return null;
+  const deployment = proposal.name.slice(0, -hash[0].length);
+  return (
+    `\`${proposal.namespace}/${proposal.name}\` is a ReplicaSet, not a Deployment: its pods are named ` +
+    `\`${proposal.name}-xxxxx\`, and \`-${hash[1]}\` is the pod template's hash. The Deployment is ` +
+    `\`${proposal.namespace}/${deployment}\` — a change aimed at the ReplicaSet's name finds nothing to patch.`
+  );
+}
+
 export function ungroundedTargetRefusal(
   proposal: Proposal,
   observed: string | null,
@@ -283,6 +315,8 @@ export function ungroundedTargetRefusal(
   if (observed === null) return null;
   const name = proposal.name.toLowerCase();
   if (!name) return null;
+  const replicaSet = replicaSetAsDeployment(proposal, name, observed.toLowerCase());
+  if (replicaSet) return replicaSet;
   if (observed.toLowerCase().includes(name)) return null;
   if (Object.values(labels).some((v) => typeof v === "string" && v.toLowerCase().includes(name))) return null;
   return (

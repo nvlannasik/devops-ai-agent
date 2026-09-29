@@ -66,6 +66,24 @@ test("a workload the tools returned, or the alert labels named, passes", () => {
   assert.equal(ungroundedTargetRefusal(restart("api-worker"), "api-worker-7d9f4c5b8-zx8k2  Running"), null);
 });
 
+// Live, 2026-09-28 (A01): the re-ask proposed a resize of deployment `payments-api-c5ccb5f74` —
+// the ReplicaSet. It passed because its name is the prefix of the pod `payments-api-c5ccb5f74-w46rd`,
+// the same rule that lets a Deployment be "seen" through its pods. In an allowed namespace that is a
+// card the dry-run answers with NotFound. The pod suffix decides: a ReplicaSet's pods are its name
+// plus FIVE characters; a Deployment's carry a template hash first.
+test("a ReplicaSet named as a Deployment is refused, and the Deployment is named instead", () => {
+  const pods = "payments-api-c5ccb5f74-w46rd   0/1   CrashLoopBackOff";
+  const refused = ungroundedTargetRefusal(restart("payments-api-c5ccb5f74"), pods) ?? "";
+  assert.match(refused, /ReplicaSet/);
+  assert.match(refused, /`bench-c06\/payments-api`/);
+  assert.equal(ungroundedTargetRefusal(restart("payments-api"), pods), null, "the Deployment itself still passes");
+  assert.equal(
+    ungroundedTargetRefusal(restart("svc-bcdfgh"), "svc-bcdfgh-7d9f8b6c5-x2x9k   Running"),
+    null,
+    "a Deployment whose own name ends in something hash-like has pods with a second hash"
+  );
+});
+
 test("with no thread to read, it refuses nothing", () => {
   assert.equal(ungroundedTargetRefusal(restart("bench-api"), null), null);
 });

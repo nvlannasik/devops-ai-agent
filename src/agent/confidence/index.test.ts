@@ -68,3 +68,14 @@ test("an answer with no confidence line at all is returned unchanged", () => {
   const plain = "No logs are available for that pod.";
   assert.deepEqual(capConfidence(plain, false), { text: plain, capped: false });
 });
+
+// Bench C03, 2026-09-29, attempt 1: `*📈 Confidence:* *High*` — the label's bold closes, the
+// value opens its own. The pattern allowed ONE marker between colon and word, so this parsed as
+// "unknown" and the cap never looked at it (nor did the bench's own check).
+test("a confidence value in its own bold is still read, and still capped", () => {
+  const rca = "• *Fact:* No logs were retrieved from the previous container instance\n*📈 Confidence:* *High* — two sources agree";
+  assert.equal(parseConfidence(rca), "high");
+  const { text, capped } = capConfidence(rca, false);
+  assert.equal(capped, true);
+  assert.match(text, /\*📈 Confidence:\* \*Medium\* — the answer states/);
+});

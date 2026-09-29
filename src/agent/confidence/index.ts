@@ -2,7 +2,10 @@ export type ConfidenceLevel = "high" | "medium" | "low" | "unknown";
 
 // matches the RCA output format: "*📈 Confidence:* `High`" or "Confidence Level: High"
 // anchored to the label so it won't match mid-sentence phrases like "does not indicate high confidence"
-const CONFIDENCE_PATTERN = /(?:📈\s*)?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*[`*]?\s*\[?(high|medium|low)\]?\b/i;
+// `(?:[`*]\s*){0,2}`, not one optional marker: "*📈 Confidence:* *High*" closes the label's bold and
+// opens the value's, and with room for only one it parsed as unknown — so the cap below never
+// saw it (bench C03, 2026-09-29).
+const CONFIDENCE_PATTERN = /(?:📈\s*)?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*(?:[`*]\s*){0,2}\[?(high|medium|low)\]?\b/i;
 
 export function parseConfidence(rcaText: string): ConfidenceLevel {
   const match = rcaText.match(CONFIDENCE_PATTERN);
@@ -48,7 +51,7 @@ const EVIDENCE_GAP: RegExp[] = [
  * SEVERITY_PATTERN). The rest of the line goes with it: the reasoning that argued for High does
  * not support Medium.
  */
-const HIGH_LINE = /^(.*?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*[`*]?\s*\[?)high(\]?[`*]?)[^\n]*$/im;
+const HIGH_LINE = /^(.*?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*(?:[`*]\s*){0,2}\[?)high(\]?[`*]?)[^\n]*$/im;
 
 const CAPPED_REASON = "the answer states the logs behind it were not available";
 
