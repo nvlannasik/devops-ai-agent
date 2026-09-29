@@ -104,12 +104,51 @@ export class ThreadQueue {
   }
 }
 
+/**
+ * The work this pod has ACCEPTED and not yet finished — queued behind a thread's earlier turn or
+ * running — so a shutdown can wait for it and name what it had to abandon.
+ *
+ * Live, 2026-09-29 07:00:44: a rollout's SIGTERM arrived mid-investigation ("unused resources for
+ * mongodb"); shutdown closed MCP under it and exited, and the user heard nothing until they typed
+ * "try again" 13 minutes later. An alert cut the same way never gets its RCA at all.
+ */
+export class InFlightWork<T> {
+  private readonly work = new Map<Promise<unknown>, T>();
+
+  track<R>(meta: T, p: Promise<R>): Promise<R> {
+    this.work.set(p, meta);
+    const settle = () => void this.work.delete(p);
+    p.then(settle, settle);
+    return p;
+  }
+
+  /** Waits up to `budgetMs` for tracked work to settle; returns what is still running. */
+  async drain(budgetMs: number): Promise<T[]> {
+    if (this.work.size === 0) return [];
+    let timer: NodeJS.Timeout | undefined;
+    const budget = new Promise<void>((resolve) => (timer = setTimeout(resolve, budgetMs)));
+    await Promise.race([Promise.allSettled([...this.work.keys()]), budget]);
+    clearTimeout(timer);
+    return [...this.work.values()];
+  }
+}
+
+type Accepted = { channel: string; threadTs: string; kind: "mention" | "alert" };
+
+// Said in the thread that will otherwise never hear back. Nothing ran against the cluster that a
+// re-run would repeat — investigations are read-only and remediation needs a human's click.
+const RESTART_NOTICE: Record<Accepted["kind"], string> = {
+  mention: "⚠️ I restarted before I could answer this, so nothing was posted for it. Mention me again to re-run it.",
+  alert: "⚠️ I restarted before this investigation finished, so no RCA was posted. Mention me in this thread to investigate it again.",
+};
+
 export class SlackApp {
   private app: App;
   private agent: DevOpsAgent;
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private readonly threadQueue = new ThreadQueue();
+  private readonly inFlight = new InFlightWork<Accepted>();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -260,7 +299,7 @@ export class SlackApp {
     // the next turn in the same conversation starts, and previousReply must be read after
     // the previous turn finished writing it. The semaphore is acquired INSIDE, so waiting
     // for our turn never holds a global investigation slot.
-    await this.threadQueue.run(threadId, async () => {
+    await this.inFlight.track({ channel: event.channel, threadTs: threadId, kind: "mention" }, this.threadQueue.run(threadId, async () => {
       await this.semaphore.acquire();
       // Captured before the investigation appends this turn's own messages: a bare "ya" is an
       // approval only if the agent put a change on the table in the turn before it.
@@ -400,7 +439,7 @@ export class SlackApp {
       } finally {
         this.semaphore.release();
       }
-    });
+    }));
   }
 
   /**
@@ -611,8 +650,11 @@ export class SlackApp {
     );
     // Same queue as the mentions: a repeat alert on a thread someone is already talking in
     // must not interleave with that conversation.
-    void this.threadQueue.run(threadId, () =>
-      this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs)
+    void this.inFlight.track(
+      { channel, threadTs: threadId, kind: "alert" },
+      this.threadQueue.run(threadId, () =>
+        this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs)
+      )
     );
   }
 
@@ -1065,6 +1107,26 @@ export class SlackApp {
       logger.info(`Slack app started in HTTP Mode on port ${config.port}`);
     }
     this.startVerificationPoller();
+  }
+
+  /**
+   * Waits up to `budgetMs` for the investigations this pod already accepted, then says so in every
+   * thread still waiting on one. Call after stop(), so nothing new arrives, and before
+   * agent.shutdown(), so the work still has its MCP and SQS clients while it finishes.
+   */
+  async drain(budgetMs: number): Promise<void> {
+    const cut = await this.inFlight.drain(budgetMs);
+    if (cut.length === 0) return;
+    // One notice per thread: a follow-up queued behind a running turn is cut with it.
+    const threads = new Map(cut.map((w) => [`${w.channel}/${w.threadTs}`, w]));
+    logger.warn(`[slack] shutting down with ${cut.length} investigation(s) unfinished — telling ${threads.size} thread(s)`);
+    await Promise.allSettled(
+      [...threads.values()].map((w) =>
+        this.app.client.chat
+          .postMessage({ channel: w.channel, thread_ts: w.threadTs, text: RESTART_NOTICE[w.kind] })
+          .catch((err) => logger.error(`[slack] restart notice not posted to ${w.threadTs}: ${errDetail(err)}`))
+      )
+    );
   }
 
   async stop(): Promise<void> {

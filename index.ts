@@ -3,6 +3,8 @@ import { SlackApp } from "./src/app/index.js";
 import { DashboardServer } from "./src/dashboard/server.js";
 import logger, { errDetail } from "./src/utils/logger/index.js";
 
+const SHUTDOWN_DRAIN_MS = 40_000;
+
 async function main() {
   try {
     // inside the try: the constructor validates config (e.g. the router's backend registry)
@@ -22,6 +24,10 @@ async function main() {
       // tab delay slack.stop() and agent.shutdown() past the grace period, so Slack kept
       // delivering to a terminating pod and the SQS dispatcher never drained.
       await slack.stop();
+      // Nothing new arrives now; let what was already accepted finish, and name what cannot.
+      // Budget against the chart's terminationGracePeriodSeconds (60 for the agent): 40s here
+      // leaves the notices, agent.shutdown() and the dashboard 20s before the SIGKILL.
+      await slack.drain(SHUTDOWN_DRAIN_MS);
       await agent.shutdown();
       await dashboard.stop();
       process.exit(0);
