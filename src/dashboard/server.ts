@@ -5,7 +5,8 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, contextPage, detailPage, errorPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
+import { benchPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
+import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
 import { buildContextView, type ContextView, type SkillView } from "./context.js";
@@ -23,7 +24,9 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "login" | "logout" }
+  | { kind: "harnessGate"; name: string }
+  | { kind: "trace"; threadTs: string }
   | { kind: "asset"; path: string }
   | { kind: "detail"; id: number }
   | { kind: "skill"; name: string };
@@ -37,6 +40,14 @@ export function matchRoute(pathname: string): Route {
   if (p === "/incidents") return { kind: "list" };
   if (p === "/topology") return { kind: "topology" };
   if (p === "/bench") return { kind: "bench" };
+  if (p === "/harness") return { kind: "harness" };
+  // A gate is routed only by its exact name from GATE_NAMES — the list is closed, so nothing a URL
+  // says reaches a query unless it is one of those strings.
+  const g = /^\/harness\/([a-z-]{1,40})$/.exec(p);
+  if (g) return (GATE_NAMES as readonly string[]).includes(g[1]!) ? { kind: "harnessGate", name: g[1]! } : { kind: "notfound" };
+  // A Slack ts and only that. Delegate sub-threads are included by the query, never addressed.
+  const tr = /^\/api\/trace\/(\d{1,12}\.\d{1,9})$/.exec(p);
+  if (tr) return { kind: "trace", threadTs: tr[1]! };
   // The dashboard's only static assets: the topology map's bundle and stylesheet. The path is
   // NOT resolved against a directory — it is a key into a Map of the two files read at boot —
   // so path traversal has nothing to traverse. An unknown key falls through to 404 below.
@@ -478,6 +489,21 @@ export class DashboardServer {
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
           return send(200, detailPage(d, now, open));
+        }
+        case "harness": {
+          const [v, open] = await Promise.all([this.queries.harness(), this.openCount()]);
+          return send(200, harnessPage(v, open));
+        }
+        case "harnessGate": {
+          const [d, open] = await Promise.all([this.queries.harnessGate(route.name), this.openCount()]);
+          return send(200, harnessGatePage(route.name, d, new Date(), open));
+        }
+        // The export source for replay (spec §6/§8.2). Same password as every page here.
+        case "trace": {
+          const events = await this.queries.trace(route.threadTs);
+          const json = "application/json; charset=utf-8";
+          if (events.length === 0) return send(404, JSON.stringify({ error: "no trace recorded for this thread" }), json);
+          return send(200, JSON.stringify({ threadTs: route.threadTs, events }), json);
         }
       }
     } catch (err) {

@@ -534,3 +534,14 @@ test("/context carries the rail badge like every other page", async () => {
     }
   });
 });
+
+// Harness trace routes: only a known gate name and a Slack ts shape reach a query.
+test("harness routes: only a known gate and a Slack ts shape are routed", () => {
+  assert.deepEqual(matchRoute("/harness"), { kind: "harness" });
+  assert.deepEqual(matchRoute("/harness/log-gap"), { kind: "harnessGate", name: "log-gap" });
+  assert.deepEqual(matchRoute("/harness/not-a-gate"), { kind: "notfound" });
+  assert.deepEqual(matchRoute("/harness/log-gap%27%3B"), { kind: "notfound" });
+  assert.deepEqual(matchRoute("/api/trace/1790690405.435999"), { kind: "trace", threadTs: "1790690405.435999" });
+  assert.deepEqual(matchRoute("/api/trace/1790690405.435999%2Fsub-1"), { kind: "notfound" });
+  assert.deepEqual(matchRoute("/api/trace/abc"), { kind: "notfound" });
+});

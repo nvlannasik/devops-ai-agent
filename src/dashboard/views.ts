@@ -6,7 +6,7 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  FeedbackRow, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens,
+  FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens,
 } from "./queries.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
@@ -57,6 +57,8 @@ const ICON = {
   // named, the speech bubble is on-call, the chip is the model — because a reader who learns
   // one on the overview should not have to relearn it on the incident page.
   bench: ico(`<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/>`),
+  // Three gates on a line: the code around the model, deciding.
+  harness: ico(`<path d="M3 12h18"/><path d="M7 8v8"/><path d="M12 8v8"/><path d="M17 8v8"/>`),
   chip: ico(
     `<rect x="7" y="7" width="10" height="10" rx="1.7"/>` +
       `<path d="M10 3.2v3.4"/><path d="M14 3.2v3.4"/><path d="M10 17.4v3.4"/><path d="M14 17.4v3.4"/>` +
@@ -105,6 +107,7 @@ const NAV_GROUPS = [
       { href: "/topology", label: "Topology", icon: ICON.topology },
       { href: "/context", label: "Context", icon: ICON.context },
       { href: "/bench", label: "Benchmark", icon: ICON.bench },
+      { href: "/harness", label: "Harness", icon: ICON.harness },
     ],
   },
 ];
@@ -973,6 +976,8 @@ export function detailPage(
     incident: IncidentDetail;
     remediations: RemediationRow[];
     feedback: FeedbackRow[];
+    /** The run's trace (agent/trace). Absent or empty for incidents older than the recorder. */
+    timeline?: TimelineEvent[];
   },
   now: Date = new Date(),
   openIncidents?: number
@@ -1101,8 +1106,160 @@ export function detailPage(
      ${remediations}
      ${section(ICON.speech, "On-call feedback")}
      ${feedback}
+     ${timelineSection(d.timeline ?? [])}
      </div>`,
     { current: "/incidents", openIncidents }
+  );
+}
+
+// --- Harness (agent/trace, migrations/011) ---
+
+/** The three ways a nudge ends — counted against the nudge, never as fires of their own. */
+const NUDGE_FATES = ["accepted", "restored", "kept-earlier"] as const;
+const isFate = (o: string): boolean => (NUDGE_FATES as readonly string[]).includes(o);
+
+/**
+ * What the harness did on this incident's thread, in order. Tool results are their size and
+ * first line only — a raw result can be 512K, and the full trace is one request away at
+ * /api/trace/<thread>. A delegate's events say which delegate.
+ */
+function timelineSection(all: TimelineEvent[]): string {
+  // start/end bracket a run and carry nothing a reader acts on; on a phone they were a third of
+  // the section's height.
+  const events = all.filter((e) => e.kind !== "start" && e.kind !== "end");
+  if (events.length === 0) return "";
+  const what = (e: TimelineEvent): string => {
+    if (e.kind === "tool") {
+      const size = e.size === null ? `<span class="meta">error</span>` : `<span class="meta">${fmtInt(e.size)} chars</span>`;
+      const first = e.head ? `<div class="meta">${esc(e.head.split("\n")[0]!.slice(0, 160))}</div>` : "";
+      return `<code translate="no">${esc(e.name ?? "")}</code> ${size}${first}`;
+    }
+    if (e.kind === "gate") {
+      return (
+        `<code translate="no">${esc(e.name ?? "")}</code> → <strong>${esc(e.outcome ?? "")}</strong>` +
+        (e.detail ? ` <span class="meta">${esc(e.detail)}</span>` : "")
+      );
+    }
+    return e.name ? `<span class="meta">${esc(e.name)}</span>` : "";
+  };
+  const rows = events
+    .map(
+      (e) =>
+        `<tr role="row">` +
+        cell("Run", `<span class="meta">${esc(e.threadTs.includes("/") ? e.threadTs.split("/")[1]! : "main")}</span>`) +
+        cell("Event", esc(e.kind)) +
+        cell("What", what(e)) +
+        `</tr>`
+    )
+    .join("");
+  return `${section(ICON.harness, "What the harness did", '<span class="meta">from the investigation trace</span>')}
+    ${table(headers("Run", "Event", "What"), rows, "pairs")}`;
+}
+
+export function harnessPage(v: HarnessView, openIncidents?: number): string {
+  const byGate = new Map<string, GateStat[]>();
+  for (const s of v.stats) byGate.set(s.name, [...(byGate.get(s.name) ?? []), s]);
+  const fires = (ss: GateStat[], k: "d7" | "d30") => ss.filter((s) => !isFate(s.outcome)).reduce((n, s) => n + s[k], 0);
+  const rows = [...byGate]
+    .sort((a, b) => fires(b[1], "d30") - fires(a[1], "d30"))
+    .map(
+      ([name, ss]) =>
+        `<tr role="row">` +
+        cell("Gate", `<a href="/harness/${esc(name)}"><code translate="no">${esc(name)}</code></a>`, "primary") +
+        cell("7 days", fmtInt(fires(ss, "d7")), "num") +
+        cell("30 days", fmtInt(fires(ss, "d30")), "num") +
+        // A ratio, not a percent: repeat-call fires several times in one investigation, and "290%"
+        // read as a broken number on the first render.
+        cell("Per investigation", v.runs30 > 0 ? `${(fires(ss, "d30") / v.runs30).toFixed(1)}×` : "—", "num") +
+        cell(
+          "Outcomes (30d)",
+          ss
+            .filter((s) => !isFate(s.outcome))
+            .map((s) => `${esc(s.outcome)} <span class="meta">${fmtInt(s.d30)}</span>`)
+            .join(" · ")
+        ) +
+        `</tr>`
+    )
+    .join("");
+  const fateRows = [...byGate]
+    .filter(([, ss]) => ss.some((s) => s.outcome === "nudge"))
+    .map(([name, ss]) => {
+      const n = (o: string) => ss.find((s) => s.outcome === o)?.d30 ?? 0;
+      const nudges = n("nudge");
+      return (
+        `<tr role="row">` +
+        cell("Gate", `<code translate="no">${esc(name)}</code>`, "primary") +
+        cell("Nudges", fmtInt(nudges), "num") +
+        NUDGE_FATES.map((f) => cell(f, nudges > 0 ? `${fmtInt(n(f))} <span class="meta">${fmtPct(n(f), nudges)}</span>` : "—", "num")).join("") +
+        `</tr>`
+      );
+    })
+    .join("");
+  const body =
+    v.stats.length === 0
+      ? empty(
+          "No gate events recorded yet.",
+          "Every investigation since the trace recorder shipped writes them; the first alert after a deploy fills this page.",
+          ICON.harness
+        )
+      : `${section(ICON.harness, "Gates", '<span class="meta">most active first · production only</span>')}
+         ${table(headers("Gate", ["7 days", "num"], ["30 days", "num"], ["Per investigation", "num"], "Outcomes (30d)"), rows, "pairs")}
+         ${
+           fateRows
+             ? `${section(ICON.overview, "What each nudge led to", '<span class="meta">30 days</span>')}
+         <p class="meta">A nudge buys the model one more round. <strong>accepted</strong>: its answer was used.
+           <strong>restored</strong>: the round fetched nothing and the earlier answer was kept.
+           <strong>kept-earlier</strong>: the round made the answer worse and was thrown away — a gate whose
+           nudges mostly end here costs more than it buys.</p>
+         ${table(headers("Gate", ["Nudges", "num"], ...NUDGE_FATES.map((f) => [f, "num"] as [string, string])), fateRows, "pairs")}`
+             : ""
+         }`;
+  return layout(
+    "Harness",
+    `<div class="doc">
+     <p class="eyebrow">Agent</p>
+     <h1>Harness</h1>
+     <p class="meta">What the code around the model decided: every nudge, refusal, cap and drop, read from the
+       investigation trace. ${fmtInt(v.runs7)} investigations in the last 7 days, ${fmtInt(v.runs30)} in 30.</p>
+     ${body}
+     </div>`,
+    { current: "/harness", openIncidents }
+  );
+}
+
+export function harnessGatePage(name: string, d: GateDrill, now: Date, openIncidents?: number): string {
+  const rows = d.events
+    .map(
+      (e) =>
+        `<tr role="row">` +
+        cell("When", timeTag(e.createdAt, now), "when") +
+        cell("Outcome", `<code translate="no">${esc(e.outcome)}</code>`) +
+        cell("Detail", e.detail ? esc(e.detail) : `<span class="meta">—</span>`) +
+        cell(
+          "Thread",
+          e.incidentId !== null
+            ? `<a href="/incidents/${e.incidentId}">Incident ${e.incidentId}</a>`
+            : `<span class="meta" translate="no">${esc(e.threadTs)}</span>`
+        ) +
+        `</tr>`
+    )
+    .join("");
+  const total = d.daily.reduce((n, p) => n + p.n, 0);
+  return layout(
+    name,
+    `<div class="doc">
+     <p class="eyebrow"><a href="/harness">Harness</a></p>
+     <h1><code translate="no">${esc(name)}</code></h1>
+     <p class="meta">${fmtInt(total)} time(s) in the last 30 days, production only.</p>
+     ${total > 0 ? lineChart(d.daily.map((p) => ({ label: p.day.slice(5), value: p.n })), { label: "Fires per day, last 30 days" }) : ""}
+     ${section(ICON.incidents, "Latest", '<span class="meta">newest first · 100 at most</span>')}
+     ${
+       rows
+         ? table(headers("When", "Outcome", "Detail", "Thread"), rows, "stack")
+         : empty("This gate has not fired in production yet.", "It will appear here the first time it does.", ICON.harness)
+     }
+     </div>`,
+    { current: "/harness", openIncidents }
   );
 }
 

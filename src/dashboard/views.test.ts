@@ -743,14 +743,14 @@ test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
   assert.equal(
-    icons.length, 9,
-    "the drawer's two states, the brand mark, five destinations and the sign-out button"
+    icons.length, 10,
+    "the drawer's two states, the brand mark, six destinations and the sign-out button"
   );
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
-  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 6);
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 7);
 });
 
 // ---------- section glyphs ----------
@@ -1920,8 +1920,8 @@ test("the rail groups its destinations, and each caption labels its own list", (
   const html = layout("Test", "<p>hi</p>", { current: "/" });
   assert.match(html, /<p class="rail-group" id="rail-g0">Monitor<\/p><ul aria-labelledby="rail-g0">/);
   assert.match(html, /<p class="rail-group" id="rail-g1">Agent<\/p><ul aria-labelledby="rail-g1">/);
-  // five destinations, and still exactly one marked
-  assert.equal([...html.matchAll(/<li><a href="/g)].length, 5);
+  // six destinations (Harness joined Agent), and still exactly one marked
+  assert.equal([...html.matchAll(/<li><a href="/g)].length, 6);
   assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
 });
 
@@ -2743,4 +2743,57 @@ test("the case-name column can shrink below its longest name", () => {
 // dashboard wrapped that way, and the cells' zero left padding existed solely to sit inside it.
 test("the benchmark tables are not double-boxed", () => {
   assert.doesNotMatch(benchPage([benchRun()]), /<div class="card">\s*<div class="table-wrap">/);
+});
+
+// --- Harness page (agent/trace) ---
+test("the harness page lists gates with outcomes and the nudge resolution split", async () => {
+  const { harnessPage } = await import("./views.js");
+  const html = harnessPage({
+    runs7: 4,
+    runs30: 9,
+    stats: [
+      { name: "log-gap", outcome: "nudge", d7: 2, d30: 5 },
+      { name: "log-gap", outcome: "accepted", d7: 1, d30: 3 },
+      { name: "log-gap", outcome: "kept-earlier", d7: 1, d30: 2 },
+      { name: "placeholder", outcome: "refused", d7: 3, d30: 3 },
+    ],
+  });
+  assert.match(html, /href="\/harness\/log-gap"/);
+  assert.match(html, /kept-earlier/);
+  assert.match(html, /<h1>Harness<\/h1>/);
+  // A ratio, never a percent over 100: a gate can fire several times in one investigation.
+  assert.match(html, /0\.6×/);
+  assert.doesNotMatch(html.slice(html.indexOf("<body")), /\d{3,}%/);
+  // The body only: the inline stylesheet's own comments use the word "undefined".
+  assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
+});
+
+test("an empty harness page says why it is empty", async () => {
+  const { harnessPage } = await import("./views.js");
+  assert.match(harnessPage({ runs7: 0, runs30: 0, stats: [] }), /No gate events recorded yet/);
+});
+
+test("a gate detail from the database is escaped on the drill-down", async () => {
+  const { harnessGatePage } = await import("./views.js");
+  const html = harnessGatePage(
+    "log-gap",
+    { daily: [], events: [{ threadTs: "1.1", outcome: "nudge", detail: "<script>x</script>", createdAt: new Date(), incidentId: 7 }] },
+    new Date()
+  );
+  assert.doesNotMatch(html, /<script>x/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /href="\/incidents\/7"/);
+});
+
+test("the incident page shows the trace timeline when there is one", () => {
+  const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "critical", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
+  const timeline = [
+    { id: 1, threadTs: "1.1", kind: "tool", name: "k8s_list_pods", outcome: null, detail: null, size: 809, head: '[{"name":"web-1"}]', createdAt: new Date() },
+    { id: 2, threadTs: "1.1/sub-1", kind: "gate", name: "log-gap", outcome: "nudge", detail: "after 1 tool round(s)", size: null, head: null, createdAt: new Date() },
+  ];
+  const html = detailPage({ incident, remediations: [], feedback: [], timeline });
+  assert.match(html, /What the harness did/);
+  assert.match(html, /log-gap/);
+  assert.match(html, /809 chars/);
+  assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /What the harness did/);
 });
