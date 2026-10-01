@@ -1561,6 +1561,7 @@ export class DevOpsAgent {
       const { text: rated, capped } = capConfidence(text, sawLogLines);
       if (capped) {
         logger.info(`[${threadId}] capped Confidence: High → Medium — the answer reports no logs`);
+        this.trace.gate(threadId, "confidence-cap", "capped");
       } else if (parseConfidence(text) === "high") {
         // Bench C03 attempt 1, 2026-09-24: every log result came back under LOG_RESULT_MIN_CHARS,
         // and the stored answer matches admitsLogGap when tested offline — both conditions looked
@@ -1571,12 +1572,16 @@ export class DevOpsAgent {
         logger.info(
           `[${threadId}] Confidence: High kept — sawLogLines=${sawLogLines} admitsLogGap=${admitsLogGap(text)}`
         );
+        this.trace.gate(threadId, "confidence-cap", "kept-high", `sawLogLines=${sawLogLines}`);
       }
       // A placeholder the model labelled instead of filling — see stripTemplateEcho. Done here
       // rather than in the Slack renderer: the same text reaches Postgres and the next
       // investigation's recall block, and "[Symptom]" is no more readable in either of those.
       const { text: filled, dropped } = stripTemplateEcho(rated);
-      if (dropped > 0) logger.info(`[${threadId}] dropped ${dropped} echoed template placeholder(s) from the answer`);
+      if (dropped > 0) {
+        logger.info(`[${threadId}] dropped ${dropped} echoed template placeholder(s) from the answer`);
+        this.trace.gate(threadId, "template-echo", "dropped", "", { count: dropped });
+      }
       // A `[system note]` the MODEL wrote — see stripFabricatedNote. Here rather than in the Slack
       // renderer for two reasons: the same text is what the proposal step reads as its evidence, and
       // a fabricated "already executed" is exactly what makes it answer {"action": null}; and it
@@ -1588,6 +1593,7 @@ export class DevOpsAgent {
         logger.warn(
           `[${threadId}] dropped ${notes} fabricated [system note] line(s) — the answer claimed an execution that never happened`
         );
+        this.trace.gate(threadId, "fabricated-note", "dropped", "", { count: notes });
       }
       // A Runbook command that would CHANGE something, or is not a command a human can run (our own
       // tool calls, 2026-09-29) — see agent/runbook. Warn, like the note above.
@@ -1597,10 +1603,12 @@ export class DevOpsAgent {
           `[${threadId}] dropped ${commands.length} Runbook line(s) that are not a read-only kubectl/helm/flux command: ` +
           truncate(commands.join(" | "), 300)
         );
+        this.trace.gate(threadId, "runbook", "dropped", truncate(commands.join(" | "), 300), { count: commands.length });
       }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
       const answer = stripOffer(readOnly);
+      if (answer !== readOnly) this.trace.gate(threadId, "offer", "stripped");
       this.trace.end(threadId, { answer, ms: durationMs, llmCalls: iterations, toolCalls: totalToolCalls });
       return answer;
     };
@@ -1638,6 +1646,7 @@ export class DevOpsAgent {
             `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
             `and ${toolRounds} tool rounds — forcing a final answer from the evidence gathered`
           );
+          this.trace.gate(threadId, "deadline", "forced");
         } else {
           // Nothing gathered, or the answer turn is already spent. Either way there is no
           // finding to salvage and the apology is the truthful reply.
@@ -1645,6 +1654,7 @@ export class DevOpsAgent {
             `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
             `(tool rounds: ${toolRounds}, answer turn ${toolsDisabled ? "already spent" : "not reachable"})`
           );
+          this.trace.gate(threadId, "deadline", "apology");
           return done("⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.");
         }
       }
@@ -1758,6 +1768,7 @@ export class DevOpsAgent {
             `[${threadId}] answered with zero tool calls — one more round to go and look` +
             (mode === "alert" ? "" : " (the answer presented tool output it never fetched)")
           );
+          this.trace.gate(threadId, "no-evidence", "nudge");
           await this.memory.append(threadId, {
             role: "user",
             content: mode === "alert" ? NO_EVIDENCE_NOTICE : FABRICATED_EVIDENCE_NOTICE,
@@ -1782,6 +1793,7 @@ export class DevOpsAgent {
             `[${threadId}] the extra round fetched nothing — keeping the pre-nudge answer ` +
             `(${preNudgeSummary.length} chars) over the retry's ${summary.length}`
           );
+          this.trace.resolveNudge(threadId, "restored");
           return done(preNudgeSummary);
         }
         if (gap === "nudge") {
@@ -1793,6 +1805,7 @@ export class DevOpsAgent {
             `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
             `[${skills.map((s) => s.name).join(", ")}] read logs — one more round`
           );
+          this.trace.gate(threadId, "log-gap", "nudge", `after ${toolRounds} tool round(s)`);
           await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
           continue;
         }
@@ -1801,6 +1814,8 @@ export class DevOpsAgent {
             `[${threadId}] the extra round replaced an RCA with something that is not one ` +
             `("${truncate(summary, 80)}") — keeping the RCA`
           );
+          this.trace.gate(threadId, "nudge-lost-rca", "kept", truncate(summary, 200));
+          this.trace.resolveNudge(threadId, "kept-earlier");
           return done(preNudgeSummary);
         }
         // Second gate, same hold slot: only one nudge may be outstanding, so this is reached only
@@ -1814,6 +1829,7 @@ export class DevOpsAgent {
             heldBy = "tools";
             toolRoundsAtNudge = toolRounds;
             logger.info(`[${threadId}] answer names \`${repo}\` only as the image that failed to pull — one more round for the tag that works`);
+            this.trace.gate(threadId, "image-gap", "nudge", repo);
             await this.memory.append(threadId, { role: "user", content: IMAGE_GAP_NOTICE });
             continue;
           }
@@ -1830,6 +1846,7 @@ export class DevOpsAgent {
             heldBy = "rca";
             toolRoundsAtNudge = toolRounds;
             logger.info(`[${threadId}] RCA is missing ${missing.join(", ")} — one more round to complete it`);
+            this.trace.gate(threadId, "rca-completeness", "nudge", missing.join(", "));
             await this.memory.append(threadId, { role: "user", content: rcaGapNotice(missing) });
             continue;
           }
@@ -1842,6 +1859,7 @@ export class DevOpsAgent {
             `[${threadId}] the completion round came back with more missing than it was given ` +
             `(${rcaGaps(summary).join(", ")}) — keeping the earlier answer`
           );
+          this.trace.resolveNudge(threadId, "kept-earlier");
           return done(preNudgeSummary);
         }
         return done(summary);
@@ -1897,6 +1915,7 @@ export class DevOpsAgent {
             if (drift.length > 0) {
               const scopeList = [...scopeNamespaces].join(", ");
               logger.info(`[${threadId}] blocked ${drift.length} out-of-scope tool call(s) — question scope is [${scopeList}]`);
+              this.trace.gate(threadId, "scope-lock", "refused", scopeList, { count: drift.length });
               refusals.push(
                 ...drift.map((t) => ({
                   type: "tool_result" as const,
@@ -1913,6 +1932,7 @@ export class DevOpsAgent {
           const logPods = new Set(logCalls.map((t) => (t.input as Record<string, unknown> | undefined)?.pod_name));
           if (logPods.size > MAX_LOG_FANOUT) {
             logger.info(`[${threadId}] log fan-out to ${logPods.size} pods blocked — steering to a confirmation question`);
+            this.trace.gate(threadId, "log-fanout", "refused", "", { pods: logPods.size });
             refusals.push(
               ...logCalls.map((t) => ({
                 type: "tool_result" as const,
@@ -1954,6 +1974,7 @@ export class DevOpsAgent {
               ? `[${threadId}] tool budget (${maxToolRounds} rounds) reached — forcing final answer`
               : `[${threadId}] iteration ceiling (${maxIterations}) reached after ${toolRounds} tool rounds — forcing final answer`
           );
+          this.trace.gate(threadId, notice === TOOL_BUDGET_NOTICE ? "tool-budget" : "iteration-ceiling", "forced");
         }
 
         await this.memory.append(threadId, { role: "user", content: trimmedResults });
@@ -1981,6 +2002,7 @@ export class DevOpsAgent {
     // reaching here means the model answered that turn with another tool_use instead of prose.
     // Nothing was posted to the thread, so don't tell the reader to review findings "above".
     logger.warn(`[${threadId}] Investigation hit max iterations (${maxIterations}) — model kept calling tools on its final, tool-free turn`);
+    this.trace.gate(threadId, "iteration-ceiling", "exhausted");
     return done("⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.");
   }
 
@@ -2014,6 +2036,7 @@ export class DevOpsAgent {
         }
         if (Date.now() >= cutoff) {
           logger.warn(`[${threadId}] delegate refused — less than the reserve left before the investigation deadline`);
+          this.trace.gate(threadId, "delegate", "refused");
           return block(
             call.id,
             "Error: not enough time left in this investigation's budget to delegate. Answer with the evidence already gathered."
@@ -2068,6 +2091,7 @@ export class DevOpsAgent {
       const { content: framed, hits } = flagInjection(raw, toolNames);
       if (hits.length > 0) {
         logger.warn(`[${threadId}] possible prompt injection in ${name} result [${hits.join(", ")}] — framed as data, not blocked`);
+        this.trace.gate(threadId, "injection", "framed", name ?? "", { hits });
       }
       return framed;
     };
@@ -2080,6 +2104,7 @@ export class DevOpsAgent {
         const def = defs.find((t) => t.name === name);
         if (def?.description.startsWith("[WRITE]")) {
           logger.warn(`[${threadId}] blocked direct write-tool call: ${name}`);
+          this.trace.gate(threadId, "write-blocked", "refused", name ?? "");
           return {
             type: "tool_result" as const,
             tool_use_id: id,
@@ -2089,6 +2114,7 @@ export class DevOpsAgent {
         const placeholder = placeholderIn(input);
         if (placeholder) {
           logger.warn(`[${threadId}] refused ${name}: placeholder ${placeholder} in its input`);
+          this.trace.gate(threadId, "placeholder", "refused", `${name}: ${placeholder}`);
           return { type: "tool_result" as const, tool_use_id: id, content: PLACEHOLDER_REFUSAL(placeholder, namespace) };
         }
         // Repeat suppression. The memo holds the PROMISE, not the settled value, so two
@@ -2104,6 +2130,7 @@ export class DevOpsAgent {
           try {
             const result = await cached.result;
             logger.info(`[${threadId}] ⟲ tool: ${name} repeat call — served from this investigation's memo (${result.length} chars), not re-run`);
+            this.trace.gate(threadId, "repeat-call", "memo", name ?? "");
             return { type: "tool_result" as const, tool_use_id: id, content: guard(REPEAT_NOTICE + result, name) };
           } catch {
             memo?.delete(key); // it failed; let this call have its own attempt
