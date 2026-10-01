@@ -1,0 +1,1435 @@
+{
+  "thread": "1790877718.653099",
+  "events": [
+    {
+      "thread_ts": "1790877718.653099",
+      "seq": 0,
+      "kind": "start",
+      "name": null,
+      "outcome": null,
+      "payload": {
+        "run": "30566e64-78a3-4756-a589-a11adfcea1d4",
+        "sha": "d0af98bc405220f44dcbd6420d13d9a67e1fb47d",
+        "opts": {
+          "mode": "conversation",
+          "depth": 0,
+          "trigger": null,
+          "namespace": null,
+          "maxIterations": null,
+          "maxToolRounds": 2
+        },
+        "issue": "[USER MESSAGE — conversation mode by default: answer directly in Slack mrkdwn. Do NOT use the RCA incident format unless this message explicitly asks to investigate an incident. If this is not about this cluster's workloads, observability data, incidents or deploys, decline in one line per Scope of Work and answer nothing else — do not debug or explain code.]\nwhat status right now?",
+        "phase": "investigate",
+        "tools": [
+          {
+            "name": "k8s_cluster_health",
+            "description": "Pod health across the WHOLE cluster in one call: scans every namespace and returns only what is wrong (CrashLoopBackOff, ImagePullBackOff, OOMKilled, Pending, not-ready) plus per-phase counts and how many pods/namespaces were actually scanned. USE THIS FIRST for any cluster-wide question — 'is anything broken', 'status check', 'cluster health', 'any pods down'. k8s_list_pods only sees ONE namespace, so answering those questions with it gives a partial answer that reads like a complete one. Pass namespace ONLY to narrow to a single namespace; omit it for the whole cluster. If scanned.complete is false the scan hit its ceiling — say so instead of reporting all-clear.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Optional — omit to scan the entire cluster (no default namespace)"
+                },
+                "restart_window_minutes": {
+                  "type": "number",
+                  "description": "How recent a restart still counts as flapping for a now-ready pod (default: 60)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_correlate_pods",
+            "description": "Do several broken pods share ONE cause? Diffs the failing pods against the HEALTHY pods in the same namespace and returns what the broken set shares that no healthy pod has — node, image, ConfigMap, Secret, PVC, ServiceAccount, env variable names. USE THIS whenever more than one pod is failing, BEFORE investigating them one by one: k8s_describe_pod on each and comparing the specs yourself is what turns one shared root cause into eight separate write-ups. Omit `pods` to take every not-ready pod in the namespace (the natural follow-up to k8s_cluster_health). Read `uniqueToBroken` FIRST — `sharedWithHealthy` is mostly noise, because pods of one Deployment share nearly everything. An empty `uniqueToBroken` is a real answer: it says a single shared cause is unlikely, so look at the node, a recent deploy, or an upstream dependency instead. The output is a LEAD, never a conclusion — confirm the shared attribute with its own tool call before naming it as the root cause.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace"
+              ],
+              "properties": {
+                "pods": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Pod names to treat as broken (default: every not-ready pod in the namespace)"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace holding the pods"
+                },
+                "label_selector": {
+                  "type": "string",
+                  "description": "Optional label selector to narrow which pods are considered at all"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_namespaces",
+            "description": "List all namespaces in the Kubernetes cluster",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_list_nodes",
+            "description": "List all nodes with status, roles, and resource capacity",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_list_pods",
+            "description": "List pods in ONE namespace. For 'is anything broken across the cluster' use k8s_cluster_health instead — this tool cannot see past a single namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                },
+                "label_selector": {
+                  "type": "string",
+                  "description": "Label selector (e.g. app=nginx)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_get_pod_logs",
+            "description": "Get logs from a pod container. Set `previous: true` to read the CRASHED/prior container instance (the current logs are the fresh restart — CrashLoop root cause is in the previous one). `since_seconds` limits to a recent window.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "pod_name"
+              ],
+              "properties": {
+                "pod_name": {
+                  "type": "string",
+                  "description": "Pod name"
+                },
+                "previous": {
+                  "type": "boolean",
+                  "description": "Logs from the previous (crashed) container instance (default: false)"
+                },
+                "container": {
+                  "type": "string",
+                  "description": "Container name. Optional: on a pod with several containers (a sidecar, a proxy, a log shipper) omit it and the tool reads the one that is failing — restarted, or not ready — and names it and the others in the result, so you can ask for a different one by name."
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                },
+                "tail_lines": {
+                  "type": "number",
+                  "description": "Number of lines from end (default: 100)"
+                },
+                "since_seconds": {
+                  "type": "number",
+                  "description": "Only logs from the last N seconds (optional)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_describe_pod",
+            "description": "Detailed status of ONE pod (the 'describe' view): per-container state incl. the exact termination/waiting reason (OOMKilled, exit code, CrashLoopBackOff, ImagePullBackOff), restart counts, pod conditions, QoS, configured requests/limits, node. Use this for crash/OOM/not-Ready RCA — it gives the ground-truth reason logs only hint at. (No CPU/mem usage — that's Prometheus.) For a pod stuck Terminating it also returns `deletionTimestamp`, `terminationGracePeriodSeconds` and `finalizers` — those three decide the cause, and they are absent on a pod that is not being deleted.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "pod_name"
+              ],
+              "properties": {
+                "pod_name": {
+                  "type": "string",
+                  "description": "Pod name"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_describe_node",
+            "description": "Detailed status of ONE node: conditions (Ready, MemoryPressure, DiskPressure, PIDPressure), taints, unschedulable flag, capacity vs allocatable, kubelet/OS version. Use for Pending pods / node-level incidents. (No live usage — that's Prometheus.)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Node name"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_get_endpoints",
+            "description": "Ready vs not-ready backend addresses (pods) behind a Service — answers 'does this Service have any ready endpoints?'. readyCount=0 explains 503 / connection-refused when the Service exists but has no healthy pods. Pass the Service name.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "service"
+              ],
+              "properties": {
+                "service": {
+                  "type": "string",
+                  "description": "Service name"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_deployments",
+            "description": "List deployments in a namespace, including each container's name and image (use this to answer image/tag questions)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_statefulsets",
+            "description": "List StatefulSets in a namespace, including each container's name and image",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_daemonsets",
+            "description": "List DaemonSets in a namespace, including each container's name and image",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_get_rollout_status",
+            "description": "Rollout progress of ONE Deployment/StatefulSet/DaemonSet: desired vs updated/ready/available/unavailable replicas, `complete` flag, and conditions (e.g. Progressing=False ProgressDeadlineExceeded). Use for 'deploy stuck / not rolling out'.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset",
+                    "daemonset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind (default: deployment)"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_replicasets",
+            "description": "List ReplicaSets in a namespace with owner Deployment + revision + desired/ready + each container's image — rollout history (which RS is active vs stale, failed old RS). The image a rollback should go back to is the `images` entry of the newest older revision that still has ready pods: read it here rather than guessing a tag.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_pvs",
+            "description": "List PersistentVolumes (cluster-scoped): phase (Bound/Available/Released/Failed), capacity, storageClass, reclaimPolicy, bound claim — for storage incidents",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_list_storageclasses",
+            "description": "List StorageClasses: provisioner, default flag, reclaim/binding mode — a PVC stuck Pending often means no default class or a broken provisioner",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_list_network_policies",
+            "description": "List NetworkPolicies in a namespace: podSelector, policyTypes, rule counts — for 'traffic blocked' investigations (a deny-all policy or missing allow rule)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_pdbs",
+            "description": "List PodDisruptionBudgets in a namespace: min/maxUnavailable + disruptionsAllowed — disruptionsAllowed=0 blocks node drain/eviction and can stall rollouts",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_get_sa_permissions",
+            "description": "What a ServiceAccount is allowed to do: its Role/ClusterRole bindings and the resolved rules (apiGroups/resources/verbs). Use for `forbidden` / permission-denied RCA — shows whether the SA is missing a needed permission.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "serviceaccount"
+              ],
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                },
+                "serviceaccount": {
+                  "type": "string",
+                  "description": "ServiceAccount name"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_jobs",
+            "description": "List Jobs in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_cronjobs",
+            "description": "List CronJobs in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_services",
+            "description": "List Services in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_ingresses",
+            "description": "List Ingresses in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_hpas",
+            "description": "List HorizontalPodAutoscalers in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_pvcs",
+            "description": "List PersistentVolumeClaims in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_resource_quotas",
+            "description": "List ResourceQuotas in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_events",
+            "description": "List events in a namespace, optionally filtered by time",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                },
+                "since_minutes": {
+                  "type": "number",
+                  "description": "Only return events from the last N minutes (optional)"
+                },
+                "field_selector": {
+                  "type": "string",
+                  "description": "Field selector (e.g. involvedObject.name=my-pod)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_crds",
+            "description": "List all CustomResourceDefinitions in the cluster (the types — use k8s_get_custom_resources for the objects)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_get_custom_resources",
+            "description": "Read custom resource OBJECTS of any CRD — e.g. Flux HelmRelease/Kustomization, cert-manager Certificate. Without `name`: compact list (name + Ready condition + message). With `name`: the full object (spec + status). Find group/version/plural via k8s_list_crds if unsure.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "group",
+                "version",
+                "plural"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Object name — omit to list"
+                },
+                "group": {
+                  "type": "string",
+                  "description": "API group, e.g. \"helm.toolkit.fluxcd.io\""
+                },
+                "plural": {
+                  "type": "string",
+                  "description": "Resource plural, e.g. \"helmreleases\""
+                },
+                "version": {
+                  "type": "string",
+                  "description": "API version, e.g. \"v2\""
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace — omit for cluster-scoped resources"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_find_by_name",
+            "description": "Find every object with this EXACT name across the kinds people name things by — Deployment, StatefulSet, DaemonSet, CronJob, Job, Pod, Service, Ingress, ConfigMap, Secret (name only), ServiceAccount, PersistentVolumeClaim — in one namespace or in all. Use it when you do not know what KIND a named object is, and before concluding that something does not exist: a lookup by a guessed kind comes back empty and reads exactly like absence. It says what a name IS, not whether it is unused — for a cleanup, k8s_find_unused_resources is still required. A name that is a namespace is reported as one. Each match carries its namespace and managedBy (flux / helm / none). Exact names only — it never suggests similar ones.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The exact object name"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace to search — omit to search every namespace"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_get_resource",
+            "description": "Get ANY Kubernetes resource by apiVersion + kind — the full object (spec + status) when `name` is given, or a compact list when it's omitted. Works for built-ins (apiVersion `v1`, `apps/v1`, `batch/v1`, `networking.k8s.io/v1`, …) AND custom resources. Use when there's no dedicated tool for the kind, or you need the raw object. Discover which apiVersions this cluster serves via k8s_list_api_resources.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "api_version",
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "Kind, e.g. \"Deployment\", \"Ingress\", \"Job\""
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Object name — omit to list"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace — omit for cluster-scoped"
+                },
+                "api_version": {
+                  "type": "string",
+                  "description": "apiVersion: \"v1\" for core, else \"<group>/<version>\" e.g. \"apps/v1\""
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_api_resources",
+            "description": "Discover which API groups/versions this cluster serves (like `kubectl api-resources`/`api-versions`): core v1 kinds + every group with its versions. Use to find the right apiVersion for k8s_get_resource. For CRD types and their plurals use k8s_list_crds.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_list_service_accounts",
+            "description": "List ServiceAccounts in a namespace",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_configmaps",
+            "description": "List ConfigMaps in a namespace with their keys and data",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_list_secrets",
+            "description": "List Secrets in a namespace (name and type only, values are not exposed)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace (default: default)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "prometheus_query",
+            "description": "Execute an instant PromQL query",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query"
+              ],
+              "properties": {
+                "time": {
+                  "type": "string",
+                  "description": "Evaluation timestamp (RFC3339 or Unix)"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "PromQL query expression"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "prometheus_query_range",
+            "description": "Execute a range PromQL query",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query",
+                "start",
+                "end",
+                "step"
+              ],
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time (RFC3339 or Unix)"
+                },
+                "step": {
+                  "type": "string",
+                  "description": "Resolution step (e.g. 15s, 1m)"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "PromQL query expression"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time (RFC3339 or Unix)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "prometheus_get_targets",
+            "description": "Get scrape targets and their health status",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "state": {
+                  "enum": [
+                    "active",
+                    "dropped",
+                    "any"
+                  ],
+                  "type": "string",
+                  "description": "Filter by state"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "prometheus_get_rules",
+            "description": "Get all alerting and recording rules",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "prometheus_get_metadata",
+            "description": "Get metric metadata (type, unit, help text)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "metric": {
+                  "type": "string",
+                  "description": "Metric name to filter (optional)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "prometheus_list_metric_names",
+            "description": "List all available metric names",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "alertmanager_get_alerts",
+            "description": "Get every alert Alertmanager is currently holding, in Alertmanager's own groups. This is the cluster-wide view of what is firing across ALL alert sources (Prometheus rules, log-based rules, anything else routed here) — use it to establish blast radius: is this incident isolated, or one symptom of something larger? Each alert is labelled with its status: active, silenced (a human muted the notification — the problem is still firing), or inhibited (suppressed by a higher-severity alert). Returns a summary with complete counts plus per-group detail.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "filter": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional label matchers, Alertmanager syntax, e.g. ['namespace=\"payments\"'] or ['severity=~\"critical|warning\"']. Omit to see the whole cluster — which is what blast radius needs."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_query",
+            "description": "Execute an instant LogQL query against Loki",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query"
+              ],
+              "properties": {
+                "time": {
+                  "type": "string",
+                  "description": "Evaluation timestamp (nanoseconds or RFC3339)"
+                },
+                "limit": {
+                  "type": "number",
+                  "description": "Max log lines (default: 100)"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "LogQL query (e.g. {app=\"nginx\"} |= \"error\")"
+                },
+                "direction": {
+                  "enum": [
+                    "forward",
+                    "backward"
+                  ],
+                  "type": "string",
+                  "description": "Log order (default: backward)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_query_range",
+            "description": "Query logs over a time range from Loki",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query",
+                "start",
+                "end"
+              ],
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time (RFC3339 or Unix nanoseconds)"
+                },
+                "limit": {
+                  "type": "number",
+                  "description": "Max log lines (default: 100)"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "LogQL query"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time (RFC3339 or Unix nanoseconds)"
+                },
+                "direction": {
+                  "enum": [
+                    "forward",
+                    "backward"
+                  ],
+                  "type": "string",
+                  "description": "Log order (default: backward)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_get_labels",
+            "description": "Get all label names available in Loki",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_get_label_values",
+            "description": "Get values for a specific label in Loki",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "label"
+              ],
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time"
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Label name (e.g. app, namespace, pod)"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_get_streams",
+            "description": "List active log streams matching a label selector",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query"
+              ],
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time"
+                },
+                "limit": {
+                  "type": "number",
+                  "description": "Max streams (default: 100)"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "Label selector (e.g. {app=\"nginx\"})"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "loki_get_stats",
+            "description": "Get ingestion statistics for a log stream (bytes, lines, chunks)",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "query"
+              ],
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "End time"
+                },
+                "query": {
+                  "type": "string",
+                  "description": "Label selector (e.g. {app=\"nginx\"})"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Start time"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "tracing_search",
+            "description": "Search distributed traces (Tempo/Jaeger). Find slow or failing requests by service, minimum duration, and time window. Returns trace summaries — use tracing_get_trace for span detail.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "description": "Window end — RFC3339 or Unix seconds (default: now)"
+                },
+                "limit": {
+                  "type": "number",
+                  "description": "Max traces returned (default: 20)"
+                },
+                "start": {
+                  "type": "string",
+                  "description": "Window start — RFC3339 or Unix seconds (default: 1h ago)"
+                },
+                "service": {
+                  "type": "string",
+                  "description": "Service name to filter by (REQUIRED for Jaeger backend, optional for Tempo)"
+                },
+                "minDurationMs": {
+                  "type": "number",
+                  "description": "Only traces slower than this many milliseconds"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "tracing_get_trace",
+            "description": "Get the full span tree for one trace by ID. Returns normalized spans (service, name, durationMs, parent, error) to pinpoint which span/service is slow or failing.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "traceId"
+              ],
+              "properties": {
+                "traceId": {
+                  "type": "string",
+                  "description": "Trace ID from tracing_search"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "tracing_list_services",
+            "description": "List service names known to the tracing backend (discovery before searching).",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [],
+              "properties": {}
+            }
+          },
+          {
+            "name": "k8s_find_unused_resources",
+            "description": "Orphaned/idle Kubernetes objects across the cluster in ONE call (the `kor` question): PVCs nothing mounts, Services with zero endpoint addresses, Deployments/StatefulSets scaled to 0, DaemonSets that match no node, and ConfigMaps/Secrets/ServiceAccounts nothing references. USE THIS for 'what can we clean up', 'unused resources', 'orphaned', 'idle', 'wasted', 'cost'. References are read from running pods AND every workload pod template, so a scaled-to-zero Deployment does NOT make its config look unused. Two more filters run on top: an object with an ownerReference is left out (its controller owns its lifecycle), and every surviving ConfigMap/Secret/PVC/ServiceAccount is cross-checked against EVERY custom resource in the cluster — so a ConfigMap an operator names in its CR spec is removed from the list, and `crossCheck.suppressed` says which CR saved it. ALWAYS read `crossCheck` and `note` before reporting: `crdsUnreadable` is non-empty when RBAC blocked some CRDs, and then the cross-check was PARTIAL — say so instead of calling the list verified. It stays a REVIEW list, not a delete list: an object read by name at runtime leaves no trace anywhere. Never propose deleting one without naming its owner. For sizing (requests/limits vs real usage) use k8s_recommend_resources instead — this tool reads no metrics.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "namespace": {
+                  "type": "string",
+                  "description": "Optional — omit to scan the whole cluster"
+                },
+                "cross_check_crds": {
+                  "type": "boolean",
+                  "description": "Cross-check candidates against every custom resource in the cluster (default: true). Turn off only if the scan is too slow — the result is then unverified against operators"
+                },
+                "include_system_namespaces": {
+                  "type": "boolean",
+                  "description": "Include kube-* namespaces (default: false — they are full of managed objects that only look unused)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_recommend_resources",
+            "description": "Right-sizing: compares each container's CONFIGURED requests/limits against its REAL usage from Prometheus and returns per-container recommendations plus the cluster's over-reserved CPU/memory. USE THIS for 'resource limits', 'requests', 'right-size', 'over-provisioned', 'how much does X actually use', and as the Short-term action in any OOMKilled / CPU-throttling / Pending-pod RCA — it produces the concrete number to change, so the recommendation is `512Mi -> 900Mi`, not 'consider raising the limit'. Flags: `oom_risk`, `cpu_throttled`, `cpu_under_provisioned`, `memory_under_provisioned`, `no_requests`, `over_provisioned`, `no_data`. Read `method` before quoting a number — it is a percentile heuristic over `window`, not a VPA verdict. Do NOT use it to find orphaned objects; that is k8s_find_unused_resources.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "properties": {
+                "window": {
+                  "type": "string",
+                  "description": "Lookback for the usage stats, e.g. 6h, 24h, 7d (default: 24h)"
+                },
+                "workload": {
+                  "type": "string",
+                  "description": "Optional Deployment/StatefulSet/DaemonSet name to narrow to"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Optional — omit for every non-kube-* namespace"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_rollout_restart",
+            "description": "[WRITE] Rolling-restart a Deployment/StatefulSet/DaemonSet (kubectl rollout restart equivalent). Only works in namespaces listed in ALLOWED_REMEDIATION_NAMESPACES. Call with dry_run=true first to validate the target without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset",
+                    "daemonset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_set_image",
+            "description": "[WRITE] Change one container's image on a Deployment/StatefulSet/DaemonSet (e.g. fix a nonexistent/broken image tag). Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true validates and reports current → new image without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name",
+                "kind",
+                "image"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset",
+                    "daemonset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "image": {
+                  "type": "string",
+                  "description": "Full new image reference (registry/repo:tag)"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "container": {
+                  "type": "string",
+                  "description": "Container name within the pod template. Optional — omit for single-container workloads (auto-resolved)"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_set_resources",
+            "description": "[WRITE] Update one container's resource requests/limits on a Deployment/StatefulSet/DaemonSet (e.g. raise the memory limit after OOMKilled). Only provided values are changed. Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true validates without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name",
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset",
+                    "daemonset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "container": {
+                  "type": "string",
+                  "description": "Container name within the pod template. Optional — omit for single-container workloads (auto-resolved)"
+                },
+                "cpu_limit": {
+                  "type": "string",
+                  "description": "K8s quantity, e.g. \"1\""
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                },
+                "cpu_request": {
+                  "type": "string",
+                  "description": "K8s quantity, e.g. \"250m\""
+                },
+                "memory_limit": {
+                  "type": "string",
+                  "description": "K8s quantity, e.g. \"1Gi\""
+                },
+                "memory_request": {
+                  "type": "string",
+                  "description": "K8s quantity, e.g. \"256Mi\""
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_scale",
+            "description": "[WRITE] Change the replica count of a Deployment/StatefulSet (DaemonSets have no replicas). Bounded by MAX_SCALE_DELTA. Scaling to zero is refused unless quarantine=true, which is only for a workload k8s_recommend_resources listed under idleWorkloads — a reversible alternative to deleting something that looks unused. Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true validates without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name",
+                "kind",
+                "replicas"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind (no daemonset)"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "replicas": {
+                  "type": "number",
+                  "description": "Target replica count (>= 1, or 0 with quarantine=true)"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                },
+                "quarantine": {
+                  "type": "boolean",
+                  "description": "Allow replicas=0 as a reversible quarantine of a workload measured idle over >=24h. Undo by scaling back to the original count. Never set this to retire a workload you have not measured."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_delete_pod",
+            "description": "[WRITE] Delete ONE stuck/wedged pod so its controller recreates it fresh (same spec). Refused for pods without a recreating controller (ReplicaSet/StatefulSet/DaemonSet) — no replacement = outage. GitOps-safe (like rollout_restart). Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true validates the target and reports the owning controller without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "pod"
+              ],
+              "properties": {
+                "pod": {
+                  "type": "string",
+                  "description": "Exact pod name (not the workload name)"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "k8s_delete_orphan",
+            "description": "[WRITE] Delete ONE abandoned object that nothing declares — a ConfigMap, Service, ServiceAccount, or a Deployment/StatefulSet already at 0 replicas. Only for objects k8s_find_unused_resources listed under `orphanKeys` (managedBy: none). REFUSED when anything declares it (Flux/Helm — remove it from the GitOps repo instead), when an ownerReference explains it, or when a workload still runs replicas. There is no minimum age on this server right now, so do not refuse one for being new — but state how old it is, because age is the only evidence of abandonment there is. Secrets and PersistentVolumeClaims are NOT supported and never will be: a Secret's backup is its credentials and a PVC's manifest is not its data. Returns `backupManifest` — the object as `kubectl apply` takes it back, captured immediately before deletion. That is the entire undo, so store it. Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true returns the manifest and every refusal without deleting anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name",
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "configmap",
+                    "service",
+                    "serviceaccount",
+                    "deployment",
+                    "statefulset"
+                  ],
+                  "type": "string",
+                  "description": "Object kind. No secret, no persistentvolumeclaim — neither can be restored from a manifest."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "flux_reconcile",
+            "description": "[WRITE] Force Flux to re-apply the GitOps repo's declared state for a workload's HelmRelease (flux reconcile helmrelease --force equivalent), reverting changes made directly in the cluster. Use when the cluster has DRIFTED from Git (someone patched it outside GitOps) — it restores the declared state, it never introduces a new one. Refused for workloads not managed by a Flux HelmRelease. Only in ALLOWED_REMEDIATION_NAMESPACES. dry_run=true validates without changing anything.",
+            "inputSchema": {
+              "type": "object",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "required": [
+                "namespace",
+                "name"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "deployment",
+                    "statefulset",
+                    "daemonset"
+                  ],
+                  "type": "string",
+                  "description": "Workload kind"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Workload name"
+                },
+                "dry_run": {
+                  "type": "boolean",
+                  "description": "Server-side dry run: validate only, change nothing"
+                },
+                "namespace": {
+                  "type": "string",
+                  "description": "Namespace of the workload"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ],
+        "source": "prod"
+      },
+      "created_at": "2026-10-01T18:02:13.622Z"
+    },
+    {
+      "thread_ts": "1790877718.653099",
+      "seq": 1,
+      "kind": "llm",
+      "name": "private-llm-agus",
+      "outcome": null,
+      "payload": {
+        "run": "30566e64-78a3-4756-a589-a11adfcea1d4",
+        "model": "agus",
+        "route": "light",
+        "usage": null,
+        "skills": [],
+        "content": [
+          {
+            "id": "c1",
+            "name": "k8s_cluster_health",
+            "type": "tool_use",
+            "input": {}
+          }
+        ],
+        "stopReason": "tool_use"
+      },
+      "created_at": "2026-10-01T18:02:13.622Z"
+    },
+    {
+      "thread_ts": "1790877718.653099",
+      "seq": 2,
+      "kind": "tool",
+      "name": "k8s_cluster_health",
+      "outcome": null,
+      "payload": {
+        "ms": 1094,
+        "run": "30566e64-78a3-4756-a589-a11adfcea1d4",
+        "input": {},
+        "result": "{\"scanned\":{\"pods\":59,\"namespaces\":14,\"complete\":true},\"summary\":{\"running\":59,\"pending\":0,\"succeeded\":0,\"failed\":0,\"unknown\":0,\"notReady\":0},\"unhealthyTotal\":0,\"unhealthy\":[],\"recentlyRestartedTotal\":0,\"recentlyRestarted\":[],\"restartWindowMinutes\":60}",
+        "truncated": false
+      },
+      "created_at": "2026-10-01T18:02:13.622Z"
+    },
+    {
+      "thread_ts": "1790877718.653099",
+      "seq": 3,
+      "kind": "llm",
+      "name": "private-llm-agus",
+      "outcome": null,
+      "payload": {
+        "run": "30566e64-78a3-4756-a589-a11adfcea1d4",
+        "model": "agus",
+        "route": "light",
+        "usage": null,
+        "skills": [
+          "pod-pending",
+          "pod-not-ready"
+        ],
+        "content": [
+          {
+            "text": "Cluster status is healthy — all 59 pods across 14 namespaces are running with no pending, failed, or not-ready pods. No recent restarts in the last 60 minutes.",
+            "type": "text"
+          }
+        ],
+        "stopReason": "end_turn"
+      },
+      "created_at": "2026-10-01T18:02:13.622Z"
+    },
+    {
+      "thread_ts": "1790877718.653099",
+      "seq": 4,
+      "kind": "end",
+      "name": null,
+      "outcome": null,
+      "payload": {
+        "ms": 13702,
+        "run": "30566e64-78a3-4756-a589-a11adfcea1d4",
+        "answer": "Cluster status is healthy — all 59 pods across 14 namespaces are running with no pending, failed, or not-ready pods. No recent restarts in the last 60 minutes.",
+        "llmCalls": 2,
+        "toolCalls": 1
+      },
+      "created_at": "2026-10-01T18:02:13.622Z"
+    }
+  ]
+}
