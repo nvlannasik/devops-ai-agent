@@ -13,7 +13,9 @@
     "test": "node --import tsx --test 'src/**/*.test.ts'",
     "build:client": "node scripts/build-client.mjs",
     "bench": "node --import tsx src/bench/run.ts",
-    "bench:log": "node --import tsx src/bench/log.ts"
+    "bench:log": "node --import tsx src/bench/log.ts",
+    "replay": "node --import tsx src/replay/cli.ts",
+    "replay:export": "node --import tsx src/replay/export.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
