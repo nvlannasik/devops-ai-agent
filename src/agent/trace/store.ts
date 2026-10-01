@@ -14,11 +14,18 @@ export interface EventRow {
 export const INSERT_CHUNK = 500;
 export const RUN_RETENTION_DAYS = 30;
 export const GATE_RETENTION_DAYS = 180;
-/** Rows deleted per kind per poller pass — a backlog is worked off over passes, never one long lock. */
+/** Rows deleted per kind per pass — a backlog is worked off over passes, never one long lock. */
 const PRUNE_LIMIT = 5000;
+/**
+ * The poller ticks every 30s, and neither DELETE can use an index (`kind <> 'gate'`), so each
+ * pass is a sequential scan. Retention is measured in days; an hour between passes loses nothing.
+ */
+const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 // Best-effort like UsageStore: losing a trace must never fail the investigation it describes.
 export class TraceStore {
+  private lastPrune = 0;
+
   constructor(private readonly pool: Pool | null) {}
 
   async insert(rows: EventRow[]): Promise<void> {
@@ -46,7 +53,8 @@ export class TraceStore {
 
   /** Retention (spec §4.3). Returns rows deleted; 0 on any failure. */
   async prune(): Promise<number> {
-    if (!this.pool) return 0;
+    if (!this.pool || Date.now() - this.lastPrune < PRUNE_EVERY_MS) return 0;
+    this.lastPrune = Date.now();
     try {
       const runs = await this.pool.query(
         `DELETE FROM agent_events WHERE id IN (

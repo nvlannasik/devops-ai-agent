@@ -46,3 +46,13 @@ test("prune deletes run bodies at 30 days and gate rows at 180", async () => {
   assert.match(sql, /kind = 'gate'[\s\S]*180 days/);
   assert.equal(n, 6);
 });
+
+// Final review: the poller ticks every 30s and neither DELETE can use an index (`kind <> 'gate'`),
+// so pruning every tick was two sequential scans of the whole table twice a minute.
+test("prune runs at most once an hour, however often the poller asks", async () => {
+  const calls: Call[] = [];
+  const store = new TraceStore(stub(calls));
+  await store.prune();
+  await store.prune();
+  assert.equal(calls.length, 2, "the second call within the hour must not query");
+});
