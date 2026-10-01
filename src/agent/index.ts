@@ -2341,7 +2341,10 @@ export class DevOpsAgent {
       },
       async (p) => {
         const r = await this.refusalFor(p, ctx);
-        if (r) logger.info(`[remediation] ${r.gate} refused ${p.summary}: ${r.reason}`);
+        if (r) {
+          logger.info(`[remediation] ${r.gate} refused ${p.summary}: ${r.reason}`);
+          this.trace.gate(opts.threadId ?? currentTrace() ?? "", refusalGate(r.gate), "refused", r.reason);
+        }
         return r;
       }
     );
@@ -2372,6 +2375,7 @@ export class DevOpsAgent {
     const dryRun = await this.mcp.callTool(proposal.action, { ...proposal.toolParams, dry_run: true });
     if (dryRun.startsWith("Error:")) {
       logger.info(`[remediation] dry-run refused for ${proposal.summary}: ${truncate(dryRun, 200)}`);
+      this.trace.gate(opts.threadId ?? currentTrace() ?? "", "dry-run", "failed", truncate(dryRun, 300));
       return { refused: dryRun.replace(/^Error:\s*/, "") };
     }
 

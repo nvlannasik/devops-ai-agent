@@ -113,3 +113,11 @@ test("a sink that throws costs the trace, never the caller", async () => {
   r.begin("1.1", {});
   await r.finish("1.1");
 });
+
+test("every refusalFor gate string maps to its own gate name", async () => {
+  const { refusalGate } = await import("./index.js");
+  assert.equal(refusalGate("image gate"), "remediation-image");
+  assert.equal(refusalGate("replacement guard"), "remediation-replacement");
+  assert.equal(refusalGate("resource-fault gate"), "remediation-resource-fault");
+  assert.equal(refusalGate("something new"), "remediation-other");
+});

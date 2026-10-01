@@ -787,6 +787,7 @@ export class SlackApp {
       // confirmed fix) — forcing it back into the template via a reformat LLM call
       // produced garbage twice. Incident store + remediation don't need the template.
       const structured = isRcaResponse(rca) && !!extractSection(rca, "Root Cause");
+      this.agent.recordGate(threadId, "rca-structure", structured ? "card" : "conversation");
       if (structured) {
         const rcaBlocks = buildRcaBlocks(rca, alertMeta ? formatRunFooter(alertMeta) : undefined);
         // What we actually handed Slack. Added because "the dividers are gone" could not be
@@ -879,7 +880,10 @@ export class SlackApp {
       // threadId: the quarantine gate reads this thread's tool results for the idle measurement
       // a scale-to-zero has to stand on. Both call sites already have it.
       const proposed = await this.agent.proposeRemediation(incidentId, labels, rca, { userRequested, threadId, offer });
-      if (!proposed) return; // no write tools / no confident proposal / already active
+      if (!proposed) {
+        this.agent.recordGate(threadId, "proposal", "null");
+        return; // no write tools / no confident proposal / already active
+      }
       if ("refused" in proposed) {
         // Posted only when a HUMAN asked for the change: then the refusal is the answer to their
         // request. When the MODEL proposed it — the alert path, an RCA, an [OFFER] nobody has said
@@ -889,9 +893,11 @@ export class SlackApp {
         // either way, so a follow-up question is still answered truthfully.
         if (!userRequested) {
           logger.info(`[remediation] refusal not posted (the model's proposal, not a request): ${truncate(proposed.refused, 200)}`);
+          this.agent.recordGate(threadId, "proposal", "refused-hidden", truncate(proposed.refused, 200));
           await this.agent.noteInThread(threadId, `Remediation was REFUSED by the server: ${truncate(proposed.refused, 300)} — do not promise an approval card for this action again; explain the refusal if asked.`);
           return;
         }
+        this.agent.recordGate(threadId, "proposal", "refused-posted", truncate(proposed.refused, 200));
         await this.app.client.chat.postMessage({
           channel,
           thread_ts: threadId,
@@ -913,6 +919,7 @@ export class SlackApp {
       // The message id is known here and nowhere else until somebody clicks. Without it the
       // expiry sweep can close the row but not the card, which is the half a human sees.
       if (card.ts) await this.agent.recordCardMessage(proposed.id, channel, card.ts, threadId);
+      this.agent.recordGate(threadId, "proposal", "posted", proposed.proposal.summary);
       logger.info(`[remediation] ${gitOps ? "GitOps PR " : ""}approval card posted (incident ${incidentId}, remediation ${proposed.id})`);
       await this.agent.noteInThread(threadId, `An approval card was posted for: ${proposed.proposal.summary}. A human must click Approve — nothing has been executed yet.`);
     } catch (err) {
@@ -1070,6 +1077,13 @@ export class SlackApp {
         }
       } catch (err) {
         logger.error(`[reconcile] incident reconciliation pass failed: ${errDetail(err)}`);
+      }
+      // Trace retention (migrations/011) — same poller, its own try, like the passes above.
+      try {
+        const n = await this.agent.pruneTraces();
+        if (n > 0) logger.info(`[trace] pruned ${n} event(s) past retention`);
+      } catch (err) {
+        logger.error(`[trace] retention pass failed: ${errDetail(err)}`);
       } finally {
         if (!this.stopping) this.armVerificationPoller(tick);
       }
@@ -1095,6 +1109,7 @@ export class SlackApp {
     try {
       const names = await this.agent.ungroundedNames(threadId, answer, trigger);
       if (names.length === 0) return;
+      this.agent.recordGate(threadId, "grounding", "gap", names.join(", "), { count: names.length });
       const shown = names.slice(0, UNGROUNDED_SHOWN).map((n) => `\`${n}\``).join(", ");
       const rest = names.length - UNGROUNDED_SHOWN;
       await this.app.client.chat.postMessage({
