@@ -63,7 +63,7 @@ export class TraceRecorder {
 
   constructor(
     private readonly sink: Sink | null,
-    private readonly opts: { source: "prod" | "bench"; sha: string }
+    private readonly opts: { source: "prod" | "bench" | "replay"; sha: string }
   ) {}
 
   get enabled(): boolean {

@@ -1236,6 +1236,11 @@ export interface AgentDeps {
   traceSource?: "prod" | "bench";
   /** Tests and replay inject one; production gets one with a store in initialize(). */
   recorder?: TraceRecorder;
+  /**
+   * Replay injects a store that accepts every card: without a database `propose()` returns null,
+   * and a proposal that passed every gate would replay as "no proposal".
+   */
+  remediations?: RemediationStore;
 }
 
 export class DevOpsAgent {
@@ -1269,7 +1274,7 @@ export class DevOpsAgent {
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
-    this.remediations = new RemediationStore(null); // no-op until initialize() wires Postgres
+    this.remediations = deps.remediations ?? new RemediationStore(null); // no-op until initialize() wires Postgres
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
 
