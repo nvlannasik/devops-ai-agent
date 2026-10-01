@@ -247,7 +247,7 @@ async function main(): Promise<void> {
   const tasks = loadCases(CASES_DIR, { filter: filterArg ? new RegExp(filterArg) : undefined, all: has("all") });
   if (tasks.length === 0) throw new Error(`no bench cases matched${filterArg ? ` --filter ${filterArg}` : ""}`);
 
-  const agent = new DevOpsAgent();
+  const agent = new DevOpsAgent({ traceSource: "bench" });
   await agent.initialize();
   const llm = createLLMClient();
 

@@ -62,7 +62,9 @@ import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, LLMResponse, ContentBlock, Message, TokenUsage, ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../redis.js";
 import logger, { errDetail } from "../utils/logger/index.js";
-import { withRoute, withTrace } from "../utils/trace/index.js";
+import { currentTrace, withRoute, withTrace } from "../utils/trace/index.js";
+import { TraceRecorder, instrumentLLM, instrumentMCP, refusalGate, type GateName } from "./trace/index.js";
+import { TraceStore } from "./trace/store.js";
 
 // One incident the sweeper closed: what to say, and the label set whose dedup claim has to be
 // released. channel/thread_ts are nullable on the row, so there may be nothing to post — the
@@ -1227,9 +1229,23 @@ const addUsage = (acc: TokenUsage, u: TokenUsage): TokenUsage => ({
   cacheCreationTokens: acc.cacheCreationTokens + u.cacheCreationTokens,
 });
 
+export interface AgentDeps {
+  llm?: LLMClient;
+  mcp?: MCPClient;
+  /** Who is running this agent — the dashboard's Harness page shows `prod` only. */
+  traceSource?: "prod" | "bench";
+  /** Tests and replay inject one; production gets one with a store in initialize(). */
+  recorder?: TraceRecorder;
+}
+
 export class DevOpsAgent {
   private llm: LLMClient;
   private mcp: MCPClient;
+  // Investigation traces (agent/trace, migrations/011). A recorder with no sink is a no-op, which
+  // is what this is until initialize() has a pool.
+  private trace: TraceRecorder;
+  private traceStore = new TraceStore(null);
+  private readonly traceSource: "prod" | "bench";
   private memory: ConversationMemory;
   private incidents: IncidentMemory;
   private usage: UsageStore;
@@ -1243,9 +1259,13 @@ export class DevOpsAgent {
   private readonly toolMemo = new Map<string, Map<string, { result: Promise<string>; window: number[] }>>();
   private budget: Budget;
 
-  constructor() {
-    this.llm = createLLMClient();
-    this.mcp = new MCPClient();
+  constructor(deps: AgentDeps = {}) {
+    this.traceSource = deps.traceSource ?? "prod";
+    this.trace = deps.recorder ?? new TraceRecorder(null, { source: this.traceSource, sha: config.trace.sha });
+    // Wrapped once, here, so every chat()/callTool() call site is recorded without touching it.
+    // The getter matters: initialize() replaces this.trace after the wrappers exist.
+    this.llm = instrumentLLM(deps.llm ?? createLLMClient(), () => this.trace);
+    this.mcp = instrumentMCP(deps.mcp ?? new MCPClient(), () => this.trace);
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
@@ -1288,6 +1308,11 @@ export class DevOpsAgent {
       pool.on("error", (err: Error) => logger.error(`Postgres pool error: ${err.message}`));
       await runMigrations(pool); // advisory-locked — safe under concurrent pod startup; fails fast if unreachable
       this.usage = new UsageStore(pool);
+      this.traceStore = new TraceStore(pool);
+      // An injected recorder (tests, replay) is kept; only the default no-op one gets the pool.
+      if (!this.trace.enabled && config.trace.enabled) {
+        this.trace = new TraceRecorder(this.traceStore, { source: this.traceSource, sha: config.trace.sha });
+      }
       this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
       this.checks = new RemediationCheckStore(pool);
@@ -1386,11 +1411,28 @@ export class DevOpsAgent {
   // threadId — that is what lets you grep one id across the agent log, the llm-worker
   // log, and the Slack thread when an answer comes out wrong.
   investigate(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
-    return withTrace(threadId, () => this.runInvestigation(threadId, userMessage, opts));
+    // finish() in a finally: a run that throws (backend down mid-loop) is still written — it is
+    // exactly the run someone will want to look at.
+    return withTrace(threadId, () =>
+      this.runInvestigation(threadId, userMessage, opts).finally(() => this.trace.finish(threadId))
+    );
   }
 
   private async runInvestigation(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
+    this.trace.begin(threadId, {
+      phase: "investigate",
+      issue: userMessage,
+      opts: {
+        mode: opts.mode ?? "alert",
+        trigger: opts.trigger ?? null,
+        namespace: opts.namespace ?? null,
+        maxToolRounds: opts.maxToolRounds !== undefined && Number.isFinite(opts.maxToolRounds) ? opts.maxToolRounds : null,
+        maxIterations: opts.maxIterations ?? null,
+        depth: opts.depth ?? 0,
+      },
+      tools: this.mcp.getTools(),
+    });
     logger.debug(`[${threadId}] Issue: ${truncate(userMessage, 120)}`);
     const investigationStart = Date.now();
 
@@ -1558,7 +1600,9 @@ export class DevOpsAgent {
       }
       // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
       // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      return stripOffer(readOnly);
+      const answer = stripOffer(readOnly);
+      this.trace.end(threadId, { answer, ms: durationMs, llmCalls: iterations, toolCalls: totalToolCalls });
+      return answer;
     };
     let totalUsage = zeroUsage();
 
@@ -1634,6 +1678,7 @@ export class DevOpsAgent {
         );
       }
 
+      this.trace.skills(threadId, assembled.skillsUsed);
       const llmStart = Date.now();
       let response;
       try {
@@ -2198,6 +2243,34 @@ export class DevOpsAgent {
   // (GitOps guard, blocked namespace, bad target). No card in any non-id case.
   async proposeRemediation(
     incidentId: number | null, // null = mention-driven investigation (no alert labels)
+    labels: Record<string, string>,
+    rca: string,
+    opts: { userRequested?: boolean; threadId?: string; offer?: string | null } = {}
+  ): ReturnType<DevOpsAgent["proposeRemediationRun"]> {
+    // A run of its own under the thread, phase "proposal": the proposal's LLM call, its guard
+    // reads, the dry-run and every refusal land in one trace beside the RCA's.
+    const thread = opts.threadId ?? currentTrace();
+    if (!thread) return this.proposeRemediationRun(incidentId, labels, rca, opts);
+    this.trace.begin(thread, {
+      phase: "proposal",
+      issue: rca,
+      opts: { userRequested: !!opts.userRequested, offer: opts.offer ?? null },
+      labels,
+      tools: this.mcp.getTools(),
+    });
+    try {
+      const out = await withTrace(thread, () => this.proposeRemediationRun(incidentId, labels, rca, opts));
+      this.trace.end(thread, {
+        answer: out === null ? null : "refused" in out ? { refused: out.refused } : { action: out.proposal.action, summary: out.proposal.summary },
+      });
+      return out;
+    } finally {
+      await this.trace.finish(thread);
+    }
+  }
+
+  private async proposeRemediationRun(
+    incidentId: number | null,
     labels: Record<string, string>,
     rca: string,
     opts: { userRequested?: boolean; threadId?: string; offer?: string | null } = {}
@@ -2817,6 +2890,16 @@ export class DevOpsAgent {
   }
 
   // D. resolved-alert loop: mark the incident resolved, return its Slack thread (or null).
+  /** A gate decided by the app layer, after the run (the RCA card, grounding, the proposal). */
+  recordGate(threadTs: string, name: GateName, outcome: string, detail = "", extra: Record<string, unknown> = {}): void {
+    this.trace.gate(threadTs, name, outcome, detail, extra);
+  }
+
+  /** Retention for agent_events — called from the app's poller. */
+  pruneTraces(): Promise<number> {
+    return this.traceStore.prune();
+  }
+
   async resolveIncident(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
     return this.incidents.markResolved(labels);
   }

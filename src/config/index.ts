@@ -142,6 +142,12 @@ export const config = {
 
   // Durable incident memory (Postgres). Disabled unless DB_HOST is set —
   // distinct from conversation memory (Redis cache); this is a long-lived record.
+  // Investigation traces (agent/trace, migrations/011). On by default whenever a database is.
+  trace: {
+    enabled: process.env.TRACE_ENABLED !== "false",
+    // Baked in by CI (Dockerfile ARG GIT_SHA); "unknown" in dev and for images built before it.
+    sha: process.env.GIT_SHA || "unknown",
+  },
   incidents: {
     enabled: !!process.env.DB_HOST,
     // Missed-resolved reconciliation (migrations/007). Alertmanager's resolved webhook fires

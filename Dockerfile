@@ -51,6 +51,10 @@ RUN apk add --no-cache curl && \
 # =============================================================================
 FROM node:24-alpine AS runtime
 
+# The commit this image was built from — stamped on every investigation trace (agent/trace).
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
 # gcompat: glibc compatibility layer untuk aws_signing_helper (glibc binary)
 # openssl: untuk entrypoint.sh cek cert expiry
 RUN apk add --no-cache gcompat openssl
