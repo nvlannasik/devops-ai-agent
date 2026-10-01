@@ -399,3 +399,33 @@ test("adding the verdict did not disturb the limit and offset binds", async () =
   assert.equal(calls[0].params.at(-1), PAGE_SIZE);
   assert.match(calls[0].sql, /LIMIT \$8 OFFSET \$9/);
 });
+
+// --- harness trace (agent_events, migrations/011) ---
+test("harness counts prod runs and gate outcomes over 7 and 30 days", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(
+    stub(calls, (sql) => (/kind = 'start'/.test(sql) ? [{ d7: "4", d30: "9" }] : [{ name: "log-gap", outcome: "nudge", d7: "2", d30: "5" }]))
+  );
+  const h = await q.harness();
+  assert.equal(h.runs7, 4);
+  assert.equal(h.runs30, 9);
+  assert.deepEqual(h.stats, [{ name: "log-gap", outcome: "nudge", d7: 2, d30: 5 }]);
+  assert.ok(calls.every((c) => /payload->>'source' = 'prod'/.test(c.sql)), "bench rows leaked into prod metrics");
+  assert.ok(calls.some((c) => /thread_ts NOT LIKE '%\/sub-%'/.test(c.sql)), "delegate runs counted as investigations");
+});
+
+test("the timeline never selects a full tool result", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).timeline("1.1");
+  assert.match(calls[0]!.sql, /left\(payload->>'result', 200\)/);
+  assert.doesNotMatch(calls[0]!.sql, /SELECT[^;]*\bpayload\s*,/);
+  assert.deepEqual(calls[0]!.params, ["1.1"]);
+});
+
+test("no database: harness, drill-down, timeline and trace are empty, not errors", async () => {
+  const q = new DashboardQueries(null);
+  assert.deepEqual(await q.harness(), { runs7: 0, runs30: 0, stats: [] });
+  assert.deepEqual(await q.harnessGate("log-gap"), { daily: [], events: [] });
+  assert.deepEqual(await q.timeline("1.1"), []);
+  assert.deepEqual(await q.trace("1.1"), []);
+});

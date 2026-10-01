@@ -9,6 +9,25 @@ export interface IncidentRow {
   alertname: string; namespace: string | null;
   severity: string | null; confidence: string | null; root_cause: string | null;
 }
+// --- harness trace (agent_events, migrations/011) ---
+export interface GateStat { name: string; outcome: string; d7: number; d30: number }
+export interface HarnessView { runs7: number; runs30: number; stats: GateStat[] }
+export interface GateEvent { threadTs: string; outcome: string; detail: string; createdAt: Date; incidentId: number | null }
+export interface GateDrill { daily: { day: string; n: number }[]; events: GateEvent[] }
+export interface TimelineEvent {
+  id: number;
+  threadTs: string;
+  kind: string;
+  name: string | null;
+  outcome: string | null;
+  detail: string | null;
+  /** Tool result length in chars; null for an error or a non-tool event. */
+  size: number | null;
+  /** First 200 chars of a tool result — never the whole thing, which can be 512K. */
+  head: string | null;
+  createdAt: Date;
+}
+
 export interface IncidentDetail extends IncidentRow {
   rca: string; channel: string | null; thread_ts: string | null;
 }
@@ -500,7 +519,7 @@ export class DashboardQueries {
       [id]
     );
     if (rows.length === 0) return null;
-    const [remediations, feedback] = await Promise.all([
+    const [remediations, feedback, timeline] = await Promise.all([
       this.pool.query(
         // LEFT JOIN, not an inner one: a remediation that was proposed and never approved has
         // no check, and a remediation approved seconds ago has one that has not run. Both must
@@ -520,12 +539,113 @@ export class DashboardQueries {
            FROM incident_feedback WHERE incident_id = $1 ORDER BY created_at LIMIT 50`,
         [id]
       ),
+      // What the harness did on this incident's thread (agent/trace). Empty for incidents older
+      // than the recorder and for threads past trace retention.
+      rows[0].thread_ts ? this.timeline(String(rows[0].thread_ts)) : Promise.resolve([] as TimelineEvent[]),
     ]);
     return {
       incident: rows[0] as IncidentDetail,
       remediations: remediations.rows as RemediationRow[],
       feedback: feedback.rows as FeedbackRow[],
+      timeline,
     };
+  }
+
+  async harness(): Promise<HarnessView> {
+    if (!this.pool) return { runs7: 0, runs30: 0, stats: [] };
+    const [runs, stats] = await Promise.all([
+      // Investigations only: a delegate's run and the proposal run belong to one the parent counted.
+      this.pool.query(
+        `SELECT count(*) FILTER (WHERE created_at > now() - interval '7 days') AS d7, count(*) AS d30
+           FROM agent_events
+          WHERE kind = 'start' AND created_at > now() - interval '30 days'
+            AND payload->>'source' = 'prod' AND payload->>'phase' = 'investigate'
+            AND thread_ts NOT LIKE '%/sub-%'`
+      ),
+      this.pool.query(
+        `SELECT name, outcome,
+                count(*) FILTER (WHERE created_at > now() - interval '7 days') AS d7, count(*) AS d30
+           FROM agent_events
+          WHERE kind = 'gate' AND created_at > now() - interval '30 days' AND payload->>'source' = 'prod'
+          GROUP BY name, outcome ORDER BY count(*) DESC LIMIT 500`
+      ),
+    ]);
+    return {
+      runs7: num(runs.rows[0]?.d7),
+      runs30: num(runs.rows[0]?.d30),
+      stats: stats.rows.map((r) => ({ name: String(r.name), outcome: String(r.outcome), d7: num(r.d7), d30: num(r.d30) })),
+    };
+  }
+
+  async harnessGate(name: string): Promise<GateDrill> {
+    if (!this.pool) return { daily: [], events: [] };
+    const [daily, events] = await Promise.all([
+      this.pool.query(
+        `SELECT to_char(d, 'YYYY-MM-DD') AS day, count(e.id) AS n
+           FROM generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') d
+           LEFT JOIN agent_events e
+             ON e.kind = 'gate' AND e.name = $1 AND e.payload->>'source' = 'prod'
+            AND e.created_at >= d AND e.created_at < d + interval '1 day'
+          GROUP BY d ORDER BY d`,
+        [name]
+      ),
+      this.pool.query(
+        `SELECT e.thread_ts, e.outcome, e.payload->>'detail' AS detail, e.created_at, i.id AS incident_id
+           FROM agent_events e
+           LEFT JOIN LATERAL (
+             SELECT id FROM incidents WHERE thread_ts = split_part(e.thread_ts, '/', 1) ORDER BY id DESC LIMIT 1
+           ) i ON true
+          WHERE e.kind = 'gate' AND e.name = $1 AND e.payload->>'source' = 'prod'
+          ORDER BY e.created_at DESC, e.id DESC LIMIT 100`,
+        [name]
+      ),
+    ]);
+    return {
+      daily: daily.rows.map((r) => ({ day: String(r.day), n: num(r.n) })),
+      events: events.rows.map((r) => ({
+        threadTs: String(r.thread_ts),
+        outcome: String(r.outcome),
+        detail: r.detail ?? "",
+        createdAt: r.created_at,
+        incidentId: r.incident_id === null || r.incident_id === undefined ? null : num(r.incident_id),
+      })),
+    };
+  }
+
+  /** One thread's events, delegates included, in write order. Tool results as size + first 200 chars only. */
+  async timeline(threadTs: string): Promise<TimelineEvent[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT id, thread_ts, kind, name, outcome, payload->>'detail' AS detail,
+              length(payload->>'result') AS size, left(payload->>'result', 200) AS head, created_at
+         FROM agent_events
+        WHERE thread_ts = $1 OR thread_ts LIKE $1 || '/sub-%'
+        ORDER BY id LIMIT 2000`,
+      [threadTs]
+    );
+    return rows.map((r) => ({
+      id: num(r.id),
+      threadTs: String(r.thread_ts),
+      kind: String(r.kind),
+      name: r.name ?? null,
+      outcome: r.outcome ?? null,
+      detail: r.detail ?? null,
+      size: r.size === null || r.size === undefined ? null : num(r.size),
+      head: r.head ?? null,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /** Full events of one thread for export (spec §6). Bounded like the timeline. */
+  async trace(threadTs: string): Promise<unknown[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT thread_ts, seq, kind, name, outcome, payload, created_at
+         FROM agent_events WHERE thread_ts = $1 OR thread_ts LIKE $1 || '/sub-%'
+        ORDER BY id LIMIT 2000`,
+      [threadTs]
+    );
+    return rows;
   }
 
   async close(): Promise<void> {
