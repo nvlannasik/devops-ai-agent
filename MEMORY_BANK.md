@@ -1943,6 +1943,27 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - **FinOps** (cost Q&A, waste audit, cost-anomaly-as-incident, rightsizing) — mostly config/prompt via OpenCost→Prometheus; see **`docs/DESIGN_finops.md`**.
 - **VM/baremetal execution** via Ansible-backed MCP tools — deemed too complex for now; K8s + observability scope only. Key notes: whitelist = curated playbooks (never generic exec), `--check` = dry-run, plain-CLI-vs-AWX decides the architecture.
 
+### Tech debt — a restart of a HEALTHY workload passes every gate
+Found 2026-10-03 (incident 207, remediation 105): a `CertificateExpiringSoon` alert on a healthy
+certificate produced an approval card for `rolling restart of deployment devops-tools/devops-ai-agent`
+— the agent restarting itself to "reload an updated certificate" that did not exist (`revision=1`,
+renewal not due until `renewalTime`). It expired unclicked. The root causes were content, not code
+(the alert's 21-day threshold and false description; `cert-expiry.md` reading `renewalTime` as a
+past renewal), but the card should not have survived the gates, and nothing in code stops the next
+playbook mistake of the same shape:
+- `replacementRefusal` (replace-guard.ts) refuses a restart only when pods look BROKEN — unready, or
+  restarted. A workload whose pods are all ready with 0 restarts returns null by design ("a wedged
+  process can still read ready").
+- `ungroundedTargetRefusal` checks the target NAME appears in tool output, not that anything about
+  it is wrong — the agent's own pods are in every `k8s_list_pods` of `devops-tools`.
+- **Candidate gate:** refuse `k8s_rollout_restart` / `k8s_delete_pod` when every target pod is ready
+  with 0 restarts AND the thread holds no fault evidence naming that workload (no failing events,
+  log errors or probe failures for it). Trade-off, same as `isServing`'s: the rare "wedged but still
+  ready" process is refused too — a human can still ask for it in words (`userRequested` skips the
+  replacement guards). Worth considering separately: refusing a restart of the agent's OWN
+  deployment on the model's initiative.
+- Verify with `npm run replay` on the exported incident-207 thread before shipping.
+
 ### Tech debt — Loki + tracing paths untested live (env not ready)
 The investigation prompt already HAS the observability playbooks — Failure Mode Playbooks
 (error-rate → `loki_query_range` LogQL; latency → `tracing_search` → `tracing_get_trace` →
