@@ -500,10 +500,10 @@ export class DashboardServer {
         }
         // The export source for replay (spec §6/§8.2). Same password as every page here.
         case "trace": {
-          const events = await this.queries.trace(route.threadTs);
+          const [events, feedback] = await Promise.all([this.queries.trace(route.threadTs), this.queries.feedback(route.threadTs)]);
           const json = "application/json; charset=utf-8";
           if (events.length === 0) return send(404, JSON.stringify({ error: "no trace recorded for this thread" }), json);
-          return send(200, JSON.stringify({ threadTs: route.threadTs, events }), json);
+          return send(200, JSON.stringify({ threadTs: route.threadTs, events, feedback }), json);
         }
       }
     } catch (err) {

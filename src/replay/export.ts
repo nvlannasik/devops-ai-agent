@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { selectRun, type Expect, type TraceEvent } from "./trace.js";
 import { redact } from "./redact.js";
+import { keyTerms } from "./terms.js";
 
 const args = process.argv.slice(2);
 const runFlag = args.indexOf("--run");
@@ -33,7 +34,13 @@ if (!cookie) throw new Error(`dashboard login failed (HTTP ${login.status})`);
 
 const res = await fetch(`${base}/api/trace/${thread}`, { headers: { cookie } });
 if (!res.ok) throw new Error(`/api/trace/${thread}: HTTP ${res.status} ${await res.text()}`);
-const { events } = (await res.json()) as { events: TraceEvent[] };
+const { events, feedback = [] } = (await res.json()) as {
+  events: TraceEvent[];
+  feedback?: Array<{ confirmedRootCause: string | null; actionTaken: string | null; outcome: string | null }>;
+};
+// What on-call confirmed through the learn feature: the closest thing this case has to an answer key.
+const confirmed = feedback.map((f) => f.confirmedRootCause?.trim()).filter((s): s is string => !!s);
+const terms = [...new Map(confirmed.flatMap((s) => keyTerms(s)).map((t) => [t.term, t])).values()];
 
 const { value: trace, hits } = redact(selectRun(events, runId));
 const runs = [...new Set(trace.events.map((e) => e.payload.run))];
@@ -44,7 +51,8 @@ const proposalEnd = trace.events.find(
   (e) => e.kind === "end" && trace.events.some((s) => s.kind === "start" && s.payload.run === e.payload.run && s.payload.phase === "proposal")
 );
 const expect: Expect = {
-  answer: { must: [], mustNot: [] },
+  ...(confirmed.length > 0 ? { confirmedByOncall: confirmed } : {}),
+  answer: { must: terms.map((t) => t.pattern), mustNot: [] },
   gates: { must: [...new Set(trace.events.filter((e) => e.kind === "gate").map((e) => `${e.name}:${e.outcome}`))], mustNot: [] },
   ...(proposalEnd ? { proposal: { action: proposalEnd.payload.answer?.action ?? null } } : {}),
   allowDiverge: false,
@@ -58,4 +66,10 @@ writeFileSync(join(dir, "expect.json"), JSON.stringify(expect, null, 2) + "\n");
 
 console.log(`wrote ${dir} — ${trace.events.length} events in ${runs.length} run(s), ${(body.length / 1024).toFixed(0)} KB`);
 console.log(hits.length === 0 ? "redactions: none" : `redactions (${hits.length}):\n  ${hits.join("\n  ")}`);
+console.log(
+  confirmed.length === 0
+    ? "learn feedback: none for this incident — answer.must is empty"
+    : `learn feedback: ${confirmed.length} confirmed root cause(s) → answer.must ${JSON.stringify(terms.map((t) => t.term))}` +
+        (terms.length === 0 ? " (no name or error term in it — write answer.must by hand from confirmedByOncall)" : "")
+);
 console.log("Review trace.json before committing it, then edit expect.json to say what this incident SHOULD produce.");

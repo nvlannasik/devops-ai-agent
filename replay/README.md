@@ -50,6 +50,16 @@ replay/cases/<name>/expect.json
 Regexes are case-insensitive. Gate entries are `name:outcome` from `GATE_NAMES`. Export writes the
 observed gates as `gates.must` — a snapshot. Edit it to say what this incident **should** produce.
 
+### On-call's answer key (the learn feature)
+
+When on-call confirmed a root cause for the incident (`@agent learn`, or the ✅ reaction —
+`incident_feedback`), export puts their sentence in `confirmedByOncall` and its **key terms** in
+`answer.must`: backticked names, k8s-shaped names (`bench-probe/p1`), `ENV_VARS`, pod states
+(`CrashLoopBackOff`, `OOMKilled`) and quantities (`256Mi`), at most six (`src/replay/terms.ts`). The
+sentence itself is never matched — a human's wording and the agent's never agree word for word,
+while the names in them must. `confirmedByOncall` is not scored; when its cause is only prose ("the
+database was down"), the terms come back empty and `answer.must` is yours to write.
+
 ## Known limits
 
 - A run replays from an empty thread. A follow-up mention's earlier turns are not restored, so a

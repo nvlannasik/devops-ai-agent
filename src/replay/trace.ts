@@ -24,6 +24,12 @@ export interface Expect {
   gates?: { must?: string[]; mustNot?: string[] };
   proposal?: { action: string | null };
   allowDiverge?: boolean;
+  /**
+   * The root cause on-call confirmed for this incident (learn feature, `incident_feedback`),
+   * verbatim. Not scored — it is the reviewer's answer key; the scored part is the key terms
+   * export derived from it into `answer.must`.
+   */
+  confirmedByOncall?: string[];
 }
 
 const isSub = (thread: string): boolean => thread.includes("/sub-");

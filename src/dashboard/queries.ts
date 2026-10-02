@@ -636,6 +636,24 @@ export class DashboardQueries {
     }));
   }
 
+  /**
+   * What on-call confirmed about the incident on this thread (the learn feature's confirmed tier,
+   * `incident_feedback`) — replay export turns it into the case's answer key. Human tier only:
+   * agent verdicts are never written to that table.
+   */
+  async feedback(threadTs: string): Promise<Array<{ confirmedRootCause: string | null; actionTaken: string | null; outcome: string | null }>> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT f.confirmed_root_cause, f.action_taken, f.outcome
+         FROM incident_feedback f
+         JOIN incidents i ON i.id = f.incident_id
+        WHERE i.thread_ts = $1
+        ORDER BY f.created_at LIMIT 20`,
+      [threadTs]
+    );
+    return rows.map((r) => ({ confirmedRootCause: r.confirmed_root_cause ?? null, actionTaken: r.action_taken ?? null, outcome: r.outcome ?? null }));
+  }
+
   /** Full events of one thread for export (spec §6). Bounded like the timeline. */
   async trace(threadTs: string): Promise<unknown[]> {
     if (!this.pool) return [];

@@ -429,3 +429,14 @@ test("no database: harness, drill-down, timeline and trace are empty, not errors
   assert.deepEqual(await q.timeline("1.1"), []);
   assert.deepEqual(await q.trace("1.1"), []);
 });
+
+// The learn feature's confirmed root causes for a thread, for replay export (spec §8.2): what an
+// on-call engineer said the cause was is the closest thing a case has to an answer key.
+test("feedback for a thread is the confirmed tier only, joined through the incident's thread", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, () => [{ confirmed_root_cause: "x", action_taken: null, outcome: "resolved" }]));
+  assert.deepEqual(await q.feedback("1.1"), [{ confirmedRootCause: "x", actionTaken: null, outcome: "resolved" }]);
+  assert.match(calls[0]!.sql, /FROM incident_feedback f\s+JOIN incidents i ON i\.id = f\.incident_id/);
+  assert.deepEqual(calls[0]!.params, ["1.1"]);
+  assert.deepEqual(await new DashboardQueries(null).feedback("1.1"), []);
+});
