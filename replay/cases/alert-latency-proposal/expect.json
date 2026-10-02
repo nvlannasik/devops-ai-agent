@@ -1,0 +1,20 @@
+{
+  "answer": {
+    "must": [],
+    "mustNot": []
+  },
+  "gates": {
+    "must": [
+      "log-gap:nudge",
+      "offer:stripped",
+      "log-gap:accepted",
+      "remediation-replacement:refused",
+      "remediation-image:refused"
+    ],
+    "mustNot": []
+  },
+  "proposal": {
+    "action": null
+  },
+  "allowDiverge": false
+}

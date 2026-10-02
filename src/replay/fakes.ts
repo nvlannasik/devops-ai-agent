@@ -29,7 +29,15 @@ export class ReplayLLM implements LLMClient {
   private readonly queues = new Map<string, LLMResponse[]>();
   private readonly served = new Map<string, number>();
 
-  constructor(trace: Trace, private readonly live: LLMClient | null = null) {
+  /**
+   * `live` answers every call, or only the calls of `livePhases` — the rest still come from the
+   * recording. Live for the proposal alone compares proposal models on the identical investigation.
+   */
+  constructor(
+    trace: Trace,
+    private readonly live: LLMClient | null = null,
+    private readonly livePhases: readonly Phase[] | null = null
+  ) {
     const phaseOf = phases(trace);
     for (const e of trace.events) {
       if (e.kind !== "llm") continue;
@@ -39,7 +47,7 @@ export class ReplayLLM implements LLMClient {
   }
 
   async chat(...args: Parameters<LLMClient["chat"]>): Promise<LLMResponse> {
-    if (this.live) return this.live.chat(...args);
+    if (this.live && (!this.livePhases || this.livePhases.includes(this.phase))) return this.live.chat(...args);
     const thread = currentTrace() ?? "";
     const k = `${this.phase}|${thread}`;
     const n = this.served.get(k) ?? 0;

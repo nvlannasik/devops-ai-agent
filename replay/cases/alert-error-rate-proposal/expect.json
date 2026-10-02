@@ -1,0 +1,21 @@
+{
+  "answer": {
+    "must": [],
+    "mustNot": []
+  },
+  "gates": {
+    "must": [
+      "rca-completeness:nudge",
+      "confidence-cap:kept-high",
+      "offer:stripped",
+      "rca-completeness:accepted",
+      "remediation-replacement:refused",
+      "remediation-image:refused"
+    ],
+    "mustNot": []
+  },
+  "proposal": {
+    "action": null
+  },
+  "allowDiverge": false
+}

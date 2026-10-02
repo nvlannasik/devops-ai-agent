@@ -5,7 +5,7 @@ import type { LLMClient } from "../agent/llm/types.js";
 import type { RemediationStore } from "../agent/remediation/index.js";
 import { config } from "../config/index.js";
 import { withTrace } from "../utils/trace/index.js";
-import { Diverged, ReplayLLM, ReplayMCP, type Mode } from "./fakes.js";
+import { Diverged, ReplayLLM, ReplayMCP, type Mode, type Phase } from "./fakes.js";
 import type { Expect, Trace } from "./trace.js";
 
 export interface ReplayResult {
@@ -14,12 +14,19 @@ export interface ReplayResult {
   /** The replay's own gate decisions, `name:outcome`, in order — delegates' included. */
   gates: string[];
   /** undefined: the trace had no proposal run. */
-  proposal?: { action: string } | { refused: string } | null;
+  /** `dryRun: "unrecorded"`: a live proposal passed every agent-side gate and reached a dry-run the
+   *  recording cannot answer — the MCP server's own validation is not something replay may invent. */
+  proposal?: { action: string; dryRun?: "unrecorded" } | { refused: string } | null;
   where?: string;
 }
 
 // Every card is accepted: without a database `propose()` returns null, and a proposal that passed
 // every gate would replay as "no proposal" (the same reason AgentDeps.remediations exists).
+const unrecordedDryRun = (refused: string): { action: string; dryRun: "unrecorded" } | null => {
+  const m = /^not recorded in this trace \(([\w-]+)\)$/.exec(refused);
+  return m ? { action: m[1]!, dryRun: "unrecorded" } : null;
+};
+
 const ACCEPT_ALL = { pendingFor: async () => null, propose: async () => 1 } as unknown as RemediationStore;
 
 /**
@@ -32,14 +39,14 @@ const ACCEPT_ALL = { pendingFor: async () => null, propose: async () => 1 } as u
  * offer parser) can decide differently than it did live. Restore prior runs' answers if a case
  * ever needs it.
  */
-export async function replay(trace: Trace, opts: { mode: Mode; live?: LLMClient }): Promise<ReplayResult> {
+export async function replay(trace: Trace, opts: { mode: Mode; live?: LLMClient; livePhases?: Phase[] }): Promise<ReplayResult> {
   const start = trace.events.find((e) => e.kind === "start" && e.thread_ts === trace.thread && e.payload.phase === "investigate");
   if (!start) throw new Error("trace has no investigation start");
   const proposalStart = trace.events.find((e) => e.kind === "start" && e.thread_ts === trace.thread && e.payload.phase === "proposal");
 
   const rows: EventRow[] = [];
   const recorder = new TraceRecorder({ insert: async (r) => void rows.push(...r) }, { source: "replay", sha: "replay" });
-  const llm = new ReplayLLM(trace, opts.mode === "tools" ? (opts.live ?? null) : null);
+  const llm = new ReplayLLM(trace, opts.mode === "tools" ? (opts.live ?? null) : null, opts.livePhases ?? null);
   const mcp = new ReplayMCP(trace, opts.mode);
   const agent = new DevOpsAgent({ llm, mcp: mcp as never, recorder, remediations: ACCEPT_ALL });
 
@@ -69,7 +76,7 @@ export async function replay(trace: Trace, opts: { mode: Mode; live?: LLMClient 
       const out = await withTrace(trace.thread, () =>
         agent.proposeRemediation(1, p.labels ?? {}, p.issue, { userRequested: p.opts?.userRequested, offer: p.opts?.offer ?? null, threadId: trace.thread })
       );
-      proposal = out === null ? null : "refused" in out ? { refused: out.refused } : { action: out.proposal.action };
+      proposal = out === null ? null : "refused" in out ? (unrecordedDryRun(out.refused) ?? { refused: out.refused }) : { action: out.proposal.action };
     }
   } catch (err) {
     const where = llm.divergedAt ?? mcp.divergedAt;

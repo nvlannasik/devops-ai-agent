@@ -137,3 +137,34 @@ test("score: answer regexes, gates, proposal, and divergence the case allows", (
   assert.equal(score({ ...r, outcome: "diverged", where: "x" }, { allowDiverge: true }).outcome, "passed");
   assert.equal(score({ ...r, outcome: "crashed", where: "boom" }, {}).outcome, "crashed");
 });
+
+// The experiment this exists for (2026-10-02): every production proposal in two days came from
+// the light backend and every one was refused. Replaying the investigation from the recording and
+// asking only the PROPOSAL of a live model compares proposal models on identical input, for the
+// price of one or two LLM calls instead of a six-minute investigation.
+test("live for the proposal only: the investigation is the recording, the proposal is the live model", async () => {
+  const events = await record(
+    [
+      use("t1", "k8s_list_pods", { namespace: "sample-apps" }),
+      say(RCA),
+      use("t2", "k8s_get_pod_logs", { namespace: "sample-apps", pod_name: POD, previous: true, tail_lines: 200 }),
+      say(RCA),
+      say('{"action": null}'),
+      say('{"action": null}'), // proposeWithRetry re-asks a null once
+    ],
+    { proposal: true }
+  );
+  const asked: string[] = [];
+  const live: LLMClient = {
+    chat: async (messages) => {
+      asked.push(JSON.stringify(messages).slice(0, 40));
+      return say('{"action":"k8s_rollout_restart","namespace":"sample-apps","workload":"worker","reason":"live model"}');
+    },
+  };
+  const r = await replay(selectRun(events), { mode: "tools", live, livePhases: ["proposal"] });
+  assert.equal(r.outcome, "completed", r.where);
+  assert.equal(r.answer, answerOf(events), "the investigation must be the recorded one");
+  assert.equal(asked.length, 1, "only the proposal reached the live model");
+  // It passed every agent-side gate; the dry-run for an action the recording never ran is unknowable.
+  assert.deepEqual(r.proposal, { action: "k8s_rollout_restart", dryRun: "unrecorded" });
+});

@@ -1,0 +1,18 @@
+{
+  "answer": {
+    "must": [],
+    "mustNot": []
+  },
+  "gates": {
+    "must": [
+      "offer:stripped",
+      "remediation-scale:refused",
+      "remediation-replacement:refused"
+    ],
+    "mustNot": []
+  },
+  "proposal": {
+    "action": null
+  },
+  "allowDiverge": false
+}
