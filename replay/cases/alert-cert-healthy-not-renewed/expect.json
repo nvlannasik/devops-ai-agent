@@ -1,0 +1,18 @@
+{
+  "answer": {
+    "must": [],
+    "mustNot": []
+  },
+  "gates": {
+    "must": [
+      "log-gap:nudge",
+      "runbook:dropped",
+      "log-gap:accepted"
+    ],
+    "mustNot": []
+  },
+  "proposal": {
+    "action": "k8s_rollout_restart"
+  },
+  "allowDiverge": false
+}

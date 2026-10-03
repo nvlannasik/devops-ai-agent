@@ -18,14 +18,26 @@ the renewal that failed weeks earlier.
    shows the attempt and why it was refused; `clusterissuers` (cluster-scoped, omit namespace)
    shows whether the issuer itself is broken — a dead ACME issuer breaks EVERY certificate it
    signs, so check it before blaming one workload.
-4. A `Ready: True` Certificate with a still-failing client means the workload has not reloaded
-   the Secret. Check the pod's age against `status.renewalTime`: a pod older than the renewal is
-   holding the previous key pair in memory, and the fix is a rolling restart, not a re-issue.
+4. **Read the dates right.** `status.renewalTime` is when cert-manager WILL renew — on a healthy
+   certificate it is in the future, and it is never evidence that a renewal happened. The current
+   key pair was issued at `status.notBefore`; a renewal has happened only if `status.revision` is
+   above 1 or a CertificateRequest is newer than the first issuance. Do not write "renewed" or
+   "updated certificate" unless one of those says so.
+5. **Expiring soon, and healthy.** `Ready: True`, `renewalTime` still ahead, issuer Ready: nothing
+   is wrong. cert-manager renews at `renewalTime` — say so and quote it. The finding is that the
+   alert fires earlier than the certificate's `spec.renewBefore` window; the Immediate action is
+   none, and the fix is the alert threshold, not the workload.
+6. A stale mount is a renewal that HAPPENED (step 4) plus a client still failing TLS. Then a pod
+   that started before `status.notBefore` holds the previous key pair, and the fix is a rolling
+   restart of THAT workload — name it from the pods that mount the Secret
+   (`k8s_describe_pod` volumes). Never "the workload that uses the Secret": a restart needs a name
+   you read.
 
 `k8s_list_secrets` shows the TLS Secret exists but never its expiry — the dates live only on the
 Certificate object. Do not infer validity from the Secret.
 
 *Recommended Actions*: for a stuck renewal name the issuer and the refusal reason. For a stale
-mount, a rolling restart of the named workload. Never propose deleting the Secret to force
+mount, a rolling restart of the named workload. For a healthy certificate whose renewal is simply
+not due yet, no Immediate action — say when it renews. Never propose deleting the Secret to force
 re-issue — cert-manager may not recreate it before the next request arrives, turning a warning
 into an outage.
