@@ -1,6 +1,6 @@
 /**
  * The names and error terms in an on-call engineer's confirmed root cause — what a replayed answer
- * must contain to agree with the human (fed by the learn feature's incident_feedback, see export.ts).
+ * must contain to agree with the human (the learn feature: replay export turns it into answer.must, and learnFromThread checks an extracted cause against the humans' own words).
  *
  * A sentence is never the test: "misconfiguration of image tag/registry/secret" and the agent's
  * "the image reference is wrong" agree and share no words. The workload, the env var, the error

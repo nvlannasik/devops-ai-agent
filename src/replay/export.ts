@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { selectRun, type Expect, type TraceEvent } from "./trace.js";
 import { redact } from "./redact.js";
-import { keyTerms } from "./terms.js";
+import { keyTerms } from "../agent/feedback/terms.js";
 
 const args = process.argv.slice(2);
 const runFlag = args.indexOf("--run");

@@ -30,7 +30,7 @@ import {
   subThreadId,
   withDelegateTool,
 } from "./subagent/index.js";
-import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM } from "./feedback/index.js";
+import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM, tracesToHumans } from "./feedback/index.js";
 import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
 import { stripTemplateEcho } from "./template-echo/index.js";
 import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js";
@@ -3071,10 +3071,21 @@ export class DevOpsAgent {
   // On-call feedback learning (`@agent learn`): map the thread to its incident, run one
   // structured-output extraction call over the transcript, store the human-confirmed
   // knowledge. Returns the user-facing result message for the thread.
-  async learnFromThread(channel: string, threadTs: string, triggerUser: string, triggerTs: string, transcript: string): Promise<string> {
+  /**
+   * `humanText` is what humans wrote in the thread (`humanStatements` — the bot's messages
+   * excluded, a ✅'d one included). It is both the precondition and the check: with nothing in it
+   * there is nothing to extract, and an extracted cause must trace back to it. Incident 208,
+   * 2026-10-03: neither was enforced, and the agent's own hallucinated RCA was stored here as
+   * "confirmed by on-call".
+   */
+  async learnFromThread(channel: string, threadTs: string, triggerUser: string, triggerTs: string, transcript: string, humanText: string): Promise<string> {
     const incidentId = await this.incidents.findIncidentByThread(channel, threadTs);
     if (incidentId === null) {
       return "🤷 This thread isn't linked to a stored incident — I can only learn from alert threads I investigated (and stored).";
+    }
+    if (!humanText.trim()) {
+      logger.info(`[learn] incident ${incidentId}: nothing a human stated in the thread — no extraction`);
+      return "🤷 Nothing a human stated in this thread yet, so there is nothing to learn — I don't learn from my own analysis. Write the actual root cause or fix here (or ✅ the message that has it), then mention me with `learn`.";
     }
 
     const response = await this.llm.chat(
@@ -3083,9 +3094,14 @@ export class DevOpsAgent {
       EXTRACTION_SYSTEM
     );
     this.recordUsage(threadTs, response);
-    const extracted = parseFeedbackJson(this.extractText(response.content));
-    if (!extracted) {
+    const parsed = parseFeedbackJson(this.extractText(response.content));
+    if (!parsed) {
       return "🤷 I couldn't find a concrete conclusion in this thread yet. State the actual root cause / action taken in the thread, then mention me with `learn` again.";
+    }
+    const extracted = tracesToHumans(parsed, humanText);
+    if (!extracted) {
+      logger.warn(`[learn] incident ${incidentId}: extraction named nothing a human wrote — refused (${truncate(parsed.confirmed_root_cause ?? parsed.action_taken ?? "", 160)})`);
+      return "🤷 What I extracted came from my own messages, not from anything a human wrote here, so I did not store it as confirmed. State the root cause or fix in your own words, then mention me with `learn`.";
     }
 
     const result = await this.incidents.storeFeedback(incidentId, {

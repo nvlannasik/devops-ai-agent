@@ -6,7 +6,7 @@ import { DevOpsAgent, type RunMeta } from "../agent/index.js";
 import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { wantsInvestigation } from "../agent/intent/index.js";
-import { buildTranscript } from "../agent/feedback/index.js";
+import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
@@ -274,6 +274,11 @@ export class SlackApp {
     // `@agent learn` — on-call feedback learning: extract the thread's confirmed
     // conclusion into durable memory. Separate flow, no agentic loop involved.
     if (/^learn\b/i.test(text)) {
+      // "learn dihiraukan aja" — "ignore learn for now" — is not a request to learn (incident 208).
+      if (learnIntent(text) === "declined") {
+        await say({ text: "👍 OK — nothing learned from this thread.", thread_ts: threadId });
+        return;
+      }
       await this.handleLearn(event, client, threadId);
       return;
     }
@@ -508,8 +513,9 @@ export class SlackApp {
       // channels:history / groups:history scopes are already required for the app
       const replies = await client.conversations.replies({ channel: event.channel, ts: threadId, limit: 100 });
       const transcript = buildTranscript(replies.messages ?? []);
+      const humanText = humanStatements(replies.messages ?? [], event.ts).join("\n");
 
-      const result = await this.agent.learnFromThread(event.channel, threadId, event.user ?? "unknown", event.ts, transcript);
+      const result = await this.agent.learnFromThread(event.channel, threadId, event.user ?? "unknown", event.ts, transcript, humanText);
       await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: result, mrkdwn: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -570,8 +576,10 @@ export class SlackApp {
 
       const replies = await client.conversations.replies({ channel, ts: threadTs, limit: 100 });
       const transcript = buildTranscript(replies.messages ?? []);
+      // The ✅ endorses the reacted message, whoever wrote it — that is what the reaction means.
+      const humanText = humanStatements(replies.messages ?? [], null, messageTs).join("\n");
       // trigger_key = reacted message ts — several ✅ on the same message store once
-      const result = await this.agent.learnFromThread(channel, threadTs, user, `reaction:${messageTs}`, transcript);
+      const result = await this.agent.learnFromThread(channel, threadTs, user, `reaction:${messageTs}`, transcript, humanText);
       if (result.startsWith("📚 Already learned")) return; // repeat reactions stay silent too
       await client.chat.postMessage({ channel, thread_ts: threadTs, text: result, mrkdwn: true });
     } catch (err) {
