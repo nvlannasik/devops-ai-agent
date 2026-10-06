@@ -354,8 +354,19 @@ export function ungroundedTargetRefusal(
   if (!name) return null;
   const replicaSet = replicaSetAsDeployment(proposal, name, observed.toLowerCase());
   if (replicaSet) return replicaSet;
-  if (observed.toLowerCase().includes(name)) return null;
-  if (Object.values(labels).some((v) => typeof v === "string" && v.toLowerCase().includes(name))) return null;
+  // A target named after its own namespace is in every result as the NAMESPACE (bench C01,
+  // 2026-10-07: restart `bench-c01/bench-c01` when the only workload was `web`). Then only a
+  // workload-shaped sighting counts: an object `"name":"<it>"` or its pods' `<it>-` prefix — and
+  // the namespace label is not one.
+  if (name === proposal.namespace.toLowerCase()) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const asWorkload = new RegExp(`"name"\\s*:\\s*"${escaped}"|(?<![a-z0-9-])${escaped}-[a-z0-9]`, "i");
+    if (asWorkload.test(observed)) return null;
+    if (Object.entries(labels).some(([k, v]) => k !== "namespace" && typeof v === "string" && v.toLowerCase().includes(name))) return null;
+  } else {
+    if (observed.toLowerCase().includes(name)) return null;
+    if (Object.values(labels).some((v) => typeof v === "string" && v.toLowerCase().includes(name))) return null;
+  }
   return (
     `\`${proposal.namespace}/${proposal.name}\` appears in no tool result from this investigation and in ` +
     `no alert label, so the target was written rather than found. Name a workload that showed up in what ` +

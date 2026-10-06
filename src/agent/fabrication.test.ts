@@ -100,3 +100,16 @@ test("a proposal that wanders off its own offer is refused", () => {
   assert.equal(offerMismatchRefusal(wrong, null), null, "no offer, nothing to disagree with");
   assert.equal(offerMismatchRefusal(wrong, "clean up the stale things"), null, "an offer naming no object");
 });
+
+// Bench C01, 2026-10-07, 2 of 3 attempts: a KubePodNotReady in namespace `bench-c01`, whose only
+// workload is `web`, and a restart proposed for deployment `bench-c01/bench-c01`. Every tool result
+// and the `namespace` label contain the string, so the substring test called an invented name seen.
+test("a workload named after its own namespace is not grounded by the namespace", () => {
+  const p = parseProposal(JSON.stringify({ action: "k8s_rollout_restart", namespace: "bench-c01", workload: "bench-c01" }))!;
+  const pods = JSON.stringify([{ name: "web-6b747db7c9-zwdcv", namespace: "bench-c01", ready: true }]) + "\nbench-c01/web-6b747db7c9-zwdcv";
+  assert.match(ungroundedTargetRefusal(p, pods, { namespace: "bench-c01", alertname: "KubePodNotReady" }) ?? "", /appears in no tool result/);
+  // …but a workload that really shares its namespace's name is seen through its own pods or objects
+  assert.equal(ungroundedTargetRefusal(p, JSON.stringify([{ name: "bench-c01-7d9f4c5b8-zx8k2", namespace: "bench-c01" }])), null);
+  assert.equal(ungroundedTargetRefusal(p, `{"name":"bench-c01","namespace":"bench-c01","kind":"Deployment"}`), null);
+  assert.equal(ungroundedTargetRefusal(p, "", { deployment: "bench-c01", namespace: "bench-c01" }), null);
+});
