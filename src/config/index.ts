@@ -33,6 +33,9 @@ export const config = {
     // who may approve/reject remediations — falls back to oncallUsers; both empty =
     // any user may decide (warned in logs; still a human gate + server-side guardrails)
     approverUsers: (process.env.SLACK_APPROVER_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    // who may mention the agent or ✅-learn — plus oncallUsers and approverUsers. Empty =
+    // anyone in a channel the bot is in (warned at boot)
+    allowedUsers: (process.env.SLACK_ALLOWED_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     // emoji name that triggers learn-from-thread when reacted inside an investigated
     // thread (needs reactions:read + the reaction_added event subscription)
     learnReaction: process.env.SLACK_LEARN_REACTION ?? "white_check_mark",

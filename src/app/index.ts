@@ -11,7 +11,7 @@ import { parseStatusCommand, type StatusCommand } from "../agent/incidents/recon
 import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
-import { timingSafeEqualStr, bearerToken } from "../utils/auth/index.js";
+import { timingSafeEqualStr, bearerToken, slackUserAllowed } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter, type Block } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
@@ -181,6 +181,10 @@ export class SlackApp {
       logger.info("Slack mode: HTTP Mode. Ensure the service is publicly reachable for Slack Events API.");
     }
 
+    if (config.slack.allowedUsers.length === 0) {
+      logger.warn("SLACK_ALLOWED_USERS not set — anyone in a channel the bot is in can mention it and ✅-learn.");
+    }
+
     this.app.event("app_mention", async (args) => {
       await this.handleMention(args as AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">);
     });
@@ -257,6 +261,14 @@ export class SlackApp {
     return provided !== null && timingSafeEqualStr(provided, expected);
   }
 
+  private mayUseAgent(user: string | undefined): boolean {
+    return slackUserAllowed(user, {
+      allowed: config.slack.allowedUsers,
+      oncall: config.slack.oncallUsers,
+      approvers: config.slack.approverUsers,
+    });
+  }
+
   private async handleMention(args: AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">): Promise<void> {
     const { event, say, client } = args;
     const threadId = event.thread_ts ?? event.ts;
@@ -265,6 +277,21 @@ export class SlackApp {
     // log the raw text here — the Issue preview inside investigate() now starts with the
     // [USER MESSAGE ...] marker, which eats the whole 120-char preview
     logger.info(`[slack] mention received — channel: ${event.channel}, thread: ${threadId}, user: ${event.user}, text: ${truncate(text, 200)}`);
+
+    if (!this.mayUseAgent(event.user)) {
+      logger.warn(`[slack] mention from ${event.user ?? "unknown"} refused — not in SLACK_ALLOWED_USERS`);
+      if (event.user) {
+        await client.chat
+          .postEphemeral({
+            channel: event.channel,
+            user: event.user,
+            thread_ts: threadId,
+            text: ":denied: You're not registered to use this agent (SLACK_ALLOWED_USERS). Ask the on-call to add you.",
+          })
+          .catch((err) => logger.warn(`[slack] refusal note failed: ${errDetail(err)}`));
+      }
+      return;
+    }
 
     if (!text) {
       await say({ text: "Hi! Describe the issue you want me to investigate.", thread_ts: threadId });
@@ -567,6 +594,11 @@ export class SlackApp {
     user: string,
     client: AllMiddlewareArgs["client"]
   ): Promise<void> {
+    // a ✅ writes human-confirmed memory, so it needs the same standing as a mention
+    if (!this.mayUseAgent(user)) {
+      logger.info(`[feedback] ✅ from ${user} ignored — not in SLACK_ALLOWED_USERS`);
+      return;
+    }
     try {
       // the reaction payload has no thread_ts — resolve the reacted message's thread root
       const msg = await client.conversations.replies({ channel, ts: messageTs, limit: 1 });

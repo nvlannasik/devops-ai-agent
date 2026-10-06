@@ -17,3 +17,17 @@ export function bearerToken(header: string | undefined): string | null {
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
   return m ? m[1].trim() : null;
 }
+
+/**
+ * Who may talk to the agent in Slack (mentions and the ✅ learn reaction). Empty `allowed`
+ * = everyone, as before the allowlist existed. Once set, on-call and approvers are admitted
+ * too, so the people the agent pages are never locked out of answering it.
+ */
+export function slackUserAllowed(
+  user: string | undefined,
+  lists: { allowed: string[]; oncall: string[]; approvers: string[] }
+): boolean {
+  if (lists.allowed.length === 0) return true;
+  if (!user) return false;
+  return lists.allowed.includes(user) || lists.oncall.includes(user) || lists.approvers.includes(user);
+}
