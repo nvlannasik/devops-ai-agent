@@ -21,6 +21,13 @@ npm test                                             # every case below, gates m
 npm run replay                                       # same, with a summary line per case
 npm run replay -- <case> --mode tools --attempts 3   # live model, pass^k
 
+# tools mode against the production router, from inside the agent pod (it holds the SQS creds).
+# AWS_CONFIG_FILE is exported by entrypoint.sh to the main process only — without it every
+# private-llm backend fails and the run quietly measures the failover chain instead.
+kubectl -n devops-tools cp replay/cases/<case> <pod>:/tmp/rc/<case>
+kubectl -n devops-tools exec <pod> -- sh -c 'AWS_CONFIG_FILE=/tmp/aws/config REPLAY_CASES_DIR=/tmp/rc \
+  node dist/src/replay/cli.js --mode tools --live investigate,proposal --attempts 3'
+
 # a production run → a new case (needs the dashboard port-forward on :3101)
 DASHBOARD_PASSWORD=… npm run replay:export -- <thread_ts> <case-name> [--run <uuid>]
 ```
