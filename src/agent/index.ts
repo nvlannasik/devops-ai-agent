@@ -36,10 +36,10 @@ import { stripTemplateEcho } from "./template-echo/index.js";
 import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js";
 import { stripMutatingCommands } from "./runbook/index.js";
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
-import { isRcaResponse } from "../utils/slack/blocks.js";
+import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
-import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
   RemediationCheckStore,
@@ -2455,7 +2455,10 @@ export class DevOpsAgent {
     // payments deployment" has placed it themselves and may know something the pod list does not
     // show. Their request is already sufficient evidence per buildProposalPrompt.
     if (!ctx.userRequested) {
-      const replaced = await this.guardRefusalFor(proposal);
+      // What may name the target as the fault: the Root Cause (never the Immediate line — that is
+      // where the reflex restart is written) and the alert's labels. Whole text when no section.
+      const mentions = `${extractSection(ctx.rca, "Root Cause") || ctx.rca}\n${Object.values(ctx.labels).join(" ")}`;
+      const replaced = await this.guardRefusalFor(proposal, mentions);
       if (replaced) return { gate: "replacement guard", reason: replaced };
     }
 
@@ -2555,8 +2558,8 @@ export class DevOpsAgent {
    * `k8s_set_image` when the resource action was blocked. A guard that has to read pod state to
    * be correct is a bigger thing than the one failure it fixes.
    */
-  async guardRefusalFor(proposal: Proposal): Promise<string | null> {
-    if (REPLACEMENT_ACTIONS.has(proposal.action)) return this.replacementRefusalFor(proposal);
+  async guardRefusalFor(proposal: Proposal, mentions = ""): Promise<string | null> {
+    if (REPLACEMENT_ACTIONS.has(proposal.action)) return this.replacementRefusalFor(proposal, mentions);
     if (proposal.action === "k8s_set_image") return this.noOpImageRefusalFor(proposal);
     if (proposal.action === "k8s_set_resources") return this.noOpResourcesRefusalFor(proposal);
     return null;
@@ -2601,12 +2604,17 @@ export class DevOpsAgent {
     }
   }
 
-  async replacementRefusalFor(proposal: Proposal): Promise<string | null> {
+  /** `mentions`: the text that may name the target as the fault — see healthyTargetRefusal. */
+  async replacementRefusalFor(proposal: Proposal, mentions = ""): Promise<string | null> {
     const namespace = proposal.toolParams.namespace;
     if (typeof namespace !== "string" || !namespace) return null;
     try {
       const raw = await this.mcp.callTool("k8s_list_pods", { namespace });
-      return replacementRefusal(proposal.action, proposal.toolParams, parsePods(raw));
+      const pods = parsePods(raw);
+      return (
+        replacementRefusal(proposal.action, proposal.toolParams, pods) ??
+        healthyTargetRefusal(proposal.action, proposal.toolParams, pods, mentions)
+      );
     } catch (err) {
       logger.debug(`[remediation] replacement guard could not list pods in ${namespace}: ${errDetail(err)}`);
       return null;

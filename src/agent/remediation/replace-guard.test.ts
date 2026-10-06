@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePods, replacementRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 
 const pod = (name: string, ready: boolean, restarts = 0, status = "Running") => ({ name, ready, restarts, status });
 const del = (target: string, pods: ReturnType<typeof pod>[]) =>
@@ -216,4 +216,42 @@ test("a restarted pod that reads ready is not described as unready", () => {
   assert.match(r, /already done that 3 time\(s\)/);
   assert.doesNotMatch(r, /unready/);
   assert.match(r, /1 of 1 pod\(s\) of `checkout-gateway` read as ready/);
+});
+
+// Incident 207 (2026-10-03, remediation 105): a healthy certificate, and a card to restart
+// devops-ai-agent — the agent itself — whose pods were all ready with zero restarts. Nothing named
+// it as the fault; it was simply the workload in that namespace.
+const AGENT_PODS = [pod("devops-ai-agent-5d75db8498-phzcr", true), pod("devops-ai-agent-5d75db8498-k2x9q", true)];
+const CERT_RCA = "Certificate `workload-cert` in `devops-tools` expires in 18 days; renewal is due at renewalTime.";
+
+test("a restart of a healthy workload nothing names as the fault is refused", () => {
+  const r = healthyTargetRefusal("k8s_rollout_restart", { namespace: "devops-tools", name: "devops-ai-agent" }, AGENT_PODS, CERT_RCA);
+  assert.match(r ?? "", /all 2 pod\(s\) of `devops-ai-agent` are ready with zero restarts/);
+});
+
+test("a healthy workload the root cause or the alert names keeps its card (stale cert, wedged process)", () => {
+  const named = "`devops-ai-agent` pods started before the renewal and still serve the old key pair.";
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", { namespace: "devops-tools", name: "devops-ai-agent" }, AGENT_PODS, named), null);
+});
+
+test("a name inside a longer name is not a mention of it", () => {
+  const pods = [pod("api-6b747db7c9-zwdcv", true)];
+  const r = healthyTargetRefusal("k8s_rollout_restart", { namespace: "x", name: "api" }, pods, "`payments-api` returns 500s");
+  assert.ok(r, "payments-api is a different workload");
+});
+
+test("the healthy-target rule never fires on a pod that is unready or has restarted", () => {
+  const params = { namespace: "x", name: "web" };
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, [pod("web-6b747db7c9-a1b2c", false)], ""), null);
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, [pod("web-6b747db7c9-a1b2c", true, 1)], ""), null);
+  // a workload the pod list does not show fails open — the target gate owns invented names
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, [pod("other-6b747db7c9-a1b2c", true)], ""), null);
+});
+
+test("a delete of a healthy pod is refused unless the pod or its workload is named", () => {
+  const p = "devops-ai-agent-5d75db8498-phzcr";
+  const params = { namespace: "devops-tools", pod: p };
+  assert.ok(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, CERT_RCA));
+  assert.equal(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, `pod \`${p}\` is wedged`), null);
+  assert.equal(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, "deployment `devops-ai-agent` is wedged"), null);
 });

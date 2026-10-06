@@ -268,5 +268,60 @@ export function replacementRefusal(
   return null;
 }
 
+/** `name` appears in `text` as a whole Kubernetes name — `api` is not mentioned by `payments-api`. */
+const names = (text: string, name: string): boolean =>
+  name.length > 0 && new RegExp(`(?<![a-z0-9-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-])`, "i").test(text);
+
+/**
+ * The other half of the question: a restart against a workload that is FINE.
+ *
+ * `replacementRefusal` refuses a replacement that cannot help a broken pod; it lets every serving
+ * pod through by design, because a process can wedge while still reading ready. Incident 207
+ * (2026-10-03) went through that door: a healthy certificate, and a card to restart
+ * `devops-ai-agent` — the agent itself — whose pods were all ready with zero restarts. Nothing
+ * named it as the fault; it was the workload that happened to live in that namespace.
+ *
+ * So when every target pod is serving, the restart needs SOMETHING to say this workload is the
+ * fault: the RCA's Root Cause names it, or the alert does (`mentions` is both). The legitimate
+ * healthy-pod restarts — a stale certificate mount, a wedged connection pool — are exactly the
+ * ones whose root cause names the workload, so they pass. A human asking in words skips this, like
+ * every replacement guard (`userRequested`).
+ *
+ * Fails open like the rest of this file: no matching pods, or any pod not serving, returns null.
+ */
+export function healthyTargetRefusal(
+  action: string,
+  params: Record<string, unknown>,
+  pods: readonly PodState[],
+  mentions: string
+): string | null {
+  if (action === "k8s_rollout_restart") {
+    const name = typeof params.name === "string" ? params.name : "";
+    const mine = podsOf(pods, name);
+    if (!name || mine.length === 0 || !mine.every(isServing) || names(mentions, name)) return null;
+    return (
+      `all ${mine.length} pod(s) of \`${name}\` are ready with zero restarts, and neither the root cause nor ` +
+      `the alert names \`${name}\` as the fault. A rolling restart of a healthy workload repairs nothing — ` +
+      `it only rolls pods that are serving. If \`${name}\` really is wedged while reading ready, the root ` +
+      `cause has to say so and why; otherwise the action belongs on the workload the root cause names.`
+    );
+  }
+  if (action === "k8s_delete_pod") {
+    const pod = typeof params.pod === "string" ? params.pod : "";
+    const target = pods.find((p) => p.name === pod);
+    if (!target || !isServing(target)) return null;
+    // the pod, its ReplicaSet, or its workload — `web-6b747db7c9-a1b2c` → `web-6b747db7c9` → `web`
+    const parts = pod.split("-");
+    const candidates = [pod, parts.slice(0, -1).join("-"), parts.slice(0, -2).join("-")];
+    if (candidates.some((c) => names(mentions, c))) return null;
+    return (
+      `\`${pod}\` is ready with zero restarts, and neither the root cause nor the alert names it or its ` +
+      `workload as the fault. Deleting a healthy pod repairs nothing; if it is wedged while reading ready, ` +
+      `the root cause has to say so.`
+    );
+  }
+  return null;
+}
+
 /** The two actions this guard applies to — the ones that rebuild a pod from the same spec. */
 export const REPLACEMENT_ACTIONS: ReadonlySet<string> = new Set(["k8s_rollout_restart", "k8s_delete_pod"]);
