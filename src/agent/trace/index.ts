@@ -91,7 +91,8 @@ export class TraceRecorder {
     if (run) run.skills = names;
   }
 
-  llm(threadTs: string, response: LLMResponse): void {
+  /** `ms` is the whole chat() as the loop waited for it — router failover included. */
+  llm(threadTs: string, response: LLMResponse, ms?: number): void {
     const run = this.runs.get(threadTs);
     if (!run) return;
     this.push(threadTs, run, "llm", response.backend ?? null, null, {
@@ -101,6 +102,7 @@ export class TraceRecorder {
       route: response.route ?? null,
       model: response.model ?? null,
       skills: run.skills,
+      ms: ms ?? null,
     });
   }
 
@@ -183,9 +185,10 @@ export class TraceRecorder {
 export function instrumentLLM(llm: LLMClient, rec: () => TraceRecorder): LLMClient {
   return {
     chat: async (messages, tools, systemPrompt) => {
+      const start = Date.now();
       const response = await llm.chat(messages, tools, systemPrompt);
       const t = currentTrace();
-      if (t) rec().llm(t, response);
+      if (t) rec().llm(t, response, Date.now() - start);
       return response;
     },
     shutdown: llm.shutdown?.bind(llm),

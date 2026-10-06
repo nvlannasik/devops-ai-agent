@@ -2768,6 +2768,27 @@ test("the harness page lists gates with outcomes and the nudge resolution split"
   assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
 });
 
+test("the harness page shows LLM latency per backend, slowest first, sub-second calls in ms", async () => {
+  const { harnessPage } = await import("./views.js");
+  const html = harnessPage({
+    runs7: 1,
+    runs30: 1,
+    stats: [{ name: "placeholder", outcome: "refused", d7: 1, d30: 1 }],
+    llm: [
+      { backend: "private-llm-agus", calls: 12, p50: 4100, p95: 61000 },
+      { backend: "haiku", calls: 3, p50: 420, p95: 900 },
+    ],
+  });
+  assert.match(html, /LLM latency/);
+  assert.match(html, /private-llm-agus/);
+  assert.match(html, /4\.1s/);
+  assert.match(html, /1m 1s/);
+  assert.match(html, /420ms/);
+  assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
+  // no llm rows (before this field was recorded) means no table, not an empty one
+  assert.doesNotMatch(harnessPage({ runs7: 1, runs30: 1, stats: [{ name: "placeholder", outcome: "refused", d7: 1, d30: 1 }] }), /LLM latency/);
+});
+
 test("an empty harness page says why it is empty", async () => {
   const { harnessPage } = await import("./views.js");
   assert.match(harnessPage({ runs7: 0, runs30: 0, stats: [] }), /No gate events recorded yet/);
@@ -2788,12 +2809,15 @@ test("a gate detail from the database is escaped on the drill-down", async () =>
 test("the incident page shows the trace timeline when there is one", () => {
   const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "critical", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
   const timeline = [
-    { id: 1, threadTs: "1.1", kind: "tool", name: "k8s_list_pods", outcome: null, detail: null, size: 809, head: '[{"name":"web-1"}]', createdAt: new Date() },
+    { id: 1, threadTs: "1.1", kind: "tool", name: "k8s_list_pods", outcome: null, detail: null, size: 809, head: '[{"name":"web-1"}]', ms: 340, createdAt: new Date() },
+    { id: 3, threadTs: "1.1", kind: "llm", name: "private-llm-agus", outcome: null, detail: null, size: null, head: null, ms: 12500, createdAt: new Date() },
     { id: 2, threadTs: "1.1/sub-1", kind: "gate", name: "log-gap", outcome: "nudge", detail: "after 1 tool round(s)", size: null, head: null, createdAt: new Date() },
   ];
   const html = detailPage({ incident, remediations: [], feedback: [], timeline });
   assert.match(html, /What the harness did/);
   assert.match(html, /log-gap/);
   assert.match(html, /809 chars/);
+  assert.match(html, /340ms/);
+  assert.match(html, /private-llm-agus[\s\S]*12\.5s/);
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /What the harness did/);
 });

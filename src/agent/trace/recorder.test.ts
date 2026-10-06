@@ -121,3 +121,17 @@ test("every refusalFor gate string maps to its own gate name", async () => {
   assert.equal(refusalGate("resource-fault gate"), "remediation-resource-fault");
   assert.equal(refusalGate("something new"), "remediation-other");
 });
+
+test("an llm event carries how long the call took, failover included", async () => {
+  const { s, r } = rec();
+  const llm = instrumentLLM(
+    { chat: async () => (await new Promise((ok) => setTimeout(ok, 30)), { content: [], stopReason: "end_turn" as const, backend: "slow" }) },
+    () => r
+  );
+  r.begin("1.1", {});
+  await withTrace("1.1", () => llm.chat([], [], ""));
+  await r.finish("1.1");
+  const ev = s.rows.find((e) => e.kind === "llm")!;
+  assert.equal(ev.name, "slow");
+  assert.ok(typeof ev.payload.ms === "number" && ev.payload.ms >= 25, `ms=${ev.payload.ms}`);
+});

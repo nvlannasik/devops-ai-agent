@@ -40,6 +40,8 @@ for (const name of names) {
     const r = await replay(c.trace, { mode, live, livePhases });
     const s = score(r, c.expect);
     if (mode === "tools") console.log(`  ${name} #${n}: proposal ${JSON.stringify(r.proposal ?? null)} gates ${r.gates.filter((g) => g.startsWith("remediation-") || g.startsWith("proposal")).join(",") || "-"}`);
+    // The RCA's first action is what the proposal converts, so a prompt experiment reads it here.
+    if (mode === "tools") console.log(`  ${name} #${n}: immediate ${r.answer.match(/\*Immediate:\*\s*(.*)/)?.[1]?.slice(0, 300) ?? "-"}`);
     if (s.outcome === "passed") passed++;
     else console.log(`  ${name} #${n}: ${s.outcome} — ${s.why.join("; ")}`);
   }

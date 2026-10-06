@@ -11,7 +11,9 @@ export interface IncidentRow {
 }
 // --- harness trace (agent_events, migrations/011) ---
 export interface GateStat { name: string; outcome: string; d7: number; d30: number }
-export interface HarnessView { runs7: number; runs30: number; stats: GateStat[] }
+/** One backend's chat() wall time over 7 days, router failover included. Milliseconds. */
+export interface LlmLatency { backend: string; calls: number; p50: number; p95: number }
+export interface HarnessView { runs7: number; runs30: number; stats: GateStat[]; llm?: LlmLatency[] }
 export interface GateEvent { threadTs: string; outcome: string; detail: string; createdAt: Date; incidentId: number | null }
 export interface GateDrill { daily: { day: string; n: number }[]; events: GateEvent[] }
 export interface TimelineEvent {
@@ -25,6 +27,8 @@ export interface TimelineEvent {
   size: number | null;
   /** First 200 chars of a tool result — never the whole thing, which can be 512K. */
   head: string | null;
+  /** How long the llm/tool call took; null for other events and for llm rows recorded before it was. */
+  ms?: number | null;
   createdAt: Date;
 }
 
@@ -552,8 +556,8 @@ export class DashboardQueries {
   }
 
   async harness(): Promise<HarnessView> {
-    if (!this.pool) return { runs7: 0, runs30: 0, stats: [] };
-    const [runs, stats] = await Promise.all([
+    if (!this.pool) return { runs7: 0, runs30: 0, stats: [], llm: [] };
+    const [runs, stats, llm] = await Promise.all([
       // Investigations only: a delegate's run and the proposal run belong to one the parent counted.
       this.pool.query(
         `SELECT count(*) FILTER (WHERE created_at > now() - interval '7 days') AS d7, count(*) AS d30
@@ -569,11 +573,24 @@ export class DashboardQueries {
           WHERE kind = 'gate' AND created_at > now() - interval '30 days' AND payload->>'source' = 'prod'
           GROUP BY name, outcome ORDER BY count(*) DESC LIMIT 500`
       ),
+      // An llm row has no source of its own — the run's start row says prod or bench.
+      this.pool.query(
+        `SELECT coalesce(e.name, '(unknown)') AS backend, count(*) AS n,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY (e.payload->>'ms')::numeric) AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY (e.payload->>'ms')::numeric) AS p95
+           FROM agent_events e
+           JOIN agent_events s
+             ON s.kind = 'start' AND s.payload->>'run' = e.payload->>'run' AND s.payload->>'source' = 'prod'
+            AND s.created_at > now() - interval '8 days'
+          WHERE e.kind = 'llm' AND e.created_at > now() - interval '7 days' AND jsonb_typeof(e.payload->'ms') = 'number'
+          GROUP BY 1 ORDER BY p95 DESC LIMIT 50`
+      ),
     ]);
     return {
       runs7: num(runs.rows[0]?.d7),
       runs30: num(runs.rows[0]?.d30),
       stats: stats.rows.map((r) => ({ name: String(r.name), outcome: String(r.outcome), d7: num(r.d7), d30: num(r.d30) })),
+      llm: llm.rows.map((r) => ({ backend: String(r.backend), calls: num(r.n), p50: Math.round(Number(r.p50)), p95: Math.round(Number(r.p95)) })),
     };
   }
 
@@ -617,7 +634,8 @@ export class DashboardQueries {
     if (!this.pool) return [];
     const { rows } = await this.pool.query(
       `SELECT id, thread_ts, kind, name, outcome, payload->>'detail' AS detail,
-              length(payload->>'result') AS size, left(payload->>'result', 200) AS head, created_at
+              length(payload->>'result') AS size, left(payload->>'result', 200) AS head,
+              (payload->>'ms')::numeric AS ms, created_at
          FROM agent_events
         WHERE thread_ts = $1 OR thread_ts LIKE $1 || '/sub-%'
         ORDER BY id LIMIT 2000`,
@@ -632,6 +650,7 @@ export class DashboardQueries {
       detail: r.detail ?? null,
       size: r.size === null || r.size === undefined ? null : num(r.size),
       head: r.head ?? null,
+      ms: r.ms === null || r.ms === undefined ? null : num(r.ms),
       createdAt: r.created_at,
     }));
   }

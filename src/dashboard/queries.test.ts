@@ -414,6 +414,25 @@ test("harness counts prod runs and gate outcomes over 7 and 30 days", async () =
   assert.ok(calls.some((c) => /thread_ts NOT LIKE '%\/sub-%'/.test(c.sql)), "delegate runs counted as investigations");
 });
 
+test("harness reads LLM latency per backend from prod runs only, over 7 days", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(
+    stub(calls, (sql) => (/kind = 'llm'/.test(sql) ? [{ backend: "private-llm-agus", n: "12", p50: "4100.5", p95: "61000" }] : []))
+  );
+  const h = await q.harness();
+  assert.deepEqual(h.llm, [{ backend: "private-llm-agus", calls: 12, p50: 4101, p95: 61000 }]);
+  const sql = calls.find((c) => /kind = 'llm'/.test(c.sql))!.sql;
+  // an llm row carries no source; the run's start row does
+  assert.match(sql, /s\.kind = 'start'[\s\S]*s\.payload->>'source' = 'prod'/);
+  assert.match(sql, /percentile_cont\(0\.95\)/);
+});
+
+test("the timeline carries each call's duration", async () => {
+  const calls: Call[] = [];
+  await new DashboardQueries(stub(calls)).timeline("1.1");
+  assert.match(calls[0]!.sql, /payload->>'ms'/);
+});
+
 test("the timeline never selects a full tool result", async () => {
   const calls: Call[] = [];
   await new DashboardQueries(stub(calls)).timeline("1.1");
@@ -424,7 +443,7 @@ test("the timeline never selects a full tool result", async () => {
 
 test("no database: harness, drill-down, timeline and trace are empty, not errors", async () => {
   const q = new DashboardQueries(null);
-  assert.deepEqual(await q.harness(), { runs7: 0, runs30: 0, stats: [] });
+  assert.deepEqual(await q.harness(), { runs7: 0, runs30: 0, stats: [], llm: [] });
   assert.deepEqual(await q.harnessGate("log-gap"), { daily: [], events: [] });
   assert.deepEqual(await q.timeline("1.1"), []);
   assert.deepEqual(await q.trace("1.1"), []);

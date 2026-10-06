@@ -109,6 +109,15 @@ export function fmtDuration(ms: number | null | undefined): string {
   return rem ? `${d}d ${rem}h` : `${d}d`;
 }
 
+/** A call's latency: `420ms`, `4.1s`, `1m 34s`. fmtDuration rounds 420ms to `0s` and 94s to `1m`. */
+export function fmtLatency(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(Number(ms)) || ms < 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 export function fmtPct(n: number, d: number): string {
   if (!d) return "—";
   return `${Math.round((n / d) * 100)}%`;

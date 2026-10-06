@@ -1,4 +1,4 @@
-import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
+import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, fmtPct, headers, table, timeTag } from "./html.js";
 import { incidentSummary, renderRca } from "./rca.js";
 import { donutChart, lineChart } from "./chart.js";
 import { STYLES } from "./styles.js";
@@ -1128,12 +1128,14 @@ function timelineSection(all: TimelineEvent[]): string {
   // the section's height.
   const events = all.filter((e) => e.kind !== "start" && e.kind !== "end");
   if (events.length === 0) return "";
+  const took = (e: TimelineEvent): string => (e.ms === null || e.ms === undefined ? "" : ` <span class="meta">· ${fmtLatency(e.ms)}</span>`);
   const what = (e: TimelineEvent): string => {
     if (e.kind === "tool") {
       const size = e.size === null ? `<span class="meta">error</span>` : `<span class="meta">${fmtInt(e.size)} chars</span>`;
       const first = e.head ? `<div class="meta">${esc(e.head.split("\n")[0]!.slice(0, 160))}</div>` : "";
-      return `<code translate="no">${esc(e.name ?? "")}</code> ${size}${first}`;
+      return `<code translate="no">${esc(e.name ?? "")}</code> ${size}${took(e)}${first}`;
     }
+    if (e.kind === "llm") return `<code translate="no">${esc(e.name ?? "llm")}</code>${took(e)}`;
     if (e.kind === "gate") {
       return (
         `<code translate="no">${esc(e.name ?? "")}</code> → <strong>${esc(e.outcome ?? "")}</strong>` +
@@ -1195,6 +1197,22 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
       );
     })
     .join("");
+  // Slowest first: the question this answers is "which backend is the run waiting on".
+  const llmRows = (v.llm ?? [])
+    .map(
+      (l) =>
+        `<tr role="row">` +
+        cell("Backend", `<code translate="no">${esc(l.backend)}</code>`, "primary") +
+        cell("Calls", fmtInt(l.calls), "num") +
+        cell("p50", fmtLatency(l.p50), "num") +
+        cell("p95", fmtLatency(l.p95), "num") +
+        `</tr>`
+    )
+    .join("");
+  const latency = llmRows
+    ? `${section(ICON.chip, "LLM latency", '<span class="meta">7 days · per chat() call, failover included · slowest first</span>')}
+         ${table(headers("Backend", ["Calls", "num"], ["p50", "num"], ["p95", "num"]), llmRows, "pairs")}`
+    : "";
   const body =
     v.stats.length === 0
       ? empty(
@@ -1213,7 +1231,8 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
            nudges mostly end here costs more than it buys.</p>
          ${table(headers("Gate", ["Nudges", "num"], ...NUDGE_FATES.map((f) => [f, "num"] as [string, string])), fateRows, "pairs")}`
              : ""
-         }`;
+         }
+         ${latency}`;
   return layout(
     "Harness",
     `<div class="doc">
