@@ -22,9 +22,9 @@ const harness = () => {
   };
   const proto = SlackApp.prototype as any;
   self.mayUseAgent = proto.mayUseAgent;
-  const mention = (user: string | undefined, text: string) =>
+  const mention = (user: string | undefined, text: string, thread_ts?: string) =>
     proto.handleMention.call(self, {
-      event: { user, text, channel: "C1", ts: "1.1" },
+      event: { user, text, channel: "C1", ts: "1.1", thread_ts },
       say: async (m: any) => void said.push(m),
       client,
     });
@@ -39,7 +39,12 @@ test("a mention from a user outside the allowlist gets an ephemeral refusal and 
   assert.equal(h.said.length, 0, "no public reply");
   assert.equal(h.ephemeral.length, 1);
   assert.equal(h.ephemeral[0].user, "U9");
-  assert.equal(h.ephemeral[0].thread_ts, "1.1");
+  // Live 2026-10-06: a top-level mention's ephemeral carried thread_ts = its own ts. Slack shows an
+  // ephemeral in a thread only when that thread already has replies, so the API said ok and
+  // the user saw nothing. Top-level → channel; inside a thread → that thread.
+  assert.equal(h.ephemeral[0].thread_ts, undefined);
+  await h.mention("U9", "<@BOT> cek pods", "0.9");
+  assert.equal(h.ephemeral[1].thread_ts, "0.9");
 });
 
 test("an allowed user, and on-call, get past the gate", async () => {

@@ -285,7 +285,8 @@ export class SlackApp {
           .postEphemeral({
             channel: event.channel,
             user: event.user,
-            thread_ts: threadId,
+            // only a thread that already exists: an ephemeral in a reply-less thread is never shown
+            thread_ts: event.thread_ts,
             text: ":denied: You're not registered to use this agent (SLACK_ALLOWED_USERS). Ask the on-call to add you.",
           })
           .catch((err) => logger.warn(`[slack] refusal note failed: ${errDetail(err)}`));
