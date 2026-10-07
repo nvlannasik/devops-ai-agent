@@ -344,7 +344,7 @@ export function rbacRestartRefusal(action: string, params: Record<string, unknow
   if (!ns) return null;
   const esc = ns.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const denial = new RegExp(
-    `system:serviceaccount:${esc}:([a-z0-9.-]+)[\\\\"' ]{0,4}cannot (get|list|watch|create|update|patch|delete) resource[\\\\"' ]{0,4}([a-z0-9.-]+)`,
+    `system:serviceaccount:${esc}:([a-z0-9.-]+)[\\\\"' ]{0,8}cannot (get|list|watch|create|update|patch|delete) resource[\\\\"' ]{0,8}([a-z0-9.-]+)`,
     "i"
   ).exec(observed);
   if (!denial) return null;

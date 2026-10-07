@@ -273,3 +273,11 @@ test("an RBAC denial for another namespace's ServiceAccount — the agent's own 
   assert.equal(rbacRestartRefusal("k8s_set_image", { namespace: "bench-a13", name: "reporter" }, A13_LOG), null);
   assert.equal(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, null), null);
 });
+
+test("the denial still reads when the API's own escaped JSON is escaped again inside a tool result", () => {
+  // A13's log IS the API server's Status body (curl output), so its quotes arrive as \" — and the
+  // tool result wraps that log in JSON once more: \\\". Bench 2026-10-07 missed 2 of 3 on this.
+  const twice = JSON.stringify({ lines: [JSON.stringify({ message: 'pods is forbidden: User "system:serviceaccount:bench-a13:reporter" cannot list resource "pods"' })] });
+  assert.match(twice, /reporter\\\\\\" cannot/);
+  assert.ok(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, twice));
+});
