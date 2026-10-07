@@ -51,3 +51,13 @@ test("a run whose LLM throws is still written", async () => {
   assert.equal(rows[0]?.kind, "start");
   assert.ok(!rows.some((e) => e.kind === "end"), "no end event — the run ended in a throw");
 });
+
+// /cluster renders every namespace in full, so it must ask for detail: without it the tool now
+// answers with the one-line-per-workload overview the agent's 8000-char cap can carry.
+test("the dashboard's inventory asks k8s_cluster_inventory for full detail", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const mcp = { ...fakeMcp(), callTool: async (name: string, input: unknown) => (calls.push([name, input]), "{}") };
+  const agent = new DevOpsAgent({ llm: { chat: async () => { throw new Error("no llm"); } } as LLMClient, mcp: mcp as any });
+  await agent.clusterInventory();
+  assert.deepEqual(calls, [["k8s_cluster_inventory", { detail: true }]]);
+});
