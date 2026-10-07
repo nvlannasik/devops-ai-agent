@@ -92,7 +92,10 @@ together with a cluster/namespace/workload noun. A tour:
 
 ### 3.3 Skill `prompts/skills/cluster-tour.md`
 
-`when:` the same vocabulary plus `mode:conversation`. Body, in order:
+`when:` the tour vocabulary only — never the mode tag: `skills/real.test.ts` forbids any skill but
+`rca-format` from keying on `[mode:…]`, since such a skill loads on every run and bypasses
+`MAX_MATCHED_SKILLS`. A test pins that every sentence `wantsTour` accepts also selects this skill.
+Body, in order:
 
 1. Overview: one `k8s_cluster_inventory` call, no namespace. Per namespace one block — workloads
    (names, kind), managed by, exposed as. Namespaces with nothing but system components
