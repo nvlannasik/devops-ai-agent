@@ -23,7 +23,7 @@ test("collapsed: one card per application namespace, system hidden until asked f
   const g = buildClusterGraph(inv, new Set(), false);
   assert.deepEqual(ids(g), [nsId("other"), nsId("shop")]);
   const shop = g.nodes.find((n) => n.id === nsId("shop"))!;
-  assert.match(shop.data.sub ?? "", /3 workloads · 1 not managed by GitOps/);
+  assert.match(shop.data.sub ?? "", /3 workloads · 1 outside GitOps/);
   assert.equal(shop.data.expanded, false);
   assert.equal(g.edges.length, 0);
   assert.ok(buildClusterGraph(inv, new Set(), true).nodes.some((n) => n.id === nsId("kube-system")));
@@ -40,7 +40,8 @@ test("expanded: host → service → workload routes, owner → workload manages
   ]);
   assert.ok(g.nodes.some((n) => n.id === "svc/shop/orphan"), "a Service that serves nothing is still drawn");
   assert.equal(g.nodes.find((n) => n.id === "owner/shop/unmanaged")!.data.tone, "warning");
-  assert.equal(g.nodes.find((n) => n.id === nsId("shop")), undefined, "an expanded namespace is its contents, not its card");
+  // The card stays in the grid, marked open — it vanishing on click left readers looking for it.
+  assert.equal(g.nodes.find((n) => n.id === nsId("shop"))!.data.expanded, true);
 });
 
 test("owners with one name in two namespaces stay two nodes", () => {

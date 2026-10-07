@@ -29,7 +29,11 @@ function ClusterMap({ inv }: { inv: ClusterInventory }): React.JSX.Element {
   const laid = useMemo(() => {
     const out = layoutClusterGraph(buildClusterGraph(inv, expanded, showSystem), cols);
     // The card toggles itself (a real <button>), so the callback rides in its data.
-    for (const n of out.nodes) if (n.data.kind === "namespace") n.data = { ...n.data, onToggle: () => toggle(n.id) };
+    for (const n of out.nodes) {
+      if (n.data.kind === "namespace") n.data = { ...n.data, onToggle: () => toggle(n.id) };
+      // The panel's ✕ closes the namespace it frames — the same toggle as its grid card.
+      if (n.data.kind === "panelHead") n.data = { ...n.data, onToggle: () => toggle(nsId(n.data.namespace)) };
+    }
     return out;
   }, [inv, expanded, showSystem, cols]);
 
@@ -55,7 +59,6 @@ function ClusterMap({ inv }: { inv: ClusterInventory }): React.JSX.Element {
     void fitView({ padding: 0.06, duration: 400, maxZoom: 1 });
   }, [initialized, nodes, fitView]);
 
-  const open = inv.namespaces.filter((n) => expanded.has(nsId(n.name)) && (showSystem || !n.system));
   const SWATCH = "w-[22px] h-3.5 rounded-[3px] shrink-0 border-[1.5px] bg-card";
   return (
     <>
@@ -64,11 +67,6 @@ function ClusterMap({ inv }: { inv: ClusterInventory }): React.JSX.Element {
           <input type="checkbox" checked={showSystem} onChange={(e) => setShowSystem(e.target.checked)} />
           Show system namespaces
         </label>
-        {open.map((n) => (
-          <button key={n.name} type="button" className="rounded-md border border-border bg-card px-2 py-0.5 font-mono text-2xs cursor-pointer hover:bg-muted" onClick={() => toggle(nsId(n.name))}>
-            Collapse {n.name}
-          </button>
-        ))}
       </div>
       <div className="topo-view">
         <ReactFlow
@@ -100,9 +98,13 @@ function ClusterMap({ inv }: { inv: ClusterInventory }): React.JSX.Element {
       <ul className="list-none m-0 px-4 pt-3 pb-4 border-t border-[var(--border)] flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
         <li className="flex items-center gap-2"><span className="inline-block w-6 border-t-2 border-[var(--text-dim)]" aria-hidden="true" />routes traffic</li>
         <li className="flex items-center gap-2"><span className="inline-block w-6 border-t-2 border-dashed border-[var(--text-dim)]" aria-hidden="true" />managed by</li>
-        <li className="flex items-center gap-2"><span className={`${SWATCH} border-warning`} aria-hidden="true" />not managed by GitOps</li>
+        <li className="flex items-center gap-2"><span className={SWATCH} style={{ boxShadow: "inset 3px 0 0 var(--mark-info)" }} aria-hidden="true" />ingress host</li>
+        <li className="flex items-center gap-2"><span className={SWATCH} style={{ boxShadow: "inset 3px 0 0 var(--accent)" }} aria-hidden="true" />service</li>
+        <li className="flex items-center gap-2"><span className={SWATCH} style={{ boxShadow: "inset 3px 0 0 var(--mark-line)" }} aria-hidden="true" />workload</li>
+        <li className="flex items-center gap-2"><span className={`${SWATCH} border-dashed`} style={{ boxShadow: "inset 3px 0 0 var(--mark-ok)" }} aria-hidden="true" />managed by GitOps</li>
+        <li className="flex items-center gap-2"><span className={`${SWATCH} border-warning`} style={{ boxShadow: "inset 3px 0 0 var(--mark-warning)" }} aria-hidden="true" />not managed by GitOps</li>
         <li className="ml-auto italic max-[46rem]:ml-0">
-          <b>+</b> opens a namespace · Drag to move · Ctrl + scroll to zoom
+          <b>+</b> opens a namespace, <b>✕</b> or <b>−</b> closes it · Ctrl + scroll to zoom
         </li>
       </ul>
     </>
