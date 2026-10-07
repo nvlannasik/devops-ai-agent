@@ -5,7 +5,7 @@ import { config } from "../config/index.js";
 import { DevOpsAgent, type RunMeta } from "../agent/index.js";
 import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
-import { wantsInvestigation } from "../agent/intent/index.js";
+import { mentionBudget, wantsInvestigation } from "../agent/intent/index.js";
 import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
@@ -331,7 +331,7 @@ export class SlackApp {
     // Plain data questions get a hard tool budget (MENTION_TOOL_ROUNDS, default 2);
     // explicit investigation requests (and the alert webhook path) keep the full budget.
     const investigation = wantsInvestigation(text);
-    const budget = investigation ? {} : { maxToolRounds: config.mentionToolRounds };
+    const budget = mentionBudget(text, { mention: config.mentionToolRounds, tour: config.tourToolRounds });
 
     // Serialised per thread: the card and the notices this turn produces must land before
     // the next turn in the same conversation starts, and previousReply must be read after

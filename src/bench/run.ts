@@ -29,6 +29,7 @@ import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, scoreRca, type Score, type TaskRun } from "./score.js";
 import { appendHistory, axisTally, publishHistory, runMeta } from "./store.js";
 import { config } from "../config/index.js";
+import { mentionBudget } from "../agent/intent/index.js";
 import { parseRegistry } from "../agent/llm/registry.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
@@ -155,7 +156,11 @@ async function attempt(
   // Conversation mode is the only one with a finite tool budget, and that is load-bearing: the
   // namespace scope lock and the log fan-out cap only engage when the budget is finite. A
   // conversation case run with an infinite budget would silently test neither.
-  const budget = task.mode === "conversation" ? { maxToolRounds: config.mentionToolRounds } : {};
+  // The budget comes from the same function app/index.ts calls (mentionBudget), per turn: a tour
+  // gets its own rounds, and a follow-up is budgeted on its own words, as in production.
+  const rounds = { mention: config.mentionToolRounds, tour: config.tourToolRounds };
+  const budgetFor = (text: string) => (task.mode === "conversation" ? mentionBudget(text, rounds) : {});
+  const budget = budgetFor(task.message ?? "");
   try {
     const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode });
     // The light route for a conversation mention, heavy for everything else — app/index.ts makes
@@ -169,7 +174,7 @@ async function attempt(
     let previousReply = "";
     if (task.followUp) {
       previousReply = await agent.lastAssistantText(threadId).catch(() => "");
-      const second = () => agent.investigate(threadId, buildMentionMarker(task.followUp!, null), { ...budget, mode: task.mode });
+      const second = () => agent.investigate(threadId, buildMentionMarker(task.followUp!, null), { ...budgetFor(task.followUp!), mode: task.mode });
       rca = task.mode === "conversation" ? await withRoute("light", second) : await second();
     }
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool

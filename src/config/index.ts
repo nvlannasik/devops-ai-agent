@@ -199,6 +199,9 @@ export const config = {
   // must answer with what it has — the deterministic scope guard for conversation mode.
   // 2 covers the common flows exactly (discover → fetch); a 3rd round only ever fed wandering
   mentionToolRounds: parseInt(process.env.MENTION_TOOL_ROUNDS ?? "2"),
+  // tool rounds for a cluster-tour mention (agent/intent wantsTour) — one inventory call covers the
+  // overview; the rest are for a drill-down or a Flux CR the model wants to read
+  tourToolRounds: parseInt(process.env.TOUR_TOOL_ROUNDS ?? "4"),
 
   // Sub-agent delegation (src/agent/subagent/). Opt-in, and OFF is meant to be today's
   // behaviour byte for byte — the tool is not registered at all, so neither the tools cache
