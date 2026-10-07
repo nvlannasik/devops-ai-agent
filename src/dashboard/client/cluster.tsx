@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Background, BackgroundVariant, Controls, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow } from "@xyflow/react";
+import { Background, BackgroundVariant, Controls, ReactFlow, ReactFlowProvider, useEdgesState, useNodesInitialized, useNodesState, useReactFlow } from "@xyflow/react";
 // No stylesheet import: the page links topology.css, which already carries React Flow's own
 // stylesheet and the shared Tailwind subset. A second stylesheet would be a second round trip.
 import { buildClusterGraph, nsId } from "../cluster-graph.js";
@@ -22,28 +22,38 @@ function ClusterMap({ inv }: { inv: ClusterInventory }): React.JSX.Element {
       if (!next.delete(id)) next.add(id);
       return next;
     });
+  // Four cards a row on a desktop frame, two on a phone: one column of 17 opened at 0.47 on the
+  // live cluster, four on a 390px frame at 0.30. Read once — the frame does not change width.
+  const [cols] = useState(() => ((document.getElementById(MOUNT_ID)?.clientWidth ?? 1000) < 640 ? 2 : 4));
 
   const laid = useMemo(() => {
-    const out = layoutClusterGraph(buildClusterGraph(inv, expanded, showSystem));
+    const out = layoutClusterGraph(buildClusterGraph(inv, expanded, showSystem), cols);
     // The card toggles itself (a real <button>), so the callback rides in its data.
     for (const n of out.nodes) if (n.data.kind === "namespace") n.data = { ...n.data, onToggle: () => toggle(n.id) };
     return out;
-  }, [inv, expanded, showSystem]);
+  }, [inv, expanded, showSystem, cols]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<ClusterFlowNode>(laid.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(laid.edges);
   const { fitView } = useReactFlow();
   const first = useRef(true);
+  const pendingFit = useRef(false);
+  const initialized = useNodesInitialized();
   useEffect(() => {
     setNodes(laid.nodes);
     setEdges(laid.edges);
-    if (first.current) {
-      first.current = false;
-      return;
-    }
-    const id = requestAnimationFrame(() => fitView({ padding: 0.06, duration: 400, maxZoom: 1 }));
-    return () => cancelAnimationFrame(id);
-  }, [laid, setNodes, setEdges, fitView]);
+    if (first.current) first.current = false;
+    else pendingFit.current = true;
+  }, [laid, setNodes, setEdges]);
+  // Fit only once the NEW cards are measured. Fitting on the next frame (as /topology does) ran
+  // before React Flow had sized the cards an expand added, so the fit used the old bounds:
+  // measured on the live cluster, 2026-10-08, a collapse kept the expanded zoom and a phone's
+  // view never moved.
+  useEffect(() => {
+    if (!initialized || !pendingFit.current) return;
+    pendingFit.current = false;
+    void fitView({ padding: 0.06, duration: 400, maxZoom: 1 });
+  }, [initialized, nodes, fitView]);
 
   const open = inv.namespaces.filter((n) => expanded.has(nsId(n.name)) && (showSystem || !n.system));
   const SWATCH = "w-[22px] h-3.5 rounded-[3px] shrink-0 border-[1.5px] bg-card";
