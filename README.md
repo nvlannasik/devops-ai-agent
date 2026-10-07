@@ -1,11 +1,36 @@
 # DevOps AI Agent
 
-AI-powered DevOps agent for incident investigation and Root Cause Analysis (RCA), integrated with Slack and backed by Kubernetes, Prometheus, and Loki via MCP.
+AI-powered DevOps agent for incident investigation and Root Cause Analysis (RCA), integrated with Slack and backed by Kubernetes, Prometheus, Loki, Alertmanager and Jaeger via MCP.
+
+## Live demo
+
+<!--
+  Replace the placeholder below with the demo video. GitHub renders an uploaded .mp4 inline:
+  drag the file into a comment/PR on github.com, copy the resulting
+  https://github.com/user-attachments/assets/... URL and paste it on its own line here.
+  A YouTube/Loom link works too, as a thumbnail image wrapped in a link:
+  [![Live demo](docs/media/demo-thumbnail.png)](https://youtu.be/<id>)
+-->
+
+> 🎬 **Video coming soon** — the recording will be added here.
+
+What the demo walks through:
+
+1. **Alert → RCA.** A fault knob in the sample apps (e.g. `GATEWAY_TIMEOUT_MS=50`) fires an
+   Alertmanager alert; the agent opens a Slack thread, investigates over MCP and posts the RCA card.
+2. **Approval-gated remediation.** The agent proposes one fix; an approver clicks *Approve*; the
+   change is executed (or opened as a GitOps PR for a Flux-managed workload) and verified ~5 min later.
+3. **Follow-up and `learn`.** A conversational follow-up in the thread, then `@agent learn` stores
+   the human-confirmed cause for the next recurrence.
+4. **Cluster tour.** `@agent explain this cluster` — inventory tables built from the cluster itself,
+   plus how each workload is deployed.
+5. **Dashboard.** The incident page (RCA, remediation verdict, LLM cost), `/harness` (every gate,
+   per run) and the `/cluster` map.
 
 ## How It Works
 
 ```
-Slack mention / Alertmanager webhook
+Slack mention (allowlisted users) / Alertmanager webhook
         ↓
    Correlation (one webhook = one alert group = one investigation, not N pods → N threads)
         ↓
@@ -13,13 +38,16 @@ Slack mention / Alertmanager webhook
         ↓
    Recall past incidents (Postgres) — confirmed fixes, prior RCAs, possibly-related leads
         ↓
-   Agent investigates (agentic loop, max 10 iterations, parallel tool calls)
+   Agent investigates (agentic loop, max 10 iterations, parallel tool calls, per-symptom skills)
         ↓
-   LLM calls MCP tools (K8s, Prometheus, Loki)
+   LLM calls MCP tools (K8s, Prometheus, Loki, Alertmanager, Tracing)
+   — identifiers masked before any backend sees the request, restored in the reply
         ↓
    RCA posted as Slack Block Kit  →  Confidence Low? → mention on-call users
         ↓
-   Remediation proposed → approval card → click → execute → verdict checked later
+   Remediation proposed → gate chain → dry-run → approval card → click → execute → verdict checked later
+        ↓
+   Whole run recorded (agent_events) → /harness on the dashboard, replayable as a regression case
 ```
 
 ## Requirements
@@ -44,11 +72,12 @@ npm test                       # unit tests
 
 Covered areas, grouped:
 
-- **Agentic loop plumbing** — history trimming with `tool_use`/`tool_result` pairing, tool-result truncation (head+tail), conversation memory, investigation-intent detection, namespace scope lock, alert correlation, trace context.
-- **LLM** — backend registry validation (contiguous indices, overlapping routes, missing fields), router failover being up-only, the `max_tokens` → `max_completion_tokens` retry, the SQS response-release backoff, token accounting.
+- **Agentic loop plumbing** — history trimming with `tool_use`/`tool_result` pairing, tool-result truncation (head+tail), conversation memory, investigation/tour intent detection, namespace scope lock, alert correlation, trace context, every forced-final-answer ceiling.
+- **LLM** — backend registry validation (contiguous indices, overlapping routes, missing fields), router failover being up-only, the `max_tokens` → `max_completion_tokens` retry, the SQS response-release backoff, token accounting, identifier masking, per-backend pricing.
 - **Memory** — incident-memory parsing and no-op guards, the three recall tiers, migrations.
-- **Remediation** — proposal parsing, the `worthProposing` mention gate (including the negated-vocabulary and Indonesian-stem traps), the durable verification verdicts, GitOps overlay-path detection and PR preview.
-- **Slack + dashboard** — the fence-safe splitter, remediation cards, route matching, auth cookies, filter/pagination parsing, HTML escaping, the RCA parser, and the topology renderer.
+- **Remediation** — proposal parsing, the `worthProposing` mention gate (including the negated-vocabulary and Indonesian-stem traps), the full gate chain (`refusalFor`), the durable verification verdicts, GitOps overlay-path detection and PR preview.
+- **Slack + dashboard** — the fence-safe splitter, RCA and tour tables, remediation cards, route matching, auth cookies, filter/pagination parsing, HTML escaping, the RCA parser, the topology and cluster maps.
+- **Replay** — every case under `replay/cases/` plays a recorded production run back through the current gates (see [Benchmark & replay](#benchmark--replay)).
 
 ## Configuration
 
@@ -60,6 +89,7 @@ Covered areas, grouped:
 | `SLACK_APP_TOKEN` | `xapp-...` for Socket Mode | optional |
 | `SLACK_ALERT_CHANNEL` | Channel ID for Alertmanager alerts | optional |
 | `ALERT_WEBHOOK_TOKEN` | Shared secret required on `POST /alert` (`Authorization: Bearer <token>`). Unset = open + a startup warning. Set it on the Alertmanager side via `http_config.authorization.credentials` | — |
+| `SLACK_ALLOWED_USERS` | Comma-separated user IDs allowed to mention the agent and ✅-learn (`SLACK_ONCALL_USERS` and `SLACK_APPROVER_USERS` are always admitted too). Anyone else gets an ephemeral "not registered" reply and is logged. Unset = anyone in the channel, with a startup warning. Alerts are unaffected | optional |
 | `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
 | `SLACK_APPROVER_USERS` | User IDs allowed to approve/reject remediations (falls back to `SLACK_ONCALL_USERS`; both empty = anyone, with a log warning) | optional |
 | `LLM_PROVIDER` | `claude` / `openai-compatible` / `private-llm` / `router` (see [LLM Router](#llm-router)) | `claude` |
@@ -71,6 +101,10 @@ Covered areas, grouped:
 | `OPENAI_COMPATIBLE_API_KEY` | | — |
 | `OPENAI_COMPATIBLE_MODEL` | | `gpt-4` |
 | `LLM_BACKEND_<N>_*`, `LLM_ROUTE_HEAVY`, `LLM_ROUTE_LIGHT` | Required if router — see [LLM Router](#llm-router) | — |
+| `LLM_ROUTER_FAILURE_THRESHOLD` | Consecutive failures before a backend is skipped for a cool-off | `2` |
+| `LLM_ROUTER_COOLOFF_SECONDS` | How long a failing backend is skipped | `120` |
+| `LLM_BACKEND_<N>_PRICE_INPUT` / `_OUTPUT` / `_CACHE_READ` | USD per million tokens, for the dashboard's cost figures. Unset = "not priced", never `$0` | — |
+| `LLM_MASK_IDENTIFIERS` | Mask IPs, emails, AWS ARNs/account ids and hostnames before any backend sees a request (see [Identifier masking](#identifier-masking)). `false` disables | `true` |
 | `SQS_REQUEST_QUEUE_NAME` | Required if private-llm | `llm-request.fifo` |
 | `SQS_RESPONSE_QUEUE_NAME` | | `llm-response.fifo` |
 | `SQS_LLM_TIMEOUT_SECONDS` | Max wait for LLM response — must cover a slow reasoning-model call plus the worker's one 2× retry | `240` |
@@ -100,6 +134,7 @@ Covered areas, grouped:
 | `REDIS_TLS` | | `false` |
 | `MAX_CONCURRENT_INVESTIGATIONS` | | `5` |
 | `MENTION_TOOL_ROUNDS` | Tool-call rounds for plain mentions (each round batches parallel calls); explicit investigation requests & alerts are uncapped. Budget resets per message | `2` |
+| `TOUR_TOOL_ROUNDS` | Tool-call rounds for a cluster tour ("explain this cluster") — between a plain mention and an uncapped investigation | `4` |
 | `INVESTIGATION_TIMEOUT_SECONDS` | Wall-clock budget per investigation (bounds how long a slot is held) | `300` |
 | `SUBAGENT_ENABLED` | Let the lead investigation delegate one hypothesis at a time to a sub-agent running the same loop in its own context. Offered only where the tool budget is unlimited (alerts and explicit investigation requests), never on a plain mention. Off means the tool is not registered at all, so off is the unchanged baseline | `false` |
 | `SUBAGENT_MAX_FANOUT` | Hypotheses delegated per turn; they run in parallel | `3` |
@@ -116,6 +151,8 @@ Covered areas, grouped:
 | `DASHBOARD_PORT` | | `3001` |
 | `DASHBOARD_PASSWORD` | Single shared password. **Unset ⇒ every page answers `503`**, never anonymous content (`/healthz` stays open). Keep it in a Secret, never a ConfigMap | — |
 | `DASHBOARD_COOKIE_SECURE` | Set `false` only for plain-HTTP local dev | `true` |
+| `TRACE_ENABLED` | Record every investigation into `agent_events` (needs `DB_HOST`). `false` disables | `true` |
+| `GIT_SHA` | Baked in by CI; stamped on every trace so a run can be tied to the build that made it | `unknown` |
 | `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
 
 ## Usage
@@ -134,6 +171,22 @@ After RCA is posted, follow-up messages are answered conversationally:
 @devops-agent show me the logs
 @devops-agent when did this start?
 ```
+
+### Cluster Tour (onboarding)
+
+```
+@devops-agent explain this cluster
+@devops-agent jelasin namespace sample-apps
+```
+
+An explain/overview/onboarding question about the cluster, a namespace or a workload is a
+**tour**: its own tool budget (`TOUR_TOOL_ROUNDS`), the `cluster-tour` skill, and no remediation
+card. The data is the MCP server's `k8s_cluster_inventory` — one line per workload for the whole
+cluster, or the detail of one namespace (Ingress host → Service → workload, plus what manages it:
+Flux HelmRelease/Kustomization, Helm, or nothing). In Slack the facts are **tables built from
+that tool result, never from the model**, posted before the model's explanation of what each
+workload is for and how it is deployed. The dashboard's `/cluster` page shows the same inventory
+as a map.
 
 ### Teaching the Agent (`learn`)
 
@@ -172,10 +225,18 @@ an RCA (alert-driven or mention-driven). Whitelisted actions:
 | `k8s_rollout_restart` | transient faults a clean restart plausibly fixes | — |
 | `k8s_set_image` | RCA shows a wrong/nonexistent image AND evidence names a working one, or the user explicitly requests a tag | never invents tags; `container` optional (auto-resolved when the workload has one container) |
 | `k8s_set_resources` | OOMKilled / resource exhaustion | only provided values patched |
-| `k8s_scale` | under-capacity (load, HPA at max) | `MAX_SCALE_DELTA` bound, scale-to-zero refused |
+| `k8s_scale` | under-capacity (load, HPA at max) | `MAX_SCALE_DELTA` bound; scale-to-zero only as a **quarantine** of a workload a `k8s_recommend_resources` run in the same thread listed as idle |
 | `k8s_delete_pod` | ONE pod wedged/crash-looping while siblings are healthy | only controller-owned pods (ReplicaSet/StatefulSet/DaemonSet — the controller recreates it); GitOps-safe |
+| `k8s_delete_orphan` | an orphaned object (e.g. a ConfigMap nothing references) found by a scan in the same thread | the manifest is backed up to Postgres and posted into the thread before the delete; the server re-checks provenance/ownership/age live |
 
-All support deployment/statefulset/daemonset (except `k8s_scale`: no daemonset). Flow:
+All workload actions support deployment/statefulset/daemonset (except `k8s_scale`: no daemonset).
+
+Before a card is posted, the proposal passes one **gate chain** (`refusalFor`, shared with the
+benchmark): placeholder and fabricated-evidence checks, asks-for-input, replacement/no-op (e.g. a
+restart of a workload whose pods are healthy, an OOM fix that shrinks memory, an image "change" to
+the image already running, a restart that cannot fix an RBAC `forbidden`), resource fault,
+scale-out, ungrounded target, offer mismatch and duplicate target. A refusal gets one re-ask with
+the refusal text; the re-asked proposal runs the chain again. Flow:
 
 ```
 RCA posted → agent proposes (separate LLM call, whitelist-validated)
@@ -209,6 +270,8 @@ fix") instead of the full RCA card — incident store and the remediation propos
 >   against the GitOps repo instead (image + scale; the card shows the diff, approve opens
 >   the PR, merge applies it). The PR is opened by the **llm-worker** — the private-network
 >   bridge to GitHub Enterprise. See `docs/DESIGN_gitops_pr_remediation.md`.
+> - **Drift** (the repo declares a value the cluster is not running): the worker refuses the PR
+>   and the agent proposes `flux_reconcile` instead — restore what Git declares, still approval-gated.
 > - **Otherwise** (flow disabled, Kustomize, or plain Helm): refused with the reason posted
 >   to the thread, naming where the real fix lives.
 
@@ -264,7 +327,7 @@ Pod payment-api-xxx OOMKilled — memory leak in connection pool.
 
 For LLMs in a strict private network, set `LLM_PROVIDER=private-llm`. The agent publishes requests to SQS and polls for responses — private network only needs outbound access to AWS SQS.
 
-See [llm-worker](../llm-worker) for the worker service deployed in the private network.
+See [llm-worker](../devops-ai-agent-worker) for the worker service deployed in the private network.
 
 ## LLM Router
 
@@ -333,7 +396,37 @@ answering confidently, not by throwing. Only deterministic failures count (empty
 content blocks echoed back as prose — the sign of a dead tool-call channel); judging answer
 *quality* would take another LLM call and wouldn't be trustworthy.
 
-Per-call token usage is recorded per backend and route in `llm_usage`.
+Per-call token usage is recorded per backend and route in `llm_usage`. A backend failing
+`LLM_ROUTER_FAILURE_THRESHOLD` times in a row is skipped for `LLM_ROUTER_COOLOFF_SECONDS`.
+
+### Cost per investigation
+
+Give each backend its price (USD per million tokens) and the dashboard turns `llm_usage` into
+money — per backend on the overview, per investigation on the incident page:
+
+```
+LLM_BACKEND_1_PRICE_INPUT=0.05
+LLM_BACKEND_1_PRICE_OUTPUT=0.4
+LLM_BACKEND_1_PRICE_CACHE_READ=0.005   # optional
+```
+
+The prices are the operator's, never a table in code. For `openai-compatible` and `private-llm`
+the reported input already contains the cached tokens, so those are billed once at the cache
+rate, not twice. A backend with no price reads `not priced`, one that reports no token counts
+`not reported` — never `$0`.
+
+## Identifier masking
+
+Before any request leaves the agent — to an external API or the private LLM alike — IPs, emails,
+AWS ARNs, AWS account ids (only where the text says it is one) and public hostnames are replaced
+with stable tokens (`ip-3f9a1c`, `host-9bfc49`, …). Every token is restored in the reply, text and
+tool-call arguments both, so tools, memory, Slack and the dashboard only ever see real values. A
+token is a hash of its value, so the same IP is the same token on every call.
+
+Deliberately **not** masked: workload, pod, Service and namespace names (the model reasons with
+them), Kubernetes label domains, public image registries, in-cluster DNS, file names and field
+paths. The system prompt is never touched (it stays one cached block). Pattern-based: it reduces
+what leaves, it is not a guarantee. `LLM_MASK_IDENTIFIERS=false` turns it off.
 
 ## Incident Memory
 
@@ -361,7 +454,7 @@ npm run migrate          # dev (tsx)
 npm run migrate:prod     # prod (node dist/src/db/migrate-cli.js)
 ```
 
-The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`006` exist; next is `migrations/007_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
+The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`011` exist; next is `migrations/012_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
 
 ## Incident Dashboard
 
@@ -369,12 +462,17 @@ Optional read-only web view over the same Postgres the agent writes to. Off by d
 set `DASHBOARD_ENABLED=true` and a `DASHBOARD_PASSWORD`.
 
 ```
-/            overview — counts, recent incidents, remediation + model activity
-/incidents   filterable list, 10 rows a page
-/incidents/N one incident: the RCA parsed into sections, its remediations & verdicts
-/topology    namespace map
-/context     what the agent sends the model: skill registry + token budget per backend
-/healthz     open (probe target) — everything else needs the session cookie
+/                overview — counts, recent incidents, remediation outcomes, model activity + cost per backend
+/incidents       filterable list, 10 rows a page
+/incidents/N     one incident: the RCA parsed into sections, its remediations & verdicts, LLM usage + cost
+/topology        the agent stack's own map: LLM backends, MCP tools, Postgres/Redis/SQS stores
+/cluster         the cluster inventory as a map: namespaces, then host → Service → workload → managed by
+/harness         every gate's activity across recorded runs, LLM latency per backend
+/harness/<gate>  one gate's runs; each links to its full trace
+/bench           benchmark history (pass rates per scenario and axis)
+/context         what the agent sends the model: skill registry + token budget per backend
+/prompt          the system prompt this process is holding
+/healthz         open (probe target) — everything else needs the session cookie
 ```
 
 It runs as a **second HTTP listener in the same process** (`DASHBOARD_PORT`, default `3001`),
@@ -385,7 +483,21 @@ The listener is the one component allowed to fail without stopping the agent: a 
 missing Secret logs and investigations carry on. Design: [`docs/DESIGN_dashboard_auth.md`](docs/DESIGN_dashboard_auth.md).
 
 Everything rendered is treated as untrusted — the RCA text is LLM output — so every
-interpolation is escaped and only `/topology` is served with a `script-src` at all.
+interpolation is escaped and only the two React Flow maps (`/topology`, `/cluster`) are served
+with a `script-src` at all — a per-response nonce, never `'unsafe-inline'`.
+
+## Benchmark & replay
+
+Two ways to measure a change before it ships, both driving the **real** loop:
+
+- **Benchmark** (`npm run bench`, `bench/README.md`) — scenario cases under `bench/cases/`
+  (alerts and mentions against a real cluster with the sample apps' fault knobs), scored on RCA,
+  proposal and grounding; history appears on `/bench`. Scenarios and scoring:
+  [`docs/BENCHMARK_agent_stack.md`](docs/BENCHMARK_agent_stack.md).
+- **Replay** (`npm run replay`, [`replay/README.md`](replay/README.md)) — a recorded production run
+  played back through the current code. `gates` mode is offline and deterministic and runs under
+  `npm test`; `tools` mode re-asks a live model against the recorded tool results.
+  `npm run replay:export` turns a run from the dashboard into a redacted case.
 
 ## Customizing the System Prompt
 
@@ -458,7 +570,7 @@ prompt cache.
 | Guarded Remediation | Approval-gated restart / set-image / set-resources / scale / delete-pod after an RCA: whitelist + mandatory dry-run + Slack Approve/Reject buttons + atomic claim + audit trail. Off unless the MCP server enables write tools. Flux HelmRelease workloads route to a **GitOps PR** (via the llm-worker); the overlay path is auto-detected from the Flux Kustomization. On the mention path the proposal call is skipped unless the answer actually carries fault evidence (or the user asked for a change) — alerts are never gated |
 | Post-remediation verification | Durable, not a timer: an executed remediation schedules a check row in Postgres, any replica claims it once due, and the verdict (`recovered` / `unchanged` / `worse` / `inconclusive`) is posted into the same thread and remembered. PR remediations get no check — nothing is live until merge+sync |
 | Remediation memory | Past executed remediations (+ their PRs/outcomes and verification verdicts) for the same alert are recalled into future investigations & proposals, so a recurrence's proven fix isn't re-proposed — and a fix that didn't work comes back as a negative prior. All remediations persist in the `remediations` table (change from→to, file, PR URL, status) |
-| Incident Dashboard | Optional read-only web view (own listener, own port, shared-password cookie) over the same Postgres — overview, filterable incident list, per-incident RCA + remediation verdicts, namespace map |
+| Incident Dashboard | Optional read-only web view (own listener, own port, shared-password cookie) over the same Postgres — overview, filterable incident list, per-incident RCA + remediation verdicts + LLM cost, the stack's topology, the cluster map, gate activity (`/harness`) and benchmark history |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Assembly | Every request is assembled, not accumulated: tool results compacted to 8000 chars, conversation history trimmed to 50 messages, then the whole thing fitted to a per-backend token budget (`fitToBudget()`) that drops oldest-first rather than letting the provider reject the call |
 | Skills | Per-symptom playbooks in `prompts/skills/*.md`, selected by a `when` regex and injected as a separate message — top 3 per turn, system prompt stays byte-identical so the prompt cache holds |
@@ -473,7 +585,12 @@ prompt cache.
 | Async Alert Webhook | `/alert` acks `200` immediately and investigates in the background — no Alertmanager timeout, notifications never wait behind another alert's investigation |
 | SQS Dispatcher | Single per-process dispatcher routes shared-queue responses by `requestId`; releases non-owned messages so concurrent investigations don't stall each other |
 | Bounded Latency | Per-tool-call, per-investigation, and SQS client request timeouts prevent a hung dependency from freezing the agent |
-| Multi-LLM | Claude, OpenAI-compatible, or private via SQS |
+| Multi-LLM | Claude, OpenAI-compatible, or private via SQS — or a router holding several, light/heavy routes, up-only failover |
+| Mention allowlist | `SLACK_ALLOWED_USERS` — only registered users can mention the agent or ✅-learn; others get an ephemeral refusal |
+| Cluster Tour | Onboarding answers from `k8s_cluster_inventory`: Slack tables built from the tool result (never the model), plus what each workload does and how it is deployed |
+| Identifier masking | IPs, emails, ARNs, account ids and public hostnames tokenised before any LLM backend sees a request, restored in the reply |
+| Cost per investigation | Operator-supplied per-backend prices turn `llm_usage` into USD on the dashboard |
+| Investigation trace + replay | Every run (LLM turns, tool calls, gate decisions) recorded to `agent_events`; replayed offline as regression cases under `npm test` |
 | Prompt from Markdown | Edit `prompts/system.md` to update prompt without rebuild |
 | Truncated Logs | Long field values shown as `...[truncated N chars]` |
 
@@ -495,16 +612,21 @@ src/
 │   ├── llm/
 │   │   ├── claude.ts, openai-compatible.ts, sqs.ts
 │   │   ├── registry.ts, router.ts  # LLM_BACKEND_<N>_* parsing; light→heavy up-only failover
+│   │   ├── mask.ts               # Identifier masking around every backend
+│   │   ├── pricing.ts            # LLM_BACKEND_<N>_PRICE_* → USD
 │   │   ├── index.ts              # createLLMClient() factory
 │   │   └── types.ts
 │   ├── feedback/index.ts         # On-call learning: transcript builder + extraction JSON parser
 │   ├── gitops/                   # PR remediation: overlay.ts (path detect), preview.ts, sqs.ts (worker bridge)
 │   ├── incidents/index.ts        # Durable incident memory (Postgres) — RCAs + confirmed feedback + similarity tier
-│   ├── intent/index.ts           # wantsInvestigation() — full vs capped tool budget
+│   ├── intent/index.ts           # wantsInvestigation(), wantsTour(), mentionBudget()
+│   ├── injection/index.ts        # Prompt-injection framing of tool results
+│   ├── trace/                    # Investigation recorder → agent_events (gates, LLM turns, tool calls)
 │   ├── mcp/client.ts             # Reconnect + mutex + ping
 │   ├── remediation/              # Guarded Remediation
 │   │   ├── index.ts              # Proposal parser + row-flip store (atomic claim)
-│   │   ├── proposal.ts           # worthProposing() — mention-path gate on the proposal call
+│   │   ├── proposal.ts           # worthProposing(), proposeWithRetry(), the gate chain
+│   │   ├── replace-guard.ts, noop-guard.ts  # Healthy-target / RBAC / OOM-shrink / no-op image refusals
 │   │   └── verify.ts             # Durable post-remediation check + verdict
 │   ├── scope/index.ts            # Namespace scope lock helpers
 │   ├── grounding/index.ts        # Resource names asserted but never returned by a tool
@@ -520,7 +642,12 @@ src/
 │   ├── views.ts, html.ts, styles.ts, chart.ts  # Server-rendered pages, esc(), inline SVG charts
 │   ├── rca.ts                    # Slack-mrkdwn RCA → per-section cards
 │   ├── context.ts                # /context — loaded skills + resolved budget per backend
-│   └── topology.ts, topology-svg.ts, topology-script.ts   # Namespace map (only page with JS)
+│   ├── topology.ts, topology-graph.ts  # /topology — the agent stack map
+│   ├── cluster-graph.ts          # /cluster — inventory → graph (also bundled for the browser)
+│   ├── bench.ts                  # /bench — reads bench/results/history.jsonl
+│   └── client/                   # React Flow bundles (topology.js, cluster.js), built by esbuild
+├── bench/                        # npm run bench — scenario runner + scoring
+├── replay/                       # npm run replay — recorded runs through the current code
 ├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
 ├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
 └── utils/
@@ -528,11 +655,13 @@ src/
     ├── logger/index.ts           # + errDetail()
     ├── trace/index.ts            # withTrace() — threadId as the cross-service traceId
     ├── truncate/index.ts
-    └── slack/                    # blocks.ts (isRcaResponse/buildRcaBlocks), remediation-card.ts, split.ts
+    └── slack/                    # blocks.ts, rca-tables.ts, tour-tables.ts, remediation-card.ts, split.ts
 
-migrations/    001…006 — run at pod startup, advisory-locked
+migrations/    001…011 — run at pod startup, advisory-locked
 prompts/       system.md + skills/*.md — editable without a rebuild
-docs/          DESIGN_*.md per subsystem, BENCHMARK_agent_stack.md (scenarios + scoring)
+bench/         cases/ + results/history.jsonl (committed)
+replay/        cases/ — recorded production runs, redacted
+docs/          DESIGN_*.md per subsystem, BENCHMARK_agent_stack.md, superpowers/specs (feature designs)
 ```
 
 ## AWS Authentication

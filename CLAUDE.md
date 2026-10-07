@@ -1,7 +1,8 @@
 # devops-ai-agent
 
-Slack bot + agentic loop for incident investigation & RCA. Part of a 3-repo system:
-`devops-ai-agent` (this), `devops-mcp-server` (tools), `llm-worker` (private-LLM SQS consumer).
+Slack bot + agentic loop for incident investigation & RCA. Part of a multi-repo system:
+`devops-ai-agent` (this), `devops-mcp-server` (tools), `llm-worker` (dir `devops-ai-agent-worker`;
+private-LLM + GitHub Enterprise SQS consumer), deployed by `devops-ai-helm-charts` + `gitops-devops-ai-manifest`.
 
 **Read `MEMORY_BANK.md` before changing the agentic loop, memory, SQS dispatcher, or
 incident memory** — it holds the architecture, design decisions, and bugs already fixed.
@@ -80,7 +81,7 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
   form and the raw output is not recoverable. Only *consecutive* runs collapse — a global dedupe
   would merge two phases of an incident.
 - **Incident memory = Postgres** (durable, `DB_*`), schema via `migrations/*.sql`. **Conversation memory = Redis** (24h cache). Don't conflate them.
-- **Migrations run at pod startup** (`runMigrations` inside `DevOpsAgent.initialize()`), so a migration that fails is a pod that won't start. No `CREATE EXTENSION` — the similarity tier uses core `to_tsvector` for exactly this reason. Next file is `011_*.sql`.
+- **Migrations run at pod startup** (`runMigrations` inside `DevOpsAgent.initialize()`), so a migration that fails is a pod that won't start. No `CREATE EXTENSION` — the similarity tier uses core `to_tsvector` for exactly this reason. Next file is `012_*.sql`.
 - **A card nobody clicks used to live for ever.** `EXPIRY_MINUTES` was checked at CLICK time only, so an untouched card kept `status='proposed'`, kept an Approve button that now refuses, and — once the duplicate guard landed — blocked every later proposal for that target. `expireStale()` rides the verification poller (one UPDATE, so one replica wins each row) and `card_channel`/`card_ts` (migration 009, written by `recordCard` right after the post) are what let it close the MESSAGE too: the message id was previously known only inside the button payload, i.e. only at the moment it was no longer needed.
 - **Recall tiers are never flattened:** human-CONFIRMED (`incident_feedback`) > agent hypothesis (`incidents`) > "possibly related" (lexical similarity, `migrations/005`). Agent-produced verdicts must never be written to `incident_feedback` — that's the human tier. **That rule is enforced in code now, not by the extraction prompt** (incident 208, 2026-10-03: "learn dihiraukan aja" — "ignore learn for now" — ran learn, and the extraction stored the agent's own hallucinated RCA as confirmed; the next investigation recalled it as fact). `learnIntent` refuses a learn mention that declines or defers; `humanStatements` is the evidence — the bot's messages excluded, a ✅'d one included — and when it is empty the extraction is never called; `tracesToHumans` drops an extracted cause whose names (`keyTerms`) appear only in the bot's messages.
 - **Post-remediation verification is durable, not a timer** (`agent/remediation/verify.ts`, `migrations/006`): the check lives in Postgres and any replica claims it, `due_at` doubles as the lease. Three rules that cost live debugging to find: `k8s_list_pods` returns the pod **phase** (a CrashLoopBackOff pod is `Running` + `ready:false`, so readiness comes from `ready`); **`worse` = readiness falling only** — a rollout replaces the pod set, so restart deltas compare different pods; and `verdict` ≠ `status` in recall — `succeeded` just means the MCP call didn't error.
