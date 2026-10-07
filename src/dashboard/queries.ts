@@ -573,16 +573,23 @@ export class DashboardQueries {
           WHERE kind = 'gate' AND created_at > now() - interval '30 days' AND payload->>'source' = 'prod'
           GROUP BY name, outcome ORDER BY count(*) DESC LIMIT 500`
       ),
-      // An llm row has no source of its own — the run's start row says prod or bench.
+      // An llm row has no source of its own — the run's start row says prod or bench. NOT a
+      // self-join: on 2026-10-08 that timed out on a 1 204-row table, because comparing
+      // payload->>'run' pair by pair de-TOASTs every llm payload (it holds the message content)
+      // once per PAIR. Each side is extracted once, MATERIALIZED, and the join runs on two small
+      // text columns (measured 592 ms where the join had not finished in 20 s).
       this.pool.query(
-        `SELECT coalesce(e.name, '(unknown)') AS backend, count(*) AS n,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY (e.payload->>'ms')::numeric) AS p50,
-                percentile_cont(0.95) WITHIN GROUP (ORDER BY (e.payload->>'ms')::numeric) AS p95
-           FROM agent_events e
-           JOIN agent_events s
-             ON s.kind = 'start' AND s.payload->>'run' = e.payload->>'run' AND s.payload->>'source' = 'prod'
-            AND s.created_at > now() - interval '8 days'
-          WHERE e.kind = 'llm' AND e.created_at > now() - interval '7 days' AND jsonb_typeof(e.payload->'ms') = 'number'
+        `WITH runs AS MATERIALIZED (
+           SELECT payload->>'run' AS run FROM agent_events
+            WHERE kind = 'start' AND payload->>'source' = 'prod' AND created_at > now() - interval '8 days'
+         ), llm AS MATERIALIZED (
+           SELECT name, payload->>'run' AS run, (payload->>'ms')::numeric AS ms FROM agent_events
+            WHERE kind = 'llm' AND created_at > now() - interval '7 days' AND jsonb_typeof(payload->'ms') = 'number'
+         )
+         SELECT coalesce(l.name, '(unknown)') AS backend, count(*) AS n,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY l.ms) AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY l.ms) AS p95
+           FROM llm l JOIN runs r ON r.run = l.run
           GROUP BY 1 ORDER BY p95 DESC LIMIT 50`
       ),
     ]);

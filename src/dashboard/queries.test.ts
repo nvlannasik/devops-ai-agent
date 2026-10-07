@@ -423,8 +423,13 @@ test("harness reads LLM latency per backend from prod runs only, over 7 days", a
   assert.deepEqual(h.llm, [{ backend: "private-llm-agus", calls: 12, p50: 4101, p95: 61000 }]);
   const sql = calls.find((c) => /kind = 'llm'/.test(c.sql))!.sql;
   // an llm row carries no source; the run's start row does
-  assert.match(sql, /s\.kind = 'start'[\s\S]*s\.payload->>'source' = 'prod'/);
+  assert.match(sql, /kind = 'start'[\s\S]*payload->>'source' = 'prod'/);
   assert.match(sql, /percentile_cont\(0\.95\)/);
+  // Live 2026-10-08: /harness timed out on a 1 204-row table. The self-join compared
+  // payload->>'run' pair by pair, de-TOASTing every llm payload (message content) per pair. Each
+  // side is extracted once into a MATERIALIZED CTE and the join runs on those small columns.
+  assert.match(sql, /AS MATERIALIZED[\s\S]*AS MATERIALIZED/);
+  assert.doesNotMatch(sql, /JOIN agent_events/);
 });
 
 test("the timeline carries each call's duration", async () => {
