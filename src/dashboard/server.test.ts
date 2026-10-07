@@ -113,13 +113,13 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 // resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
 async function withServer<T>(
   fn: (port: number) => Promise<T>,
-  opts: { unconfigured?: boolean; skills?: SkillView[] } = {}
+  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string> } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(new DashboardQueries(null), undefined, () => opts.skills ?? []);
+  const dashboard = new DashboardServer(new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -544,4 +544,36 @@ test("harness routes: only a known gate and a Slack ts shape are routed", () => 
   assert.deepEqual(matchRoute("/api/trace/1790690405.435999"), { kind: "trace", threadTs: "1790690405.435999" });
   assert.deepEqual(matchRoute("/api/trace/1790690405.435999%2Fsub-1"), { kind: "notfound" });
   assert.deepEqual(matchRoute("/api/trace/abc"), { kind: "notfound" });
+});
+
+// spec 2026-10-07-cluster-tour §3.5: the inventory is a whole-cluster scan, so a reload must not
+// repeat it — and it needs no database, like the skill pages above.
+test("/cluster renders the inventory, reads it once per 60 s, and needs no database", async () => {
+  assert.deepEqual(matchRoute("/cluster"), { kind: "cluster" });
+  let calls = 0;
+  const inventory = async () => {
+    calls++;
+    return JSON.stringify({ scanned: { namespaces: 1, complete: true }, namespaces: [
+      { name: "sample-apps", system: false, services: [], ingresses: [],
+        workloads: [{ kind: "Deployment", name: "storefront", ready: 2, desired: 2, images: ["web:1"], managedBy: { type: "unmanaged" } }] }] });
+  };
+  await withServer(async (port) => {
+    const first = await raw(port, "GET /cluster HTTP/1.1", authed);
+    assert.match(status(first), /^HTTP\/1\.1 200\b/);
+    assert.match(first, /storefront/);
+    await raw(port, "GET /cluster HTTP/1.1", authed);
+    assert.equal(calls, 1, "the second request came from the cache");
+    assert.match(status(await raw(port, "GET /cluster HTTP/1.1")), /^HTTP\/1\.1 303\b/, "behind the password");
+  }, { inventory });
+});
+
+test("/cluster turns a failing or non-JSON inventory into a note, never a 500", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /cluster HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(res, /Error: MCP down/);
+  }, { inventory: async () => "Error: MCP down" });
+  await withServer(async (port) => {
+    assert.match(await raw(port, "GET /cluster HTTP/1.1", authed), /MCP server not connected/);
+  });
 });

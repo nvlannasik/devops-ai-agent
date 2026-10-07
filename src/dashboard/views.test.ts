@@ -743,14 +743,14 @@ test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
   assert.equal(
-    icons.length, 10,
-    "the drawer's two states, the brand mark, six destinations and the sign-out button"
+    icons.length, 11,
+    "the drawer's two states, the brand mark, seven destinations and the sign-out button"
   );
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
-  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 7);
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 8);
 });
 
 // ---------- section glyphs ----------
@@ -1920,8 +1920,8 @@ test("the rail groups its destinations, and each caption labels its own list", (
   const html = layout("Test", "<p>hi</p>", { current: "/" });
   assert.match(html, /<p class="rail-group" id="rail-g0">Monitor<\/p><ul aria-labelledby="rail-g0">/);
   assert.match(html, /<p class="rail-group" id="rail-g1">Agent<\/p><ul aria-labelledby="rail-g1">/);
-  // six destinations (Harness joined Agent), and still exactly one marked
-  assert.equal([...html.matchAll(/<li><a href="/g)].length, 6);
+  // seven destinations (Cluster joined Agent), and still exactly one marked
+  assert.equal([...html.matchAll(/<li><a href="/g)].length, 7);
   assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
 });
 
@@ -2820,4 +2820,31 @@ test("the incident page shows the trace timeline when there is one", () => {
   assert.match(html, /340ms/);
   assert.match(html, /private-llm-agus[\s\S]*12\.5s/);
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /What the harness did/);
+});
+
+test("the cluster page lists each namespace's workloads with owner, and collapses system namespaces", async () => {
+  const { clusterPage } = await import("./views.js");
+  const html = clusterPage({
+    scanned: { namespaces: 3, complete: true },
+    namespaces: [
+      { name: "sample-apps", system: false, services: [{ name: "storefront", type: "ClusterIP", ports: ["80/TCP→3000"] }], ingresses: [{ name: "storefront", hosts: ["shop.example.com"] }],
+        workloads: [{ kind: "Deployment", name: "storefront", ready: 1, desired: 2, images: ["ghcr.io/x/storefront:1.4.2"], managedBy: { type: "helmrelease", name: "storefront", namespace: "flux-app", chart: "storefront-0.3.1" } }] },
+      { name: "empty", system: false, workloads: [], services: [], ingresses: [] },
+      { name: "kube-system", system: true, workloads: [{ kind: "Deployment", name: "coredns", ready: 1, desired: 1, images: ["coredns:1.11"], managedBy: { type: "unmanaged" } }], services: [], ingresses: [] },
+    ],
+  }, null);
+  assert.match(html, /<h1>Cluster<\/h1>/);
+  assert.match(html, /storefront/);
+  assert.match(html, /1\/2/);
+  assert.match(html, /HelmRelease <code[^>]*>flux-app\/storefront<\/code>/);
+  assert.match(html, /shop\.example\.com/);
+  assert.match(html, /Nothing deployed here/);
+  assert.match(html, /<details[^>]*>[\s\S]*kube-system[\s\S]*<\/details>/);
+  assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
+});
+
+test("a partial scan says so, and an unreachable tool is a note, not a crash", async () => {
+  const { clusterPage } = await import("./views.js");
+  assert.match(clusterPage({ scanned: { namespaces: 1, complete: false }, namespaces: [] }, null), /partial/i);
+  assert.match(clusterPage(null, "MCP server not connected"), /MCP server not connected/);
 });

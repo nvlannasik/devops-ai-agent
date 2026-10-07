@@ -105,6 +105,7 @@ const NAV_GROUPS = [
     label: "Agent",
     items: [
       { href: "/topology", label: "Topology", icon: ICON.topology },
+      { href: "/cluster", label: "Cluster", icon: ICON.layers },
       { href: "/context", label: "Context", icon: ICON.context },
       { href: "/bench", label: "Benchmark", icon: ICON.bench },
       { href: "/harness", label: "Harness", icon: ICON.harness },
@@ -1981,5 +1982,89 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
      ${body}
      </div>`,
     { current: "/bench", openIncidents }
+  );
+}
+
+// --- /cluster (spec 2026-10-07-cluster-tour §3.5) ---
+// The mcp-server's k8s_cluster_inventory output, structurally — the dashboard imports no type
+// from another repo, same as McpTool.
+type ManagedBy =
+  | { type: "helmrelease"; name: string; namespace: string; chart?: string }
+  | { type: "kustomization"; name: string; namespace: string; path?: string }
+  | { type: "helm"; chart?: string }
+  | { type: "unmanaged" };
+export interface ClusterInventory {
+  scanned: { namespaces: number; complete: boolean };
+  namespaces: Array<{
+    name: string;
+    system: boolean;
+    workloads: Array<{ kind: string; name: string; ready: number | null; desired: number | null; images: string[]; managedBy: ManagedBy; schedule?: string }>;
+    services: Array<{ name: string; type: string; ports: string[] }>;
+    ingresses: Array<{ name: string; hosts: string[] }>;
+  }>;
+}
+
+const managed = (m: ManagedBy): string => {
+  const extra = (v?: string) => (v ? ` <span class="meta">· ${esc(v)}</span>` : "");
+  if (m.type === "helmrelease") return `HelmRelease <code translate="no">${esc(`${m.namespace}/${m.name}`)}</code>${extra(m.chart)}`;
+  if (m.type === "kustomization") return `Kustomization <code translate="no">${esc(`${m.namespace}/${m.name}`)}</code>${extra(m.path)}`;
+  if (m.type === "helm") return `Helm${extra(m.chart)}`;
+  return `<span class="meta">not managed by GitOps</span>`;
+};
+
+/** The inventory, deterministically — no LLM. `error` is the reason there is no inventory. */
+export function clusterPage(inv: ClusterInventory | null, error: string | null, openIncidents?: number): string {
+  const nsBlock = (ns: ClusterInventory["namespaces"][number]): string => {
+    if (ns.workloads.length === 0) {
+      return `${section(ICON.layers, ns.name)}${empty("Nothing deployed here.", "No Deployment, StatefulSet, DaemonSet or CronJob in this namespace.", ICON.layers)}`;
+    }
+    const rows = ns.workloads
+      .map(
+        (w) =>
+          `<tr role="row">` +
+          cell("Workload", `<code translate="no">${breakable(w.name)}</code>`, "primary") +
+          cell("Kind", esc(w.kind) + (w.schedule ? ` <code translate="no" style="white-space:nowrap">${esc(w.schedule)}</code>` : "")) +
+          cell("Ready", w.ready === null || w.desired === null ? "—" : `${fmtInt(w.ready)}/${fmtInt(w.desired)}`, "num") +
+          cell("Image", w.images.map((i) => `<code translate="no">${esc(i)}</code>`).join("<br>") || "—") +
+          cell("Managed by", managed(w.managedBy)) +
+          `</tr>`
+      )
+      .join("");
+    const svc = ns.services.map((x) => `<code translate="no">${esc(x.name)}</code> ${esc(x.ports.join(", "))}`).join(" · ");
+    const hosts = ns.ingresses.flatMap((x) => x.hosts).map((h) => `<code translate="no">${esc(h)}</code>`).join(" · ");
+    return (
+      `${section(ICON.layers, ns.name)}` +
+      table(headers("Workload", "Kind", ["Ready", "num"], "Image", "Managed by"), rows, "pairs") +
+      (svc || hosts
+        ? `<p class="meta">${svc ? `Services: ${svc}` : ""}${svc && hosts ? "<br>" : ""}${hosts ? `Ingress: ${hosts}` : ""}</p>`
+        : "")
+    );
+  };
+  let body: string;
+  if (!inv) {
+    body = empty(error ?? "No inventory.", "The inventory comes from the MCP server's k8s_cluster_inventory.", ICON.plug);
+  } else {
+    const user = inv.namespaces.filter((n) => !n.system);
+    const system = inv.namespaces.filter((n) => n.system);
+    body =
+      (inv.scanned.complete
+        ? ""
+        : `<p class="meta"><strong>Partial inventory</strong> — the scan hit its ceiling after ${fmtInt(inv.scanned.namespaces)} namespace(s); what is missing is not shown as empty.</p>`) +
+      user.map(nsBlock).join("") +
+      (system.length
+        ? `${section(ICON.layers, "System namespaces")}` +
+          `<details><summary>Show ${fmtInt(system.length)} namespace(s) the platform runs — ${esc(system.map((n) => n.name).join(", "))}</summary>${system.map(nsBlock).join("")}</details>`
+        : "");
+  }
+  return layout(
+    "Cluster",
+    `<div class="doc">
+     <p class="eyebrow">Agent</p>
+     <h1>Cluster</h1>
+     <p class="meta">What runs here and who manages it, read live from <code translate="no">k8s_cluster_inventory</code> —
+       the same inventory the agent's cluster tour answers from. No model is involved in this page.</p>
+     ${body}
+     </div>`,
+    { current: "/cluster", openIncidents }
   );
 }

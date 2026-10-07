@@ -1350,6 +1350,11 @@ export class DevOpsAgent {
   // The tool list devops-mcp-server returned at connect, for the dashboard's dependency map.
   // Read-only and already in memory — this makes no call. Empty before initialize() and after
   // a failed connect, which is a state the dashboard renders rather than an error.
+  /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
+  async clusterInventory(): Promise<string> {
+    return this.mcp.callTool("k8s_cluster_inventory", {});
+  }
+
   mcpTools(): ToolDefinition[] {
     return this.mcp.getTools();
   }

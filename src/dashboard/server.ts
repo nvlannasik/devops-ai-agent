@@ -5,7 +5,7 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage } from "./views.js";
+import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -24,7 +24,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
   | { kind: "asset"; path: string }
@@ -41,6 +41,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/topology") return { kind: "topology" };
   if (p === "/bench") return { kind: "bench" };
   if (p === "/harness") return { kind: "harness" };
+  if (p === "/cluster") return { kind: "cluster" };
   // A gate is routed only by its exact name from GATE_NAMES — the list is closed, so nothing a URL
   // says reaches a query unless it is one of those strings.
   const g = /^\/harness\/([a-z-]{1,40})$/.exec(p);
@@ -127,6 +128,9 @@ export class DashboardServer {
   private readonly queries: DashboardQueries;
   private readonly mcpTools: () => readonly McpTool[];
   private readonly skills: () => readonly SkillView[];
+  // k8s_cluster_inventory's raw result. A whole-cluster scan, so it is cached: a reload must not rescan.
+  private readonly inventory: (() => Promise<string>) | undefined;
+  private inventoryCache: { at: number; inv: ClusterInventory | null; error: string | null } | null = null;
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
   // never built, which the topology page renders as a note rather than an empty frame.
@@ -140,11 +144,13 @@ export class DashboardServer {
   constructor(
     queries?: DashboardQueries,
     mcpTools?: () => readonly McpTool[],
-    skills?: () => readonly SkillView[]
+    skills?: () => readonly SkillView[],
+    inventory?: () => Promise<string>
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
     this.skills = skills ?? (() => []);
+    this.inventory = inventory;
   }
 
   async start(): Promise<void> {
@@ -286,6 +292,31 @@ export class DashboardServer {
    * assert that nothing is firing, which is exactly the wrong thing to say when the reason we
    * have no number is that the database did not answer. No badge says nothing.
    */
+  /** The inventory or the reason there is none — never a throw, so /cluster never 500s. */
+  private async clusterInventory(): Promise<{ inv: ClusterInventory | null; error: string | null }> {
+    const TTL_MS = 60_000;
+    if (this.inventoryCache && Date.now() - this.inventoryCache.at < TTL_MS) return this.inventoryCache;
+    let entry: { at: number; inv: ClusterInventory | null; error: string | null };
+    if (!this.inventory) {
+      entry = { at: Date.now(), inv: null, error: "MCP server not connected" };
+    } else {
+      try {
+        const raw = await this.inventory();
+        const parsed = (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })();
+        // The MCP client returns a tool failure as text ("Error: …"), not a throw — show that text.
+        entry =
+          parsed && typeof parsed === "object" && Array.isArray((parsed as ClusterInventory).namespaces)
+            ? { at: Date.now(), inv: parsed as ClusterInventory, error: null }
+            : { at: Date.now(), inv: null, error: raw.slice(0, 300) || "Empty inventory response" };
+      } catch (err) {
+        entry = { at: Date.now(), inv: null, error: `Inventory failed: ${errDetail(err).split("\n")[0]}` };
+      }
+    }
+    // A failure is not cached: the next reload should try again rather than show a stale error.
+    if (entry.inv) this.inventoryCache = entry;
+    return entry;
+  }
+
   private async openCount(): Promise<number | undefined> {
     if (!this.queries.enabled) return undefined;
     try {
@@ -455,6 +486,12 @@ export class DashboardServer {
     // Same side of the database gate as /context and /prompt, and for the same reason: the score
     // history is a file in the image, read out of the running process. No migration, no pool,
     // and it answers while Postgres is down.
+    // Same side of the database gate: the inventory comes from the MCP server, not Postgres.
+    if (route.kind === "cluster") {
+      const { inv, error } = await this.clusterInventory();
+      return send(200, clusterPage(inv, error, await this.openCount()), "text/html; charset=utf-8");
+    }
+
     if (route.kind === "bench") {
       return send(200, benchPage(loadBenchHistory(), await this.openCount()), "text/html; charset=utf-8");
     }
