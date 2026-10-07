@@ -344,6 +344,28 @@ function replicaSetAsDeployment(proposal: Proposal, name: string, observed: stri
   );
 }
 
+/**
+ * The latest result of one tool in a thread, or null. A `tool_result` block carries no tool name,
+ * so it is paired to its `tool_use` by id. For the cluster tour, whose tables are built from the
+ * inventory the tool returned rather than from the model's prose (utils/slack/tour-tables).
+ */
+export function lastToolResultIn(history: Message[], tool: string): string | null {
+  const ids = new Set<string>();
+  for (const m of history) {
+    if (typeof m.content === "string") continue;
+    for (const b of m.content) if (b.type === "tool_use" && b.name === tool && b.id) ids.add(b.id);
+  }
+  for (let i = history.length - 1; i >= 0; i--) {
+    const c = history[i]!.content;
+    if (typeof c === "string") continue;
+    for (let j = c.length - 1; j >= 0; j--) {
+      const b = c[j]!;
+      if (b.type === "tool_result" && b.tool_use_id && ids.has(b.tool_use_id) && typeof b.content === "string") return b.content;
+    }
+  }
+  return null;
+}
+
 export function ungroundedTargetRefusal(
   proposal: Proposal,
   observed: string | null,
@@ -1350,6 +1372,11 @@ export class DevOpsAgent {
   // The tool list devops-mcp-server returned at connect, for the dashboard's dependency map.
   // Read-only and already in memory — this makes no call. Empty before initialize() and after
   // a failed connect, which is a state the dashboard renders rather than an error.
+  /** The thread's latest result of `tool` — see lastToolResultIn. */
+  async lastToolResult(threadId: string, tool: string): Promise<string | null> {
+    return lastToolResultIn(await this.memory.get(threadId).catch(() => [] as Message[]), tool);
+  }
+
   /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
   async clusterInventory(): Promise<string> {
     return this.mcp.callTool("k8s_cluster_inventory", { detail: true });

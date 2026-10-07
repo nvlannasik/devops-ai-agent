@@ -4,23 +4,21 @@ description: Onboarding — what runs in the cluster and how each workload is de
 when: jelas\w* [^\n]{0,30}(cluster|klaster|namespace|workload|deploy|service)|explain\w* [^\n]{0,20}(cluster|namespace|workload)|overview|gambaran|onboard\w*|walk ?me ?through|apa aja yang (jalan|ada)|what (runs|is running|'s running)|workload apa
 ---
 
-Someone new is asking what runs here and how it gets deployed. They cannot tell an invented name
-from a real one, so every name in the answer comes from a tool result — and the inventory is one call.
+Someone new is asking what runs here and how it gets deployed. The facts reach them as TABLES the
+agent builds from your `k8s_cluster_inventory` result — workloads, kind, ready, image, who manages
+each, Services, Ingress. So the call is mandatory, and your reply must NOT repeat that inventory.
 
-1. *Overview* (no namespace named): `k8s_cluster_inventory` with no namespace. One block per
-   namespace: the workloads (kind + name), who manages them, what they expose (Ingress hosts). A
-   namespace whose `system` is true collapses into one closing line naming them.
+1. *Overview* (no namespace named): `k8s_cluster_inventory` with no namespace.
 2. *Detail* (a namespace named, usually the follow-up): `k8s_cluster_inventory namespace=<ns>`.
-   Per workload: kind, image, ready/desired, its Services and ports, Ingress hosts, a CronJob's
-   schedule, and where it is deployed from — HelmRelease `<ns>/<name>` with its chart, Kustomization
-   `<ns>/<name>` with its path, plain Helm with its chart, or *not managed by GitOps*. Unmanaged on a
-   GitOps cluster is worth saying plainly: it is the thing a newcomer should not copy.
-3. Two labelled parts, always: *Terbaca* — what the tool returned, names in backticks exactly as
-   returned — and *Dugaan fungsi* — what a workload is probably FOR, inferred from its name, image or
-   labels, every line marked as a guess. Never state a purpose outside that part.
-4. `scanned.complete` false: say the inventory is partial before anything else.
-5. Health is not the question: a not-ready count is reported as a number, not diagnosed. Do not
-   offer a change. End with what they can ask next — a namespace to detail, or `k8s_cluster_health`
-   if something looked wrong.
+3. Your reply, under the tables, is three short parts:
+   • One or two lines of orientation: how the cluster is organised (which namespaces hold the
+     applications, which are platform), and anything a newcomer should notice — a workload *not
+     managed by GitOps* on a GitOps cluster is the thing not to copy.
+   • *Dugaan fungsi* — what the main workloads are probably FOR, inferred from name, image or
+     labels, one line each, every line marked as a guess (`_dugaan dari nama/image_`). Names in
+     backticks exactly as the tool returned them; never a name the inventory did not contain.
+   • What they can ask next — a namespace to detail.
+4. `scanned.complete` false: say the inventory is partial.
+5. Health is not the question: do not diagnose a not-ready count, and do not offer a change.
 
-Plain Slack mrkdwn: `*bold*` section lines and `•` bullets, no `#` headings, no tables.
+Plain Slack mrkdwn: `*bold*` section lines and `•` bullets, no `#` headings, no tables of your own.

@@ -29,7 +29,8 @@ import { loadCases, type Case } from "./case.js";
 import { combine, passRates, scoreGrounding, scoreProposal, scoreRca, type Score, type TaskRun } from "./score.js";
 import { appendHistory, axisTally, publishHistory, runMeta } from "./store.js";
 import { config } from "../config/index.js";
-import { mentionBudget } from "../agent/intent/index.js";
+import { mentionBudget, wantsTour } from "../agent/intent/index.js";
+import { tourBlocks } from "../utils/slack/tour-tables.js";
 import { parseRegistry } from "../agent/llm/registry.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
@@ -176,6 +177,12 @@ async function attempt(
       previousReply = await agent.lastAssistantText(threadId).catch(() => "");
       const second = () => agent.investigate(threadId, buildMentionMarker(task.followUp!, null), { ...budgetFor(task.followUp!), mode: task.mode });
       rca = task.mode === "conversation" ? await withRoute("light", second) : await second();
+    }
+    // A tour's facts reach Slack as tables built from the tool result (app postTourTables), not in
+    // the model's reply — score what a reader sees: those facts, then the reply.
+    if (task.mode === "conversation" && wantsTour(task.followUp ?? task.message ?? "")) {
+      const tour = tourBlocks(await agent.lastToolResult(threadId, "k8s_cluster_inventory").catch(() => null));
+      if (tour) rca = `${tour.text}\n\n${rca}`;
     }
     // BEFORE the finally clears the thread: grounding is checked against this run's own tool
     // results, which live in the conversation memory the teardown is about to drop.
