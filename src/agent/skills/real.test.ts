@@ -408,3 +408,18 @@ test("the prompt forbids substituting a near-match for the object asked about", 
   assert.match(prompt, /Never substitute a near-match/i);
   assert.match(prompt, /capped per kind/i);
 });
+
+// Cluster tour (spec 2026-10-07): the skill keys on vocabulary, never the mode tag — so the only
+// thing keeping wantsTour (which routes the budget) and this skill's `when` in agreement is this.
+test("every sentence wantsTour accepts also selects cluster-tour", async () => {
+  const { wantsTour } = await import("../intent/index.js");
+  const registry = loadSkills(resolveSkillsDir());
+  const selectedFor = (text: string, mode: string) => registry.select(`[mode:${mode}]\n${text}`, new Set()).selected.map((s) => s.name);
+  const sentences = ["jelasin cluster ini dong", "workload apa aja yang jalan di cluster?", "explain this cluster to me, I just joined",
+                     "gambaran namespace devops-tools", "onboarding cluster dong", "jelaskan workload di namespace sample-apps",
+                     "give me an overview of the namespaces"];
+  for (const s of sentences) {
+    assert.equal(wantsTour(s), true, s);
+    assert.ok(selectedFor(s, "conversation").includes("cluster-tour"), `cluster-tour not selected for: ${s}`);
+  }
+});
