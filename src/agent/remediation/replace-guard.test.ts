@@ -281,3 +281,11 @@ test("the denial still reads when the API's own escaped JSON is escaped again in
   assert.match(twice, /reporter\\\\\\" cannot/);
   assert.ok(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, twice));
 });
+
+test("the denial reads through any depth of escaping — Loki's result carries three levels", () => {
+  // Captured 2026-10-07 from loki_query_range on bench-a13: fluent-bit's JSON log field, Loki's
+  // JSON, the MCP result — seven backslashes before every quote. A width limit was the wrong fix.
+  const bs = "\\".repeat(7);
+  const loki = `"pods is forbidden: User ${bs}"system:serviceaccount:bench-a13:reporter${bs}" cannot list resource ${bs}"pods${bs}" in API group`;
+  assert.ok(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, loki.toLowerCase()));
+});

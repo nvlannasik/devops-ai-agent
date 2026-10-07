@@ -343,10 +343,13 @@ export function rbacRestartRefusal(action: string, params: Record<string, unknow
   const ns = typeof params.namespace === "string" ? params.namespace : "";
   if (!ns) return null;
   const esc = ns.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Quotes and backslashes out first: the line arrives escaped as many times as it was wrapped
+  // (Loki's result carries three levels), so no width between the tokens is ever the right one.
+  const plain = observed.replace(/[\\"']/g, "");
   const denial = new RegExp(
-    `system:serviceaccount:${esc}:([a-z0-9.-]+)[\\\\"' ]{0,8}cannot (get|list|watch|create|update|patch|delete) resource[\\\\"' ]{0,8}([a-z0-9.-]+)`,
+    `system:serviceaccount:${esc}:([a-z0-9.-]+)\\s+cannot (get|list|watch|create|update|patch|delete) resource\\s+([a-z0-9.-]+)`,
     "i"
-  ).exec(observed);
+  ).exec(plain);
   if (!denial) return null;
   return (
     `the evidence is an RBAC denial — ServiceAccount \`${ns}/${denial[1]}\` cannot ${denial[2]} ` +
