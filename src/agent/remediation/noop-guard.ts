@@ -64,9 +64,11 @@ export function noOpImageRefusal(
   const containers = mine?.containers;
   if (!Array.isArray(containers) || containers.length === 0) return null;
 
-  // With a container named, only that one counts. Without, any container already on this image
-  // makes the write a no-op for the thing being changed.
-  const relevant = container ? containers.filter((c) => c.name === container) : containers;
+  // With a container named, only that one counts. Without — or with a name no container has, which
+  // the model invents (A13: `curl` for a container called `reporter`) — any container already on
+  // this image makes the write a no-op for the thing being changed.
+  const named = containers.filter((c) => c.name === container);
+  const relevant = named.length > 0 ? named : containers;
   if (!relevant.some((c) => c.image === proposed)) return null;
 
   return (

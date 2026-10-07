@@ -104,3 +104,14 @@ test("a raise passes; so does a lowered limit with no OOMKill in view (rightsizi
   assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", cpu_limit: "200m" }, a02, OOM), null);
   assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", memory_limit: "32Mi" }, "not json", OOM), null);
 });
+
+// Bench A13 rerun, 2026-10-07: `k8s_set_image` to curlimages/curl:8.5.0 — the image already running —
+// for container `curl`, which does not exist (the container is `reporter`). Filtering to a container
+// that matches nothing compared against nothing, and the no-op passed.
+test("a container name that matches no container does not hide a no-op image", () => {
+  const l = JSON.stringify([{ name: "reporter", containers: [{ name: "reporter", image: "curlimages/curl:8.5.0" }] }]);
+  assert.match(noOpImageRefusal("k8s_set_image", { name: "reporter", container: "curl", image: "curlimages/curl:8.5.0" }, l) ?? "", /already running/);
+  // a REAL container name still scopes the comparison
+  const two = JSON.stringify([{ name: "w", containers: [{ name: "app", image: "a:1" }, { name: "side", image: "b:1" }] }]);
+  assert.equal(noOpImageRefusal("k8s_set_image", { name: "w", container: "app", image: "b:1" }, two), null);
+});
