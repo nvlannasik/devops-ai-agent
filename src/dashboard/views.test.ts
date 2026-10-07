@@ -2848,3 +2848,23 @@ test("a partial scan says so, and an unreachable tool is a note, not a crash", a
   assert.match(clusterPage({ scanned: { namespaces: 1, complete: false }, namespaces: [] }, null), /partial/i);
   assert.match(clusterPage(null, "MCP server not connected"), /MCP server not connected/);
 });
+
+test("the cluster page mounts the map above the tables, with the inventory as an escaped JSON block", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "x</script><b>", system: false, workloads: [], services: [], ingresses: [] }] };
+  const assets = { js: { path: "/assets/topology.a.js" }, css: { path: "/assets/topology.b.css" }, clusterJs: { path: "/assets/cluster.c.js" } } as any;
+  const html = clusterPage(inv as any, null, 0, "n0nce", assets);
+  assert.match(html, /<div id="cluster-root" data-fallback>/);
+  assert.match(html, /<script type="application\/json" id="cluster-data" nonce="n0nce">/);
+  assert.doesNotMatch(html, /x<\/script><b>/, "the data block cannot be closed from inside");
+  assert.match(html, /<script src="\/assets\/cluster\.c\.js" nonce="n0nce" defer><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/assets\/topology\.b\.css">/);
+  assert.ok(html.indexOf("cluster-root") < html.indexOf("Nothing deployed here"), "map above the tables");
+});
+
+test("no bundle or no inventory: tables or note, never a broken map frame", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "a", system: false, workloads: [], services: [], ingresses: [] }] };
+  assert.match(clusterPage(inv as any, null, 0, "n", null), /The cluster map is not built/);
+  assert.doesNotMatch(clusterPage(null, "MCP server not connected", 0, "n", null), /cluster-root/);
+});

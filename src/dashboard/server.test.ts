@@ -563,6 +563,11 @@ test("/cluster renders the inventory, reads it once per 60 s, and needs no datab
     assert.match(first, /storefront/);
     await raw(port, "GET /cluster HTTP/1.1", authed);
     assert.equal(calls, 1, "the second request came from the cache");
+    // the map's <script> runs under this response's nonce, like /topology
+    const csp = header(first, "content-security-policy") ?? "";
+    const nonce = /'nonce-([^']+)'/.exec(csp)?.[1];
+    assert.ok(nonce, `no nonce in CSP: ${csp}`);
+    for (const m of first.matchAll(/<script[^>]* nonce="([^"]+)"/g)) assert.equal(m[1], nonce);
     assert.match(status(await raw(port, "GET /cluster HTTP/1.1")), /^HTTP\/1\.1 303\b/, "behind the password");
   }, { inventory });
 });

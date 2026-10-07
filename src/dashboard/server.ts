@@ -489,7 +489,11 @@ export class DashboardServer {
     // Same side of the database gate: the inventory comes from the MCP server, not Postgres.
     if (route.kind === "cluster") {
       const { inv, error } = await this.clusterInventory();
-      return send(200, clusterPage(inv, error, await this.openCount()), "text/html; charset=utf-8");
+      // The map's bundle runs under this response's nonce, exactly as /topology's does.
+      const nonce = newNonce();
+      return send(200, clusterPage(inv, error, await this.openCount(), nonce, this.assets), "text/html; charset=utf-8", {
+        "content-security-policy": csp(nonce),
+      });
     }
 
     if (route.kind === "bench") {

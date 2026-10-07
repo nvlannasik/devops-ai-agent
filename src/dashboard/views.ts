@@ -2000,7 +2000,37 @@ const managed = (m: ManagedBy): string => {
 };
 
 /** The inventory, deterministically — no LLM. `error` is the reason there is no inventory. */
-export function clusterPage(inv: ClusterInventory | null, error: string | null, openIncidents?: number): string {
+/**
+ * The cluster map's frame — topoFrame's contract for the second bundle (client/cluster.tsx): a
+ * mount holding the no-JS sentence, the inventory as an escaped JSON block, the script under the
+ * response's nonce. No bundle (`npm run dev`) is a note, not an empty frame.
+ */
+function clusterFrame(inv: ClusterInventory, nonce: string, assets: Assets | null): string {
+  if (!assets) {
+    return (
+      `<div class="card topo-frame">` +
+      empty("The cluster map is not built.", "Run npm run build:client to bundle it. Every fact it draws is in the tables below.", ICON.plug) +
+      `</div>`
+    );
+  }
+  return (
+    `<div class="card flush topo-frame">` +
+    `<div id="cluster-root" data-fallback>` +
+    `<p class="topo-fallback">The cluster map needs JavaScript. The tables below carry the same facts.</p>` +
+    `</div>` +
+    `</div>` +
+    jsonBlock("cluster-data", nonce, inv) +
+    `<script src="${esc(assets.clusterJs.path)}" nonce="${esc(nonce)}" defer></script>`
+  );
+}
+
+export function clusterPage(
+  inv: ClusterInventory | null,
+  error: string | null,
+  openIncidents?: number,
+  nonce = "",
+  assets: Assets | null = null
+): string {
   const nsBlock = (ns: ClusterInventory["namespaces"][number]): string => {
     if (ns.workloads.length === 0) {
       return `${section(ICON.layers, ns.name)}${empty("Nothing deployed here.", "No Deployment, StatefulSet, DaemonSet or CronJob in this namespace.", ICON.layers)}`;
@@ -2037,6 +2067,7 @@ export function clusterPage(inv: ClusterInventory | null, error: string | null, 
       (inv.scanned.complete
         ? ""
         : `<p class="meta"><strong>Partial inventory</strong> — the scan hit its ceiling after ${fmtInt(inv.scanned.namespaces)} namespace(s); what is missing is not shown as empty.</p>`) +
+      clusterFrame(inv, nonce, assets) +
       user.map(nsBlock).join("") +
       (system.length
         ? `${section(ICON.layers, "System namespaces")}` +
@@ -2052,6 +2083,6 @@ export function clusterPage(inv: ClusterInventory | null, error: string | null, 
        the same inventory the agent's cluster tour answers from. No model is involved in this page.</p>
      ${body}
      </div>`,
-    { current: "/cluster", openIncidents }
+    { current: "/cluster", openIncidents, stylesheet: assets?.css.path }
   );
 }
