@@ -202,6 +202,9 @@ export const config = {
   // tool rounds for a cluster-tour mention (agent/intent wantsTour) — one inventory call covers the
   // overview; the rest are for a drill-down or a Flux CR the model wants to read
   tourToolRounds: parseInt(process.env.TOUR_TOOL_ROUNDS ?? "4"),
+  // Mask IPs, emails, AWS ARNs/account ids and hostnames before ANY backend sees a request, and
+  // restore them in the response (agent/llm/mask.ts). On unless explicitly "false".
+  maskIdentifiers: process.env.LLM_MASK_IDENTIFIERS !== "false",
 
   // Sub-agent delegation (src/agent/subagent/). Opt-in, and OFF is meant to be today's
   // behaviour byte for byte — the tool is not registered at all, so neither the tools cache

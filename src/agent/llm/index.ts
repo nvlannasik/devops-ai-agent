@@ -4,9 +4,16 @@ import { OpenAICompatibleClient } from "./openai-compatible.js";
 import { buildBackends, parseRegistry } from "./registry.js";
 import { RouterLLMClient } from "./router.js";
 import { SQSLLMClient } from "./sqs.js";
+import { maskingClient } from "./mask.js";
 import type { LLMClient } from "./types.js";
 
+/** The client every caller gets — masked unless LLM_MASK_IDENTIFIERS=false (see mask.ts). */
 export function createLLMClient(): LLMClient {
+  const client = createUnmaskedClient();
+  return config.maskIdentifiers ? maskingClient(client) : client;
+}
+
+function createUnmaskedClient(): LLMClient {
   // config casts LLM_PROVIDER to the union without checking it, so an unknown value reaches
   // here as a plain string. Same rule as parseRegistry below: an env-var typo must stop the
   // pod at boot, not silently demote it to a provider nobody asked for.
