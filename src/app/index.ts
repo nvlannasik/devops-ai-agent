@@ -14,7 +14,7 @@ import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken, slackUserAllowed } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter, type Block } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
-import { tourBlocks } from "../utils/slack/tour-tables.js";
+import { stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
@@ -275,17 +275,22 @@ export class SlackApp {
    * k8s_cluster_inventory result. Refused blocks go again as the same facts in plain mrkdwn —
    * a table must never cost the facts. No inventory in the thread posts nothing.
    */
-  private async postTourTables(channel: string, threadTs: string, client: AllMiddlewareArgs["client"]): Promise<void> {
-    const tour = tourBlocks(await this.agent.lastToolResult(threadTs, "k8s_cluster_inventory").catch(() => null));
-    if (!tour) return;
+  private async postTourTables(channel: string, threadTs: string, client: AllMiddlewareArgs["client"]): Promise<string | null> {
+    const raw = await this.agent.lastToolResult(threadTs, "k8s_cluster_inventory").catch(() => null);
+    const tour = tourBlocks(raw);
+    if (!tour) return null;
     try {
       await client.chat.postMessage({ channel, thread_ts: threadTs, text: tour.text, blocks: tour.blocks });
     } catch (err) {
       logger.warn(`[slack] tour tables refused, posting them as text (thread ${threadTs}): ${errDetail(err)}`);
-      await client.chat.postMessage({ channel, thread_ts: threadTs, text: tour.text, mrkdwn: true }).catch((e) =>
-        logger.warn(`[slack] tour text post failed (thread ${threadTs}): ${errDetail(e)}`)
+      const sent = await client.chat.postMessage({ channel, thread_ts: threadTs, text: tour.text, mrkdwn: true }).then(
+        () => true,
+        (e) => (logger.warn(`[slack] tour text post failed (thread ${threadTs}): ${errDetail(e)}`), false)
       );
+      // Neither form reached Slack: keep the model's reply whole, it is the only copy of the facts.
+      if (!sent) return null;
     }
+    return raw;
   }
 
   private async handleMention(args: AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">): Promise<void> {
@@ -432,7 +437,11 @@ export class SlackApp {
         } else {
           // A cluster tour's facts are tables built from the tool's own result, posted first; the
           // model's reply below is what only it can write — what each workload is probably for.
-          if (wantsTour(text)) await this.postTourTables(event.channel, threadId, client);
+          if (wantsTour(text)) {
+            const inventory = await this.postTourTables(event.channel, threadId, client);
+            // The tables carry the facts; what the model restated of them goes (stripRepeatedInventory).
+            if (inventory) reply = stripRepeatedInventory(reply, inventory) || reply;
+          }
           // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
           // fence-safe, so displayed logs keep rendering as code blocks
           const parts = splitForSlack(reply);

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tourBlocks } from "./tour-tables.js";
+import { tourBlocks, stripRepeatedInventory } from "./tour-tables.js";
+import { readFileSync } from "node:fs";
 
 // The cluster tour's facts come straight from k8s_cluster_inventory — the model never writes them,
 // so a name in these tables is one the cluster returned (D02 rerun, 2026-10-07: the model's own
@@ -92,4 +93,48 @@ test("more than 50 rows split into several tables rather than being refused", ()
   assert.equal(ts.length, 2);
   assert.ok(ts.every((t) => t.rows.length <= 51));
   assert.equal(ts.reduce((n, t) => n + t.rows.length - 1, 0), 60);
+});
+
+// Bench 2026-10-07 after the tables shipped: 4 of 6 replies restated the inventory under the
+// tables anyway — one drew its own markdown table (raw pipes in Slack) — though cluster-tour.md
+// forbids it. A prompt rule alone has never held on the small model here, so the code removes
+// what the tables already say, using the inventory's own facts, and keeps *Dugaan fungsi*.
+const replies = JSON.parse(readFileSync(new URL("./tour-replies.fixture.json", import.meta.url), "utf8")) as Record<string, string>;
+const benchInv = (ns: string) => JSON.stringify({ scanned: { namespaces: 1, complete: true }, namespaces: [{
+  name: ns, system: false,
+  workloads: [
+    { kind: "Deployment", name: "catalog-api", ready: 1, desired: 1, images: ["nginx:1.27-alpine"], managedBy: { type: "unmanaged" } },
+    { kind: "CronJob", name: "price-sync", ready: null, desired: null, images: ["busybox:1.36"], managedBy: { type: "unmanaged" }, schedule: "*/30 * * * *" },
+  ],
+  services: [{ name: "catalog-api", type: "ClusterIP", ports: ["80/TCP"] }],
+  ingresses: [{ name: "catalog-api", hosts: [`catalog.${ns}.local`] }],
+}] });
+
+test("the model's own markdown table and its restated inventory are removed; Dugaan fungsi stays", () => {
+  const out = stripRepeatedInventory(replies.D01_1!, benchInv("bench-d01"));
+  assert.doesNotMatch(out, /^\s*\|/m, "no pipe table reaches Slack");
+  assert.doesNotMatch(out, /nginx:1\.27-alpine|busybox:1\.36/);
+  assert.doesNotMatch(out, /^\*(Overview|Detail)\*\s*$/m, "headings left empty are dropped");
+  assert.match(out, /Dugaan fungsi/);
+  assert.match(out, /`catalog-api` — layanan API/);
+  assert.match(out, /`price-sync` — pekerjaan berkala/);
+});
+
+test("prose that restates images, schedules, ports and hosts is removed; orientation stays", () => {
+  const out = stripRepeatedInventory(replies.D02_3!, benchInv("bench-d02"));
+  assert.doesNotMatch(out, /nginx:1\.27-alpine|\*\/30 \* \* \* \*|80\/TCP|catalog\.bench-d02\.local/);
+  assert.match(out, /tidak dikendalikan oleh GitOps/);
+  assert.match(out, /cukup sebutkan/);
+});
+
+test("no recorded reply restates an image or draws a table after stripping, and none is emptied", () => {
+  for (const [k, reply] of Object.entries(replies)) {
+    const out = stripRepeatedInventory(reply, benchInv(k.startsWith("D01") ? "bench-d01" : "bench-d02"));
+    assert.doesNotMatch(out, /nginx:1\.27-alpine|busybox:1\.36|^\s*\|/m, k);
+    assert.ok(out.trim().length > 40, `${k} lost everything: ${JSON.stringify(out)}`);
+  }
+});
+
+test("without an inventory the reply is untouched", () => {
+  assert.equal(stripRepeatedInventory("anything at all", null), "anything at all");
 });

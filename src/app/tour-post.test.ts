@@ -21,7 +21,7 @@ const harness = (inventory: string | null, fail = false) => {
 
 test("a tour's inventory goes out as table blocks with the same facts as text", async () => {
   const h = harness(INV);
-  await h.post();
+  assert.equal(await h.post(), INV, "returns the inventory the tables were built from — the reply is stripped against it");
   assert.equal(h.posted.length, 1);
   assert.ok(h.posted[0].blocks.some((b: any) => b.type === "table"));
   assert.match(h.posted[0].text, /storefront/);
@@ -35,6 +35,6 @@ test("refused blocks are re-posted as plain text; no inventory posts nothing", a
   assert.equal(h.posted[0].blocks, undefined);
   assert.match(h.posted[0].text, /storefront/);
   const none = harness(null);
-  await none.post();
+  assert.equal(await none.post(), null);
   assert.equal(none.posted.length, 0);
 });

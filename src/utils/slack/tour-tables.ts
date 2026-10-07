@@ -137,3 +137,69 @@ export function tourBlocks(raw: string | null): { blocks: KnownBlock[]; text: st
   }
   return { blocks, text: text.join("\n") };
 }
+
+const KIND = /\b(Deployment|StatefulSet|DaemonSet|CronJob)\b/;
+const BULLET = /^\s*([•\-]|\*(?=\s))\s*/;
+const HEADING = /^\s*(\*{1,2}|_)[^\n]+?(\*{1,2}|_):?\s*$/;
+const DUGAAN = /dugaan/i;
+
+/**
+ * The model's reply with what the tables already say removed (bench 2026-10-07: 4 of 6 replies
+ * restated the inventory under the tables, one as its own markdown table — raw pipes in Slack —
+ * though cluster-tour.md forbids it). Facts come from the same inventory the tables were built
+ * from: a line carrying an image, a port, a host or a schedule restates it, and so does a bullet
+ * naming a workload with its kind. Markdown table rows go; headings left with nothing under them
+ * go. Anything under or about *Dugaan fungsi* is kept whole — it is the part only the model writes.
+ * ponytail: line-level heuristics over prose; a restatement that names neither a fact nor a kind
+ * survives — harmless, it is the reply as it was.
+ */
+export function stripRepeatedInventory(reply: string, raw: string | null): string {
+  const inv = parse(raw);
+  if (!inv) return reply;
+  const facts: string[] = [];
+  const names: string[] = [];
+  for (const n of inv.namespaces) {
+    facts.push(...(n.hosts ?? []), ...(n.ingresses ?? []).flatMap((i) => i.hosts));
+    for (const s of n.services ?? []) facts.push(...s.ports.map((p) => p.split("→")[0]!));
+    for (const w of n.workloads) {
+      if (typeof w === "string") {
+        const m = /^\S+ (\S+) —/.exec(w);
+        if (m) names.push(m[1]!);
+      } else {
+        names.push(w.name);
+        facts.push(...w.images, ...(w.schedule ? [w.schedule] : []));
+      }
+    }
+  }
+  const lines = reply.split("\n");
+  const drop = lines.map(() => false);
+  let inDugaan = false;
+  lines.forEach((line, i) => {
+    const t = line.trim();
+    if (HEADING.test(t)) inDugaan = DUGAAN.test(t);
+    if (inDugaan || DUGAAN.test(t)) return;
+    if (t.startsWith("|")) drop[i] = true;
+    else if (facts.some((f) => f && line.includes(f))) drop[i] = true;
+    else if (BULLET.test(line) && KIND.test(t) && names.some((nm) => t.includes(nm))) drop[i] = true;
+  });
+  const nextKept = (i: number): number => {
+    for (let j = i + 1; j < lines.length; j++) if (lines[j]!.trim() && !drop[j]) return j;
+    return -1;
+  };
+  const nextAny = (i: number): number => {
+    for (let j = i + 1; j < lines.length; j++) if (lines[j]!.trim()) return j;
+    return -1;
+  };
+  // Lead-ins and headings whose content was all dropped — "Workloads:", "*Detail*".
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i]!.trim();
+    if (!t || drop[i] || DUGAAN.test(t)) continue;
+    const any = nextAny(i);
+    if (t.endsWith(":") && any >= 0 && drop[any]) drop[i] = true;
+    else if (HEADING.test(t)) {
+      const k = nextKept(i);
+      if (k < 0 || HEADING.test(lines[k]!.trim())) drop[i] = true;
+    }
+  }
+  return lines.filter((_, i) => !drop[i]).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
