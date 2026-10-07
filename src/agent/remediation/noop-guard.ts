@@ -156,3 +156,49 @@ export function noOpResourcesRefusal(
     `If the size is not the fault, say what is.`
   );
 }
+
+const OOM_KILL = /\b(oomkill\w*|out of memory|exit ?code\W{0,3}137)\b/i;
+
+/**
+ * A memory limit that does not rise, proposed for a container the kernel killed AT its limit.
+ *
+ * Bench A02, 2026-10-07, 2 of 3 attempts: OOMKilled at 128Mi, and a card for `memory_limit=32Mi`
+ * — "to match observed peak usage", the usage read just before the kill. An OOMKill says the limit
+ * is too LOW; the only resize that addresses it raises the limit. Lowering a limit is legitimate
+ * rightsizing elsewhere, so this fires only with an OOMKill in what the investigation read.
+ *
+ * Same source as `noOpResourcesRefusal` (the configured value from `k8s_recommend_resources`), and
+ * the same tolerance: anything unreadable returns null.
+ */
+export function oomShrinkRefusal(
+  action: string,
+  params: Record<string, unknown>,
+  recommendations: string,
+  observed: string | null
+): string | null {
+  if (action !== "k8s_set_resources" || !observed || !OOM_KILL.test(observed)) return null;
+  const workload = typeof params.name === "string" ? params.name : "";
+  const container = typeof params.container === "string" ? params.container : "";
+  const proposed = typeof params.memory_limit === "string" ? parseQuantity(params.memory_limit) : null;
+  if (!workload || proposed === null) return null;
+  const start = recommendations.indexOf("[");
+  const end = recommendations.lastIndexOf("]");
+  if (start < 0 || end <= start) return null;
+  let items: unknown;
+  try {
+    items = JSON.parse(recommendations.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(items)) return null;
+  const row = (items as Recommendation[]).find((r) => r && r.workload === workload && (!container || r.container === container));
+  const configured = typeof row?.current?.memoryLimit === "string" ? row.current.memoryLimit : null;
+  const limit = configured === null ? null : parseQuantity(configured);
+  if (limit === null || proposed > limit) return null;
+  return (
+    `\`${workload}\` was OOMKilled at its memory limit of ${configured}, and this proposal sets ` +
+    `memory_limit=${params.memory_limit} — ${proposed === limit ? "the same limit" : "a LOWER one"}. An OOMKill means ` +
+    `the container needed more than the limit allows; usage read before the kill is not its peak. The ` +
+    `resize that addresses it raises the limit above ${configured}.`
+  );
+}

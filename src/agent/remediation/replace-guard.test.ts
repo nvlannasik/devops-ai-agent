@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePods, replacementRefusal, healthyTargetRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 
 const pod = (name: string, ready: boolean, restarts = 0, status = "Running") => ({ name, ready, restarts, status });
 const del = (target: string, pods: ReturnType<typeof pod>[]) =>
@@ -254,4 +254,22 @@ test("a delete of a healthy pod is refused unless the pod or its workload is nam
   assert.ok(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, CERT_RCA));
   assert.equal(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, `pod \`${p}\` is wedged`), null);
   assert.equal(healthyTargetRefusal("k8s_delete_pod", params, AGENT_PODS, "deployment `devops-ai-agent` is wedged"), null);
+});
+
+// Bench A13, 2026-10-07: the reporter's ServiceAccount cannot list pods, and the card was a restart
+// "to refresh pod permissions". RBAC is evaluated by the API server on every request; a new pod
+// presents the same token for the same ServiceAccount and is denied the same way.
+const A13_LOG =
+  'pods is forbidden: User \\"system:serviceaccount:bench-a13:reporter\\" cannot list resource \\"pods\\" in API group \\"\\" in the namespace \\"bench-a13\\"';
+
+test("a restart or a pod delete against an RBAC denial in the workload's namespace is refused", () => {
+  assert.match(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, A13_LOG) ?? "", /RBAC/);
+  assert.ok(rbacRestartRefusal("k8s_delete_pod", { namespace: "bench-a13", pod: "reporter-77d98c47f7-mrcx9" }, A13_LOG));
+});
+
+test("an RBAC denial for another namespace's ServiceAccount — the agent's own tools — refuses nothing", () => {
+  const ours = 'User "system:serviceaccount:devops-tools:devops-mcp-server" cannot list resource "secrets"';
+  assert.equal(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, ours), null);
+  assert.equal(rbacRestartRefusal("k8s_set_image", { namespace: "bench-a13", name: "reporter" }, A13_LOG), null);
+  assert.equal(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, null), null);
 });

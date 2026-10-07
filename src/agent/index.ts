@@ -39,8 +39,8 @@ import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
-import { parsePods, replacementRefusal, healthyTargetRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
-import { noOpImageRefusal, noOpResourcesRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
+import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -2465,11 +2465,12 @@ export class DevOpsAgent {
     // reaching for a gesture when it cannot place a fault; a person who types "restart the
     // payments deployment" has placed it themselves and may know something the pod list does not
     // show. Their request is already sufficient evidence per buildProposalPrompt.
+    const evidence = await this.threadEvidence(ctx.threadId);
     if (!ctx.userRequested) {
       // What may name the target as the fault: the Root Cause (never the Immediate line — that is
       // where the reflex restart is written) and the alert's labels. Whole text when no section.
       const mentions = `${extractSection(ctx.rca, "Root Cause") || ctx.rca}\n${Object.values(ctx.labels).join(" ")}`;
-      const replaced = await this.guardRefusalFor(proposal, mentions);
+      const replaced = (await this.guardRefusalFor(proposal, mentions, evidence)) ?? rbacRestartRefusal(proposal.action, proposal.toolParams, evidence);
       if (replaced) return { gate: "replacement guard", reason: replaced };
     }
 
@@ -2490,7 +2491,6 @@ export class DevOpsAgent {
     if (wrongTarget) return { gate: "offer gate", reason: wrongTarget };
 
     // A target nothing in the run ever saw is an invented one — see ungroundedTargetRefusal.
-    const evidence = await this.threadEvidence(ctx.threadId);
     const target = ungroundedTargetRefusal(proposal, evidence, ctx.labels);
     if (target) return { gate: "target gate", reason: target };
 
@@ -2569,10 +2569,10 @@ export class DevOpsAgent {
    * `k8s_set_image` when the resource action was blocked. A guard that has to read pod state to
    * be correct is a bigger thing than the one failure it fixes.
    */
-  async guardRefusalFor(proposal: Proposal, mentions = ""): Promise<string | null> {
+  async guardRefusalFor(proposal: Proposal, mentions = "", evidence: string | null = null): Promise<string | null> {
     if (REPLACEMENT_ACTIONS.has(proposal.action)) return this.replacementRefusalFor(proposal, mentions);
     if (proposal.action === "k8s_set_image") return this.noOpImageRefusalFor(proposal);
-    if (proposal.action === "k8s_set_resources") return this.noOpResourcesRefusalFor(proposal);
+    if (proposal.action === "k8s_set_resources") return this.noOpResourcesRefusalFor(proposal, evidence);
     return null;
   }
 
@@ -2583,12 +2583,13 @@ export class DevOpsAgent {
    * benchmark applies `guardRefusalFor` and never runs the write path, so a guard that needed the
    * dry-run's `previousResources` would be invisible to the measurement that found this.
    */
-  async noOpResourcesRefusalFor(proposal: Proposal): Promise<string | null> {
+  /** `evidence`: the thread's tool output, for the OOMKill half (oomShrinkRefusal). */
+  async noOpResourcesRefusalFor(proposal: Proposal, evidence: string | null = null): Promise<string | null> {
     const namespace = proposal.toolParams.namespace;
     if (typeof namespace !== "string" || !namespace) return null;
     try {
       const raw = await this.mcp.callTool("k8s_recommend_resources", { namespace, workload: proposal.name });
-      return noOpResourcesRefusal(proposal.action, proposal.toolParams, raw);
+      return noOpResourcesRefusal(proposal.action, proposal.toolParams, raw) ?? oomShrinkRefusal(proposal.action, proposal.toolParams, raw, evidence);
     } catch (err) {
       logger.debug(`[remediation] no-op resources guard could not read ${namespace}/${proposal.name}: ${errDetail(err)}`);
       return null;

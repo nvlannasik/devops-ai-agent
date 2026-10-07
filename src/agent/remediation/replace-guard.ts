@@ -325,3 +325,33 @@ export function healthyTargetRefusal(
 
 /** The two actions this guard applies to — the ones that rebuild a pod from the same spec. */
 export const REPLACEMENT_ACTIONS: ReadonlySet<string> = new Set(["k8s_rollout_restart", "k8s_delete_pod"]);
+
+/**
+ * A restart proposed against an RBAC denial.
+ *
+ * Bench A13, 2026-10-07: the reporter's ServiceAccount cannot list pods, and the card was a
+ * restart "to refresh pod permissions". RBAC is evaluated by the API server on every request, so
+ * a replacement pod — same ServiceAccount, same token — is denied the same way, and a fixed Role
+ * applies to the running pod without one. The fix is the Role/RoleBinding, which goes through Git.
+ *
+ * Narrow on purpose: only a denial naming a ServiceAccount IN THE TARGET'S NAMESPACE counts, so the
+ * agent's own tools being forbidden somewhere (`system:serviceaccount:devops-tools:…`) refuse
+ * nothing elsewhere. Quotes may arrive escaped — the log line is inside a JSON tool result.
+ */
+export function rbacRestartRefusal(action: string, params: Record<string, unknown>, observed: string | null): string | null {
+  if (!REPLACEMENT_ACTIONS.has(action) || !observed) return null;
+  const ns = typeof params.namespace === "string" ? params.namespace : "";
+  if (!ns) return null;
+  const esc = ns.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const denial = new RegExp(
+    `system:serviceaccount:${esc}:([a-z0-9.-]+)[\\\\"' ]{0,4}cannot (get|list|watch|create|update|patch|delete) resource[\\\\"' ]{0,4}([a-z0-9.-]+)`,
+    "i"
+  ).exec(observed);
+  if (!denial) return null;
+  return (
+    `the evidence is an RBAC denial — ServiceAccount \`${ns}/${denial[1]}\` cannot ${denial[2]} ` +
+    `\`${denial[3]}\`. The API server checks RBAC on every request, so a restarted pod presents the same ` +
+    `ServiceAccount and is denied the same way; a corrected Role applies to the running pod without one. ` +
+    `The fix is the Role or RoleBinding granting that verb, and it belongs in Git.`
+  );
+}

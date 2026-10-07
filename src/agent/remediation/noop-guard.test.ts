@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { noOpImageRefusal, noOpResourcesRefusal, LISTING_FOR_KIND } from "./noop-guard.js";
+import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, LISTING_FOR_KIND } from "./noop-guard.js";
 
 // C03 on the agus backend, three attempts out of three: busybox:1.36 proposed for a container
 // already running busybox:1.36, one of them admitting it in its own reason.
@@ -84,4 +84,23 @@ test("unreadable input refuses nothing, and other actions are not its business",
   assert.equal(noOpResourcesRefusal("k8s_set_resources", { name: "w", cpu_request: "1" }, "Error: upstream down"), null);
   assert.equal(noOpResourcesRefusal("k8s_set_resources", { name: "absent", cpu_request: "64" }, recommend), null);
   assert.equal(noOpResourcesRefusal("k8s_scale", { name: "batch-runner", cpu_request: "64" }, recommend), null);
+});
+
+// Bench A02, 2026-10-07, 2 of 3 attempts: a container OOMKilled at 128Mi, and a card LOWERING the
+// limit to 32Mi — "to match observed peak usage", the usage it read just before the kernel killed it.
+const a02 = JSON.stringify([{ workload: "backend-api", container: "api-server", current: { memoryLimit: "128Mi", memoryRequest: "64Mi" } }]);
+const OOM = 'lastState: {"terminated":{"reason":"OOMKilled","exitCode":137}}';
+
+test("on an OOMKill, a memory limit at or below the configured one is refused", () => {
+  const p = { name: "backend-api", container: "api-server", memory_limit: "32Mi" };
+  assert.match(oomShrinkRefusal("k8s_set_resources", p, a02, OOM) ?? "", /OOMKilled at its memory limit of 128Mi/);
+  assert.ok(oomShrinkRefusal("k8s_set_resources", { ...p, memory_limit: "128Mi" }, a02, OOM), "unchanged is no fix either");
+});
+
+test("a raise passes; so does a lowered limit with no OOMKill in view (rightsizing)", () => {
+  assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", container: "api-server", memory_limit: "256Mi" }, a02, OOM), null);
+  assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", container: "api-server", memory_limit: "32Mi" }, a02, "all pods Running"), null);
+  // a cpu-only change and an unreadable listing say nothing
+  assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", cpu_limit: "200m" }, a02, OOM), null);
+  assert.equal(oomShrinkRefusal("k8s_set_resources", { name: "backend-api", memory_limit: "32Mi" }, "not json", OOM), null);
 });
