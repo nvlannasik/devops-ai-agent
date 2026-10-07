@@ -1050,3 +1050,16 @@ test("without a refuse hook nothing changes — no extra call on a proposal a ga
   assert.equal(r.proposal?.action, "k8s_rollout_restart");
   assert.equal(calls, 1);
 });
+
+// spec 2026-10-07-cluster-tour §3.4: an inventory says "0/2 ready" in the words a fault report uses.
+test("a tour reply listing a not-ready workload does not propose", () => {
+  // Worded to reach the fault-evidence branch: "0/2 ready, CrashLoopBackOff" is eaten by NEGATED
+  // (a 0 within 30 chars of crash…) and would pass this test without the suppression existing.
+  const reply = "*sample-apps* — `storefront` Deployment with 2 pods in CrashLoopBackOff; managed by HelmRelease `flux-app/storefront`.";
+  assert.equal(worthProposing("show me sample-apps", reply, false).propose, true, "the fixture must hit fault evidence");
+  const g = worthProposing("jelasin namespace sample-apps", reply, false);
+  assert.equal(g.propose, false);
+  assert.match(g.reason, /tour/);
+  // an explicit request still proposes
+  assert.equal(worthProposing("restart storefront di sample-apps", reply, false).propose, true);
+});

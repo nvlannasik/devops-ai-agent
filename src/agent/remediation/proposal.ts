@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { withoutRunbook } from "../runbook/index.js";
+import { wantsTour } from "../intent/index.js";
 
 export interface Proposal {
   action: string;
@@ -354,6 +355,11 @@ export function worthProposing(
         byUser: false,
       };
     }
+    // Same reasoning for a cluster tour (agent/intent wantsTour): an inventory reports state, it
+    // does not diagnose it, and a newcomer asking "what runs here" never asked for a change.
+    if (wantsTour(userText)) {
+      return { propose: false, reason: `cluster tour — "${hit[0]}" is inventory, not a fault to repair`, byUser: false };
+    }
     return { propose: true, reason: `fault evidence in the answer ("${hit[0]}")`, byUser: false };
   }
   return { propose: false, reason: "read-only question, no fault evidence in the answer", byUser: false };
@@ -458,7 +464,7 @@ export function explainGate(userText: string, reply: string, previousReply: stri
     `intent=${b(ACTION_INTENT.test(userText))} cleanup=${b(CLEANUP_INTENT.test(userText))} ` +
     `named=${b(NAMES_OBJECT.test(userText))} approval=${b(isApproval(userText))} ` +
     `prevIntent=${b(ACTION_INTENT.test(previousReply))} offer=${offer ? JSON.stringify(offer) : 0} ` +
-    `fault=${fault ? JSON.stringify(fault) : 0} capacity=${b(CAPACITY_QUESTION.test(userText))} ` +
+    `fault=${fault ? JSON.stringify(fault) : 0} capacity=${b(CAPACITY_QUESTION.test(userText))} tour=${b(wantsTour(userText))} ` +
     `prev="${tail.length === 120 ? "…" : ""}${tail}"`
   );
 }
