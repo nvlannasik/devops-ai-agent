@@ -138,3 +138,18 @@ test("no recorded reply restates an image or draws a table after stripping, and 
 test("without an inventory the reply is untouched", () => {
   assert.equal(stripRepeatedInventory("anything at all", null), "anything at all");
 });
+
+// Bench rerun 2026-10-07 (D02 #1): the model nested each guess under a bullet that restated the
+// workload; dropping the bullet left "_dugaan_: probably a static catalog…" with no workload named.
+test("a dropped bullet whose guess is nested under it keeps the workload's name", () => {
+  const reply = [
+    "• `catalog-api` Deployment 1/1, image `nginx:1.27-alpine`",
+    "  _dugaan dari nama/image_: kemungkinan layanan katalog statis",
+    "• `price-sync` CronJob `*/30 * * * *`",
+    "  _dugaan dari nama/image_: sinkronisasi harga berkala",
+  ].join("\n");
+  const out = stripRepeatedInventory(reply, benchInv("bench-d02"));
+  assert.doesNotMatch(out, /nginx:1\.27-alpine|\*\/30/);
+  assert.match(out, /^• `catalog-api`\s*\n\s+_dugaan dari nama\/image_: kemungkinan layanan katalog/m);
+  assert.match(out, /^• `price-sync`\s*\n\s+_dugaan dari nama\/image_: sinkronisasi/m);
+});

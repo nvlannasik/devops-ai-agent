@@ -182,6 +182,20 @@ export function stripRepeatedInventory(reply: string, raw: string | null): strin
     else if (facts.some((f) => f && line.includes(f))) drop[i] = true;
     else if (BULLET.test(line) && KIND.test(t) && names.some((nm) => t.includes(nm))) drop[i] = true;
   });
+  // A dropped bullet with a kept guess nested under it keeps its name, or the guess names nothing.
+  const indent = (l: string) => l.length - l.trimStart().length;
+  const kept: Record<number, string> = {};
+  lines.forEach((line, i) => {
+    if (!drop[i] || !BULLET.test(line)) return;
+    for (let j = i + 1; j < lines.length && (!lines[j]!.trim() || indent(lines[j]!) > indent(line)); j++) {
+      if (lines[j]!.trim() && !drop[j]) {
+        const name = /`[^`]+`/.exec(line)?.[0];
+        if (name) { kept[i] = `${line.slice(0, indent(line))}• ${name}`; drop[i] = false; }
+        return;
+      }
+    }
+  });
+  for (const [i, l] of Object.entries(kept)) lines[Number(i)] = l;
   const nextKept = (i: number): number => {
     for (let j = i + 1; j < lines.length; j++) if (lines[j]!.trim() && !drop[j]) return j;
     return -1;
