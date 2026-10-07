@@ -15,6 +15,7 @@ import logger from "../utils/logger/index.js";
 const FILES = [
   { name: "topology.js", type: "text/javascript; charset=utf-8" },
   { name: "topology.css", type: "text/css; charset=utf-8" },
+  { name: "cluster.js", type: "text/javascript; charset=utf-8" },
 ] as const;
 
 export interface Asset {
@@ -27,6 +28,8 @@ export interface Asset {
 export interface Assets {
   js: Asset;
   css: Asset;
+  /** /cluster's map. It links `css` — one stylesheet serves both maps. */
+  clusterJs: Asset;
   byPath: Map<string, Asset>;
 }
 
@@ -83,6 +86,6 @@ export function loadAssets(): Assets | null {
     loaded.push({ path: `/assets/${base}.${hash}.${ext}`, body, type: f.type });
   }
 
-  const [js, css] = loaded as [Asset, Asset];
-  return { js, css, byPath: new Map(loaded.map((a) => [a.path, a])) };
+  const [js, css, clusterJs] = loaded as [Asset, Asset, Asset];
+  return { js, css, clusterJs, byPath: new Map(loaded.map((a) => [a.path, a])) };
 }

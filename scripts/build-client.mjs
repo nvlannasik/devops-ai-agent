@@ -35,9 +35,14 @@ const FORBIDDEN = [
 await rm(outdir, { recursive: true, force: true });
 
 const result = await build({
-  entryPoints: [path.join(root, "src", "dashboard", "client", "topology.tsx")],
+  // Two maps, two entries: /topology and /cluster. Only topology.tsx imports a stylesheet, so
+  // only topology.css is produced — /cluster links that same file.
+  entryPoints: {
+    topology: path.join(root, "src", "dashboard", "client", "topology.tsx"),
+    cluster: path.join(root, "src", "dashboard", "client", "cluster.tsx"),
+  },
   outdir,
-  entryNames: "topology",
+  entryNames: "[name]",
   bundle: true,
   minify: true,
   // iife, not esm: a classic script needs no `type="module"`, no CORS considerations for a
@@ -57,15 +62,19 @@ const result = await build({
   metafile: true,
 });
 
-const js = await readFile(path.join(outdir, "topology.js"), "utf8");
-for (const needle of FORBIDDEN) {
-  if (js.includes(needle)) {
-    throw new Error(
-      `client bundle contains ${needle} — a client module has imported the server's config. ` +
-        `See the note at the top of src/dashboard/topology-types.ts.`
-    );
+for (const bundle of ["topology.js", "cluster.js"]) {
+  const js = await readFile(path.join(outdir, bundle), "utf8");
+  for (const needle of FORBIDDEN) {
+    if (js.includes(needle)) {
+      throw new Error(
+        `${bundle} contains ${needle} — a client module has imported the server's config. ` +
+          `See the note at the top of src/dashboard/topology-types.ts.`
+      );
+    }
   }
 }
+// A cluster.css would only appear if cluster.tsx imported a stylesheet; the page never links it.
+await rm(path.join(outdir, "cluster.css"), { force: true });
 
 // Tailwind runs AFTER esbuild and its output is APPENDED to the stylesheet esbuild produced.
 // Both halves of that are deliberate:
