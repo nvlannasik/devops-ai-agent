@@ -1,3 +1,4 @@
+import type { ClusterInventory, ManagedBy } from "./cluster-types.js";
 import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, fmtPct, headers, table, timeTag } from "./html.js";
 import { incidentSummary, renderRca } from "./rca.js";
 import { donutChart, lineChart } from "./chart.js";
@@ -1986,23 +1987,9 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
 }
 
 // --- /cluster (spec 2026-10-07-cluster-tour §3.5) ---
-// The mcp-server's k8s_cluster_inventory output, structurally — the dashboard imports no type
-// from another repo, same as McpTool.
-type ManagedBy =
-  | { type: "helmrelease"; name: string; namespace: string; chart?: string }
-  | { type: "kustomization"; name: string; namespace: string; path?: string }
-  | { type: "helm"; chart?: string }
-  | { type: "unmanaged" };
-export interface ClusterInventory {
-  scanned: { namespaces: number; complete: boolean };
-  namespaces: Array<{
-    name: string;
-    system: boolean;
-    workloads: Array<{ kind: string; name: string; ready: number | null; desired: number | null; images: string[]; managedBy: ManagedBy; schedule?: string }>;
-    services: Array<{ name: string; type: string; ports: string[] }>;
-    ingresses: Array<{ name: string; hosts: string[] }>;
-  }>;
-}
+// The mcp-server's k8s_cluster_inventory output — one definition, in cluster-types.ts, which the
+// client bundle shares (it must not import anything that reaches server config).
+export type { ClusterInventory } from "./cluster-types.js";
 
 const managed = (m: ManagedBy): string => {
   const extra = (v?: string) => (v ? ` <span class="meta">· ${esc(v)}</span>` : "");
