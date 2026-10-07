@@ -9,6 +9,7 @@ import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGate
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
+import { backendPrices, type Price } from "../agent/llm/pricing.js";
 import { buildContextView, type ContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
 import {
@@ -135,6 +136,9 @@ export class DashboardServer {
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
   // never built, which the topology page renders as a note rather than an empty frame.
   private readonly assets: Assets | null = loadAssets();
+  // The operator's per-backend prices (LLM_BACKEND_<N>_PRICE_*), read once: env does not change
+  // while the process lives, and the dashboard runs in the agent's process.
+  private readonly prices: ReadonlyMap<string, Price> = backendPrices();
 
   // A getter, not a snapshot: the dashboard starts before — and outlives — any given MCP
   // connection, so a list captured at construction time would be permanently empty. McpTool is
@@ -517,7 +521,7 @@ export class DashboardServer {
             this.queries.list(parseFilters(new URLSearchParams())),
             this.openCount(),
           ]);
-          return send(200, overviewPage(o, recent.rows, now, open));
+          return send(200, overviewPage(o, recent.rows, now, open, this.prices));
         }
         case "list": {
           const now = new Date();
@@ -529,7 +533,7 @@ export class DashboardServer {
           const now = new Date();
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
-          return send(200, detailPage(d, now, open));
+          return send(200, detailPage(d, now, open, this.prices));
         }
         case "harness": {
           const [v, open] = await Promise.all([this.queries.harness(), this.openCount()]);

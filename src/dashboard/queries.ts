@@ -523,7 +523,7 @@ export class DashboardQueries {
       [id]
     );
     if (rows.length === 0) return null;
-    const [remediations, feedback, timeline] = await Promise.all([
+    const [remediations, feedback, timeline, usage] = await Promise.all([
       this.pool.query(
         // LEFT JOIN, not an inner one: a remediation that was proposed and never approved has
         // no check, and a remediation approved seconds ago has one that has not run. Both must
@@ -546,12 +546,29 @@ export class DashboardQueries {
       // What the harness did on this incident's thread (agent/trace). Empty for incidents older
       // than the recorder and for threads past trace retention.
       rows[0].thread_ts ? this.timeline(String(rows[0].thread_ts)) : Promise.resolve([] as TimelineEvent[]),
+      // What this investigation cost, per backend. By incident id OR thread: the calls before the
+      // incident row existed (the RCA is written with it) carry only the thread.
+      this.pool.query(
+        `SELECT coalesce(backend, 'unknown') AS backend, coalesce(model, 'unknown') AS model,
+                count(*)::int AS calls,
+                coalesce(sum(input_tokens), 0)::bigint          AS input,
+                coalesce(sum(output_tokens), 0)::bigint         AS output,
+                coalesce(sum(cache_read_tokens), 0)::bigint     AS cache_read,
+                coalesce(sum(cache_creation_tokens), 0)::bigint AS cache_creation
+           FROM llm_usage WHERE incident_id = $1 OR thread_ts = $2
+          GROUP BY 1, 2 ORDER BY 1 LIMIT 20`,
+        [id, rows[0].thread_ts ?? null]
+      ),
     ]);
     return {
       incident: rows[0] as IncidentDetail,
       remediations: remediations.rows as RemediationRow[],
       feedback: feedback.rows as FeedbackRow[],
       timeline,
+      usage: usage.rows.map((r: any): TokenLine => ({
+        backend: String(r.backend), model: String(r.model), calls: num(r.calls),
+        input: num(r.input), output: num(r.output), cacheRead: num(r.cache_read), cacheCreation: num(r.cache_creation),
+      })),
     };
   }
 

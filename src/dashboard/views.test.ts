@@ -2868,3 +2868,30 @@ test("no bundle or no inventory: tables or note, never a broken map frame", asyn
   assert.match(clusterPage(inv as any, null, 0, "n", null), /The cluster map is not built/);
   assert.doesNotMatch(clusterPage(null, "MCP server not connected", 0, "n", null), /cluster-root/);
 });
+
+// Cost per investigation (2026-10-08): from the operator's prices per backend, never a built-in
+// table; a backend without a price shows its tokens and no cost, never "$0.00".
+test("the overview prices each backend it has a price for, and totals the window", () => {
+  const prices = new Map([["claude", { input: 5, output: 25, cacheRead: 0.5 }]]);
+  const html = overviewPage({ ...emptyOverview, tokens }, [], new Date(), undefined, prices);
+  const body = html.slice(html.indexOf("<body"));
+  // claude: 104 889 × 5 + 8 310 × 25 + 950 004 × 0.5 per million = 0.524 + 0.208 + 0.475
+  assert.match(body, /\$1\.21/);
+  assert.match(body, /Cost/);
+  assert.match(body, /not priced/, "private-llm has no price: said, not $0");
+  assert.doesNotMatch(body, /\$0\.00/);
+});
+
+test("the incident page shows what its investigation cost, per backend", () => {
+  const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "high", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
+  const usage = [
+    { backend: "chatgpt", model: "gpt-5-nano", calls: 4, input: 200_000, output: 10_000, cacheRead: 0, cacheCreation: 0 },
+    { backend: "private-llm-agus", model: "agus", calls: 6, input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+  ];
+  const html = detailPage({ incident, remediations: [], feedback: [], usage }, new Date(), undefined, new Map([["chatgpt", { input: 0.05, output: 0.4 }]]));
+  const body = html.slice(html.indexOf("<body"));
+  assert.match(body, /LLM usage/);
+  assert.match(body, /chatgpt[\s\S]*\$0\.01/); // 200k × 0.05 + 10k × 0.4 per million = 0.014
+  assert.match(body, /private-llm-agus[\s\S]*not reported/, "a backend that reports no tokens says so");
+  assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /LLM usage/);
+});

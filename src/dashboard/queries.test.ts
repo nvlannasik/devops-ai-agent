@@ -464,3 +464,16 @@ test("feedback for a thread is the confirmed tier only, joined through the incid
   assert.deepEqual(calls[0]!.params, ["1.1"]);
   assert.deepEqual(await new DashboardQueries(null).feedback("1.1"), []);
 });
+
+test("an incident's LLM usage is grouped per backend, by its incident id or its thread", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, (sql) =>
+    /FROM incidents WHERE id/.test(sql) ? [{ id: 7, thread_ts: "1.1" }]
+      : /FROM llm_usage/.test(sql) ? [{ backend: "chatgpt", model: "m", calls: "4", input: "200000", output: "10000", cache_read: "0", cache_creation: "0" }]
+      : []));
+  const d = await q.detail(7);
+  assert.deepEqual(d!.usage, [{ backend: "chatgpt", model: "m", calls: 4, input: 200000, output: 10000, cacheRead: 0, cacheCreation: 0 }]);
+  const sql = calls.find((c) => /FROM llm_usage/.test(c.sql))!;
+  assert.match(sql.sql, /incident_id = \$1 OR thread_ts = \$2/);
+  assert.deepEqual(sql.params, [7, "1.1"]);
+});

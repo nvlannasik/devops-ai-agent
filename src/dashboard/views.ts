@@ -1,4 +1,14 @@
 import type { ClusterInventory, ManagedBy } from "./cluster-types.js";
+import { costUsd, type Price } from "../agent/llm/pricing.js";
+
+/** `$1.21`; under a cent is "<$0.01", never a rounded "$0.00" that reads as free. */
+const fmtUsd = (n: number): string => (n > 0 && n < 0.005 ? "<$0.01" : `$${n.toFixed(2)}`);
+/** A backend's cost cell: priced, not priced, or nothing reported to price. */
+const costCell = (prices: ReadonlyMap<string, Price>, b: { backend: string; input: number; output: number; cacheRead: number }): string => {
+  if (b.input + b.output === 0) return `<span class="meta">not reported</span>`;
+  const c = costUsd(prices.get(b.backend), b);
+  return c === null ? `<span class="meta">not priced</span>` : fmtUsd(c);
+};
 import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, fmtPct, headers, table, timeTag } from "./html.js";
 import { incidentSummary, renderRca } from "./rca.js";
 import { donutChart, lineChart } from "./chart.js";
@@ -7,7 +17,7 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens,
+  FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens, TokenLine,
 } from "./queries.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
@@ -520,7 +530,7 @@ function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date = new D
 // What the investigations cost. The stats are totals over the window; the table is per
 // backend AND model, because under the router "which model did that" is the question — a
 // heavy backend answering what a light one could have is the finding this section exists for.
-function tokenUsage(t: Tokens): string {
+function tokenUsage(t: Tokens, prices: ReadonlyMap<string, Price> = new Map()): string {
   if (t.calls === 0) {
     return empty(
       "No LLM calls recorded in this window.",
@@ -540,9 +550,13 @@ function tokenUsage(t: Tokens): string {
         cell("Input", fmtInt(b.input), "num") +
         cell("Output", fmtInt(b.output), "num") +
         cell("Cache read", fmtInt(b.cacheRead), "num") +
+        cell("Cost", costCell(prices, b), "num") +
         `</tr>`
     )
     .join("");
+  // Only the priced backends add up — an unpriced one is not $0, so the total says what it covers.
+  const priced = t.byBackend.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
+  const total = priced.length ? ` · ${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends` : "";
   return (
     statList(
       [
@@ -550,7 +564,7 @@ function tokenUsage(t: Tokens): string {
         // denominator of the figure above it ("how much, over how many calls"), and as its own
         // tile it was the odd one out on a four-wide shelf — a count of events among three
         // counts of tokens.
-        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: `input + output over ${fmtInt(t.calls)} calls` },
+        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: `input + output over ${fmtInt(t.calls)} calls${total}` },
         // The split, not just the two counts. An investigation that is 95% input is a caching
         // problem; one that is 40% output is a verbosity problem. The shares say which.
         { icon: ICON.inTokens, label: "Input", value: fmtInt(t.input), sub: `${fmtPct(t.input, t.input + t.output)} of tokens` },
@@ -561,7 +575,7 @@ function tokenUsage(t: Tokens): string {
       ]
     ) +
     table(
-      headers("Backend", "Model", "Calls", "Input", "Output", "Cache read"),
+      headers("Backend", "Model", "Calls", "Input", "Output", "Cache read", "Cost"),
       rows,
       "pairs"
     )
@@ -577,7 +591,8 @@ export function overviewPage(
   o: Overview,
   recent: IncidentRow[],
   now: Date = new Date(),
-  openIncidents?: number
+  openIncidents?: number,
+  prices: ReadonlyMap<string, Price> = new Map()
 ): string {
   const remediationTotal = o.remediationSucceeded + o.remediationFailed;
   const feedbackTotal = Object.values(o.feedback).reduce((a, b) => a + b, 0);
@@ -745,7 +760,7 @@ export function overviewPage(
        </section>
      </div>
      ${section(ICON.chip, "Token usage")}
-     ${tokenUsage(o.tokens)}
+     ${tokenUsage(o.tokens, prices)}
      ${section(ICON.repeat, "Most recurring")}
      ${recurring}
      ${section(ICON.incidents, "Recent incidents", `<a class="standalone" href="/incidents">All incidents →</a>`)}
@@ -980,9 +995,12 @@ export function detailPage(
     feedback: FeedbackRow[];
     /** The run's trace (agent/trace). Absent or empty for incidents older than the recorder. */
     timeline?: TimelineEvent[];
+    /** llm_usage for this incident, per backend and model. */
+    usage?: TokenLine[];
   },
   now: Date = new Date(),
-  openIncidents?: number
+  openIncidents?: number,
+  prices: ReadonlyMap<string, Price> = new Map()
 ): string {
   const i = d.incident;
   // app_redirect needs no workspace domain, so the deep link costs no configuration.
@@ -1108,6 +1126,7 @@ export function detailPage(
      ${remediations}
      ${section(ICON.speech, "On-call feedback")}
      ${feedback}
+     ${usageSection(d.usage ?? [], prices)}
      ${timelineSection(d.timeline ?? [])}
      </div>`,
     { current: "/incidents", openIncidents }
@@ -1125,6 +1144,27 @@ const isFate = (o: string): boolean => (NUDGE_FATES as readonly string[]).includ
  * first line only — a raw result can be 512K, and the full trace is one request away at
  * /api/trace/<thread>. A delegate's events say which delegate.
  */
+/** What this investigation cost (2026-10-08): its llm_usage rows, priced by the operator's prices. */
+function usageSection(usage: TokenLine[], prices: ReadonlyMap<string, Price>): string {
+  if (usage.length === 0) return "";
+  const rows = usage
+    .map(
+      (b) =>
+        `<tr role="row">` +
+        cell("Backend", `<code translate="no">${esc(b.backend)}</code>`, "primary") +
+        cell("Calls", fmtInt(b.calls), "num") +
+        cell("Input", b.input + b.output === 0 ? `<span class="meta">not reported</span>` : fmtInt(b.input), "num") +
+        cell("Output", b.input + b.output === 0 ? "—" : fmtInt(b.output), "num") +
+        cell("Cost", costCell(prices, b), "num") +
+        `</tr>`
+    )
+    .join("");
+  const priced = usage.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
+  const total = priced.length ? `<span class="meta">${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends</span>` : "";
+  return `${section(ICON.chip, "LLM usage", total)}
+    ${table(headers("Backend", ["Calls", "num"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]), rows, "pairs")}`;
+}
+
 function timelineSection(all: TimelineEvent[]): string {
   // start/end bracket a run and carry nothing a reader acts on; on a phone they were a third of
   // the section's height.
