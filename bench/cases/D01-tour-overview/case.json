@@ -1,0 +1,15 @@
+{
+  "id": "D01-tour-overview",
+  "tier": "D",
+  "title": "Onboarding overview — every workload named, who manages it, no card",
+  "mode": "conversation",
+  "settleSeconds": 5,
+  "message": "aku baru join, jelasin workload apa aja yang jalan di namespace bench-d01 dan gimana deploy-nya",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": ["catalog-api", "price-sync", "catalog\\.bench-d01\\.local", "(unmanaged|tidak (dikelola|di-?manage)|not managed|bukan gitops|tanpa gitops)"],
+      "mustNot": ["\\*📍 Root Cause\\*"]
+    }
+  }
+}

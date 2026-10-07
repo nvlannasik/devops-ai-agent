@@ -1,0 +1,16 @@
+{
+  "id": "D02-tour-namespace-detail",
+  "tier": "D",
+  "title": "Onboarding drill-down — image and replicas from the inventory, no card",
+  "mode": "conversation",
+  "settleSeconds": 5,
+  "message": "gambaran cluster ini dong, aku anak baru",
+  "followUp": "jelasin namespace bench-d02 lebih detail",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": ["nginx:1\\.27-alpine", "catalog-api", "(1/1|1 of 1|1 dari 1)", "\\*/30"],
+      "mustNot": ["\\*📍 Root Cause\\*"]
+    }
+  }
+}
