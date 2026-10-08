@@ -138,3 +138,36 @@ test("renderForSlack: long commit messages capped at 100 chars; multiple commits
   // All & should be escaped
   assert.doesNotMatch(text, /(?<!&)&(?!amp;|lt;|gt;)/);
 });
+
+test("short: handles emoji and code points safely without lone surrogates", () => {
+  const emoji = "a".repeat(98) + "😀" + "b".repeat(10);
+  const shortened = renderForSlack(T({ commits: [{ ...commit, message: emoji, helmRelease: "x" }] }))!;
+  const text = (shortened as { text: { text: string } }).text.text;
+  const lonePattern = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.doesNotMatch(text, lonePattern, "text should not contain lone surrogates from emoji splitting");
+});
+
+test("renderForSlack: overflow with mixed entities and emoji stays under 2900 chars with proper escaping", () => {
+  const longUnread = "&<😀".repeat(625); // 5000 chars of mixed special chars
+  const changes = Array.from({ length: 5 }, (_, i) => ({
+    at: `2026-10-08T${String(12 + i).padStart(2, "0")}:00:00Z`,
+    source: "rollout",
+    kind: "spec-change",
+    workload: `Deployment/w${i}`,
+    diff: [{ field: "f", from: longUnread.slice(0, 100), to: longUnread.slice(100, 200) }],
+  }));
+  const b = renderForSlack(T({ changes: changes as never, unread: [longUnread] }))!;
+  const text = (b as { text: { text: string } }).text.text;
+  assert.ok(text.length <= 2900, `text length ${text.length} should be <= 2900`);
+  const lonePattern = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.doesNotMatch(text, lonePattern, "text should not contain lone surrogates");
+  assert.doesNotMatch(text, /&(?!amp;|lt;|gt;)/);
+  // Every line should start with *, •, or _
+  const lines = text.split("\n");
+  for (const line of lines) {
+    assert.match(line, /^[\*•_]/);
+  }
+  // Last line should be the unread line
+  assert.match(lines[lines.length - 1], /^_Not read:/);
+  assert.match(lines[lines.length - 1], /_$/);
+});

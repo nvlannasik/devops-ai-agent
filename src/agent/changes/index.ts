@@ -97,7 +97,10 @@ export async function collectChanges(
   return t;
 }
 
-const short = (v: string, n = 60): string => (v.length > n ? `${v.slice(0, n - 1)}…` : v);
+const short = (v: string, n = 60): string => {
+  const cp = Array.from(v);
+  return cp.length > n ? `${cp.slice(0, n - 1).join("")}…` : v;
+};
 const diffText = (c: TimelineChange): string => {
   const d = c.diff ?? [];
   const shown = d.slice(0, 3).map((x) => `${x.field} ${short(x.from)} → ${short(x.to)}`).join("; ");
@@ -133,7 +136,7 @@ export function renderForSlack(t: ChangeTimeline): KnownBlock | null {
     ...t.changes.map((c) => ({
       subject: isSubject(nameOf(c.workload), t.subjects),
       at: c.at,
-      line: `• ${when(c.at)} \`${esc(c.workload)}\` ${esc(c.kind)}${c.revision ? ` rev ${esc(c.revision)}` : ""}${c.diff?.length ? ` — ${esc(diffText(c))}` : ""}`,
+      line: `• ${when(c.at)} \`${esc(c.workload)}\` ${esc(c.kind)}${c.revision ? ` rev ${esc(c.revision)}` : ""}${c.diff?.length ? ` — ${esc(short(diffText(c), 400))}` : ""}`,
     })),
     ...t.commits.map((c) => {
       const link = linkUrl(c.url);
@@ -146,20 +149,18 @@ export function renderForSlack(t: ChangeTimeline): KnownBlock | null {
       };
     }),
   ].sort((a, b) => Number(b.subject) - Number(a.subject) || b.at.localeCompare(a.at));
-  const lines = [`*🕑 Recent changes* (24h before the alert, \`${esc(t.namespace)}\`)`];
-  let entryCount = 0;
-  for (const e of entries) {
-    if (entryCount >= SLACK_ENTRIES) break;
-    lines.push(e.line);
-    entryCount++;
+  const MAX_TEXT = 2900;
+  const head = `*🕑 Recent changes* (24h before the alert, \`${esc(t.namespace)}\`)`;
+  const tail = t.unread.length > 0 ? [`_Not read: ${esc(short(t.unread.join("; "), 400))}_`] : [];
+  const RESERVE = "_+999 more on the dashboard_";
+  const body: string[] = [];
+  for (const e of entries.slice(0, SLACK_ENTRIES)) {
+    if ([head, ...body, e.line, RESERVE, ...tail].join("\n").length > MAX_TEXT) break;
+    body.push(e.line);
   }
-  const omitted = entries.length - entryCount;
-  if (omitted > 0) lines.push(`_+${omitted} more on the dashboard_`);
-  if (entries.length === 0) lines.push("_No changes found in the sources that were read._");
-  if (t.unread.length > 0) lines.push(`_Not read: ${esc(t.unread.join("; "))}_`);
-  let text = lines.join("\n");
-  if (text.length > 2900) {
-    text = lines.slice(0, -1).join("\n").slice(0, 2900);
-  }
+  const omitted = entries.length - body.length;
+  if (omitted > 0) body.push(`_+${omitted} more on the dashboard_`);
+  if (entries.length === 0) body.push("_No changes found in the sources that were read._");
+  const text = [head, ...body, ...tail].join("\n");
   return { type: "section", block_id: RECENT_CHANGES_BLOCK, text: { type: "mrkdwn", text } };
 }
