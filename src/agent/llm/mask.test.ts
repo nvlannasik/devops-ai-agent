@@ -33,6 +33,20 @@ test("what the model needs to reason with is left alone", () => {
   for (const k of keep) assert.equal(maskText(k, new Map()), k, k);
 });
 
+// Found by masking a live pod, its events and the nodes (2026-10-08): these were tokenised. None is
+// a secret, and two carry the diagnosis — "refused 127.0.0.1:5432" is an app pointed at localhost,
+// "listening on 0.0.0.0" is a bind address — which a token erases.
+test("loopback, the unspecified address and the cluster's own label domains are left alone", () => {
+  const keep = [
+    "dial tcp 127.0.0.1:5432: connect: connection refused", "listening on 0.0.0.0:8080", "127.0.1.1",
+    "k3s.io/hostname", "node.k3s.io/instance-type", "flannel.alpha.coreos.com/public-ip",
+    "wrangler.cattle.io/finalizer", "driver.longhorn.io",
+  ];
+  for (const k of keep) assert.equal(maskText(k, new Map()), k, k);
+  // the neighbours of the exemption are still masked
+  assert.match(maskText("pod 10.42.2.224 and node 10.10.10.3", new Map()), /^pod ip-[0-9a-f]{6} and node ip-[0-9a-f]{6}$/);
+});
+
 const fakeInner = (seen: Message[][]): LLMClient => ({
   chat: async (messages) => {
     seen.push(messages);

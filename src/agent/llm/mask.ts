@@ -47,7 +47,13 @@ const FILE_EXT = new Set("md sh py rs pl cc so tf ps mk ts js go rb".split(" "))
 const ALLOW_SUFFIX = [
   "kubernetes.io", "k8s.io", "fluxcd.io", "helm.sh", "cert-manager.io", "prometheus.io", "grafana.com",
   "ghcr.io", "docker.io", "quay.io", "gcr.io", "fluentbit.io", "github.com", "githubusercontent.com", "golang.org", "opentelemetry.io",
+  // This cluster's own label/annotation domains (k3s, flannel, Rancher's wrangler, Longhorn) — found
+  // tokenised in a live pod and node listing, 2026-10-08.
+  "k3s.io", "coreos.com", "cattle.io", "longhorn.io",
 ];
+// Loopback and the unspecified address identify nothing, and they ARE the diagnosis in "refused
+// 127.0.0.1:5432" (an app pointed at localhost) or "listening on 0.0.0.0".
+const NOT_AN_ADDRESS = /^(?:127\.|0\.0\.0\.0$)/;
 const INTERNAL = /\.(?:local|svc|internal|cluster|localhost|lan)$/i;
 
 function isMaskableHost(host: string, tld: string): boolean {
@@ -64,7 +70,7 @@ export function maskText(text: string, rev: Map<string, string>): string {
     .replace(ARN, (m) => token("arn", m, rev))
     .replace(EMAIL, (m) => token("email", m, rev))
     .replace(ACCOUNT, (_m, prefix: string, id: string) => `${prefix}${token("acct", id, rev)}`)
-    .replace(IPV4, (m) => token("ip", m, rev))
+    .replace(IPV4, (m) => (NOT_AN_ADDRESS.test(m) ? m : token("ip", m, rev)))
     .replace(HOST, (m, host: string, tld: string) => (isMaskableHost(host, tld) ? token("host", m, rev) : m));
 }
 
