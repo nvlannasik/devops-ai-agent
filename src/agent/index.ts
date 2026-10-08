@@ -2501,7 +2501,8 @@ export class DevOpsAgent {
     if (!ctx.userRequested) {
       // What may name the target as the fault: the Root Cause (never the Immediate line — that is
       // where the reflex restart is written) and the alert's labels. Whole text when no section.
-      const mentions = `${extractSection(ctx.rca, "Root Cause") || ctx.rca}\n${Object.values(ctx.labels).join(" ")}`;
+      // Labels as key=value, so `service=api` reads as the Service, never as the Deployment `api`.
+      const mentions = `${extractSection(ctx.rca, "Root Cause") || ctx.rca}\n${Object.entries(ctx.labels).map(([k, v]) => `${k}=${v}`).join(" ")}`;
       const replaced = (await this.guardRefusalFor(proposal, mentions, evidence)) ?? rbacRestartRefusal(proposal.action, proposal.toolParams, evidence);
       if (replaced) return { gate: "replacement guard", reason: replaced };
     }

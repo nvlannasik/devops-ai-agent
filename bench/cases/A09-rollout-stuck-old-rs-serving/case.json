@@ -35,7 +35,7 @@
     "rca": {
       "must": [
         "replicaset|replica set",
-        "(masih|still|tetap|remain|keep|continu)[^.\\n]{0,80}(melayani|serving|serve|menerima|traffic|trafik|berjalan|running|ready)"
+        "(masih|still|tetap|remain|keep|continu|currently|saat ini)[^.\\n]{0,100}\\b(melayani|serv(?:e[sd]?|ing)\\b|menerima|traffic|trafik|berjalan|running|ready|available|operational|tersedia)"
       ],
       "mustNot": [
         "(total|complete|full)[- ]?(outage|down)|layanan (mati|down) total|semua pod (mati|gagal)"

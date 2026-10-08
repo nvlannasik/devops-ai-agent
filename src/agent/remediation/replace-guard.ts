@@ -269,8 +269,26 @@ export function replacementRefusal(
 }
 
 /** `name` appears in `text` as a whole Kubernetes name — `api` is not mentioned by `payments-api`. */
-const names = (text: string, name: string): boolean =>
-  name.length > 0 && new RegExp(`(?<![a-z0-9-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-])`, "i").test(text);
+const reEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Kinds that are never the workload a restart rebuilds, however they are spelled before the name.
+const NOT_A_WORKLOAD = "services?|svc|ingress(?:es)?|configmaps?|cm|secrets?|endpoints?|endpointslices?|serviceaccounts?|networkpolic(?:y|ies)|netpol|pvcs?|persistentvolumeclaims?|hpas?|horizontalpodautoscalers?";
+// A citation is `_tool_name_ \`argument\`` (rca-format): where the evidence came from, not a claim
+// about what is broken — "_k8s_get_endpoints_ `bench-a10/api`" cites the Service.
+const CITATION = /_[a-z0-9_]+_\s*`[^`\n]*`/gi;
+
+/**
+ * Does `text` name `name` AS the fault? A Service, Ingress or ConfigMap of the same name does not
+ * count, and neither does a tool citation (bench A10, 2026-10-08: "Service `bench-a10/api` has no
+ * ready endpoints" let a restart of the healthy Deployment `api` through, twice).
+ */
+const names = (text: string, name: string): boolean => {
+  if (!name) return false;
+  const n = reEsc(name);
+  const own = text
+    .replace(CITATION, " ")
+    .replace(new RegExp(`\\b(?:${NOT_A_WORKLOAD})(?:\\s*[\`'"]?(?:[a-z0-9-]+/)?|[/=])${n}(?![a-z0-9-])`, "gi"), " ");
+  return new RegExp(`(?<![a-z0-9-])${n}(?![a-z0-9-])`, "i").test(own);
+};
 
 /**
  * The other half of the question: a restart against a workload that is FINE.

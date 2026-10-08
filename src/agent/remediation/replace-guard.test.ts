@@ -240,6 +240,24 @@ test("a name inside a longer name is not a mention of it", () => {
   assert.ok(r, "payments-api is a different workload");
 });
 
+// Bench A10, 2026-10-08, twice: a Service whose selector matched no pod, and a card to restart the
+// Deployment of the same name — the Root Cause said "Service `bench-a10/api` has no ready
+// endpoints", and that read as naming the workload. A Service and its Deployment sharing one name is
+// the commonest shape there is, so every no-endpoints incident could raise this card.
+test("a name qualified as another kind — the Service of the same name — is not a mention of the workload", () => {
+  const pods = [pod("api-7bc9f54598-cl54l", true), pod("api-7bc9f54598-f8swn", true)];
+  const params = { namespace: "bench-a10", name: "api" };
+  for (const rca of [
+    "1. *Symptom:* Service `bench-a10/api` has no ready endpoints — _k8s_get_endpoints_ `bench-a10/api`",
+    "The Service api selects no pods: its selector is app=api-v2",
+    "`bench-a10/Service/api` has readyCount 0",
+    "svc/api has no endpoints; ingress `api` routes to it\nalertname=KubernetesServiceHasNoReadyEndpoints service=api",
+  ]) assert.match(healthyTargetRefusal("k8s_rollout_restart", params, pods, rca) ?? "", /all 2 pod\(s\) of `api`/, rca);
+  // the workload itself named, beside its Service, still keeps the card
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, pods, "Service `api` is fine; Deployment `api` holds a wedged connection pool"), null);
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, pods, "`api` pods stopped answering after the cert renewal"), null);
+});
+
 test("the healthy-target rule never fires on a pod that is unready or has restarted", () => {
   const params = { namespace: "x", name: "web" };
   assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, [pod("web-6b747db7c9-a1b2c", false)], ""), null);
