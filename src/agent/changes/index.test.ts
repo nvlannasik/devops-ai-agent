@@ -90,3 +90,51 @@ test("renderForSlack: capped at 5 entries, escaped, under 3000 chars, carries th
   assert.match(ct, /&lt;fast&gt; &amp; safe/);
   assert.match(ct, /<https:\/\/gh\/c\/abc\|abc1234>/);
 });
+
+test("renderForSlack: URL with | and > is escaped or not rendered as link; javascript: URL has no link", () => {
+  const badUrl = "https://gh/c/abc|bad>link";
+  const jsUrl = "javascript:alert('xss')";
+  const b = renderForSlack(T({ commits: [
+    { ...commit, url: badUrl, helmRelease: "x" },
+    { ...commit, url: jsUrl, sha: "def5678ghi", helmRelease: "y" }
+  ] }))!;
+  const text = (b as { text: { text: string } }).text.text;
+  // The bad URL should not have raw | or > inside the link
+  assert.doesNotMatch(text, /\|[\w<>]*\|/);
+  // javascript: URL should not create a link
+  assert.doesNotMatch(text, /<javascript:/);
+  // Plain sha should still appear for javascript URL
+  assert.match(text, /def5678/);
+});
+
+test("collectChanges: date comparison handles timezone offsets and second precision", async () => {
+  const cluster2 = {
+    ...cluster,
+    changes: [
+      { at: "2026-10-07T13:00:00+00:00", source: "rollout", kind: "spec-change", workload: "Deployment/test-1", revision: "1" },
+      { at: "2026-10-07T11:59:59+00:00", source: "rollout", kind: "spec-change", workload: "Deployment/test-2", revision: "1" },
+      { at: "2026-10-07T12:00:00.000Z", source: "rollout", kind: "spec-change", workload: "Deployment/test-3", revision: "1" },
+    ],
+    helmReleases: [],
+  };
+  const t = await collectChanges({ callTool: async () => JSON.stringify(cluster2) }, "apps", ALERT, [], NOW);
+  assert.deepEqual(t.changes.map((c) => c.workload), ["Deployment/test-1", "Deployment/test-3"], "inside window with offset and edge case kept, outside dropped");
+});
+
+test("renderForSlack: long commit messages capped at 100 chars; multiple commits stay under 3000 chars with no lone surrogates", () => {
+  const longMsg = "&".repeat(100);
+  const commits = Array.from({ length: 5 }, (_, i) => ({
+    ...commit,
+    sha: `abc${i}def`,
+    message: longMsg,
+    helmRelease: `release-${i}`,
+  }));
+  const b = renderForSlack(T({ commits }))!;
+  const text = (b as { text: { text: string } }).text.text;
+  assert.ok(text.length < 3000, `text length ${text.length} should be < 3000`);
+  // Check no lone surrogates
+  const lonePattern = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.doesNotMatch(text, lonePattern, "text should not contain lone surrogates");
+  // All & should be escaped
+  assert.doesNotMatch(text, /(?<!&)&(?!amp;|lt;|gt;)/);
+});

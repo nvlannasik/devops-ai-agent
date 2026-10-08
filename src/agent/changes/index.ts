@@ -55,6 +55,7 @@ export async function collectChanges(
   timeouts = DEFAULT_TIMEOUTS
 ): Promise<ChangeTimeline> {
   const from = new Date(alertAt.getTime() - WINDOW_MS);
+  const fromMs = from.getTime();
   const t: ChangeTimeline = { namespace, window: { from: from.toISOString(), to: now.toISOString() }, changes: [], commits: [], unread: [], subjects };
   const sinceHours = Math.min(168, Math.max(1, Math.ceil((now.getTime() - from.getTime()) / 3_600_000)));
   let helmReleases: Array<{ name: string; namespace: string }> = [];
@@ -62,7 +63,10 @@ export async function collectChanges(
   try {
     raw = await within(timeouts.mcpMs, deps.callTool("k8s_change_timeline", { namespace, sinceHours }));
     const parsed = JSON.parse(raw) as { changes?: TimelineChange[]; helmReleases?: typeof helmReleases; unread?: string[] };
-    t.changes = (parsed.changes ?? []).filter((c) => c.at >= t.window.from);
+    t.changes = (parsed.changes ?? []).filter((c) => {
+      const atMs = Date.parse(c.at);
+      return !isNaN(atMs) && atMs >= fromMs;
+    });
     helmReleases = parsed.helmReleases ?? [];
     t.unread.push(...(parsed.unread ?? []));
   } catch (err) {
@@ -75,7 +79,10 @@ export async function collectChanges(
       helmReleases.slice(0, MAX_HELM_RELEASES).map(async (hr) => {
         try {
           const p = await within(timeouts.gitMs, history(hr, t.window.from));
-          if (p.ok) t.commits.push(...p.commits.filter((c) => c.at >= t.window.from).map((c) => ({ ...c, helmRelease: hr.name })));
+          if (p.ok) t.commits.push(...p.commits.filter((c) => {
+            const atMs = Date.parse(c.at);
+            return !isNaN(atMs) && atMs >= fromMs;
+          }).map((c) => ({ ...c, helmRelease: hr.name })));
           else t.unread.push(`git history ${hr.name}: ${p.reason}`);
         } catch (err) {
           t.unread.push(`git history ${hr.name}: ${msg(err)}`);
@@ -115,6 +122,10 @@ export function renderForModel(t: ChangeTimeline): string {
 
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const when = (iso: string): string => `${iso.slice(5, 16).replace("T", " ")} UTC`;
+const linkUrl = (url: string): string | null => {
+  if (!url.startsWith("https://") && !url.startsWith("http://")) return null;
+  return esc(url).replace(/\|/g, "%7C");
+};
 
 export function renderForSlack(t: ChangeTimeline): KnownBlock | null {
   if (t.changes.length === 0 && t.commits.length === 0 && t.unread.length === 0) return null;
@@ -124,15 +135,31 @@ export function renderForSlack(t: ChangeTimeline): KnownBlock | null {
       at: c.at,
       line: `• ${when(c.at)} \`${esc(c.workload)}\` ${esc(c.kind)}${c.revision ? ` rev ${esc(c.revision)}` : ""}${c.diff?.length ? ` — ${esc(diffText(c))}` : ""}`,
     })),
-    ...t.commits.map((c) => ({
-      subject: isSubject(c.helmRelease, t.subjects),
-      at: c.at,
-      line: `• ${when(c.at)} <${c.url}|${c.sha.slice(0, 7)}> ${esc(c.message)} — ${esc(c.author)}`,
-    })),
+    ...t.commits.map((c) => {
+      const link = linkUrl(c.url);
+      const sha = c.sha.slice(0, 7);
+      const shaText = link ? `<${link}|${sha}>` : sha;
+      return {
+        subject: isSubject(c.helmRelease, t.subjects),
+        at: c.at,
+        line: `• ${when(c.at)} ${shaText} ${esc(short(c.message, 100))} — ${esc(c.author)}`,
+      };
+    }),
   ].sort((a, b) => Number(b.subject) - Number(a.subject) || b.at.localeCompare(a.at));
-  const lines = [`*🕑 Recent changes* (24h before the alert, \`${esc(t.namespace)}\`)`, ...entries.slice(0, SLACK_ENTRIES).map((e) => e.line)];
-  if (entries.length > SLACK_ENTRIES) lines.push(`_+${entries.length - SLACK_ENTRIES} more on the dashboard_`);
+  const lines = [`*🕑 Recent changes* (24h before the alert, \`${esc(t.namespace)}\`)`];
+  let entryCount = 0;
+  for (const e of entries) {
+    if (entryCount >= SLACK_ENTRIES) break;
+    lines.push(e.line);
+    entryCount++;
+  }
+  const omitted = entries.length - entryCount;
+  if (omitted > 0) lines.push(`_+${omitted} more on the dashboard_`);
   if (entries.length === 0) lines.push("_No changes found in the sources that were read._");
   if (t.unread.length > 0) lines.push(`_Not read: ${esc(t.unread.join("; "))}_`);
-  return { type: "section", block_id: RECENT_CHANGES_BLOCK, text: { type: "mrkdwn", text: lines.join("\n").slice(0, 2900) } };
+  let text = lines.join("\n");
+  if (text.length > 2900) {
+    text = lines.slice(0, -1).join("\n").slice(0, 2900);
+  }
+  return { type: "section", block_id: RECENT_CHANGES_BLOCK, text: { type: "mrkdwn", text } };
 }
