@@ -57,6 +57,7 @@ import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
 import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
+import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, LLMResponse, ContentBlock, Message, TokenUsage, ToolDefinition } from "./llm/types.js";
@@ -1444,15 +1445,36 @@ export class DevOpsAgent {
     ].join("\n");
   }
 
+  // The change timeline for an alert (agent/changes). Called by app/index.ts BEFORE investigate()
+  // and outside any trace run, so replay never executes it. null = no namespace to scope it to.
+  async collectChanges(namespace: string | undefined, alertAt: Date, subjects: string[]): Promise<ChangeTimeline | null> {
+    if (!namespace) return null;
+    const gitops = this.gitops;
+    const t = await collectChanges(
+      {
+        callTool: (name, input) => this.mcp.callTool(name, input),
+        history: gitops
+          ? async (hr, since) => (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix: await this.resolveOverlayPath(hr) })) as HistoryPayload
+          : undefined,
+      },
+      namespace,
+      alertAt,
+      subjects
+    );
+    logger.info(`[changes] ${namespace}: ${t.changes.length} change(s), ${t.commits.length} commit(s)${t.unread.length ? `, unread: ${t.unread.join("; ")}` : ""}`);
+    return t;
+  }
+
   storeIncident(
     labels: Record<string, string>,
     rca: string,
     channel?: string,
     threadTs?: string,
     /** The group's Alertmanager severity as the Slack card rendered it — see store(). */
-    alertSeverity?: string | null
+    alertSeverity?: string | null,
+    changes?: ChangeTimeline | null
   ): Promise<number | null> {
-    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity);
+    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes);
   }
 
   // Everything below runs inside the trace context so outbound SQS requests carry the

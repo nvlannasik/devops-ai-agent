@@ -311,15 +311,18 @@ export class IncidentMemory {
      *  `labels` because the caller resolves it across the group (commonLabels, then the
      *  first firing alert) and that resolution must not be written back into the label map —
      *  AlertDeduplicator fingerprints every key, so an added one orphans the claim. */
-    alertSeverity?: string | null
+    alertSeverity?: string | null,
+    /** The change timeline (agent/changes) assembled before the investigation — null/undefined
+     *  when there was no namespace to scope it to, or no GitOps bridge configured. */
+    changes?: unknown
   ): Promise<number | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
     if (!alertname) return null;
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
          RETURNING id`,
         [
           alertname,
@@ -341,6 +344,7 @@ export class IncidentMemory {
           // richer than group_by) — alertname+namespace hashes to a different fingerprint,
           // so without storing it nothing outside the webhook can release the claim
           JSON.stringify(labels),
+          changes ? JSON.stringify(changes) : null,
         ]
       );
       const id = Number(rows[0].id);

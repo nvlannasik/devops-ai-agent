@@ -19,6 +19,7 @@ import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/re
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
+import { renderForModel, renderForSlack, RECENT_CHANGES_BLOCK } from "../agent/changes/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 
 /**
@@ -534,7 +535,8 @@ export class SlackApp {
       //
       // Only attempted when there IS a table to drop, and the plain-text path stays underneath for
       // everything else — a section over the limit, a lone surrogate, an outage at Slack.
-      const withoutTables = blocks.filter((b) => b.type !== "table");
+      // The change timeline block is the other newest block and is dropped with them.
+      const withoutTables = blocks.filter((b) => b.type !== "table" && b.block_id !== RECENT_CHANGES_BLOCK);
       if (withoutTables.length < blocks.length) {
         try {
           await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: withoutTables });
@@ -716,6 +718,10 @@ export class SlackApp {
     // candidate causes stated by the payload itself, and that is the condition the model never
     // recognised on its own. Empty string whenever delegation is not on the table.
     const subjects = distinctSubjects(firing);
+    const changeScope = {
+      alertAt: new Date(Math.min(...firing.map((a) => Date.parse(a.startsAt ?? "")).filter(Number.isFinite), Date.now())),
+      subjects: [...(subjects?.values ?? []), ...firing.map((a) => a.labels.pod).filter((p): p is string => !!p)],
+    };
     const hint = delegationHint(subjects, config.subagents);
     // Logged whether or not it fires. A hint that returns "" left no trace at all, so "the model
     // did not delegate" and "the group never looked multi-subject" read identically in the log —
@@ -731,7 +737,7 @@ export class SlackApp {
     void this.inFlight.track(
       { channel, threadTs: threadId, kind: "alert" },
       this.threadQueue.run(threadId, () =>
-        this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, noticeTs)
+        this.investigateAlertInBackground(channel, threadId, issueText, groupLabels, hint, alertSeverity, changeScope, noticeTs)
       )
     );
   }
@@ -804,6 +810,8 @@ export class SlackApp {
      * the second one is `null`.
      */
     alertSeverity: string | null,
+    /** The window + subjects the change timeline (agent/changes) is scoped to for this group. */
+    changeScope: { alertAt: Date; subjects: string[] },
     /** ts of the "Auto-investigating" notice, updated in place with per-round progress. */
     noticeTs?: string
   ): Promise<void> {
@@ -812,17 +820,24 @@ export class SlackApp {
       // Prepend prior similar incidents AND what was remediated about them before, so the
       // agent recognizes a recurrence and its prior fix. Best-effort — recall failures must
       // not block the investigation.
-      const [priorIncidents, priorRemediations] = await Promise.all([
+      const [priorIncidents, priorRemediations, changes] = await Promise.all([
         this.agent.recallIncidents(labels, issueText).catch(() => ""),
         this.agent.recallRemediations(labels).catch(() => ""),
+        // Best-effort like recall, with its own timeouts inside: never blocks the investigation.
+        this.agent.collectChanges(labels.namespace, changeScope.alertAt, changeScope.subjects).catch((e) => {
+          logger.warn(`[changes] timeline failed for thread ${threadId}: ${errDetail(e)}`);
+          return null;
+        }),
       ]);
       const memory = [priorIncidents, priorRemediations].filter(Boolean).join("\n\n");
+      const timeline = changes ? renderForModel(changes) : "";
+      const context = [timeline, memory].filter(Boolean).join("\n\n");
       // The [SOURCE: ...] marker is the deterministic mode signal for the system prompt:
       // only Alertmanager-driven messages carry it → mandatory investigation mode.
       // Human mentions have no marker → conversation-first (see prompts/system.md).
       const fullIssue =
         `[SOURCE: Alertmanager webhook — automated incident investigation]${delegation}\n\n` +
-        (memory ? `${memory}\n\n---\n\n${issueText}` : issueText);
+        (context ? `${context}\n\n---\n\n${issueText}` : issueText);
 
       // One message updated in place, never a post per round: a four-round investigation
       // would otherwise push the alert itself off the screen with progress chatter, and this
@@ -862,6 +877,8 @@ export class SlackApp {
       this.agent.recordGate(threadId, "rca-structure", structured ? "card" : "conversation");
       if (structured) {
         const rcaBlocks = buildRcaBlocks(rca, alertMeta ? formatRunFooter(alertMeta) : undefined);
+        const changesBlock = changes ? renderForSlack(changes) : null;
+        if (changesBlock) rcaBlocks.push(changesBlock);
         // What we actually handed Slack. Added because "the dividers are gone" could not be
         // answered from here: the card rendered (its header comes from buildRcaBlocks and
         // nothing else in the repo writes that string), so the blocks were built — but whether
@@ -893,7 +910,7 @@ export class SlackApp {
         }
       }
       await this.agent.markRcaSent(threadId);
-      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId, alertSeverity).catch((e) => {
+      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId, alertSeverity, changes).catch((e) => {
         logger.error(`[slack] failed to store incident for thread ${threadId}: ${errDetail(e)}`);
         return null;
       });
@@ -903,7 +920,7 @@ export class SlackApp {
       // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
       // proposal model needs to avoid re-proposing.
       const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
-      await this.warnIfUngrounded(channel, threadId, rca, issueText);
+      await this.warnIfUngrounded(channel, threadId, rca, timeline ? `${issueText}\n${timeline}` : issueText);
       await this.notifyIfLowConfidence(channel, threadId, rca);
       // The alert path is otherwise ungated — an alert firing IS the evidence. The one answer
       // that cannot support a card is one that reached no conclusion and asked the human for the

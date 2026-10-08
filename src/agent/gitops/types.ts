@@ -8,7 +8,7 @@ export interface GitOpsChange {
   to: string | number;
 }
 
-export interface GitOpsRequestBody {
+export interface GitOpsChangeBody {
   op: "dry_run" | "open_pr";
   helmRelease: { name: string; namespace: string };
   action: string;
@@ -18,6 +18,15 @@ export interface GitOpsRequestBody {
   pathPrefix?: string; // repo subtree, auto-detected from the Flux Kustomization spec.path
   incident?: { summary?: string; threadUrl?: string };
 }
+
+export interface GitOpsHistoryBody {
+  op: "history";
+  helmRelease: { name: string; namespace: string };
+  pathPrefix?: string;
+  since: string; // ISO
+}
+
+export type GitOpsRequestBody = GitOpsChangeBody | GitOpsHistoryBody;
 
 // The repo declares this key, but the cluster is running a different value — somebody
 // changed the cluster outside GitOps. The repo is the source of truth, so the answer is a
@@ -32,4 +41,5 @@ export interface GitOpsDrift {
 export type GitOpsPayload =
   | { ok: true; op: "dry_run"; path: string; valuesKey: string; before: string; after: string; diff: string }
   | { ok: true; op: "open_pr"; path: string; prUrl: string }
+  | { ok: true; op: "history"; commits: Array<{ sha: string; at: string; author: string; message: string; url: string; paths: string[] }> }
   | { ok: false; reason: string; drift?: GitOpsDrift };
