@@ -40,7 +40,7 @@ import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
-import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, LISTING_FOR_KIND } from "./remediation/noop-guard.js";
+import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./remediation/noop-guard.js";
 import {
   RemediationCheckStore,
   summarizePods,
@@ -2497,6 +2497,11 @@ export class DevOpsAgent {
     // reaching for a gesture when it cannot place a fault; a person who types "restart the
     // payments deployment" has placed it themselves and may know something the pod list does not
     // show. Their request is already sufficient evidence per buildProposalPrompt.
+    // First, and for a user's request too: every check below that reads the spec reads it by kind,
+    // and a wrong kind makes each of them fail open (bench B04). See wrongKindRefusal.
+    const wrongKind = await this.kindRefusalFor(proposal);
+    if (wrongKind) return { gate: "kind gate", reason: wrongKind };
+
     const evidence = await this.threadEvidence(ctx.threadId);
     if (!ctx.userRequested) {
       // What may name the target as the fault: the Root Cause (never the Immediate line — that is
@@ -2635,6 +2640,29 @@ export class DevOpsAgent {
    * One listing call, chosen by the proposal's own kind. Fails open on anything it cannot read,
    * like the replacement guard — a guard that refuses on a failed tool call is a guess.
    */
+  /**
+   * The workload listings `wrongKindRefusal` judges from. The proposed kind's listing first, and in
+   * the common case only that one — the name is there, and it is the read the no-op gate makes
+   * anyway, so a recorded run replays unchanged. The other kinds only when it is not.
+   * A failed call is an unreadable listing, which refuses nothing.
+   */
+  async kindRefusalFor(proposal: Proposal): Promise<string | null> {
+    if (!WORKLOAD_ACTIONS.has(proposal.action)) return null;
+    const { namespace, name } = proposal.toolParams;
+    if (typeof namespace !== "string" || !namespace || typeof name !== "string" || !name) return null;
+    const kind = typeof proposal.toolParams.kind === "string" ? proposal.toolParams.kind : "deployment";
+    if (!LISTING_FOR_KIND[kind]) return null;
+    const list = (k: string) =>
+      this.mcp.callTool(LISTING_FOR_KIND[k]!, { namespace }).catch((err) => {
+        logger.debug(`[remediation] kind gate could not list ${k}s in ${namespace}: ${errDetail(err)}`);
+        return "";
+      });
+    const listings: Record<string, string> = { [kind]: await list(kind) };
+    if (holdsWorkload(listings[kind]!, name) !== false) return null;
+    for (const k of Object.keys(LISTING_FOR_KIND)) if (k !== kind) listings[k] = await list(k);
+    return wrongKindRefusal(proposal.action, proposal.toolParams, listings);
+  }
+
   async noOpImageRefusalFor(proposal: Proposal): Promise<string | null> {
     const namespace = proposal.toolParams.namespace;
     const kind = typeof proposal.toolParams.kind === "string" ? proposal.toolParams.kind : "deployment";

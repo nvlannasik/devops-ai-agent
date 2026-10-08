@@ -46,6 +46,7 @@ test("it fails open, and only judges resize proposals", () => {
 const chainWith = (evidence: string) =>
   ({
     guardRefusalFor: async () => null,
+    kindRefusalFor: async () => null,
     quarantineRefusalFor: async () => null,
     orphanRefusalFor: async () => null,
     scaleRefusalFor: async () => null,

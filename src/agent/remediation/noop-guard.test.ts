@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, LISTING_FOR_KIND } from "./noop-guard.js";
+import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, LISTING_FOR_KIND } from "./noop-guard.js";
 
 // C03 on the agus backend, three attempts out of three: busybox:1.36 proposed for a container
 // already running busybox:1.36, one of them admitting it in its own reason.
@@ -114,4 +114,31 @@ test("a container name that matches no container does not hide a no-op image", (
   // a REAL container name still scopes the comparison
   const two = JSON.stringify([{ name: "w", containers: [{ name: "app", image: "a:1" }, { name: "side", image: "b:1" }] }]);
   assert.equal(noOpImageRefusal("k8s_set_image", { name: "w", container: "app", image: "b:1" }, two), null);
+});
+
+// Bench B04, 2026-10-07 and -08: `payments` is a StatefulSet, the re-asked proposal said
+// `kind: deployment`, and every kind-keyed check behind it failed open — the no-op gate listed
+// Deployments, found no `payments`, and let a write of the image already running through. In
+// production the dry-run's NotFound was the only thing left; with a Deployment AND a StatefulSet
+// of one name in a namespace, the dry-run passes and the card acts on the other workload.
+const sts = JSON.stringify([{ name: "payments", containers: [{ name: "api", image: "busybox:1.36" }] }]);
+const none = JSON.stringify([]);
+
+test("a workload proposed under a kind it is not is refused, naming the kind it is", () => {
+  const why = wrongKindRefusal("k8s_set_image", { namespace: "bench-b04", name: "payments", kind: "deployment" }, {
+    deployment: none, statefulset: sts, daemonset: none,
+  });
+  assert.match(why ?? "", /`bench-b04\/payments` is a StatefulSet, not a Deployment/);
+  assert.match(why ?? "", /kind: statefulset/);
+  // no kind at all means deployment to the MCP server, so it is the same mistake
+  assert.ok(wrongKindRefusal("k8s_rollout_restart", { namespace: "bench-b04", name: "payments" }, { deployment: none, statefulset: sts }));
+});
+
+test("the kind gate lets through what it cannot judge, and what is right", () => {
+  const p = { namespace: "x", name: "payments", kind: "statefulset" };
+  assert.equal(wrongKindRefusal("k8s_set_image", p, { statefulset: sts }), null, "right kind");
+  assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: none, statefulset: none, daemonset: none }), null, "nowhere — the target gate's and the dry-run's");
+  assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: "Error: timeout", statefulset: sts }), null, "its own kind unreadable");
+  assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: sts, statefulset: sts }), null, "both kinds hold the name — the model's pick is not provably wrong");
+  assert.equal(wrongKindRefusal("k8s_delete_pod", { namespace: "x", pod: "payments-0" }, { deployment: none, statefulset: sts }), null, "not a workload action");
 });

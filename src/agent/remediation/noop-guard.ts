@@ -32,6 +32,66 @@ export const LISTING_FOR_KIND: Readonly<Record<string, string>> = {
   daemonset: "k8s_list_daemonsets",
 };
 
+/** A listing tool's items, or null when the payload is not a readable list. */
+function workloadItems(listing: string): WorkloadItem[] | null {
+  const start = listing.indexOf("[");
+  const end = listing.lastIndexOf("]");
+  if (start < 0 || end <= start) return null;
+  try {
+    const items: unknown = JSON.parse(listing.slice(start, end + 1));
+    return Array.isArray(items) ? (items as WorkloadItem[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Does this listing hold a workload of that name? null when the listing is unreadable. */
+export function holdsWorkload(listing: string, name: string): boolean | null {
+  const items = workloadItems(listing);
+  return items ? items.some((w) => w && w.name === name) : null;
+}
+
+/** The actions that address a workload by `kind` + `name` — the MCP server defaults kind to deployment. */
+export const WORKLOAD_ACTIONS: ReadonlySet<string> = new Set(["k8s_rollout_restart", "k8s_set_image", "k8s_set_resources", "k8s_scale"]);
+const KIND_LABEL: Readonly<Record<string, string>> = { deployment: "Deployment", statefulset: "StatefulSet", daemonset: "DaemonSet" };
+
+/**
+ * A workload proposed under a kind it is not.
+ *
+ * Bench B04 (2026-10-07, -08): `payments` is a StatefulSet and the re-asked proposal said
+ * `kind: deployment`. Every kind-keyed check behind it failed open — the no-op gate listed
+ * Deployments, found no `payments`, and let through a write of the image already running. In
+ * production only the dry-run's NotFound stood behind that, and with a Deployment AND a StatefulSet
+ * of the same name the dry-run passes and the card acts on the other workload. So the kind is
+ * checked first, against the listings, and a refusal names the kind the workload really is — the
+ * one re-ask then has what it needs to get it right.
+ *
+ * `listings` maps kind → that kind's listing output. Refuses only when the proposed kind's listing
+ * is readable and lacks the name while another kind's holds it. Both holding it is not provably
+ * wrong; neither holding it belongs to the target gate and the dry-run.
+ */
+export function wrongKindRefusal(
+  action: string,
+  params: Record<string, unknown>,
+  listings: Readonly<Record<string, string>>
+): string | null {
+  if (!WORKLOAD_ACTIONS.has(action)) return null;
+  const name = typeof params.name === "string" ? params.name : "";
+  const ns = typeof params.namespace === "string" ? params.namespace : "";
+  const kind = typeof params.kind === "string" ? params.kind : "deployment";
+  if (!name || !(kind in LISTING_FOR_KIND)) return null;
+  const has = (k: string): boolean | null => (listings[k] === undefined ? null : holdsWorkload(listings[k]!, name));
+  if (has(kind) !== false) return null;
+  const actual = Object.keys(LISTING_FOR_KIND).filter((k) => k !== kind && has(k) === true);
+  if (actual.length === 0) return null;
+  const is = actual.map((k) => KIND_LABEL[k]).join(" and a ");
+  return (
+    `\`${ns}/${name}\` is a ${is}, not a ${KIND_LABEL[kind]} — no ${KIND_LABEL[kind]} of that name exists in ` +
+    `\`${ns}\`, so this card would act on nothing, or on another workload that shares the name. If the ` +
+    `change is right, propose it again with kind: ${actual[0]}.`
+  );
+}
+
 /**
  * Why this image change is a no-op, or null to let it through.
  *
@@ -49,18 +109,10 @@ export function noOpImageRefusal(
   const container = typeof params.container === "string" ? params.container : "";
   if (!workload || !proposed) return null;
 
-  const start = listing.indexOf("[");
-  const end = listing.lastIndexOf("]");
-  if (start < 0 || end <= start) return null;
-  let items: unknown;
-  try {
-    items = JSON.parse(listing.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(items)) return null;
+  const items = workloadItems(listing);
+  if (!items) return null;
 
-  const mine = (items as WorkloadItem[]).find((w) => w && w.name === workload);
+  const mine = items.find((w) => w && w.name === workload);
   const containers = mine?.containers;
   if (!Array.isArray(containers) || containers.length === 0) return null;
 

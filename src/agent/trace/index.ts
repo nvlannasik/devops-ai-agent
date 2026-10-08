@@ -17,7 +17,7 @@ export const GATE_NAMES = [
   "grounding", "rca-structure",
   "remediation-replacement", "remediation-quarantine", "remediation-orphan", "remediation-offer",
   "remediation-target", "remediation-resource-fault", "remediation-scale", "remediation-image",
-  "remediation-other", "dry-run", "proposal",
+  "remediation-kind", "remediation-other", "dry-run", "proposal",
 ] as const;
 export type GateName = (typeof GATE_NAMES)[number];
 export type NudgeResolution = "accepted" | "restored" | "kept-earlier";
