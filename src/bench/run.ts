@@ -32,6 +32,7 @@ import { config } from "../config/index.js";
 import { mentionBudget, wantsTour } from "../agent/intent/index.js";
 import { stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
 import { parseRegistry } from "../agent/llm/registry.js";
+import { closeSilence, openSilence } from "./silence.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
 const RESULTS_DIR = join(process.cwd(), "bench", "results");
@@ -267,37 +268,54 @@ async function main(): Promise<void> {
   const runs: TaskRun[] = [];
   const detail: Array<Record<string, unknown>> = [];
 
-  for (const task of tasks) {
-    const scores: Score[] = [];
-    for (let n = 1; n <= attempts; n++) {
-      logger.info(`[bench] ${task.id} attempt ${n}/${attempts} — setup`);
-      let score: Score;
-      let rca = "";
-      let proposal: Proposal | null = null;
-      let proposalRaw = "";
-      let proposalContext = "";
-      let ungrounded: string[] = [];
-      try {
-        // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
-        // catch inside attempt(). It also must not skip cleanup: the first live run of this
-        // harness hit a fault injector that could not fire, and the crash left its namespace
-        // behind on the cluster.
-        await waitForIsolation();
-        await resetIncidentMemory();
-        hook(task, "setup.sh");
-        if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
-        ({ score, rca, proposal, proposalRaw, proposalContext, ungrounded } = await attempt(agent, llm, task, n));
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
-      } finally {
-        hook(task, "cleanup.sh");
+  // Before the first fault: an injected fault fires a real alert that pages the production agent.
+  // Bounded at 10 min an attempt (the 2026-10-07 full run averaged under 3), so a run killed with
+  // Ctrl-C leaves a silence that still ends — and a killed run can leave a faulting namespace,
+  // which is exactly why the silence is not expired on SIGINT.
+  const silence = process.env.BENCH_SILENCE === "false" ? null : openSilence(tasks.length * attempts * 10 * 60_000);
+  if (silence) logger.info(`[bench] Alertmanager silence ${silence} on namespace=~bench-.* for the run`);
+  else logger.warn("[bench] BENCH_SILENCE=false — injected faults will page whatever Alertmanager feeds");
+
+  try {
+    for (const task of tasks) {
+      const scores: Score[] = [];
+      for (let n = 1; n <= attempts; n++) {
+        logger.info(`[bench] ${task.id} attempt ${n}/${attempts} — setup`);
+        let score: Score;
+        let rca = "";
+        let proposal: Proposal | null = null;
+        let proposalRaw = "";
+        let proposalContext = "";
+        let ungrounded: string[] = [];
+        try {
+          // A setup that fails is a failed ATTEMPT, not a failed run — same reasoning as the
+          // catch inside attempt(). It also must not skip cleanup: the first live run of this
+          // harness hit a fault injector that could not fire, and the crash left its namespace
+          // behind on the cluster.
+          await waitForIsolation();
+          await resetIncidentMemory();
+          hook(task, "setup.sh");
+          if (task.settleSeconds) await sleep(task.settleSeconds * 1000);
+          ({ score, rca, proposal, proposalRaw, proposalContext, ungrounded } = await attempt(agent, llm, task, n));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          score = { pass: false, reasons: [`setup failed, so the fault was never injected: ${msg}`] };
+        } finally {
+          hook(task, "cleanup.sh");
+        }
+        logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
+        scores.push(score);
+        detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, proposalContext, rca });
       }
-      logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
-      scores.push(score);
-      detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, proposalContext, rca });
+      runs.push({ task: task.id, attempts: scores });
     }
-    runs.push({ task: task.id, attempts: scores });
+  } finally {
+    // The last cleanup deletes with --wait=false: its pods are still crashlooping while the
+    // namespace terminates, and expiring first would let them page after all.
+    if (silence) {
+      await waitForIsolation();
+      closeSilence(silence);
+    }
   }
 
   const rates = passRates(runs);

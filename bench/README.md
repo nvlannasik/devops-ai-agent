@@ -191,22 +191,22 @@ KubernetesContainerOomKiller       no namespace selector
 KubernetesPodCrashLooping          increase(kube_pod_container_status_restarts_total[5m]) > 2
 ```
 
-A02 trips both. Silence them for the duration of the run, matching the bench namespaces:
+Nearly every case trips one of them. **The runner silences them itself**
+(`src/bench/silence.ts`): before the first fault it runs `amtool silence add namespace=~bench-.*`
+inside the Alertmanager pod (`kubectl exec svc/alertmanager`, no port-forward), bounded at 10
+minutes an attempt, and expires it at the end — after the last namespace is gone, because the
+final cleanup returns while its pods are still faulting. It fails **closed**: if the silence
+cannot be opened, the run stops before injecting anything.
 
-```bash
-kubectl -n monitoring port-forward svc/alertmanager 9093:9093 &
+| Variable | Meaning | Default |
+|---|---|---|
+| `BENCH_ALERTMANAGER` | `<namespace>/<service>:<port>` of the Alertmanager to silence | `monitoring/alertmanager:9093` |
+| `BENCH_SILENCE` | `false` skips the silence — only for a cluster with no Alertmanager feeding a real agent | on |
 
-curl -s -XPOST http://localhost:9093/api/v2/silences -H 'Content-Type: application/json' -d '{
-  "matchers": [{"name":"namespace","value":"bench-.*","isRegex":true,"isEqual":true}],
-  "startsAt": "'"$(date -u +%FT%TZ)"'",
-  "endsAt":   "'"$(date -u -d '+2 hours' +%FT%TZ)"'",
-  "createdBy": "bench",
-  "comment": "fault injection — do not page the agent"
-}'
-```
-
-Delete the silence when the run finishes. An open-ended silence on `bench-.*` is harmless; one
-left on a broader matcher is how a real incident goes unnoticed.
+A run killed with Ctrl-C keeps its silence until it ends on its own: a killed run can leave a
+faulting namespace behind, and that is exactly when the silence is still needed. It never matches
+more than `bench-.*` — a broader matcher is how a real incident goes unnoticed. (This used to be
+a manual step; the 2026-10-08 run skipped it and paged the production agent three times.)
 
 Then point the harness at the in-cluster MCP server and use the production LLM config:
 
