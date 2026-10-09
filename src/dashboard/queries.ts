@@ -3,6 +3,7 @@ import { createPool } from "../db/pool.js";
 import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DEFAULT_RANGE, PAGE_SIZE, type Filters, type Range } from "./filters.js";
+import type { ChangeTimeline } from "../agent/changes/index.js";
 
 export interface IncidentRow {
   id: number; created_at: Date; resolved_at: Date | null;
@@ -34,6 +35,8 @@ export interface TimelineEvent {
 
 export interface IncidentDetail extends IncidentRow {
   rca: string; channel: string | null; thread_ts: string | null;
+  /** The change timeline collected before the investigation (agent/changes, migrations/012). */
+  changes?: ChangeTimeline | null;
 }
 // `status` and `verdict` are two different facts and the page must never merge them.
 //
@@ -517,7 +520,7 @@ export class DashboardQueries {
       // filtered on the primary key, so this is already at most one row — the LIMIT
       // is redundant but present for the same reason as the totals query above.
       `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence,
-              root_cause, rca, channel, thread_ts
+              root_cause, rca, channel, thread_ts, changes
          FROM incidents WHERE id = $1
         LIMIT 1`,
       [id]

@@ -1057,6 +1057,34 @@ export function detailPage(
           "stack"
         );
 
+  // The change timeline (agent/changes, migrations/012): what changed in the namespace in the
+  // 24h before the alert, collected before the investigation started and stored on the row — a
+  // source that could not be read is named rather than silently dropped, the same "unknown ≠
+  // none" rule the timeline module itself states.
+  const ch = i.changes;
+  const changes = !ch
+    ? ""
+    : section(ICON.wrench, "Recent changes") +
+      (ch.changes.length + ch.commits.length === 0
+        ? `<p class="sub">No changes found in the sources that were read.</p>`
+        : table(
+            headers("When", "What", "Change"),
+            [
+              ...ch.changes.map((c) =>
+                `<tr role="row">${cell("When", timeTag(new Date(c.at), now), "when")}` +
+                cell("What", `<span translate="no">${esc(c.workload)}</span>`, "mono") +
+                cell("Change", esc(`${c.kind}${c.revision ? ` rev ${c.revision}` : ""}${(c.diff ?? []).map((d) => ` · ${d.field} ${d.from} → ${d.to}`).join("")}`)) +
+                `</tr>`),
+              ...ch.commits.map((c) =>
+                `<tr role="row">${cell("When", timeTag(new Date(c.at), now), "when")}` +
+                cell("What", `<a href="${esc(c.url)}">${esc(c.sha.slice(0, 7))}</a>`, "mono") +
+                cell("Change", esc(`${c.message} — ${c.author}`)) +
+                `</tr>`),
+            ].join(""),
+            "stack"
+          )) +
+      (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : "");
+
   const feedback =
     d.feedback.length === 0
       ? empty("No on-call feedback yet.", "Reply in the Slack thread to record what actually fixed it.", ICON.speech)
@@ -1122,6 +1150,7 @@ export function detailPage(
          ? renderRca(i.rca)
          : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.", ICON.search)
      }
+     ${changes}
      ${section(ICON.wrench, "Remediation")}
      ${remediations}
      ${section(ICON.speech, "On-call feedback")}

@@ -923,7 +923,7 @@ tbody td:first-child {
 [data-tone="warning"]  { --spine: var(--mark-warning);  --tint: var(--tint-warning);  --ink: var(--warning); }
 [data-tone="info"]     { --spine: var(--mark-info);     --tint: var(--tint-info);     --ink: var(--info); }
 [data-tone="ok"]       { --spine: var(--mark-ok);       --tint: var(--tint-ok);       --ink: var(--ok); }
-td .sub { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 2px; overflow-wrap: anywhere; }
+td .sub, p.sub { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 2px; overflow-wrap: anywhere; }
 /* An incident row's summary is the symptom (incidentSummary in rca.ts), and it is a preview, not
    the finding: two lines, then the row ends. Unclamped, one causal chain made a row 300px tall. */
 td .summary {

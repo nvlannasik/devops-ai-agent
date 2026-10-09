@@ -277,6 +277,13 @@ handler over SQS: `{ requestId, op: "dry_run"|"open_pr", repo, helmRelease:{name
 action, currentValue, newValue }` → `{ requestId, diff | prUrl | error }`, routed by
 `requestId` on the shared FIFO response queue. Changing the shape breaks both sides.
 
+A third op, `history` — `{ requestId, op: "history", helmRelease, pathPrefix?, since }` →
+`{ ok: true, op: "history", commits: [{sha, at, author, message, url, paths}] }` — is
+read-only: the commits that touched the HelmRelease's files (overlay + base), for the agent's
+change timeline. `author` is a login or name, never an email. The worker also refuses
+`ok:false "ambiguous: ..."` when more than one file in the overlay set, or in the base set,
+defines the HelmRelease.
+
 > Alternative considered: `@octokit/auth-app` + `@octokit/rest`. Rejected for now to honor
 > the project's "prefer stdlib / no new deps" rule — the JWT + 3 REST calls are small enough
 > to own. Revisit if the surface grows.

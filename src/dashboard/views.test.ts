@@ -2895,3 +2895,22 @@ test("the incident page shows what its investigation cost, per backend", () => {
   assert.match(body, /private-llm-agus[\s\S]*not reported/, "a backend that reports no tokens says so");
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /LLM usage/);
 });
+
+// The change timeline (agent/changes, migrations/012): what changed in the alert's namespace
+// before it fired, stored on the incident and shown beside Remediation/Feedback. A source that
+// could not be read is named, never silently dropped — the same "unknown ≠ none" rule the
+// timeline module itself states.
+test("the incident page shows the stored change timeline, escaped, and says what was not read", () => {
+  const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "high", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
+  const changes = {
+    namespace: "apps", window: { from: "2026-10-07T12:00:00.000Z", to: "2026-10-09T00:00:00.000Z" }, subjects: [],
+    changes: [{ at: "2026-10-08T11:00:00Z", source: "rollout", kind: "spec-change", workload: "Deployment/orders-api", revision: "5", diff: [{ field: "api.env.T", from: "<a>", to: "50" }] }],
+    commits: [], unread: ["git history x: timeout"],
+  };
+  const body = detailPage({ incident: { ...incident, changes }, remediations: [], feedback: [] });
+  assert.match(body, /Recent changes/);
+  assert.match(body, /Deployment\/orders-api/);
+  assert.match(body, /&lt;a&gt;/);
+  assert.match(body, /Not read: git history x: timeout/);
+  assert.doesNotMatch(detailPage({ incident: { ...incident, changes: null }, remediations: [], feedback: [] }), /Recent changes/);
+});

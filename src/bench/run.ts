@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
+import { renderForModel } from "../agent/changes/index.js";
 import { parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { buildProposalContext } from "../app/index.js";
 import { withRoute } from "../utils/trace/index.js";
@@ -152,8 +153,14 @@ async function attempt(
   // The same door production uses, for whichever mode the case declares. A mention is wrapped in
   // buildMentionMarker because that wrapper IS the input on that path — it restates the thread's
   // alertname and namespace, and an investigation that never sees it is not the one Slack runs.
+  const alertText = task.mode === "alert" ? buildGroupAlertText(task.groupLabels!, task.alerts!, task.commonAnnotations) : "";
+  // The same timeline app/index.ts prepends for an alert — measured, not skipped. Bench
+  // namespaces are not Flux-managed, so only the cluster half runs here.
+  const changes = task.mode === "alert"
+    ? await agent.collectChanges(task.groupLabels!.namespace, new Date(), (task.alerts ?? []).flatMap((a) => Object.values(a.labels))).catch(() => null)
+    : null;
   const issue = task.mode === "alert"
-    ? buildGroupAlertText(task.groupLabels!, task.alerts!, task.commonAnnotations)
+    ? (changes ? `${renderForModel(changes)}\n\n---\n\n${alertText}` : alertText)
     : buildMentionMarker(task.message!, null);
   // Conversation mode is the only one with a finite tool budget, and that is load-bearing: the
   // namespace scope lock and the log fan-out cap only engage when the budget is finite. A
