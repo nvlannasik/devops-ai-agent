@@ -79,6 +79,29 @@ test("staleRollbackRefusal: every other action passes through untouched", () => 
   assert.equal(staleRollbackRefusal({ action: "k8s_rollout_restart" } as never, null, "{}"), null);
 });
 
+// Fix round 2, finding: a rollout restart creates a revision too, recorded as `kind: "restart"`
+// rather than `"spec-change"` — "the restart didn't help, roll it back" is the normal case, and
+// a live revision that matches a recorded restart must NOT read as a stale timeline. The target
+// revision is still chosen from spec-changes only (specChangesOf) — a restart is never proposed
+// as the thing being undone.
+const restart = (rev: string, at: string) => ({ ...spec(rev, at), kind: "restart", diff: undefined });
+
+test("staleRollbackRefusal: a recorded restart counts as the newest rollout entry, not just spec-changes", () => {
+  const t = T([spec("4", "2026-10-09T01:00:00Z"), restart("5", "2026-10-09T02:00:00Z")]);
+  // The gate's TARGET still comes from the spec-change (rev 4 → allowed 3), proving the restart
+  // never became the thing being undone.
+  assert.equal(rollbackRefusal(undo(3), t), null);
+  // The live revision (5) matches the recorded restart, so the timeline is NOT stale.
+  assert.equal(staleRollbackRefusal(undo(3), t, JSON.stringify({ fromRevision: 5 })), null);
+});
+
+test("staleRollbackRefusal: a live revision past the recorded restart is still stale", () => {
+  const t = T([spec("4", "2026-10-09T01:00:00Z"), restart("5", "2026-10-09T02:00:00Z")]);
+  const r = staleRollbackRefusal(undo(3), t, JSON.stringify({ fromRevision: 6 }));
+  assert.match(r ?? "", /revision 6/);
+  assert.match(r ?? "", /revision 5/);
+});
+
 // Finding 4 (wiring gap): refusalFor must run the rollback gate even for a user's own request —
 // "roll it back" names an intent, not a revision, so userRequested cannot skip it the way it
 // skips the replacement guard. Every other gate ahead of it in the chain is stubbed open, the

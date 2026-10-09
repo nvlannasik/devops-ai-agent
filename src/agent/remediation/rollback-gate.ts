@@ -19,6 +19,19 @@ const specChangesOf = (timeline: ChangeTimeline, name: string) =>
     .filter((c) => c.workload === `Deployment/${name}` && c.kind === "spec-change" && Number.isFinite(Number(c.revision)))
     .sort((a, b) => Number(b.revision) - Number(a.revision));
 
+// Every rollout entry for this Deployment, any KIND — a restart creates a revision too (it is
+// recorded as `kind: "restart"`, never `"spec-change"`), and "the restart didn't help, roll it
+// back" is the common case. staleRollbackRefusal asks "does the timeline know about the live
+// revision at all", which a restart answers just as well as a spec-change; only the TARGET
+// (specChangesOf, above) must stay spec-changes-only, so a restart is never proposed as the
+// thing being undone.
+const newestRolloutRevisionOf = (timeline: ChangeTimeline, name: string): number | null => {
+  const revisions = timeline.changes
+    .filter((c) => c.source === "rollout" && c.workload === `Deployment/${name}` && Number.isFinite(Number(c.revision)))
+    .map((c) => Number(c.revision));
+  return revisions.length > 0 ? Math.max(...revisions) : null;
+};
+
 export function rollbackRefusal(proposal: Proposal, timeline: ChangeTimeline | null): string | null {
   if (proposal.action !== "k8s_rollout_undo") return null;
   const { namespace, name, to_revision } = proposal.toolParams as { namespace: string; name: string; to_revision: number };
@@ -61,9 +74,11 @@ export function staleRollbackRefusal(proposal: Proposal, timeline: ChangeTimelin
     // not JSON — leave it to the other paths
   }
   if (fromRevision === null || !timeline) return null;
-  const changes = specChangesOf(timeline, name);
-  if (changes.length === 0) return null;
-  const newest = Number(changes[0]!.revision);
+  // ALL rollout kinds, not just spec-change: a restart is recorded too, and a live revision that
+  // matches a recorded restart is not stale — "restart didn't help, roll it back" is the normal
+  // case this must not refuse. specChangesOf stays the one used to pick the TARGET revision.
+  const newest = newestRolloutRevisionOf(timeline, name);
+  if (newest === null) return null;
   if (fromRevision === newest) return null;
   return `\`${namespace}/${name}\` is now at revision ${fromRevision}, past the timeline's newest recorded change (revision ${newest}) — the timeline is stale; re-investigate before rolling back.`;
 }
