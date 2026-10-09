@@ -39,7 +39,7 @@ import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
-import { rollbackRefusal } from "./remediation/rollback-gate.js";
+import { rollbackRefusal, staleRollbackRefusal } from "./remediation/rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./remediation/noop-guard.js";
 import {
@@ -2473,6 +2473,20 @@ export class DevOpsAgent {
       logger.info(`[remediation] dry-run refused for ${proposal.summary}: ${truncate(dryRun, 200)}`);
       this.trace.gate(opts.threadId ?? currentTrace() ?? "", "dry-run", "failed", truncate(dryRun, 300));
       return { refused: dryRun.replace(/^Error:\s*/, "") };
+    }
+
+    // The gate chain is tool-free and reasons only from the timeline collected before the
+    // investigation started — a "roll it back" mention hours later can find the Deployment has
+    // moved past it (a fix-forward, someone else's rollout). The dry-run's own `fromRevision` is
+    // the one piece of LIVE evidence in this flow, so this runs AFTER it succeeds, never inside
+    // refusalFor. See rollback-gate.ts.
+    if (proposal.action === "k8s_rollout_undo") {
+      const stale = staleRollbackRefusal(proposal, await this.timelineFor(opts.threadId), dryRun);
+      if (stale) {
+        logger.info(`[remediation] rollback refused for ${proposal.summary}: ${truncate(stale, 200)}`);
+        this.trace.gate(opts.threadId ?? currentTrace() ?? "", "remediation-rollback", "refused", stale);
+        return { refused: stale };
+      }
     }
 
     // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
