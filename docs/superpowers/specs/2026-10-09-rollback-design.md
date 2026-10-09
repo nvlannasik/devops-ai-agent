@@ -33,18 +33,18 @@ timeline.
 Registered only under `MCP_ENABLE_WRITE_TOOLS=true`, beside the other write tools, behind the
 same guardrails (namespace allowlist, provenance checks) and with the same `dryRun` parameter.
 
-Input: `{ namespace: string, name: string, kind?: "deployment", toRevision: number, dryRun?: boolean }`.
+Input: `{ namespace: string, name: string, kind?: "deployment", to_revision: number, dry_run?: boolean }` (snake case, like every other write tool's `dry_run`/`cpu_request`).
 
 - **Plain workload.**
-  - Find the ReplicaSet the Deployment owns whose `deployment.kubernetes.io/revision` equals `toRevision`.
+  - Find the ReplicaSet the Deployment owns whose `deployment.kubernetes.io/revision` equals `to_revision`.
   - Patch the Deployment's `spec.template` to that ReplicaSet's `spec.template`, with the `pod-template-hash` label removed from `metadata.labels`. This is what `kubectl rollout undo --to-revision` does.
   - `dryRun: true` uses a server-side dry-run.
   - The result names the revision rolled back from and to, and the template diff (the same `diffPodTemplates` the timeline uses).
 - **Flux-managed workload** (the existing `gitOpsPreviewOrRefuse` provenance check): no patch.
-  - The dry-run returns the existing preview shape with `action: "rollback"`, `changes: []` and `toRevision`. This is how the agent knows to take the PR path.
+  - The dry-run returns the existing preview shape with `action: "rollback"`, `changes: []` and `to_revision`. This is how the agent knows to take the PR path.
 - **Refusals:**
   - no ReplicaSet with that revision;
-  - `toRevision` is the revision currently running;
+  - `to_revision` is the revision currently running;
   - `kind` other than `deployment`;
   - a workload outside the allowlist.
 - **RBAC:** `patch` on `deployments` already exists for `k8s_rollout_restart`, and `list` on `replicasets` already exists. No chart change.
@@ -72,13 +72,13 @@ Response:
 ### 3. Agent
 
 **Proposal action.** `k8s_rollout_undo` goes in `parseProposal`, `PROPOSABLE_ACTIONS` with its numbered JSON shape in `buildProposalPrompt`, `prompts/system.md` `## Execution & Remediation`, and the MCP tool. That is the four-places rule in `CLAUDE.md`, and the existing `prompt-offers-every-parseable-action` tests pin the first two.
-- The prompt line: propose it only when the investigation names a recent change to the workload as the cause. `toRevision` is the revision just before that change.
+- The prompt line: propose it only when the investigation names a recent change to the workload as the cause. `to_revision` is the revision just before that change.
 
 **Timeline per thread.** `DevOpsAgent.collectChanges` gains a `threadId` and keeps the result in a per-process map (bounded, 24 h). `timelineFor(threadId)` reads the map, then falls back to `incidents.changes` by `thread_ts`, so a later mention, or another replica, still sees it. It returns `null` when neither has one.
 
 **Rollback gate** (`refusalFor`, new name `remediation-rollback` in `GATE_NAMES`). Runs for `k8s_rollout_undo` only, user requests included, and fails closed like the quarantine gate:
 - No timeline for the thread, or its rollout source unread → refuse: "no change timeline for this thread; a rollback needs the change it undoes".
-- Find changes on `Deployment/<name>` with kind `spec-change` or `restart`, newest first. The allowed target is `revision - 1` of the newest one. Anything else is refused with the allowed revision named: "propose it again with toRevision: N". The existing re-ask can then correct it.
+- Find changes on `Deployment/<name>` with kind `spec-change`, newest first. A `restart` does NOT qualify: every image here is `:latest` with pull policy Always, so rolling back a restart only reverts the `restartedAt` annotation and the pods pull the same `:latest` again — a card that changes nothing. The allowed target is `revision - 1` of the newest one. Anything else is refused with the allowed revision named: "propose it again with to_revision: N". The existing re-ask can then correct it.
 - No such change → refuse: "the timeline records no change to `<ns>/<name>` to undo".
 - The gate makes no tool calls, so recorded replay cases do not diverge.
 
@@ -99,7 +99,7 @@ Response:
 | Condition | Behaviour |
 |---|---|
 | Thread has no timeline / rollout source unread | gate refuses; no card |
-| Model's `toRevision` ≠ revision before the newest change | gate refuses naming N; one re-ask |
+| Model's `to_revision` ≠ revision before the newest `spec-change` | gate refuses naming N; one re-ask |
 | Target ReplicaSet gone at execution | MCP refuses; remediation `failed`; nothing patched |
 | A later commit touched the file | worker refuses "not a clean revert"; no card |
 | Commit does not touch the HelmRelease files | worker refuses; no card |
@@ -120,11 +120,11 @@ Response:
   - `dryRun` calls no write method; the history memo is never used.
   - Parse accepts `revert_pr` and still rejects malformed `dry_run`.
 - **agent:**
-  - Gate: the right revision passes; the wrong revision is refused naming N; no timeline → refused; an unread rollout source → refused; no change to that workload → refused. It makes no tool calls.
+  - Gate: the right revision passes; a `restart`-only history is refused; the wrong revision is refused naming N; no timeline → refused; an unread rollout source → refused; no change to that workload → refused. It makes no tool calls.
   - Parser and prompt list stay in sync.
   - The PR path picks the sha from the timeline, ignores a sha in the model's params, and does not take the PR path when the timeline has no commit.
   - `timelineFor` falls back to the DB.
-- **bench:** A14 `expect` becomes `{ "action": "k8s_rollout_undo", "namespace": "bench-a14", "target": "invoice-worker", "params": { "kind": "deployment", "toRevision": "1" } }`. `params` is an exact match in `bench/score.ts`; `changed` means "differs from the broken value", so it is the wrong field here. The two `rca.must` checks stay. Run 3 attempts after deploy.
+- **bench:** A14 `expect` becomes `{ "action": "k8s_rollout_undo", "namespace": "bench-a14", "target": "invoice-worker", "params": { "kind": "deployment", "to_revision": "1" } }`. `params` is an exact match in `bench/score.ts`; `changed` means "differs from the broken value", so it is the wrong field here. The two `rca.must` checks stay. Run 3 attempts after deploy.
 - Full suites green in all three repos; replay cases unchanged.
 
 ## Contract and docs updates (same commits)
