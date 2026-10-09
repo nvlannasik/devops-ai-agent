@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { parseProposal, buildProposalPrompt, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate, answerAsksForInput } from "./proposal.js";
+import { parseProposal, buildProposalPrompt, buildAlertProposalContext, worthProposing, declaredAction, retryNotice, proposeWithRetry, PROPOSABLE_ACTIONS, parseOffer, stripOffer, dropCardPromises, explainGate, answerAsksForInput } from "./proposal.js";
 import { RemediationStore } from "./index.js";
 import { quarantineRefusal, orphanDeleteRefusal, backupFrom } from "../index.js";
 import { compactToolResult, MAX_TOOL_RESULT_CHARS } from "../context/compact.js";
@@ -671,6 +671,7 @@ test("each listed action actually parses", () => {
     k8s_scale: { namespace: "a", workload: "b", kind: "deployment", replicas: 2 },
     k8s_delete_pod: { namespace: "a", pod: "b-123" },
     k8s_delete_orphan: { namespace: "a", name: "b", kind: "configmap" },
+    k8s_rollout_undo: { namespace: "a", workload: "b", kind: "deployment", to_revision: 1 },
   };
   for (const action of PROPOSABLE_ACTIONS) {
     assert.ok(parseProposal(JSON.stringify({ action, ...minimal[action] })), `${action} did not parse`);
@@ -1062,4 +1063,31 @@ test("a tour reply listing a not-ready workload does not propose", () => {
   assert.match(g.reason, /tour/);
   // an explicit request still proposes
   assert.equal(worthProposing("restart storefront di sample-apps", reply, false).propose, true);
+});
+
+// ── k8s_rollout_undo (Task 3: the "rollback / revert PR" feature) ────────────
+// The undo must carry an integer to_revision, Deployments only, and never a model-supplied sha:
+// on a Flux workload the agent picks the commit from its own change timeline, and an unverified
+// Git target from the model would be a worse source than that.
+
+test("parseProposal: k8s_rollout_undo carries an integer to_revision, deployments only, never a sha", () => {
+  const p = parseProposal(
+    '{"action":"k8s_rollout_undo","namespace":"bench-a14","workload":"invoice-worker","kind":"deployment","to_revision":1,"reason":"QUEUE_MODE change in rev 2"}'
+  );
+  assert.deepEqual(p?.toolParams, { namespace: "bench-a14", name: "invoice-worker", kind: "deployment", to_revision: 1 });
+  assert.match(p?.summary ?? "", /roll back deployment `bench-a14\/invoice-worker` to revision 1/);
+  assert.equal(
+    parseProposal('{"action":"k8s_rollout_undo","namespace":"n","workload":"w","kind":"statefulset","to_revision":1,"reason":"r"}'),
+    null
+  );
+  assert.equal(parseProposal('{"action":"k8s_rollout_undo","namespace":"n","workload":"w","to_revision":0,"reason":"r"}'), null);
+  assert.equal(
+    "sha" in (parseProposal('{"action":"k8s_rollout_undo","namespace":"n","workload":"w","to_revision":2,"sha":"abc1234","reason":"r"}')?.toolParams ?? {}),
+    false
+  );
+});
+
+test("buildAlertProposalContext puts the timeline first, then memory, then the RCA", () => {
+  assert.equal(buildAlertProposalContext("T", "M", "R"), "T\n\nM\n\n---\n\nR");
+  assert.equal(buildAlertProposalContext("", "", "R"), "R");
 });

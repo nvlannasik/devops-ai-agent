@@ -61,6 +61,14 @@ const SetResources = z
     memory_limit: s.optional(),
   })
   .refine((o) => o.cpu_request || o.memory_request || o.cpu_limit || o.memory_limit);
+// Deployments only (StatefulSet/DaemonSet rollout history works differently server-side) and no
+// sha field at all — see the case below for why a model-supplied sha is never trusted.
+const RolloutUndo = z.object({
+  namespace: s,
+  workload: s,
+  kind: z.literal("deployment").optional(),
+  to_revision: z.number().int().min(1),
+});
 
 export function parseProposal(text: string): Proposal | null {
   const match = text.match(/\{[\s\S]*\}/);
@@ -93,7 +101,7 @@ export function parseProposal(text: string): Proposal | null {
   //
   // Deleted rather than made nullable in each schema: null and absent have to mean the SAME
   // thing here, and toolParams goes straight to the MCP server — a null forwarded as a value
-  // is a different bug one layer down. One place, all five action shapes.
+  // is a different bug one layer down. One place, all seven action shapes.
   for (const [k, v] of Object.entries(raw)) if (v === null) delete raw[k];
   const reason = typeof raw.reason === "string" && raw.reason.trim() ? raw.reason.trim() : "proposed by the agent after RCA";
 
@@ -186,6 +194,21 @@ export function parseProposal(text: string): Proposal | null {
         // The card has to say what the undo IS, not that one exists. "Reversible" with no
         // mechanism named reads as reassurance; a stored manifest is a fact.
         summary: `delete abandoned ${kind} \`${namespace}/${name}\` (manifest is backed up first — restore by re-applying it)`,
+      };
+    }
+    case "k8s_rollout_undo": {
+      const p = RolloutUndo.safeParse(raw);
+      if (!p.success) return null;
+      const { namespace, workload, to_revision } = p.data;
+      return {
+        action: "k8s_rollout_undo",
+        namespace,
+        name: workload,
+        reason,
+        // No sha, ever: on a Flux workload the agent picks the commit from its own change
+        // timeline (proposeRevertPr). A model-supplied sha would be an unverified Git target.
+        toolParams: { namespace, name: workload, kind: "deployment", to_revision },
+        summary: `roll back deployment \`${namespace}/${workload}\` to revision ${to_revision}`,
       };
     }
     default:
@@ -490,6 +513,7 @@ export const PROPOSABLE_ACTIONS = [
   "k8s_scale",
   "k8s_delete_pod",
   "k8s_delete_orphan",
+  "k8s_rollout_undo",
 ] as const;
 
 export const PROPOSAL_SYSTEM =
@@ -537,6 +561,8 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     '7. {"action":"k8s_delete_orphan","namespace":"...","name":"...","kind":"configmap|service|serviceaccount|deployment|statefulset","reason":"..."}\n' +
     "   — removes an ABANDONED object. ONLY when the context contains a `k8s_find_unused_resources` result whose `orphanKeys` list holds `namespace/kind/name` for this exact object. `orphanKeys` is narrower than `findings`: it is the subset nothing declares. An object in `findings` with `managedBy` of `flux` or `helm` is NOT proposable — the cluster is not where it gets removed, and something declaring it on purpose is evidence the finding is wrong. Say that instead of proposing this\n" +
     "   — there is NO delete for a secret or a persistentvolumeclaim, and asking for one is not an option: a Secret's backup is its credentials and a PVC's manifest is not its data, so neither can be made reversible. Output null and say which of those two applies\n" +
+    '8. {"action":"k8s_rollout_undo","namespace":"...","workload":"...","kind":"deployment","to_revision":N,"reason":"..."}\n' +
+    "   — UNDO A RECENT CHANGE: ONLY when the investigation names a recent rollout of this Deployment as the cause — the [CHANGE TIMELINE] (or ReplicaSet history) shows a new revision whose diff IS the fault (an env value, args, resources, probes). to_revision is the revision just BEFORE that change. Not for a restart: the images are :latest, so undoing a restart changes nothing. On a Flux-managed workload this becomes a revert PR of the commit — propose it the same way\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
     // of real faults, and saying so is what stops the model reaching for a restart to have
     // something to say.
@@ -555,6 +581,14 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     '"container" is optional: include it ONLY if the container name literally appears in the context; otherwise omit it (single-container workloads are auto-resolved). NEVER guess a container name from the workload name.\n' +
     "Only use namespaces, workloads, containers, images, and values that appear in the context above — never invent them."
   );
+}
+
+// The alert path's proposal context: the change timeline first (the revision numbers a rollback
+// needs live there and nowhere else), then incident/remediation memory, then the RCA.
+// app/index.ts and bench/run.ts both call this, so the bench measures the prompt production sends.
+export function buildAlertProposalContext(timeline: string, memory: string, rca: string): string {
+  const head = [timeline, memory].filter(Boolean).join("\n\n");
+  return head ? `${head}\n\n---\n\n${rca}` : rca;
 }
 
 // ---- One retry, when the model's own answer contradicts itself ----
@@ -594,6 +628,8 @@ const REQUIRED: Record<string, string> = {
   k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
   k8s_delete_orphan:
     "namespace, name, and kind as one of configmap / service / serviceaccount / deployment / statefulset. The object must appear in a `k8s_find_unused_resources` result's `orphanKeys` as `namespace/kind/name` — there is no delete for a secret or a PVC",
+  k8s_rollout_undo:
+    'namespace, workload, kind "deployment", and to_revision as an integer — the revision just BEFORE the change the investigation names as the cause (the [CHANGE TIMELINE] lists each rollout\'s revision)',
 };
 
 /** The action the model NAMED, whether or not the rest of the object validated. */
@@ -615,9 +651,9 @@ export function retryNotice(raw: string): string {
   return (
     `RETRY — a check, not a correction. Your previous answer proposed no action. That is frequently ` +
     `the right answer: a missing config key, a wrong Service selector, a bad RBAC rule and an absent ` +
-    `pull secret are real faults none of the five actions repairs, and answering {"action": null} ` +
+    `pull secret are real faults none of the seven actions repairs, and answering {"action": null} ` +
     `again is a correct outcome of this check. Before you do, re-read the Recommended Actions in the ` +
-    `context. If they name a concrete change one of the five actions performs — an image tag that was ` +
+    `context. If they name a concrete change one of the seven actions performs — an image tag that was ` +
     `running before this rollout, a resource value, a replica count — emit that action now with the ` +
     `values taken from the context. Decide from the context; never invent a value to have something to say.`
   );
