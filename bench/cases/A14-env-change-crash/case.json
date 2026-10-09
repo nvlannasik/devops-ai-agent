@@ -18,7 +18,7 @@
     "rca": {
       "must": [
         "QUEUE_MODE",
-        "(revisi|revision|rollout|deploy|perubahan|change|changed|diubah)"
+        "(batch[^.\\n]{0,40}(→|->|\\bto\\b|menjadi|\\bke\\b|diubah)[^.\\n]{0,20}streaming|\\brev(isi|ision)?\\s*#?2\\b|revisi kedua|second revision)"
       ]
     }
   }

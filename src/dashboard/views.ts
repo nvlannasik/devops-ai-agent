@@ -97,6 +97,11 @@ const ICON = {
     `<path d="M12 21.6v-4.2"/><path d="M8.8 6.6V2.4"/><path d="M15.2 6.6V2.4"/>` +
       `<path d="M5.8 12.4V6.6h12.4v5.8a5 5 0 0 1-5 5h-2.4a5 5 0 0 1-5-5Z"/>`
   ),
+  // Recent changes: a clock running backwards, not the wrench — that one is remediation's and
+  // stays remediation's (src/dashboard/CLAUDE.md: "a glyph repeats only where the meaning does").
+  changes: ico(
+    `<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>`
+  ),
 };
 
 // Two groups, because the four destinations are two different KINDS of thing and the rail was
@@ -1064,7 +1069,7 @@ export function detailPage(
   const ch = i.changes;
   const changes = !ch
     ? ""
-    : section(ICON.wrench, "Recent changes") +
+    : section(ICON.changes, "Recent changes") +
       (ch.changes.length + ch.commits.length === 0
         ? `<p class="sub">No changes found in the sources that were read.</p>`
         : table(
@@ -1075,11 +1080,16 @@ export function detailPage(
                 cell("What", `<span translate="no">${esc(c.workload)}</span>`, "mono") +
                 cell("Change", esc(`${c.kind}${c.revision ? ` rev ${c.revision}` : ""}${(c.diff ?? []).map((d) => ` · ${d.field} ${d.from} → ${d.to}`).join("")}`)) +
                 `</tr>`),
-              ...ch.commits.map((c) =>
-                `<tr role="row">${cell("When", timeTag(new Date(c.at), now), "when")}` +
-                cell("What", `<a href="${esc(c.url)}">${esc(c.sha.slice(0, 7))}</a>`, "mono") +
-                cell("Change", esc(`${c.message} — ${c.author}`)) +
-                `</tr>`),
+              ...ch.commits.map((c) => {
+                // esc() stops markup injection, not a scheme — a `javascript:` URL from the
+                // GitOps worker's `history` op would still render as a clickable link otherwise.
+                const sha7 = esc(c.sha.slice(0, 7));
+                const link = /^https?:\/\//.test(c.url) ? `<a href="${esc(c.url)}">${sha7}</a>` : sha7;
+                return `<tr role="row">${cell("When", timeTag(new Date(c.at), now), "when")}` +
+                  cell("What", link, "mono") +
+                  cell("Change", esc(`${c.message} — ${c.author}`)) +
+                  `</tr>`;
+              }),
             ].join(""),
             "stack"
           )) +

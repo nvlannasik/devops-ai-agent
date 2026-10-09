@@ -2914,3 +2914,45 @@ test("the incident page shows the stored change timeline, escaped, and says what
   assert.match(body, /Not read: git history x: timeout/);
   assert.doesNotMatch(detailPage({ incident: { ...incident, changes: null }, remediations: [], feedback: [] }), /Recent changes/);
 });
+
+// "A glyph repeats only where the meaning does (wrench = remediation ...)" — src/dashboard/CLAUDE.md.
+// Recent changes is not remediation, so it must not borrow the wrench's path data.
+test("the change timeline section has its own icon, not the remediation wrench", () => {
+  const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "high", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
+  const changes = {
+    namespace: "apps", window: { from: "2026-10-07T12:00:00.000Z", to: "2026-10-09T00:00:00.000Z" }, subjects: [],
+    changes: [{ at: "2026-10-08T11:00:00Z", source: "rollout", kind: "spec-change", workload: "Deployment/orders-api", revision: "5", diff: [] }],
+    commits: [], unread: [],
+  };
+  const body = detailPage({ incident: { ...incident, changes }, remediations: [], feedback: [] });
+  const recentIdx = body.indexOf("Recent changes");
+  assert.ok(recentIdx > -1);
+  const recentHeading = body.slice(Math.max(0, recentIdx - 500), recentIdx);
+  assert.doesNotMatch(
+    recentHeading,
+    /M14\.6 6\.4a1 1 0 0 0 0 1\.4l1\.6 1\.6/,
+    "Recent changes must not reuse the wrench icon's path data"
+  );
+  // Remediation, right below it, keeps the wrench — only the new section's glyph should change.
+  assert.match(body.slice(recentIdx), /M14\.6 6\.4a1 1 0 0 0 0 1\.4l1\.6 1\.6/);
+});
+
+// Commit URLs come from the GitOps worker's `history` op — never verified as http(s) before this.
+// esc() stops markup injection but not a javascript: scheme, so the scheme itself must be checked.
+test("a commit link renders only for http(s) URLs; any other scheme is plain text", () => {
+  const incident = { id: 1, created_at: new Date(), resolved_at: null, alertname: "A", namespace: "n", severity: "high", confidence: "High", root_cause: "r", rca: "x", channel: "C", thread_ts: "1.1" } as unknown as IncidentDetail;
+  const changes = {
+    namespace: "apps", window: { from: "2026-10-07T12:00:00.000Z", to: "2026-10-09T00:00:00.000Z" }, subjects: [],
+    changes: [],
+    commits: [
+      { sha: "abc1234567", at: "2026-10-08T10:00:00Z", author: "a", message: "ok commit", url: "https://gh/c/abc", helmRelease: "hr" },
+      { sha: "def7654321", at: "2026-10-08T10:05:00Z", author: "b", message: "bad commit", url: "javascript:alert(1)", helmRelease: "hr" },
+    ],
+    unread: [],
+  };
+  const body = detailPage({ incident: { ...incident, changes }, remediations: [], feedback: [] });
+  assert.match(body, /<a href="https:\/\/gh\/c\/abc"/);
+  assert.doesNotMatch(body, /href="javascript:/);
+  assert.match(body, /abc1234/);
+  assert.match(body, /def7654/);
+});
