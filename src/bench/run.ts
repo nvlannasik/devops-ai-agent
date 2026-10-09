@@ -20,7 +20,7 @@ import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { renderForModel } from "../agent/changes/index.js";
-import { parseOffer, worthProposing } from "../agent/remediation/proposal.js";
+import { buildAlertProposalContext, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { buildProposalContext } from "../app/index.js";
 import { withRoute } from "../utils/trace/index.js";
 import { createLLMClient } from "../agent/llm/index.js";
@@ -157,7 +157,7 @@ async function attempt(
   // The same timeline app/index.ts prepends for an alert — measured, not skipped. Bench
   // namespaces are not Flux-managed, so only the cluster half runs here.
   const changes = task.mode === "alert"
-    ? await agent.collectChanges(task.groupLabels!.namespace, new Date(), (task.alerts ?? []).flatMap((a) => Object.values(a.labels))).catch(() => null)
+    ? await agent.collectChanges(task.groupLabels!.namespace, new Date(), (task.alerts ?? []).flatMap((a) => Object.values(a.labels)), threadId).catch(() => null)
     : null;
   const issue = task.mode === "alert"
     ? (changes ? `${renderForModel(changes)}\n\n---\n\n${alertText}` : alertText)
@@ -221,7 +221,9 @@ async function attempt(
     const proposalContext =
       // Production's own context, from the same function — a benchmark that builds its own
       // measures a prompt production does not send.
-      task.mode === "alert" ? rca : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply);
+      task.mode === "alert"
+        ? buildAlertProposalContext(changes ? renderForModel(changes) : "", "", rca)
+        : buildProposalContext(task.followUp ?? task.message!, rca, offer, previousReply);
     // The gates run inside proposeRemediation, which this runner deliberately skips — so it passes
     // production's own chain, agent.refusalFor, to proposeWithRetry exactly as proposeRemediation
     // does. That gets the bench the same refusals AND the same one re-ask after a refusal. A

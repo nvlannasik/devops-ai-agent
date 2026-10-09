@@ -8,7 +8,7 @@ import { parseConfidence } from "../agent/confidence/index.js";
 import { mentionBudget, wantsInvestigation, wantsTour } from "../agent/intent/index.js";
 import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
-import { answerAsksForInput, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
+import { answerAsksForInput, buildAlertProposalContext, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken, slackUserAllowed } from "../utils/auth/index.js";
@@ -846,7 +846,7 @@ export class SlackApp {
         this.agent.recallIncidents(labels, issueText).catch(() => ""),
         this.agent.recallRemediations(labels).catch(() => ""),
         // Best-effort like recall, with its own timeouts inside: never blocks the investigation.
-        this.agent.collectChanges(labels.namespace, changeScope.alertAt, changeScope.subjects).catch((e) => {
+        this.agent.collectChanges(labels.namespace, changeScope.alertAt, changeScope.subjects, threadId).catch((e) => {
           logger.warn(`[changes] timeline failed for thread ${threadId}: ${errDetail(e)}`);
           return null;
         }),
@@ -945,7 +945,7 @@ export class SlackApp {
       // Prior incidents + prior remediations go into the proposal context too — a
       // recurrence's proven fix ("change tag to X", "last PR did Y") is exactly what the
       // proposal model needs to avoid re-proposing.
-      const proposalContext = memory ? `${memory.slice(0, 1600)}\n\n---\n\n${rca}` : rca;
+      const proposalContext = buildAlertProposalContext(timeline, memory.slice(0, 1600), rca);
       await this.warnIfUngrounded(channel, threadId, rca, timeline ? `${issueText}\n${timeline}` : issueText);
       await this.notifyIfLowConfidence(channel, threadId, rca);
       // The alert path is otherwise ungated — an alert firing IS the evidence. The one answer

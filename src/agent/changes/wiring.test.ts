@@ -28,3 +28,17 @@ test("without a GitOps bridge there is no git source at all", async () => {
 test("migration 012 adds incidents.changes", () => {
   assert.match(readFileSync(new URL("../../../migrations/012_incident_changes.sql", import.meta.url), "utf8"), /ALTER TABLE incidents ADD COLUMN IF NOT EXISTS changes jsonb/);
 });
+
+test("timelineFor: this process's copy first, then the incident row's", async () => {
+  const fake = {
+    mcp: { callTool: async () => JSON.stringify({ changes: [], helmReleases: [], unread: [] }) },
+    gitops: null,
+    timelines: new Map(),
+    incidents: { changesForThread: async (ts: string) => (ts === "stored" ? { namespace: "db", changes: [], commits: [], unread: [], subjects: [], window: { from: "", to: "" } } : null) },
+  };
+  await DevOpsAgent.prototype.collectChanges.call(fake as never, "apps", new Date(), [], "live");
+  assert.equal((await DevOpsAgent.prototype.timelineFor.call(fake as never, "live"))?.namespace, "apps");
+  assert.equal((await DevOpsAgent.prototype.timelineFor.call(fake as never, "stored"))?.namespace, "db");
+  assert.equal(await DevOpsAgent.prototype.timelineFor.call(fake as never, "none"), null);
+  assert.equal(await DevOpsAgent.prototype.timelineFor.call(fake as never, undefined), null);
+});

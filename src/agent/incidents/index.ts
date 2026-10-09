@@ -466,6 +466,17 @@ export class IncidentMemory {
     }
   }
 
+  // The newest change timeline stored for a Slack thread (agent/changes). The rollback gate's
+  // fallback when this process did not collect it — another replica, or a mention after a restart.
+  async changesForThread(threadTs: string): Promise<unknown | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(
+      `SELECT changes FROM incidents WHERE thread_ts = $1 AND changes IS NOT NULL ORDER BY id DESC LIMIT 1`,
+      [threadTs]
+    );
+    return rows[0]?.changes ?? null;
+  }
+
   // Cheap reachability check for /health. true when disabled (nothing to be unhealthy about)
   // or when a SELECT 1 succeeds.
   async ping(): Promise<boolean> {

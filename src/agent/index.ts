@@ -39,6 +39,7 @@ import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
+import { rollbackRefusal } from "./remediation/rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./remediation/noop-guard.js";
 import {
@@ -89,6 +90,10 @@ export const MAX_ITERATIONS = 10;
 // conversation mode: max distinct pods whose logs may be fetched in one round — a generic
 // name matching many pods ("metallb" → 8) should produce a "which one?" question, not a dump
 const MAX_LOG_FANOUT = 2;
+// this.timelines (the rollback gate's per-process copy of a thread's change timeline): pruned by
+// age so a thread nobody revisits does not leak forever, and capped by count as a hard backstop.
+const TIMELINE_MAX_AGE_MS = 24 * 3_600_000;
+const TIMELINE_MAX_ENTRIES = 500;
 
 /** Conversation mode: the tool budget is spent. Answer, and stay out of RCA format. */
 export const TOOL_BUDGET_NOTICE =
@@ -1296,6 +1301,9 @@ export class DevOpsAgent {
   // threadId -> (tool call key -> in-flight or settled result). One entry per INVESTIGATION,
   // not per thread: a later turn must be free to re-fetch, because the cluster moved on.
   private readonly toolMemo = new Map<string, Map<string, { result: Promise<string>; window: number[] }>>();
+  // threadId -> this process's own copy of the thread's change timeline (agent/changes), for the
+  // rollback gate. ponytail: in-process map + DB fallback (timelineFor); bounded by age and count.
+  private readonly timelines = new Map<string, { t: ChangeTimeline; at: number }>();
   private budget: Budget;
 
   constructor(deps: AgentDeps = {}) {
@@ -1447,7 +1455,7 @@ export class DevOpsAgent {
 
   // The change timeline for an alert (agent/changes). Called by app/index.ts BEFORE investigate()
   // and outside any trace run, so replay never executes it. null = no namespace to scope it to.
-  async collectChanges(namespace: string | undefined, alertAt: Date, subjects: string[]): Promise<ChangeTimeline | null> {
+  async collectChanges(namespace: string | undefined, alertAt: Date, subjects: string[], threadId?: string): Promise<ChangeTimeline | null> {
     if (!namespace) return null;
     const gitops = this.gitops;
     const t = await collectChanges(
@@ -1462,7 +1470,25 @@ export class DevOpsAgent {
       subjects
     );
     logger.info(`[changes] ${namespace}: ${t.changes.length} change(s), ${t.commits.length} commit(s)${t.unread.length ? `, unread: ${t.unread.join("; ")}` : ""}`);
+    if (threadId) {
+      const now = Date.now();
+      for (const [k, v] of this.timelines) if (now - v.at > TIMELINE_MAX_AGE_MS) this.timelines.delete(k);
+      if (this.timelines.size >= TIMELINE_MAX_ENTRIES) {
+        const oldest = this.timelines.keys().next().value;
+        if (oldest !== undefined) this.timelines.delete(oldest);
+      }
+      this.timelines.set(threadId, { t, at: now });
+    }
     return t;
+  }
+
+  // The change timeline a rollback is gated on: this process's copy, else the incident row's.
+  async timelineFor(threadId?: string): Promise<ChangeTimeline | null> {
+    if (!threadId) return null;
+    const hit = this.timelines.get(threadId);
+    if (hit) return hit.t;
+    const stored = await this.incidents.changesForThread(threadId).catch(() => null);
+    return (stored as ChangeTimeline | null) ?? null;
   }
 
   storeIncident(
@@ -2545,6 +2571,13 @@ export class DevOpsAgent {
     // Same rule, same reason, for the one action that cannot be undone from the cluster.
     const orphan = await this.orphanRefusalFor(proposal, ctx.threadId);
     if (orphan) return { gate: "orphan gate", reason: orphan };
+
+    // A rollback needs the change it undoes ON RECORD — see rollback-gate.ts. Not skipped for a
+    // user request: "roll it back" names an intent, not a revision.
+    if (proposal.action === "k8s_rollout_undo") {
+      const rollback = rollbackRefusal(proposal, await this.timelineFor(ctx.threadId));
+      if (rollback) return { gate: "rollback gate", reason: rollback };
+    }
 
     // The offer is what the human answered "yes" to — see offerMismatchRefusal.
     const wrongTarget = offerMismatchRefusal(proposal, ctx.offer);
