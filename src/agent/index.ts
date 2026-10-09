@@ -2857,7 +2857,7 @@ export class DevOpsAgent {
     proposal: Proposal,
     preview: GitOpsPreview,
     threadId?: string
-  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
     if (!this.gitops) return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
     const commit = pickRevertCommit(await this.timelineFor(threadId), preview.helmRelease.name);
     if (!commit) {
@@ -2892,7 +2892,12 @@ export class DevOpsAgent {
       logger.info(`[remediation] revert not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
       return null;
     }
-    return { id, proposal: { ...proposal, summary }, dryRunSummary: truncate(payload.diff, 400) };
+    return {
+      id,
+      proposal: { ...proposal, summary },
+      dryRunSummary: payload.diff,
+      gitOps: { path: payload.paths.join(", "), valuesKey: `revert ${commit.sha.slice(0, 7)}`, helmRelease: preview.helmRelease },
+    };
   }
 
   // Cluster drifted from Git (someone patched the cluster directly). Propose a Flux

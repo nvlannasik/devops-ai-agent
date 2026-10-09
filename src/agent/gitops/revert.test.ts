@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRevertCommit } from "./revert.js";
 import { DevOpsAgent } from "../index.js";
+import { buildRemediationCard } from "../../utils/slack/remediation-card.js";
 
 const c = (sha: string, at: string, helmRelease: string) => ({ sha, at, author: "a", message: "m", url: "u", paths: ["p"], helmRelease });
 const T = (commits: ReturnType<typeof c>[]) => ({ namespace: "n", window: { from: "", to: "" }, changes: [], commits, unread: [], subjects: [] });
@@ -30,6 +31,13 @@ test("proposeRevertPr takes the sha from the timeline, dry-runs first, and store
   assert.deepEqual({ op: sent[0].op, sha: sent[0].sha, dryRun: sent[0].dryRun }, { op: "revert_pr", sha: "new2222", dryRun: true });
   assert.equal(stored!.revert, true);
   assert.equal(stored!.sha, "new2222");
+  assert.deepEqual(out.gitOps, { path: "p", valuesKey: `revert ${"new2222".slice(0, 7)}`, helmRelease: preview.helmRelease });
+  assert.equal(out.dryRunSummary, "d");
+
+  const blocks = buildRemediationCard(7, out.proposal, out.dryRunSummary, [], out.gitOps);
+  const text = (blocks[0] as { text: { text: string } }).text.text;
+  assert.match(text, /```diff/);
+  assert.match(text, /Approve opens a PR/);
 });
 
 test("proposeRevertPr with no commit for the HelmRelease refuses and never calls the worker", async () => {
