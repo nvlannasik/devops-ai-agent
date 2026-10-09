@@ -69,6 +69,29 @@ test("store returns the inserted id and persists the Slack thread link", async (
   assert.deepEqual(captured!.params.slice(-4), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null]);
 });
 
+test("store: a lone surrogate or \\u0000 in `changes` is cleaned before the jsonb INSERT, so the row is still written", async () => {
+  let captured: { params: unknown[] } | null = null;
+  const fakePool = {
+    query: async (_sql: string, params: unknown[]) => {
+      captured = { params };
+      return { rows: [{ id: "7" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+  const dirty = { commits: [{ message: "emoji cut mid-codepoint \ud83d, null byte \u0000 here" }] };
+
+  const id = await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, undefined, undefined, dirty);
+  assert.equal(id, 7);
+  const changesParam = captured!.params[10] as string; // $11
+  assert.equal(typeof changesParam, "string");
+  // JSON.stringify renders a lone surrogate / \u0000 as a literal \uXXXX escape sequence in
+  // the JSON TEXT (not an actual code unit) — and that literal escape is exactly what
+  // Postgres' jsonb input function rejects. Check for the escape text, not a raw code point.
+  assert.doesNotMatch(changesParam, /\\u0000/, "jsonb rejects the \\u0000 escape");
+  assert.doesNotMatch(changesParam, /\\u[dD][89abAB][0-9a-fA-F]{2}/, "jsonb rejects an unpaired surrogate escape");
+  assert.doesNotThrow(() => JSON.parse(changesParam));
+});
+
 test("store fires onStored with the inserted id and thread ts (the usage backfill link)", async () => {
   const fakePool = { query: async () => ({ rows: [{ id: "42" }] }) } as any;
   const calls: Array<[number, string]> = [];

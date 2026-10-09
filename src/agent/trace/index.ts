@@ -45,7 +45,9 @@ interface Run {
 }
 
 // Postgres jsonb refuses \u0000 and a lone surrogate, and either one fails the WHOLE batch.
-const cleanDeep = (v: unknown): unknown => {
+// Exported so other jsonb writers (e.g. incidents' `changes` column) reuse the same cleaner
+// instead of duplicating it.
+export const cleanDeep = (v: unknown): unknown => {
   if (typeof v === "string") return stripLoneSurrogates(v.replaceAll("\u0000", ""));
   if (Array.isArray(v)) return v.map(cleanDeep);
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cleanDeep(x)]));

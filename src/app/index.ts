@@ -20,6 +20,7 @@ import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { renderForModel, renderForSlack, RECENT_CHANGES_BLOCK } from "../agent/changes/index.js";
+import { flagInjection } from "../agent/injection/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 
 /**
@@ -36,6 +37,25 @@ import { withRoute, withTrace } from "../utils/trace/index.js";
  * it reads.
  */
 const PREVIOUS_TURN_CHARS = 1500;
+
+/**
+ * The change timeline (agent/changes) re-renders tool output verbatim — env values, commit
+ * messages — straight into the model's context, which makes it the second place attacker-
+ * controlled text enters the conversation (the first is executeToolCalls' own guard, see
+ * agent/injection/). Same detector, same notice. This runs in investigateAlertInBackground,
+ * before any trace run begins, so there is no run to record a gate event against: a hit is a
+ * warn log only (onHit), never a trace.gate call.
+ */
+export function frameChangeTimeline(
+  timeline: string,
+  toolNames: readonly string[],
+  onHit?: (hits: string[]) => void
+): string {
+  if (!timeline) return timeline;
+  const { content, hits } = flagInjection(timeline, toolNames);
+  if (hits.length > 0) onHit?.(hits);
+  return content;
+}
 
 export function buildProposalContext(userText: string, reply: string, offer: string | null, previousReply: string): string {
   const prior = previousReply.trim()
@@ -525,23 +545,25 @@ export class SlackApp {
     try {
       await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks });
     } catch (err) {
-      // One retry without the tables before the card is given up entirely.
+      // One retry without the tables or the change timeline block before the card is given up
+      // entirely.
       //
       // The tables are the newest and least settled thing in this message, and on 2026-09-25 a
       // single empty cell in one of them cost two complete RCAs their card — Slack answers
       // `invalid_blocks` for the WHOLE message, so a defect confined to one block was paid for by
       // every other block in it. That asymmetry is what this closes: a table bug should cost the
-      // table.
+      // table. The change timeline block is the other newest block (env values, commit messages
+      // re-rendered into Slack mrkdwn) and shares the same risk, so it is dropped with them.
       //
-      // Only attempted when there IS a table to drop, and the plain-text path stays underneath for
-      // everything else — a section over the limit, a lone surrogate, an outage at Slack.
-      // The change timeline block is the other newest block and is dropped with them.
+      // Only attempted when there IS a table or a timeline block to drop, and the plain-text path
+      // stays underneath for everything else — a section over the limit, a lone surrogate, an
+      // outage at Slack.
       const withoutTables = blocks.filter((b) => b.type !== "table" && b.block_id !== RECENT_CHANGES_BLOCK);
       if (withoutTables.length < blocks.length) {
         try {
           await this.app.client.chat.postMessage({ channel, thread_ts: threadId, text: rca, blocks: withoutTables });
           logger.warn(
-            `[slack] RCA card rejected for thread ${threadId} WITH tables, posted without them: ${errDetail(err)}`
+            `[slack] RCA card rejected for thread ${threadId} WITH tables/timeline block, posted without them: ${errDetail(err)}`
           );
           return;
         } catch (second) {
@@ -830,7 +852,11 @@ export class SlackApp {
         }),
       ]);
       const memory = [priorIncidents, priorRemediations].filter(Boolean).join("\n\n");
-      const timeline = changes ? renderForModel(changes) : "";
+      const timeline = frameChangeTimeline(
+        changes ? renderForModel(changes) : "",
+        this.agent.mcpTools().map((t) => t.name),
+        (hits) => logger.warn(`[${threadId}] possible prompt injection in change timeline [${hits.join(", ")}] — framed as data, not blocked`)
+      );
       const context = [timeline, memory].filter(Boolean).join("\n\n");
       // The [SOURCE: ...] marker is the deterministic mode signal for the system prompt:
       // only Alertmanager-driven messages carry it → mandatory investigation mode.

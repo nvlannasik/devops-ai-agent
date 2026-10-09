@@ -54,6 +54,16 @@ test("collectChanges: at most 3 HelmReleases are asked for history", async () =>
   assert.equal(asked, 3);
 });
 
+test("collectChanges: the alerting subject's own HelmRelease is asked for history even when alphabetically last", async () => {
+  const askedFor: string[] = [];
+  const five = { ...cluster, helmReleases: ["a", "b", "c", "storefront"].map((name) => ({ name, namespace: "f" })) };
+  await collectChanges(
+    { callTool: tool(five), history: async (hr) => { askedFor.push(hr.name); return { ok: true, op: "history", commits: [] }; } },
+    "apps", ALERT, ["storefront-6b7-x"], NOW
+  );
+  assert.ok(askedFor.includes("storefront"), `expected storefront among ${JSON.stringify(askedFor)}`);
+});
+
 const T = (over: Partial<ChangeTimeline> = {}): ChangeTimeline => ({
   namespace: "apps", window: { from: "2026-10-07T12:00:00.000Z", to: "2026-10-09T00:00:00.000Z" },
   changes: [], commits: [], unread: [], subjects: [], ...over,
@@ -70,6 +80,11 @@ test("renderForModel: one line per change with its diff, subjects marked", () =>
   const s = renderForModel(T({ subjects: ["orders-api"], changes: [cluster.changes[0] as never], commits: [{ ...commit, helmRelease: "orders-api" }] }));
   assert.match(s, /Deployment\/orders-api spec-change rev 5 \(alerting workload\): api\.env\.TIMEOUT_MS 2000 → 50/);
   assert.match(s, /commit abc1234 by jdoe: .*HelmRelease orders-api/);
+});
+
+test("renderForModel: a restart change is explained as a possible deploy, not rendered as bare \"restart\"", () => {
+  const s = renderForModel(T({ changes: [cluster.changes[1] as never] }));
+  assert.match(s, /restart \(pod template unchanged — a mutable tag such as :latest may have pulled a new image\)/);
 });
 
 test("renderForSlack: null when nothing changed and everything was read", () => {

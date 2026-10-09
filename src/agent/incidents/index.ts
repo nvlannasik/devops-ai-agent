@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import type { UnresolvedIncident } from "./reconcile.js";
 import { parseConfidence } from "../confidence/index.js";
+import { cleanDeep } from "../trace/index.js";
 import { SEVERITY_PATTERN } from "../../utils/slack/blocks.js";
 import logger from "../../utils/logger/index.js";
 
@@ -344,7 +345,9 @@ export class IncidentMemory {
           // richer than group_by) — alertname+namespace hashes to a different fingerprint,
           // so without storing it nothing outside the webhook can release the claim
           JSON.stringify(labels),
-          changes ? JSON.stringify(changes) : null,
+          // Same cleaner the trace recorder uses before its jsonb writes: a commit message cut
+          // mid-emoji upstream can carry a lone surrogate or \u0000, and jsonb rejects either.
+          changes ? JSON.stringify(cleanDeep(changes)) : null,
         ]
       );
       const id = Number(rows[0].id);

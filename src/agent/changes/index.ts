@@ -75,8 +75,14 @@ export async function collectChanges(
   }
   const history = deps.history;
   if (history) {
+    // Stable-sort subjects first: MCP lists HelmReleases alphabetically, and the slice below
+    // must not drop the alerting workload's own release in favor of earlier-alphabetical ones.
+    const bySubjectFirst = helmReleases
+      .map((hr, i) => ({ hr, i }))
+      .sort((a, b) => (isSubject(a.hr.name, subjects) ? 0 : 1) - (isSubject(b.hr.name, subjects) ? 0 : 1) || a.i - b.i)
+      .map(({ hr }) => hr);
     await Promise.all(
-      helmReleases.slice(0, MAX_HELM_RELEASES).map(async (hr) => {
+      bySubjectFirst.slice(0, MAX_HELM_RELEASES).map(async (hr) => {
         try {
           const p = await within(timeouts.gitMs, history(hr, t.window.from));
           if (p.ok) t.commits.push(...p.commits.filter((c) => {
@@ -106,8 +112,10 @@ const diffText = (c: TimelineChange): string => {
   const shown = d.slice(0, 3).map((x) => `${x.field} ${short(x.from)} → ${short(x.to)}`).join("; ");
   return d.length > 3 ? `${shown}; (+${d.length - 3} more)` : shown;
 };
+const kindText = (kind: string): string =>
+  kind === "restart" ? "restart (pod template unchanged — a mutable tag such as :latest may have pulled a new image)" : kind;
 const changeLine = (c: TimelineChange, subjects: string[]): string =>
-  `${c.workload} ${c.kind}${c.revision ? ` rev ${c.revision}` : ""}${isSubject(nameOf(c.workload), subjects) ? " (alerting workload)" : ""}${c.diff?.length ? `: ${diffText(c)}` : ""}`;
+  `${c.workload} ${kindText(c.kind)}${c.revision ? ` rev ${c.revision}` : ""}${isSubject(nameOf(c.workload), subjects) ? " (alerting workload)" : ""}${c.diff?.length ? `: ${diffText(c)}` : ""}`;
 
 export function renderForModel(t: ChangeTimeline): string {
   const lines = [
