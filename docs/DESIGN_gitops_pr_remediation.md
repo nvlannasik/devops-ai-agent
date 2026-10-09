@@ -284,6 +284,12 @@ change timeline. `author` is a login or name, never an email. The worker also re
 `ok:false "ambiguous: ..."` when more than one file in the overlay set, or in the base set,
 defines the HelmRelease.
 
+A fourth op, `revert_pr` — `{ requestId, op: "revert_pr", helmRelease, sha, pathPrefix?,
+dryRun?, incident? }` → `{ ok: true, op: "revert_pr", dryRun, paths, diff | prUrl }` —
+restores the HelmRelease's files to `sha`'s parent, and refuses unless the revert is clean
+(HEAD equals `sha` for every touched file). It never uses the history file cache. The agent
+picks `sha` from its change timeline, never from model output.
+
 > Alternative considered: `@octokit/auth-app` + `@octokit/rest`. Rejected for now to honor
 > the project's "prefer stdlib / no new deps" rule — the JWT + 3 REST calls are small enough
 > to own. Revisit if the surface grows.

@@ -14,7 +14,10 @@
     }
   ],
   "expect": {
-    "action": null,
+    "action": "k8s_rollout_undo",
+    "namespace": "bench-a14",
+    "target": "invoice-worker",
+    "params": { "kind": "deployment", "to_revision": "1" },
     "rca": {
       "must": [
         "QUEUE_MODE",

@@ -56,6 +56,7 @@ import {
 } from "./remediation/verify.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "./gitops/preview.js";
+import { pickRevertCommit } from "./gitops/revert.js";
 import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
@@ -2492,7 +2493,7 @@ export class DevOpsAgent {
     // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
     // validation) — route to the GitOps PR flow instead of storing a direct-patch card.
     const preview = parseGitOpsPreview(dryRun);
-    if (preview) return this.proposeGitOpsPr(incidentId, proposal, preview);
+    if (preview) return preview.action === "rollback" ? this.proposeRevertPr(incidentId, proposal, preview, opts.threadId) : this.proposeGitOpsPr(incidentId, proposal, preview);
 
     // store the exact tool params + display fields — execution replays params verbatim
     const id = await this.remediations.propose(incidentId, proposal.action, {
@@ -2848,6 +2849,52 @@ export class DevOpsAgent {
     return { id, proposal: { ...proposal, summary }, dryRunSummary: payload.diff, gitOps: { path: payload.path, valuesKey: payload.valuesKey, helmRelease: preview.helmRelease } };
   }
 
+  // A rollback on a Flux-managed Deployment: the cluster patch would be reverted by Flux, so the
+  // undo is a revert PR of the commit the change timeline names (pickRevertCommit — never a sha
+  // from the model). Dry-run first, so the card shows the diff and an unclean revert never posts.
+  private async proposeRevertPr(
+    incidentId: number | null,
+    proposal: Proposal,
+    preview: GitOpsPreview,
+    threadId?: string
+  ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string } | { refused: string } | null> {
+    if (!this.gitops) return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
+    const commit = pickRevertCommit(await this.timelineFor(threadId), preview.helmRelease.name);
+    if (!commit) {
+      return {
+        refused: `\`${proposal.namespace}/${proposal.name}\` is managed by Flux HelmRelease \`${preview.helmRelease.name}\`, and the change timeline holds no Git commit for it — there is nothing to revert. If its values changed with no commit, the cluster drifted from Git; reconcile instead.`,
+      };
+    }
+    const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    let payload;
+    try {
+      payload = await this.gitops.request({ op: "revert_pr", helmRelease: preview.helmRelease, sha: commit.sha, pathPrefix, dryRun: true });
+    } catch (err) {
+      return { refused: `couldn't prepare the revert PR: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!payload.ok) {
+      logger.info(`[remediation] revert_pr dry-run refused: ${payload.reason}`);
+      return { refused: payload.reason };
+    }
+    if (payload.op !== "revert_pr" || !payload.dryRun) return null; // defensive: wrong op from the worker
+    const summary = `open a revert PR for \`${commit.sha.slice(0, 7)}\` ${commit.message} (\`${payload.paths.join("`, `")}\`) — undoes the change behind ${proposal.summary}`;
+    const id = await this.remediations.propose(incidentId, proposal.action, {
+      gitops: true,
+      revert: true,
+      helmRelease: preview.helmRelease,
+      sha: commit.sha,
+      pathPrefix,
+      target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      reason: proposal.reason,
+      summary,
+    });
+    if (typeof id !== "number") {
+      logger.info(`[remediation] revert not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
+      return null;
+    }
+    return { id, proposal: { ...proposal, summary }, dryRunSummary: truncate(payload.diff, 400) };
+  }
+
   // Cluster drifted from Git (someone patched the cluster directly). Propose a Flux
   // reconcile: it restores what the repo declares instead of encoding the drifted value.
   // Same approval card as everything else — a human still decides, because the drifted
@@ -2970,6 +3017,23 @@ export class DevOpsAgent {
     if (!this.gitops) {
       await this.remediations.finish(id, false, "gitops client not available");
       return { text: `❌ *PR not opened* — ${label}: the GitOps PR client is not enabled on this agent.` };
+    }
+    if ((params as { revert?: boolean }).revert) {
+      const r = params as { helmRelease: { name: string; namespace: string }; sha: string; pathPrefix?: string; summary?: string };
+      try {
+        const payload = await this.gitops.request({ op: "revert_pr", helmRelease: r.helmRelease, sha: r.sha, pathPrefix: r.pathPrefix, dryRun: false, incident: { summary: r.summary } });
+        if (!payload.ok || payload.op !== "revert_pr" || payload.dryRun) {
+          const reason = payload.ok ? "unexpected worker response" : payload.reason;
+          await this.remediations.finish(id, false, reason);
+          return { text: `❌ *Revert PR not opened* — ${label}: ${truncate(reason, 300)}` };
+        }
+        await this.remediations.finish(id, true, payload.prUrl);
+        return { text: `✅ *Revert PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.` };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await this.remediations.finish(id, false, msg);
+        return { text: `❌ *Revert PR not opened* — ${label}: ${truncate(msg, 300)}` };
+      }
     }
     try {
       const payload = await this.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });

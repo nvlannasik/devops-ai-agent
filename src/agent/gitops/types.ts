@@ -26,7 +26,19 @@ export interface GitOpsHistoryBody {
   since: string; // ISO
 }
 
-export type GitOpsRequestBody = GitOpsChangeBody | GitOpsHistoryBody;
+// A rollback on a Flux-managed workload: Flux would revert a cluster patch, so the undo is a
+// revert PR of the Git commit that made the change (picked by pickRevertCommit from the change
+// timeline, never a sha the model proposed).
+export interface GitOpsRevertBody {
+  op: "revert_pr";
+  helmRelease: { name: string; namespace: string };
+  sha: string;
+  pathPrefix?: string;
+  dryRun?: boolean;
+  incident?: { summary?: string; threadUrl?: string };
+}
+
+export type GitOpsRequestBody = GitOpsChangeBody | GitOpsHistoryBody | GitOpsRevertBody;
 
 // The repo declares this key, but the cluster is running a different value — somebody
 // changed the cluster outside GitOps. The repo is the source of truth, so the answer is a
@@ -42,4 +54,6 @@ export type GitOpsPayload =
   | { ok: true; op: "dry_run"; path: string; valuesKey: string; before: string; after: string; diff: string }
   | { ok: true; op: "open_pr"; path: string; prUrl: string }
   | { ok: true; op: "history"; commits: Array<{ sha: string; at: string; author: string; message: string; url: string; paths: string[] }> }
+  | { ok: true; op: "revert_pr"; dryRun: true; paths: string[]; diff: string }
+  | { ok: true; op: "revert_pr"; dryRun: false; paths: string[]; prUrl: string }
   | { ok: false; reason: string; drift?: GitOpsDrift };
