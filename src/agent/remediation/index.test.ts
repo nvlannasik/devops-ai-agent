@@ -1087,6 +1087,25 @@ test("parseProposal: k8s_rollout_undo carries an integer to_revision, deployment
   );
 });
 
+// Final review, finding 3: a long timeline filled the prompt's 2500-char head, and the RCA's middle
+// fell into the "...[truncated]..." gap. Capped on whole lines, so the model never reads half an entry.
+test("buildAlertProposalContext caps the timeline at 1200 chars on line boundaries, and the RCA survives the prompt", () => {
+  const lines = Array.from({ length: 50 }, (_, i) => `- 2026-10-09T0${i % 10}:00:00Z Deployment/w${i} spec-change rev ${i}: w.env.K ${"v".repeat(40)} → ${"u".repeat(20)}`);
+  const timeline = lines.join("\n");
+  const rca = "## Root cause\n" + "The invoice-worker QUEUE_MODE change broke it. ".repeat(40) + "\nRecommended: roll back to revision 3.";
+  const ctx = buildAlertProposalContext(timeline, "", rca);
+  const [head] = ctx.split("\n\n---\n\n");
+  const marker = head.match(/\n… \(\+(\d+) more lines\)$/);
+  assert.ok(marker, "a cut timeline says how much is missing");
+  const kept = head.slice(0, marker!.index);
+  assert.ok(kept.length <= 1200, `kept ${kept.length} chars`);
+  assert.ok(kept.split("\n").every((l) => lines.includes(l)), "whole lines only, in order");
+  assert.equal(kept.split("\n").length + Number(marker![1]), 50);
+  assert.ok(ctx.includes(rca));
+  assert.ok(buildProposalPrompt({}, ctx).includes(rca), "the whole RCA reaches the proposal prompt");
+  assert.equal(buildAlertProposalContext("short\ntimeline", "", "R"), "short\ntimeline\n\n---\n\nR", "a short timeline is untouched");
+});
+
 test("buildAlertProposalContext puts the timeline first, then memory, then the RCA", () => {
   assert.equal(buildAlertProposalContext("T", "M", "R"), "T\n\nM\n\n---\n\nR");
   assert.equal(buildAlertProposalContext("", "", "R"), "R");

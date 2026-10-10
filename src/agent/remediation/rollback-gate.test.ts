@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rollbackRefusal, staleRollbackRefusal } from "./rollback-gate.js";
+import { rollbackRefusal, staleRollbackRefusal, rollbackDryRunSummary } from "./rollback-gate.js";
 import type { ChangeTimeline } from "../changes/index.js";
 import { DevOpsAgent } from "../index.js";
 import { parseProposal } from "./proposal.js";
@@ -129,4 +129,25 @@ test("refusalFor runs the rollback gate even when the user asked for it themselv
   });
   assert.equal(r?.gate, "rollback gate");
   assert.match(r?.reason ?? "", /to_revision: 2/);
+});
+
+// Final review, finding 4: the approval card showed the raw dry-run JSON cut at 400 chars.
+test("rollbackDryRunSummary: the revision move, then one line per diff entry", () => {
+  const dry = JSON.stringify({ fromRevision: 4, toRevision: 3, diff: [{ field: "worker.env.QUEUE_MODE", from: "streaming", to: "batch" }, { field: "worker.image", from: "a:1", to: "a:2" }] });
+  assert.equal(rollbackDryRunSummary(dry), "revision 4 → 3\nworker.env.QUEUE_MODE: streaming → batch\nworker.image: a:1 → a:2");
+});
+
+test("rollbackDryRunSummary: an empty diff says the change is elsewhere in the template", () => {
+  assert.equal(
+    rollbackDryRunSummary(JSON.stringify({ fromRevision: 2, toRevision: 1, diff: [] })),
+    "revision 2 → 1\nno container image/env/args/resources/probes difference — the change is elsewhere in the pod template; review the ReplicaSets before approving"
+  );
+});
+
+test("rollbackDryRunSummary: each value is cut at 120 code points, never mid-surrogate", () => {
+  const long = "😀".repeat(200);
+  const out = rollbackDryRunSummary(JSON.stringify({ fromRevision: 2, toRevision: 1, diff: [{ field: "f", from: long, to: "x" }] }));
+  const from = out.split("\n")[1].slice("f: ".length).split(" → ")[0];
+  assert.ok(Array.from(from).length <= 120);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(from.replace(/…$/, "")), "no lone high surrogate");
 });

@@ -33,7 +33,10 @@ export function buildRemediationCard(
       mentions
     : `🔧 *Remediation needed* — ${p.summary}\n` +
       `*Why:* ${p.reason}\n` +
-      `*Dry-run:* ✅ \`${dryRunSummary.slice(0, 400)}\`` +
+      // a rollback's summary is multi-line (revision move + one line per template diff entry)
+      (p.action === "k8s_rollout_undo"
+        ? `*Dry-run:* ✅\n\`\`\`\n${dryRunSummary.slice(0, 1500)}\n\`\`\``
+        : `*Dry-run:* ✅ \`${dryRunSummary.slice(0, 400)}\``) +
       mentions;
   return [
     {

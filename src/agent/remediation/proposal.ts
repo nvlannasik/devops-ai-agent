@@ -583,11 +583,24 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
   );
 }
 
+// The timeline is capped (whole lines, in order — renderForModel puts the alerting workload's
+// entries first): buildProposalPrompt keeps only head 2500 + tail 1500 of the context, and an
+// uncapped timeline filled the head so the RCA's middle fell into the gap.
+const TIMELINE_MAX = 1200;
+function capTimeline(timeline: string): string {
+  if (timeline.length <= TIMELINE_MAX) return timeline;
+  const lines = timeline.split("\n");
+  let kept = 0;
+  let len = -1;
+  while (kept < lines.length && len + 1 + lines[kept].length <= TIMELINE_MAX) len += 1 + lines[kept++].length;
+  return `${lines.slice(0, kept).join("\n")}\n… (+${lines.length - kept} more lines)`;
+}
+
 // The alert path's proposal context: the change timeline first (the revision numbers a rollback
 // needs live there and nowhere else), then incident/remediation memory, then the RCA.
 // app/index.ts and bench/run.ts both call this, so the bench measures the prompt production sends.
 export function buildAlertProposalContext(timeline: string, memory: string, rca: string): string {
-  const head = [timeline, memory].filter(Boolean).join("\n\n");
+  const head = [capTimeline(timeline), memory].filter(Boolean).join("\n\n");
   return head ? `${head}\n\n---\n\n${rca}` : rca;
 }
 

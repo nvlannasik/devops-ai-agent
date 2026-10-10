@@ -39,7 +39,7 @@ import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { extractSection, isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, stripOffer, type Proposal, type Refusal } from "./remediation/proposal.js";
-import { rollbackRefusal, staleRollbackRefusal } from "./remediation/rollback-gate.js";
+import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSummary, rolloutFromRevision } from "./remediation/rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./remediation/replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./remediation/noop-guard.js";
 import {
@@ -2495,9 +2495,18 @@ export class DevOpsAgent {
     const preview = parseGitOpsPreview(dryRun);
     if (preview) return preview.action === "rollback" ? this.proposeRevertPr(incidentId, proposal, preview, opts.threadId) : this.proposeGitOpsPr(incidentId, proposal, preview);
 
+    // A rollback replays the live revision the dry-run saw as `from_revision`: the MCP patch
+    // tests it first, so an approve after the Deployment moved fails instead of undoing a
+    // revision the approver never saw. Fail closed if the dry-run did not say.
+    const rollbackFrom = proposal.action === "k8s_rollout_undo" ? rolloutFromRevision(dryRun) : undefined;
+    if (proposal.action === "k8s_rollout_undo" && rollbackFrom === undefined) {
+      return { refused: `the rollback dry-run for \`${proposal.namespace}/${proposal.name}\` did not report the live revision, so the approval cannot be pinned to it — re-investigate` };
+    }
+
     // store the exact tool params + display fields — execution replays params verbatim
     const id = await this.remediations.propose(incidentId, proposal.action, {
       ...proposal.toolParams,
+      ...(rollbackFrom !== undefined ? { from_revision: rollbackFrom } : {}),
       target: targetKey(proposal.action, proposal.namespace, proposal.name),
       reason: proposal.reason,
       summary: proposal.summary,
@@ -2507,7 +2516,7 @@ export class DevOpsAgent {
       return null;
     }
 
-    return { id, proposal, dryRunSummary: truncate(dryRun, 400) };
+    return { id, proposal, dryRunSummary: proposal.action === "k8s_rollout_undo" ? rollbackDryRunSummary(dryRun) : truncate(dryRun, 400) };
   }
 
   /**
@@ -2859,7 +2868,17 @@ export class DevOpsAgent {
     threadId?: string
   ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
     if (!this.gitops) return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
-    const commit = pickRevertCommit(await this.timelineFor(threadId), preview.helmRelease.name);
+    // The commit behind the broken rollout landed BEFORE it. A newer commit to the same release
+    // means the repo moved on since — reverting either one is a guess, so refuse.
+    const timeline = await this.timelineFor(threadId);
+    const broke = timeline ? specChangesOf(timeline, proposal.name)[0] : undefined;
+    const newer = broke && (timeline?.commits ?? []).find((c) => c.helmRelease === preview.helmRelease.name && Date.parse(c.at) > Date.parse(broke.at));
+    if (broke && newer) {
+      return {
+        refused: `the GitOps repo moved past the rollout that broke \`${proposal.namespace}/${proposal.name}\` (commit ${newer.sha.slice(0, 7)} at ${newer.at} is newer than revision ${broke.revision}) — re-investigate before reverting`,
+      };
+    }
+    const commit = broke ? pickRevertCommit(timeline, preview.helmRelease.name, broke.at) : null;
     if (!commit) {
       return {
         refused: `\`${proposal.namespace}/${proposal.name}\` is managed by Flux HelmRelease \`${preview.helmRelease.name}\`, and the change timeline holds no Git commit for it — there is nothing to revert. If its values changed with no commit, the cluster drifted from Git; reconcile instead.`,

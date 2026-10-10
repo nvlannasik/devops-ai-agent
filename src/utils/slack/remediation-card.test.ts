@@ -39,3 +39,14 @@ test("GitOps PR card renders a diff block + the target file/key", () => {
   assert.match(t, /apps\/base\/release.yaml/);
   assert.match(t, /Approve opens a PR/);
 });
+
+test("a rollback card renders its dry-run summary as a fenced block, not a 400-char code span", () => {
+  const undo: Proposal = { ...proposal, action: "k8s_rollout_undo", summary: "roll back deployment `apps/api` to revision 1" };
+  const summary = "revision 2 → 1\n" + "x".repeat(2000);
+  const t = (buildRemediationCard(3, undo, summary) as Array<{ text?: { text: string } }>)[0].text!.text;
+  assert.ok(t.includes("*Dry-run:* ✅\n```\nrevision 2 → 1\n"));
+  assert.ok(t.includes("x".repeat(1500 - "revision 2 → 1\n".length) + "\n```"), "kept up to 1500 chars");
+  assert.ok(!t.includes("x".repeat(1500)), "and no more");
+  const set = (buildRemediationCard(3, proposal, "validated") as Array<{ text?: { text: string } }>)[0].text!.text;
+  assert.match(set, /\*Dry-run:\* ✅ `validated`/, "other actions keep the inline span");
+});

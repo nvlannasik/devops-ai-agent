@@ -103,7 +103,7 @@ export async function collectChanges(
   return t;
 }
 
-const short = (v: string, n = 60): string => {
+export const short = (v: string, n = 60): string => {
   const cp = Array.from(v);
   return cp.length > n ? `${cp.slice(0, n - 1).join("")}…` : v;
 };

@@ -1,4 +1,4 @@
-import type { ChangeTimeline } from "../changes/index.js";
+import { short, type ChangeTimeline } from "../changes/index.js";
 import type { Proposal } from "./proposal.js";
 
 // A rollback undoes a change, so the change has to be ON RECORD: the thread's change timeline
@@ -14,7 +14,7 @@ import type { Proposal } from "./proposal.js";
 // but keeps that ReplicaSet's original creationTimestamp, so a time sort can pick an earlier
 // revision as "newest". The MCP server's own notion of "current" is the highest revision number,
 // and this gate has to agree with it or it names the wrong target.
-const specChangesOf = (timeline: ChangeTimeline, name: string) =>
+export const specChangesOf = (timeline: ChangeTimeline, name: string) =>
   timeline.changes
     .filter((c) => c.workload === `Deployment/${name}` && c.kind === "spec-change" && Number.isFinite(Number(c.revision)))
     .sort((a, b) => Number(b.revision) - Number(a.revision));
@@ -52,28 +52,33 @@ export function rollbackRefusal(proposal: Proposal, timeline: ChangeTimeline | n
   return `The newest change to \`${namespace}/${name}\` is revision ${newest.revision} (${newest.at}); the revision before it is ${allowed}. Propose it again with to_revision: ${allowed}.`;
 }
 
+// The live revision a k8s_rollout_undo dry-run reports (cluster path and Flux preview alike), or
+// undefined when the result is not JSON or carries no number.
+export function rolloutFromRevision(dryRunResult: string): number | undefined {
+  try {
+    const n = Number((JSON.parse(dryRunResult) as { fromRevision?: unknown }).fromRevision);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // The gate above is tool-free, so it can only reason from the timeline collected BEFORE the
 // investigation started. A "roll it back" mention hours later can find the Deployment has moved
 // — a fix-forward, or someone else's rollout — and the timeline has no way to see that. Checked
 // AFTER the mandatory dry-run succeeds (never inside the tool-free gate itself, so recorded
 // replay cases still cannot diverge on rollbackRefusal): the dry-run result is the one piece of
-// LIVE evidence in this whole flow, and `fromRevision` is read from it.
+// LIVE evidence in this whole flow, and `fromRevision` is read from it — the Flux `rollback`
+// preview carries it too, so a revert PR is checked the same way.
 //
-// Returns null — not a refusal — when `fromRevision` is missing or unparseable, e.g. a GitOps
-// preview (a structured PR diff, not a plain rollout dry-run): that shape is a different path's
-// problem, and this function only has an opinion when it actually has the number.
+// Returns null — not a refusal — when `fromRevision` is missing or unparseable (an older MCP
+// server, non-JSON): this function only has an opinion when it actually has the number. The
+// cluster path fails closed on a missing number separately, in proposeRemediationRun.
 export function staleRollbackRefusal(proposal: Proposal, timeline: ChangeTimeline | null, dryRunResult: string): string | null {
   if (proposal.action !== "k8s_rollout_undo") return null;
   const { namespace, name } = proposal.toolParams as { namespace: string; name: string };
-  let fromRevision: number | null = null;
-  try {
-    const parsed = JSON.parse(dryRunResult) as { fromRevision?: unknown };
-    const n = Number(parsed.fromRevision);
-    if (Number.isFinite(n)) fromRevision = n;
-  } catch {
-    // not JSON — leave it to the other paths
-  }
-  if (fromRevision === null || !timeline) return null;
+  const fromRevision = rolloutFromRevision(dryRunResult);
+  if (fromRevision === undefined || !timeline) return null;
   // ALL rollout kinds, not just spec-change: a restart is recorded too, and a live revision that
   // matches a recorded restart is not stale — "restart didn't help, roll it back" is the normal
   // case this must not refuse. specChangesOf stays the one used to pick the TARGET revision.
@@ -81,4 +86,17 @@ export function staleRollbackRefusal(proposal: Proposal, timeline: ChangeTimelin
   if (newest === null) return null;
   if (fromRevision === newest) return null;
   return `\`${namespace}/${name}\` is now at revision ${fromRevision}, past the timeline's newest recorded change (revision ${newest}) — the timeline is stale; re-investigate before rolling back.`;
+}
+
+// The approval card's dry-run line for a cluster-path rollback: the raw tool JSON cut at 400 chars
+// showed the approver a fragment of `diff`, so the card is built from its fields instead. An
+// empty diff is said out loud — diffPodTemplates compares containers only (image/env/args/
+// resources/probes), and a rollback that changes none of those changes something it cannot show.
+export function rollbackDryRunSummary(dryRunResult: string): string {
+  const d = JSON.parse(dryRunResult) as { fromRevision?: unknown; toRevision?: unknown; diff?: Array<{ field: string; from: string; to: string }> };
+  const diff = d.diff ?? [];
+  const lines = diff.length
+    ? diff.map((x) => `${x.field}: ${short(String(x.from), 120)} → ${short(String(x.to), 120)}`)
+    : ["no container image/env/args/resources/probes difference — the change is elsewhere in the pod template; review the ReplicaSets before approving"];
+  return [`revision ${d.fromRevision} → ${d.toRevision}`, ...lines].join("\n");
 }
