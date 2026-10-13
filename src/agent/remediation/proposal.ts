@@ -522,8 +522,13 @@ export const PROPOSAL_SYSTEM =
 export function buildProposalPrompt(labels: Record<string, string>, full: string): string {
   const rca = withoutRunbook(full);
   // head+tail, not head-only: long RCAs put the concrete fix in Recommended Actions at
-  // the END — a head-only slice cut it off and the model proposed nothing
-  const ctx = rca.length <= 4000 ? rca : `${rca.slice(0, 2500)}\n...[truncated]...\n${rca.slice(-1500)}`;
+  // the END — a head-only slice cut it off and the model proposed nothing.
+  // Thresholds raised (4000/2500/1500 -> 6000/4000/1500): the alert path's context is
+  // buildAlertProposalContext(timeline, memory, rca) — the capped timeline (<=1200) plus
+  // memory (<=1600) can run ~2800 chars BEFORE the RCA even starts, so a 2500-char head
+  // never reached the RCA's own head (Severity/TL;DR/Root Cause), only its tail did. 4000
+  // keeps the RCA head alive behind that prefix.
+  const ctx = rca.length <= 6000 ? rca : `${rca.slice(0, 4000)}\n...[truncated]...\n${rca.slice(-1500)}`;
   return (
     `An investigation just completed (alert-driven RCA, or a direct user request in Slack).\nAlert labels: ${JSON.stringify(labels)}\n\nContext:\n${ctx}\n\n` +
     'An explicit user request for one of these actions (e.g. "restart deployment X", "change the image tag to v1.2", "scale to 4 replicas") is sufficient on its own — propose it even without fault evidence; a human still approves it. An `Agent offered:` line that the user then approves ("ya", "iya", "ok", "oke", "yes", "lanjut", "gas", "go ahead", "do it") IS such a request, for exactly that action on exactly that object: the agent put it on the table, the human said yes, so propose it and do not re-judge whether it is needed — not even when the previous turn said the target looks healthy, because the person approving may know something the pod list does not show. Actions 6 and 7 are the exception: a request is never enough for them, because the user asking is not evidence that a workload is idle or that an object is abandoned — they are asking BECAUSE they are unsure. Those two need the tool result named beside them, in this context, or the answer is null. If the user gives only an image tag, keep the current image repository from the context and change only the tag.\n' +

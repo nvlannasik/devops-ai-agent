@@ -1110,3 +1110,22 @@ test("buildAlertProposalContext puts the timeline first, then memory, then the R
   assert.equal(buildAlertProposalContext("T", "M", "R"), "T\n\nM\n\n---\n\nR");
   assert.equal(buildAlertProposalContext("", "", "R"), "R");
 });
+
+// Residual finding, 2026-10-13: the alert path's timeline (capped 1200) + memory (<=1600) prefix
+// can run ~2800 chars before the RCA even starts, so buildProposalPrompt's old 2500-char head
+// never reached the RCA's own head (Severity/TL;DR/Root Cause) — only its tail survived.
+test("buildProposalPrompt keeps the RCA head behind the alert path's timeline + memory prefix", () => {
+  const lines = Array.from(
+    { length: 50 },
+    (_, i) => `- 2026-10-09T0${i % 10}:00:00Z Deployment/w${i} spec-change rev ${i}: w.env.K ${"v".repeat(40)} → ${"u".repeat(20)}`
+  );
+  const timeline = lines.join("\n");
+  const memory = "M".repeat(1600);
+  const head = "*📍 Root Cause*\nROOTCAUSE-MARKER ";
+  const tail = " RECOMMENDED-MARKER";
+  const rca = head + "x".repeat(5000 - head.length - tail.length) + tail;
+  const ctx = buildAlertProposalContext(timeline, memory, rca);
+  const prompt = buildProposalPrompt({}, ctx);
+  assert.ok(prompt.includes("ROOTCAUSE-MARKER"), "the RCA head must survive the timeline+memory prefix");
+  assert.ok(prompt.includes("RECOMMENDED-MARKER"), "the RCA tail (Recommended Actions) must still survive");
+});
