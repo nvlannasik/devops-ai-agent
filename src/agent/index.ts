@@ -4,6 +4,7 @@ import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
+import type { OpenIncident } from "./correlation/topology.js";
 import {
   alertsReadable,
   decideReconcile,
@@ -1499,9 +1500,17 @@ export class DevOpsAgent {
     threadTs?: string,
     /** The group's Alertmanager severity as the Slack card rendered it — see store(). */
     alertSeverity?: string | null,
-    changes?: ChangeTimeline | null
+    changes?: ChangeTimeline | null,
+    /** Cross-alert correlation (agent/correlation): subjects + child, passed straight through. */
+    opts?: { subjects?: string[]; child?: boolean }
   ): Promise<number | null> {
-    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes);
+    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes, opts);
+  }
+
+  // Open top-level incidents in `namespace` from the last `sinceMinutes` — the candidate set a
+  // new alert group is checked against for cross-alert correlation (agent/correlation).
+  openRelatable(namespace: string, sinceMinutes: number): Promise<OpenIncident[]> {
+    return this.incidents.openRelatable(namespace, sinceMinutes);
   }
 
   // Everything below runs inside the trace context so outbound SQS requests carry the

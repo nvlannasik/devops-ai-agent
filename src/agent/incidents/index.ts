@@ -4,6 +4,14 @@ import { parseConfidence } from "../confidence/index.js";
 import { cleanDeep } from "../trace/index.js";
 import { SEVERITY_PATTERN } from "../../utils/slack/blocks.js";
 import logger from "../../utils/logger/index.js";
+import type { OpenIncident } from "../correlation/topology.js";
+
+// A child row (agent/correlation) shares its parent's thread_ts but is never itself a parent
+// and never surfaces in recall — it IS the parent's investigation, re-filed under the same
+// thread with a different root cause. An unlinked child (stored while its parent investigation
+// was still in flight) is known by its rca prefix ("Merged into …") rather than by parent_id,
+// which is why both halves of this filter are needed, not just `parent_id IS NULL`.
+export const TOP_LEVEL = "parent_id IS NULL AND rca NOT LIKE 'Merged into%'";
 
 // How many distinct stemmed terms an old root cause must share with the current alert
 // before it is worth showing. 1 is noise — every Kubernetes alert shares *some* word with
@@ -98,7 +106,7 @@ export class IncidentMemory {
       this.pool.query(
         `SELECT created_at, severity, assessed_severity, confidence, root_cause
            FROM incidents
-          WHERE alertname = $1 AND ($2::text IS NULL OR namespace = $2)
+          WHERE alertname = $1 AND ($2::text IS NULL OR namespace = $2) AND ${TOP_LEVEL}
           ORDER BY created_at DESC
           LIMIT $3`,
         [alertname, namespace, limit]
@@ -202,6 +210,7 @@ export class IncidentMemory {
              FROM incidents i, q
             WHERE i.root_cause_tsv @@ q.tsq
               AND NOT (i.alertname = $2 AND ($3::text IS NULL OR i.namespace = $3))
+              AND i.parent_id IS NULL AND i.rca NOT LIKE 'Merged into%'
          )
          SELECT * FROM cand WHERE overlap >= $4 ORDER BY overlap DESC, created_at DESC LIMIT $5`,
         [terms, alertname, namespace, MIN_OVERLAP, limit]
@@ -241,11 +250,13 @@ export class IncidentMemory {
     }
   }
 
-  // Map a Slack thread back to its incident (threads are linked since migration 002).
+  // Map a Slack thread back to its incident (threads are linked since migration 002). The
+  // TOP_LEVEL filter is what makes this the PARENT'S id when the thread also holds children —
+  // feedback and remediation link to the investigation, not to a merged-in child row.
   async findIncidentByThread(channel: string, threadTs: string): Promise<number | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
-      `SELECT id FROM incidents WHERE channel = $1 AND thread_ts = $2 ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id FROM incidents WHERE channel = $1 AND thread_ts = $2 AND ${TOP_LEVEL} ORDER BY created_at DESC LIMIT 1`,
       [channel, threadTs]
     );
     return rows.length > 0 ? Number(rows[0].id) : null;
@@ -265,7 +276,7 @@ export class IncidentMemory {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
       `SELECT alertname, namespace FROM incidents
-         WHERE channel = $1 AND thread_ts = $2 ORDER BY created_at DESC LIMIT 1`,
+         WHERE channel = $1 AND thread_ts = $2 AND ${TOP_LEVEL} ORDER BY created_at DESC LIMIT 1`,
       [channel, threadTs]
     );
     if (rows.length === 0) return null;
@@ -315,15 +326,27 @@ export class IncidentMemory {
     alertSeverity?: string | null,
     /** The change timeline (agent/changes) assembled before the investigation — null/undefined
      *  when there was no namespace to scope it to, or no GitOps bridge configured. */
-    changes?: unknown
+    changes?: unknown,
+    /** `subjects`: the service-level identity (agent/correlation) this incident is matched on —
+     *  stored so a later group can be recognised as "the same service, again". `child: true`
+     *  means this row is a merge into an already-open incident on the same thread: its
+     *  `parent_id` is resolved from the thread's TOP_LEVEL row rather than passed in, because
+     *  the caller knows the thread, not the id. */
+    opts?: { subjects?: string[]; child?: boolean }
   ): Promise<number | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
     if (!alertname) return null;
     try {
+      // For a child, $8/$9 are the same channel/thread_ts params already bound below — the
+      // subquery finds the thread's current top-level (non-child) row to parent onto. For a
+      // non-child, parent_id is always NULL: a store never arrives already knowing its parent.
+      const parentIdExpr = opts?.child
+        ? `(SELECT id FROM incidents WHERE channel = $8 AND thread_ts = $9 AND ${TOP_LEVEL} ORDER BY id LIMIT 1)`
+        : "NULL";
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
+        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes, subjects, parent_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, ${parentIdExpr})
          RETURNING id`,
         [
           alertname,
@@ -348,16 +371,65 @@ export class IncidentMemory {
           // Same cleaner the trace recorder uses before its jsonb writes: a commit message cut
           // mid-emoji upstream can carry a lone surrogate or \u0000, and jsonb rejects either.
           changes ? JSON.stringify(cleanDeep(changes)) : null,
+          opts?.subjects ? JSON.stringify(opts.subjects) : null,
         ]
       );
       const id = Number(rows[0].id);
       // fire-and-forget: links this investigation's llm_usage rows to the incident they
       // produced. Best-effort by contract — see UsageStore.
       if (slack?.threadTs) this.onStored?.(id, slack.threadTs);
+      // A child never anchors a thread, so it never links anything. A non-child INSERT, by
+      // contrast, may have just landed on a thread that already carries unlinked children —
+      // rows merged while this investigation was still open, so they predate this row and
+      // could not name it as their parent at insert time. Link them now. Best-effort: a
+      // dangling child (still carrying its "Merged into…" rca) is still excluded from recall
+      // by TOP_LEVEL, so a failed link here costs nothing but the parent_id column.
+      if (!opts?.child && id && slack?.channel && slack?.threadTs) {
+        try {
+          await this.pool.query(
+            `UPDATE incidents SET parent_id = $1 WHERE channel = $2 AND thread_ts = $3 AND id <> $1 AND parent_id IS NULL AND rca LIKE 'Merged into%'`,
+            [id, slack.channel, slack.threadTs]
+          );
+        } catch (err) {
+          logger.error(`[incidents] linking unlinked children on thread ${slack.threadTs} failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
       return id;
     } catch (err) {
       logger.error(`[incidents] store failed: ${err instanceof Error ? err.message : err}`);
       return null;
+    }
+  }
+
+  // Open top-level incidents in a namespace within the last `sinceMinutes` — the candidate set
+  // Task 3's relatability check matches a new alert group against (same service, or one call
+  // edge away). TOP_LEVEL excludes children: a child IS the match already made, not a fresh
+  // candidate to match again. Fails open to [] — no candidates reads as "no correlation found",
+  // which is today's (pre-correlation) behaviour.
+  async openRelatable(namespace: string, sinceMinutes: number): Promise<OpenIncident[]> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT id, channel, thread_ts, alertname, namespace, subjects, created_at
+           FROM incidents
+          WHERE namespace = $1 AND resolved_at IS NULL AND ${TOP_LEVEL}
+            AND created_at > now() - ($2::int * interval '1 minute')
+          ORDER BY created_at DESC LIMIT 20`,
+        [namespace, sinceMinutes]
+      );
+      return rows.map((r: Record<string, any>) => ({
+        id: Number(r.id),
+        channel: r.channel,
+        threadTs: r.thread_ts,
+        alertname: r.alertname,
+        namespace: r.namespace,
+        subjects: r.subjects ?? [],
+        startedAt: r.created_at instanceof Date ? r.created_at.getTime() : Date.parse(r.created_at),
+        resolved: false,
+      }));
+    } catch (err) {
+      logger.error(`[incidents] openRelatable failed: ${err instanceof Error ? err.message : err}`);
+      return [];
     }
   }
 
@@ -471,7 +543,7 @@ export class IncidentMemory {
   async changesForThread(threadTs: string): Promise<unknown | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
-      `SELECT changes FROM incidents WHERE thread_ts = $1 AND changes IS NOT NULL ORDER BY id DESC LIMIT 1`,
+      `SELECT changes FROM incidents WHERE thread_ts = $1 AND changes IS NOT NULL AND ${TOP_LEVEL} ORDER BY id DESC LIMIT 1`,
       [threadTs]
     );
     return rows[0]?.changes ?? null;

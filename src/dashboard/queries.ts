@@ -4,6 +4,7 @@ import { config } from "../config/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DEFAULT_RANGE, PAGE_SIZE, type Filters, type Range } from "./filters.js";
 import type { ChangeTimeline } from "../agent/changes/index.js";
+import { TOP_LEVEL } from "../agent/incidents/index.js";
 
 export interface IncidentRow {
   id: number; created_at: Date; resolved_at: Date | null;
@@ -637,7 +638,11 @@ export class DashboardQueries {
         `SELECT e.thread_ts, e.outcome, e.payload->>'detail' AS detail, e.created_at, i.id AS incident_id
            FROM agent_events e
            LEFT JOIN LATERAL (
-             SELECT id FROM incidents WHERE thread_ts = split_part(e.thread_ts, '/', 1) ORDER BY id DESC LIMIT 1
+             -- TOP_LEVEL: a child row shares its parent's thread_ts, so without this a gate
+             -- event could map to a merged-in child instead of the investigation it belongs to.
+             SELECT id FROM incidents
+              WHERE thread_ts = split_part(e.thread_ts, '/', 1) AND ${TOP_LEVEL}
+              ORDER BY id DESC LIMIT 1
            ) i ON true
           WHERE e.kind = 'gate' AND e.name = $1 AND e.payload->>'source' = 'prod'
           ORDER BY e.created_at DESC, e.id DESC LIMIT 100`,
@@ -694,6 +699,9 @@ export class DashboardQueries {
          FROM incident_feedback f
          JOIN incidents i ON i.id = f.incident_id
         WHERE i.thread_ts = $1
+          -- TOP_LEVEL (agent/incidents/index.ts): feedback belongs to the investigation, not a
+          -- merged-in child row sharing the same thread.
+          AND i.parent_id IS NULL AND i.rca NOT LIKE 'Merged into%'
         ORDER BY f.created_at LIMIT 20`,
       [threadTs]
     );

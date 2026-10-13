@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { IncidentMemory, parseSeverity, extractRootCause, queryTerms } from "./index.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { IncidentMemory, parseSeverity, extractRootCause, queryTerms, TOP_LEVEL } from "./index.js";
 
 const SAMPLE_RCA = [
   "🔴 *Critical Severity Incident*",
@@ -51,10 +53,12 @@ test("recall/store are safe no-ops when Postgres is disabled (pool=null)", async
 });
 
 test("store returns the inserted id and persists the Slack thread link", async () => {
-  let captured: { sql: string; params: unknown[] } | null = null;
+  // A non-child store issues a second query (the best-effort linking UPDATE), so every call
+  // is captured and the INSERT is picked out by its own marker rather than "the last call".
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
   const fakePool = {
     query: async (sql: string, params: unknown[]) => {
-      captured = { sql, params };
+      calls.push({ sql, params });
       return { rows: [{ id: "42" }] }; // pg returns BIGSERIAL as string
     },
   } as any;
@@ -62,11 +66,15 @@ test("store returns the inserted id and persists the Slack thread link", async (
 
   const id = await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, { channel: "C123", threadTs: "1720.99" });
   assert.equal(id, 42);
-  assert.match(captured!.sql, /RETURNING id/);
+  const insert = calls.find((c) => /RETURNING id/.test(c.sql))!;
   // channel, thread_ts, the group identity the dedup claim was taken under (without that
-  // one nothing outside the resolved webhook can release the claim), and the change timeline
-  // (null here — no changes argument was passed)
-  assert.deepEqual(captured!.params.slice(-4), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null]);
+  // one nothing outside the resolved webhook can release the claim), the change timeline
+  // (null here — no changes argument was passed), and subjects (null — no opts passed)
+  assert.deepEqual(insert.params.slice(-5), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null, null]);
+  // a non-child store with a Slack thread links that thread's unlinked children — best-effort,
+  // and here a no-op since the fake pool has no real rows to match.
+  const update = calls.find((c) => c !== insert)!;
+  assert.match(update.sql, /UPDATE incidents SET parent_id = \$1/);
 });
 
 test("store: a lone surrogate or \\u0000 in `changes` is cleaned before the jsonb INSERT, so the row is still written", async () => {
@@ -112,6 +120,188 @@ test("store does NOT fire onStored without a Slack thread — nothing to link", 
 
   assert.equal(id, 42);
   assert.deepEqual(calls, []);
+});
+
+// --- subjects, children, parent linking (migrations/013) --------------------------------
+
+test("store(..., { subjects }) passes JSON.stringify(subjects) as a param and the INSERT names the column", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [{ id: "42" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, undefined, undefined, undefined, { subjects: ["orders-api"] });
+  const insert = calls.find((c) => /RETURNING id/.test(c.sql))!;
+  assert.match(insert.sql, /subjects/);
+  assert.ok(insert.params.includes(JSON.stringify(["orders-api"])));
+});
+
+test("store(..., { child: true }) makes parent_id a subquery over the same channel/thread_ts, gated by TOP_LEVEL, and never links children", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [{ id: "99" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  await mem.store(
+    { alertname: "X", namespace: "ns" },
+    SAMPLE_RCA,
+    { channel: "C123", threadTs: "1720.99" },
+    undefined,
+    undefined,
+    { child: true }
+  );
+  assert.equal(calls.length, 1, "a child store never issues the linking UPDATE");
+  assert.match(calls[0]!.sql, /parent_id/);
+  assert.match(calls[0]!.sql, /rca NOT LIKE 'Merged into%'/);
+});
+
+test("a non-child store that returns an id links that thread's unlinked children", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [{ id: "42" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, { channel: "C123", threadTs: "1720.99" });
+  const update = calls.find((c) => /UPDATE incidents SET parent_id/.test(c.sql))!;
+  assert.equal(
+    update.sql.replace(/\s+/g, " ").trim(),
+    "UPDATE incidents SET parent_id = $1 WHERE channel = $2 AND thread_ts = $3 AND id <> $1 AND parent_id IS NULL AND rca LIKE 'Merged into%'"
+  );
+  assert.deepEqual(update.params, [42, "C123", "1720.99"]);
+});
+
+test("openRelatable queries open top-level incidents in a namespace within the window", async () => {
+  let captured: { sql: string; params: unknown[] } | null = null;
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      captured = { sql, params };
+      return {
+        rows: [
+          {
+            id: "5",
+            channel: "C1",
+            thread_ts: "100.1",
+            alertname: "HighErrorRate",
+            namespace: "sample-apps",
+            subjects: ["orders-api"],
+            created_at: "2026-10-13T00:00:00.000Z",
+          },
+          {
+            id: "6",
+            channel: "C2",
+            thread_ts: "100.2",
+            alertname: "HighLatency",
+            namespace: "sample-apps",
+            subjects: null,
+            created_at: new Date("2026-10-13T00:00:00.000Z"),
+          },
+        ],
+      };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  const out = await mem.openRelatable("sample-apps", 30);
+  assert.match(captured!.sql, /resolved_at IS NULL/);
+  assert.match(captured!.sql, /parent_id IS NULL AND rca NOT LIKE 'Merged into%'/);
+  assert.match(captured!.sql, /namespace = \$1/);
+  assert.deepEqual(captured!.params, ["sample-apps", 30]);
+  assert.deepEqual(out, [
+    {
+      id: 5,
+      channel: "C1",
+      threadTs: "100.1",
+      alertname: "HighErrorRate",
+      namespace: "sample-apps",
+      subjects: ["orders-api"],
+      startedAt: Date.parse("2026-10-13T00:00:00.000Z"),
+      resolved: false,
+    },
+    {
+      id: 6,
+      channel: "C2",
+      threadTs: "100.2",
+      alertname: "HighLatency",
+      namespace: "sample-apps",
+      subjects: [],
+      startedAt: Date.parse("2026-10-13T00:00:00.000Z"),
+      resolved: false,
+    },
+  ]);
+});
+
+test("openRelatable returns [] on error without throwing", async () => {
+  const mem = new IncidentMemory({ query: async () => { throw new Error("boom"); } } as any);
+  assert.deepEqual(await mem.openRelatable("sample-apps", 30), []);
+});
+
+test("TOP_LEVEL excludes children: a merged incident is never a parent, never recalled", () => {
+  assert.equal(TOP_LEVEL, "parent_id IS NULL AND rca NOT LIKE 'Merged into%'");
+});
+
+test("findIncidentByThread carries the TOP_LEVEL filter", async () => {
+  let captured = "";
+  const mem = new IncidentMemory({ query: async (sql: string) => ((captured = sql), { rows: [] }) } as any);
+  await mem.findIncidentByThread("C1", "111.22");
+  assert.match(captured, /parent_id IS NULL AND rca NOT LIKE 'Merged into%'/);
+});
+
+test("threadAlertIdentity carries the TOP_LEVEL filter", async () => {
+  let captured = "";
+  const mem = new IncidentMemory({ query: async (sql: string) => ((captured = sql), { rows: [] }) } as any);
+  await mem.threadAlertIdentity("C1", "111.22");
+  assert.match(captured, /parent_id IS NULL AND rca NOT LIKE 'Merged into%'/);
+});
+
+test("changesForThread carries the TOP_LEVEL filter", async () => {
+  let captured = "";
+  const mem = new IncidentMemory({ query: async (sql: string) => ((captured = sql), { rows: [] }) } as any);
+  await mem.changesForThread("111.22");
+  assert.match(captured, /parent_id IS NULL AND rca NOT LIKE 'Merged into%'/);
+});
+
+test("recall's hypothesis query carries the TOP_LEVEL filter", async () => {
+  const seen: string[] = [];
+  const fakePool = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      return { rows: [] };
+    },
+  } as any;
+  await new IncidentMemory(fakePool).recall({ alertname: "X", namespace: "ns" });
+  const hypo = seen.find((s) => s.includes("FROM incidents") && !s.includes("incident_feedback"))!;
+  assert.match(hypo, /parent_id IS NULL AND rca NOT LIKE 'Merged into%'/);
+});
+
+test("recallSimilar's cand CTE carries the TOP_LEVEL filter, aliased", async () => {
+  let captured = "";
+  const fakePool = {
+    query: async (sql: string) => {
+      if (sql.includes("root_cause_tsv")) captured = sql;
+      return { rows: [] };
+    },
+  } as any;
+  await new IncidentMemory(fakePool).recall({ alertname: "X" }, { queryText: "memory limit exceeded value" });
+  assert.match(captured, /i\.parent_id IS NULL AND i\.rca NOT LIKE 'Merged into%'/);
+});
+
+test("migration 013 adds subjects and parent_id idempotently", () => {
+  const path = fileURLToPath(new URL("../../../migrations/013_incident_correlation.sql", import.meta.url));
+  const sql = readFileSync(path, "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS subjects jsonb/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS parent_id integer REFERENCES incidents\(id\)/);
 });
 
 test("recall returns '' without an alertname to key on", async () => {
