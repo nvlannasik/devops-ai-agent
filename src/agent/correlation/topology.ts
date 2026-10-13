@@ -17,11 +17,29 @@ const CACHE_MS = 5 * 60_000;
 const TIMEOUT_MS = 3_000;
 
 export function parseCallGraph(promResult: string): CallGraph | null {
-  let p: { status?: string; data?: { resultType?: string; result?: Array<{ metric?: Record<string, string> }> } };
+  let p: unknown;
   try { p = JSON.parse(promResult); } catch { return null; }
-  if (p.status !== "success" || p.data?.resultType !== "vector" || !Array.isArray(p.data.result)) return null;
+
+  // The real shape from prometheus_query MCP tool: resultType and result at top level.
+  // Defensively also accept the envelope form if it exists.
+  const obj = (p as any);
+  let resultType: string | undefined;
+  let result: Array<{ metric?: Record<string, string> }> | undefined;
+
+  if (obj.resultType === "vector" && Array.isArray(obj.result)) {
+    // Real shape: top-level resultType/result
+    resultType = obj.resultType;
+    result = obj.result;
+  } else if (obj.status === "success" && obj.data?.resultType === "vector" && Array.isArray(obj.data.result)) {
+    // Envelope form: nested under status/data
+    resultType = obj.data.resultType;
+    result = obj.data.result;
+  }
+
+  if (resultType !== "vector" || !result) return null;
+
   const g: CallGraph = {};
-  for (const s of p.data.result) {
+  for (const s of result) {
     const { namespace, service, peer } = s.metric ?? {};
     if (!namespace || !service || !peer || service === peer) continue;
     (g[namespace] ??= []).push({ from: service, to: peer });
