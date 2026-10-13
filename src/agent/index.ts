@@ -1393,6 +1393,12 @@ export class DevOpsAgent {
     return this.mcp.callTool("k8s_cluster_inventory", { detail: true });
   }
 
+  /** Direct MCP access for callers outside the agentic loop — e.g. cross-alert correlation's
+   * service-graph query (app/index.ts), which needs one tool call and no investigation. */
+  callTool(name: string, input: Record<string, unknown>): Promise<string> {
+    return this.mcp.callTool(name, input);
+  }
+
   mcpTools(): ToolDefinition[] {
     return this.mcp.getTools();
   }

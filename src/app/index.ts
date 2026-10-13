@@ -10,6 +10,7 @@ import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, buildAlertProposalContext, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
+import { serviceGraph, relatedIncident, describeVia, type OpenIncident } from "../agent/correlation/topology.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken, slackUserAllowed } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter, type Block } from "../utils/slack/blocks.js";
@@ -174,8 +175,15 @@ export class SlackApp {
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private readonly threadQueue = new ThreadQueue();
   private readonly inFlight = new InFlightWork<Accepted>();
-  /** Alert threads whose incident is not stored yet, and a resolve that arrived for one meanwhile — see handleResolvedAlert. */
-  private readonly unstored = new Map<string, { key: string; resolved?: AlertItem[] }>();
+  /**
+   * Alert threads whose incident is not stored yet, and a resolve that arrived for one meanwhile
+   * — see handleResolvedAlert. Also doubles as the in-flight half of correlate()'s candidate set:
+   * an incident not stored yet is still an open incident another alert can be merged into.
+   */
+  private readonly unstored = new Map<
+    string,
+    { key: string; resolved?: AlertItem[]; channel?: string; namespace?: string; subjects?: string[]; startedAt?: number; alertname?: string }
+  >();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -675,6 +683,81 @@ export class SlackApp {
     }
   }
 
+  // Cross-group correlation (agent/correlation/topology.ts, spec 2026-10-13). True = this alert
+  // was merged into an open incident's thread and is fully handled; false = take today's path.
+  // Fail open at every step: no subject, no graph, no match, or a failed post all return false,
+  // so an alert is never lost to correlation.
+  // ponytail: in-flight parents are this process's `unstored` map only — a related alert landing
+  // on another replica before the parent's row is stored opens its own thread, as before.
+  private async correlate(
+    channel: string,
+    groupLabels: Record<string, string>,
+    firing: AlertItem[],
+    issueText: string,
+    alertSeverity: string | null
+  ): Promise<boolean> {
+    const namespace = groupLabels.namespace;
+    const subjects = distinctSubjects(firing)?.values ?? [];
+    if (!namespace || subjects.length === 0) return false;
+    const graph = await serviceGraph((n, i) => this.agent.callTool(n, i));
+    if (!graph) return false;
+    const inFlight: OpenIncident[] = [...this.unstored.entries()]
+      .filter(([, u]) => u.namespace && u.startedAt !== undefined)
+      .map(([threadTs, u]) => ({
+        threadTs,
+        channel: u.channel ?? channel,
+        alertname: u.alertname ?? "",
+        namespace: u.namespace!,
+        subjects: u.subjects ?? [],
+        startedAt: u.startedAt!,
+        resolved: !!u.resolved,
+      }));
+    const stored = await this.agent.openRelatable(namespace, 30).catch(() => [] as OpenIncident[]);
+    const seen = new Set(inFlight.map((c) => c.threadTs));
+    const startsAt = Math.min(...firing.map((a) => Date.parse(a.startsAt ?? "")).filter(Number.isFinite), Date.now());
+    const rel = relatedIncident({ namespace, subjects, startsAt }, [...inFlight, ...stored.filter((s) => !seen.has(s.threadTs))], graph);
+    if (!rel) return false;
+    const alertName = groupLabels.alertname ?? firing[0]?.labels.alertname ?? "Unknown";
+    const via = describeVia(rel.via);
+    try {
+      await this.app.client.chat.postMessage({
+        channel: rel.incident.channel,
+        thread_ts: rel.incident.threadTs,
+        text: `🔗 *Related alert* — ${alertName} on \`${subjects.join("`, `")}\` (${via}) · grouped into this incident\n\n${issueText}`,
+        mrkdwn: true,
+      });
+    } catch (err) {
+      logger.warn(`[correlation] could not post ${alertName} into thread ${rel.incident.threadTs} — taking the normal path: ${errDetail(err)}`);
+      return false;
+    }
+    logger.info(`[correlation] ${alertName} (${subjects.join(",")}) merged into thread ${rel.incident.threadTs} via ${via}`);
+    await this.agent
+      .storeIncident(groupLabels, `Merged into the incident in this thread (${via}).`, rel.incident.channel, rel.incident.threadTs, alertSeverity, null, {
+        subjects,
+        child: true,
+      })
+      .catch((e) => logger.error(`[correlation] child incident store failed for ${alertName}: ${errDetail(e)}`));
+    const question = `Related alert ${alertName} fired on ${subjects.join(", ")} (${via}) while this incident was open. Does it fit the root cause already found? Check only what you need to say so, and say plainly if it looks like a separate problem.`;
+    void this.threadQueue.run(rel.incident.threadTs, async () => {
+      try {
+        const reply = toMrkdwn(
+          await withRoute("light", () =>
+            this.agent.investigate(rel.incident.threadTs, question, {
+              mode: "conversation",
+              ...mentionBudget(question, { mention: config.mentionToolRounds, tour: config.tourToolRounds }),
+            })
+          )
+        );
+        for (const part of splitForSlack(reply)) {
+          await this.app.client.chat.postMessage({ channel: rel.incident.channel, thread_ts: rel.incident.threadTs, text: part, mrkdwn: true });
+        }
+      } catch (err) {
+        logger.error(`[correlation] follow-up for ${alertName} in thread ${rel.incident.threadTs} failed: ${errDetail(err)}`);
+      }
+    });
+    return true;
+  }
+
   private async handleAlert(payload: AlertmanagerPayload): Promise<void> {
     const channel = config.slack.alertChannel;
     if (!channel) { logger.warn("SLACK_ALERT_CHANNEL not set, skipping"); return; }
@@ -710,6 +793,16 @@ export class SlackApp {
 
     const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
 
+    // Cross-alert correlation: a related alert joins the open incident's thread instead of
+    // opening its own. Checked before the new thread is posted — a merge needs no thread at all.
+    if (
+      await this.correlate(channel, groupLabels, firing, issueText, alertSeverity).catch((e) => {
+        logger.warn(`[correlation] failed, taking the normal path: ${errDetail(e)}`);
+        return false;
+      })
+    )
+      return;
+
     // Post the alert + investigating notice up front so it shows in Slack immediately.
     // The dedup claim above is already taken at this point: if posting throws
     // (channel_not_found, not_in_channel, invalid_auth, rate limit) the claim would sit
@@ -743,6 +836,8 @@ export class SlackApp {
     const changeScope = {
       alertAt: new Date(Math.min(...firing.map((a) => Date.parse(a.startsAt ?? "")).filter(Number.isFinite), Date.now())),
       subjects: [...(subjects?.values ?? []), ...firing.map((a) => a.labels.pod).filter((p): p is string => !!p)],
+      /** Service-level only (never pod names) — threaded into storeIncident's correlation opts. */
+      serviceSubjects: subjects?.values ?? [],
     };
     const hint = delegationHint(subjects, config.subagents);
     // Logged whether or not it fires. A hint that returns "" left no trace at all, so "the model
@@ -755,7 +850,14 @@ export class SlackApp {
     );
     // Same queue as the mentions: a repeat alert on a thread someone is already talking in
     // must not interleave with that conversation.
-    this.unstored.set(threadId, { key: incidentKey(groupLabels) });
+    this.unstored.set(threadId, {
+      key: incidentKey(groupLabels),
+      channel,
+      namespace: groupLabels.namespace,
+      subjects: changeScope.serviceSubjects,
+      startedAt: changeScope.alertAt.getTime(),
+      alertname: alertName,
+    });
     void this.inFlight.track(
       { channel, threadTs: threadId, kind: "alert" },
       this.threadQueue.run(threadId, () =>
@@ -833,7 +935,7 @@ export class SlackApp {
      */
     alertSeverity: string | null,
     /** The window + subjects the change timeline (agent/changes) is scoped to for this group. */
-    changeScope: { alertAt: Date; subjects: string[] },
+    changeScope: { alertAt: Date; subjects: string[]; serviceSubjects: string[] },
     /** ts of the "Auto-investigating" notice, updated in place with per-round progress. */
     noticeTs?: string
   ): Promise<void> {
@@ -936,7 +1038,7 @@ export class SlackApp {
         }
       }
       await this.agent.markRcaSent(threadId);
-      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId, alertSeverity, changes).catch((e) => {
+      const incidentId = await this.agent.storeIncident(labels, rca, channel, threadId, alertSeverity, changes, { subjects: changeScope.serviceSubjects }).catch((e) => {
         logger.error(`[slack] failed to store incident for thread ${threadId}: ${errDetail(e)}`);
         return null;
       });
