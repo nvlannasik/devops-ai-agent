@@ -2,7 +2,8 @@
 // alertname+namespace), so every alert in the payload shares a root cause. Investigate the
 // group ONCE instead of spawning N threads / N investigations / N remediation cards for N
 // crashlooping pods. We deliberately do NOT correlate across different alertnames/webhooks
-// here (that heuristic risks merging unrelated incidents — YAGNI until it's shown to hurt).
+// here (that heuristic risks merging unrelated incidents — YAGNI until it's shown to hurt):
+// that is `topology.ts`, by the live call graph, never by names.
 
 export interface AlertItem {
   status?: "firing" | "resolved";

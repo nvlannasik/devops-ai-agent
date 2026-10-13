@@ -6,7 +6,7 @@ import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageW
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
-import type { IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
+import type { ChildIncident, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, Tokens } from "./queries.js";
 import type { Topology } from "./topology.js";
 import { buildGraph } from "./topology-graph.js";
 import type { ContextView } from "./context.js";
@@ -111,6 +111,66 @@ test("detailPage URL-encodes channel/thread_ts so an embedded # cannot inject a 
   const html = detailPage({ incident, remediations: [], feedback: [] });
   assert.doesNotMatch(html, /message_ts=1785282508\.001#evil/);
   assert.match(html, /message_ts=1785282508\.001%23evil/);
+});
+
+// Cross-alert correlation (Task 4): a parent's "Related alerts" section — the dashboard's view
+// of the children correlate() files under the same thread (agent/correlation).
+test("detailPage renders Related alerts with a link and the escaped alertname when there are children", () => {
+  const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null };
+  const html = detailPage({
+    incident,
+    remediations: [],
+    feedback: [],
+    children: [
+      {
+        id: 9,
+        alertname: "SampleAppHighErrorRate",
+        subjects: ["checkout-gateway"],
+        created_at: new Date("2026-10-13T10:05:00Z"),
+        resolved_at: null,
+      } satisfies ChildIncident,
+    ],
+  });
+  assert.match(html, /Related alerts/);
+  assert.match(html, /href="\/incidents\/9"/);
+  // breakable() inserts <wbr> at CamelCase humps (same as the incident list's own alertname
+  // links), so the assertion tolerates it rather than asserting the literal unbroken string.
+  assert.match(html, /Sample(<wbr>)?App(<wbr>)?High(<wbr>)?Error(<wbr>)?Rate/);
+});
+
+test("detailPage escapes a child's alertname in Related alerts", () => {
+  const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null };
+  const html = detailPage({
+    incident,
+    remediations: [],
+    feedback: [],
+    children: [
+      { id: 9, alertname: "<b>X</b>", subjects: [], created_at: new Date("2026-10-13T10:05:00Z"), resolved_at: null },
+    ],
+  });
+  assert.doesNotMatch(html, /<b>X<\/b>/);
+  assert.match(html, /&lt;b&gt;X&lt;\/b&gt;/);
+});
+
+test("detailPage renders no Related alerts section when there are no children", () => {
+  const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null };
+  assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /Related alerts/);
+  assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [], children: [] }), /Related alerts/);
+});
+
+test("detailPage renders Merged into #N for a child incident, linking to the parent", () => {
+  const incident: IncidentDetail = {
+    ...row, rca: "Merged into the incident in this thread (checkout-gateway).",
+    channel: null, thread_ts: null, parent_id: 5,
+  };
+  const html = detailPage({ incident, remediations: [], feedback: [] });
+  assert.match(html, /Merged into #5/);
+  assert.match(html, /href="\/incidents\/5"/);
+});
+
+test("detailPage omits the Merged into line for a top-level incident", () => {
+  const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null, parent_id: null };
+  assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /Merged into/);
 });
 
 test("listPage keeps the active filters in the form and in the pager link", () => {

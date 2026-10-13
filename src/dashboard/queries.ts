@@ -38,6 +38,22 @@ export interface IncidentDetail extends IncidentRow {
   rca: string; channel: string | null; thread_ts: string | null;
   /** The change timeline collected before the investigation (agent/changes, migrations/012). */
   changes?: ChangeTimeline | null;
+  /** Set when this row is a child, merged into another incident's thread (agent/correlation,
+   *  migrations/013). Null/absent for a top-level incident. See TOP_LEVEL in agent/incidents. */
+  parent_id?: number | null;
+}
+
+/**
+ * A related alert group that correlate() filed as a CHILD of this incident — same Slack thread,
+ * `rca` starting "Merged into…" (agent/correlation). `subjects` is the service-level identity it
+ * was matched on, the same field `distinctSubjects()` fills on the parent.
+ */
+export interface ChildIncident {
+  id: number;
+  alertname: string;
+  subjects: string[];
+  created_at: Date;
+  resolved_at: Date | null;
 }
 // `status` and `verdict` are two different facts and the page must never merge them.
 //
@@ -521,13 +537,13 @@ export class DashboardQueries {
       // filtered on the primary key, so this is already at most one row — the LIMIT
       // is redundant but present for the same reason as the totals query above.
       `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence,
-              root_cause, rca, channel, thread_ts, changes
+              root_cause, rca, channel, thread_ts, changes, parent_id
          FROM incidents WHERE id = $1
         LIMIT 1`,
       [id]
     );
     if (rows.length === 0) return null;
-    const [remediations, feedback, timeline, usage] = await Promise.all([
+    const [remediations, feedback, timeline, usage, children] = await Promise.all([
       this.pool.query(
         // LEFT JOIN, not an inner one: a remediation that was proposed and never approved has
         // no check, and a remediation approved seconds ago has one that has not run. Both must
@@ -563,6 +579,9 @@ export class DashboardQueries {
           GROUP BY 1, 2 ORDER BY 1 LIMIT 20`,
         [id, rows[0].thread_ts ?? null]
       ),
+      // Related alerts correlate() filed as children of THIS row (agent/correlation). Never the
+      // other direction — a child's own detail page does not list its siblings.
+      this.children(id),
     ]);
     return {
       incident: rows[0] as IncidentDetail,
@@ -573,7 +592,27 @@ export class DashboardQueries {
         backend: String(r.backend), model: String(r.model), calls: num(r.calls),
         input: num(r.input), output: num(r.output), cacheRead: num(r.cache_read), cacheCreation: num(r.cache_creation),
       })),
+      children,
     };
+  }
+
+  /** Children of incident `parentId` — related alerts correlate() merged into its thread. */
+  async children(parentId: number): Promise<ChildIncident[]> {
+    if (!this.pool) return [];
+    // LIMIT 50, same cap as the remediations/feedback lists beside it on this page — every
+    // query this module emits carries one (queries.test.ts enforces it mechanically).
+    const { rows } = await this.pool.query(
+      `SELECT id, alertname, subjects, created_at, resolved_at FROM incidents
+        WHERE parent_id = $1 ORDER BY created_at LIMIT 50`,
+      [parentId]
+    );
+    return rows.map((r) => ({
+      id: num(r.id),
+      alertname: String(r.alertname),
+      subjects: r.subjects ?? [],
+      created_at: r.created_at,
+      resolved_at: r.resolved_at ?? null,
+    }));
   }
 
   async harness(): Promise<HarnessView> {

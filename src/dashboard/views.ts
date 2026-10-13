@@ -17,7 +17,7 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens, TokenLine,
+  ChildIncident, FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens, TokenLine,
 } from "./queries.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
@@ -101,6 +101,13 @@ const ICON = {
   // stays remediation's (src/dashboard/CLAUDE.md: "a glyph repeats only where the meaning does").
   changes: ico(
     `<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>`
+  ),
+  // Related alerts (agent/correlation): a chain link, new on this page — nothing else here
+  // means "another incident merged into this one", so no existing glyph fits.
+  link: ico(
+    `<path d="M9.5 14.5 14.5 9.5"/>` +
+      `<path d="M11 6.2 13 4.2a3.4 3.4 0 0 1 4.8 4.8l-2 2"/>` +
+      `<path d="M13 17.8 11 19.8a3.4 3.4 0 0 1-4.8-4.8l2-2"/>`
   ),
 };
 
@@ -1002,6 +1009,8 @@ export function detailPage(
     timeline?: TimelineEvent[];
     /** llm_usage for this incident, per backend and model. */
     usage?: TokenLine[];
+    /** Related alerts correlate() merged into this incident's thread (agent/correlation). */
+    children?: ChildIncident[];
   },
   now: Date = new Date(),
   openIncidents?: number,
@@ -1095,6 +1104,37 @@ export function detailPage(
           )) +
       (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : "");
 
+  // Related alerts (agent/correlation, migrations/013): other alert groups correlate() matched
+  // to the same open incident and filed as children of this row, same Slack thread. A child
+  // carries its own "Merged into #N" line on its own page instead — this list only ever runs
+  // one level, there is no section nesting a tree.
+  const children = d.children ?? [];
+  const relatedAlerts =
+    children.length === 0
+      ? ""
+      : section(ICON.link, "Related alerts") +
+        table(
+          headers("Alertname", "Subjects", "Started", "Status"),
+          children
+            .map(
+              (c) => `<tr role="row">` +
+                cell("Alertname", `<a href="/incidents/${esc(c.id)}">${breakable(c.alertname)}</a>`, "primary") +
+                cell("Subjects", esc(c.subjects.length ? c.subjects.join(", ") : "—")) +
+                cell("Started", timeTag(c.created_at, now), "when") +
+                cell("Status", stateBadge(c.resolved_at)) +
+                `</tr>`
+            )
+            .join(""),
+          "stack"
+        );
+
+  // The mirror of the above: THIS incident is a child, merged into another thread. The row's
+  // own rca already says so in prose ("Merged into the incident in this thread…") but a reader
+  // on this page did not navigate from the parent and has no way to reach it without this link.
+  const mergedInto = i.parent_id
+    ? `<a class="standalone" href="/incidents/${esc(i.parent_id)}">Merged into #${esc(i.parent_id)} →</a>`
+    : "";
+
   const feedback =
     d.feedback.length === 0
       ? empty("No on-call feedback yet.", "Reply in the Slack thread to record what actually fixed it.", ICON.speech)
@@ -1131,6 +1171,7 @@ export function detailPage(
      <div class="title-meta">
        ${severityBadge(i.severity)}
        ${stateBadge(i.resolved_at)}
+       ${mergedInto}
        ${slack}
      </div>
      ${statList(
@@ -1161,6 +1202,7 @@ export function detailPage(
          : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.", ICON.search)
      }
      ${changes}
+     ${relatedAlerts}
      ${section(ICON.wrench, "Remediation")}
      ${remediations}
      ${section(ICON.speech, "On-call feedback")}
