@@ -440,24 +440,10 @@ export class SlackApp {
           await client.chat.delete({ channel: event.channel, ts: noticeTs })
             .catch((e) => logger.debug(`[slack] could not remove the progress notice for thread ${threadId}: ${errDetail(e)}`));
         }
-        if (!investigation && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
-          // Deterministic format backstop — the model sometimes ignores the conversation-mode
-          // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
-          // simple change request). Rewrite instead of shipping the wall of text.
-          logger.warn(`[slack] conversation-mode mention leaked RCA structure — reformatting (thread ${threadId})`);
-          reply = await this.agent.reformatToConversation(reply).catch(() => reply);
-        }
+        // !investigation: the mention path's own gate on the reformat half — see conversationReply.
+        reply = await this.conversationReply(reply, threadId, !investigation);
         // The reply investigate() returned has the [OFFER] line stripped; memory still has it.
         const offer = parseOffer(await this.agent.lastAssistantText(threadId).catch(() => ""));
-        // Not the prompt's job alone — see dropCardPromises. Conversation replies only: an RCA is
-        // parsed into Block Kit sections and a dropped sentence there would be a silent edit.
-        if (!isRcaResponse(reply)) {
-          const cleaned = dropCardPromises(reply);
-          if (cleaned.dropped > 0) {
-            logger.warn(`[slack] dropped ${cleaned.dropped} sentence(s) promising or excusing an approval card (thread ${threadId})`);
-            reply = cleaned.text;
-          }
-        }
         const isRca = isRcaResponse(reply);
         logger.info(`[slack] response type=${isRca ? "rca" : "conversation"} thread=${threadId}`);
         const footer = meta ? formatRunFooter(meta) : undefined;
@@ -683,6 +669,38 @@ export class SlackApp {
     }
   }
 
+  /**
+   * Post-processing a conversation-mode reply needs before it reaches Slack — shared between a
+   * mention's own reply and the correlation follow-up's, which is always conversation mode.
+   *
+   * `reformat` gates ONLY the deterministic format backstop: the mention path passes
+   * `!investigation` so an explicit investigation request is left exactly as before (it never
+   * reformatted); the correlation follow-up passes `true` (there is no `investigation` flag on
+   * that path — it is conversation mode by construction). The card-promise scrub below is NOT
+   * gated by `reformat` — the mention path ran it unconditionally (only `!isRcaResponse(reply)`
+   * gated it), so moving it here keeps that half byte-identical too.
+   */
+  private async conversationReply(reply: string, threadId: string, reformat: boolean): Promise<string> {
+    if (reformat && (isRcaResponse(reply) || leaksRcaStructure(reply))) {
+      // Deterministic format backstop — the model sometimes ignores the conversation-mode
+      // marker (full RCA format, or a partial leak: plan/impact/confidence sections on a
+      // simple change request). Rewrite instead of shipping the wall of text.
+      logger.warn(`[slack] conversation-mode mention leaked RCA structure — reformatting (thread ${threadId})`);
+      reply = await this.agent.reformatToConversation(reply).catch(() => reply);
+    }
+    // Not the prompt's job alone — see dropCardPromises. Conversation replies only: an RCA is
+    // parsed into Block Kit sections and a dropped sentence there would be a silent edit. The
+    // correlation follow-up never makes a card either, so a promised one would be just as false.
+    if (!isRcaResponse(reply)) {
+      const cleaned = dropCardPromises(reply);
+      if (cleaned.dropped > 0) {
+        logger.warn(`[slack] dropped ${cleaned.dropped} sentence(s) promising or excusing an approval card (thread ${threadId})`);
+        reply = cleaned.text;
+      }
+    }
+    return reply;
+  }
+
   // Cross-group correlation (agent/correlation/topology.ts, spec 2026-10-13). True = this alert
   // was merged into an open incident's thread and is fully handled; false = take today's path.
   // Fail open at every step: no subject, no graph, no match, or a failed post all return false,
@@ -740,7 +758,7 @@ export class SlackApp {
     const question = `Related alert ${alertName} fired on ${subjects.join(", ")} (${via}) while this incident was open. Does it fit the root cause already found? Check only what you need to say so, and say plainly if it looks like a separate problem.`;
     void this.threadQueue.run(rel.incident.threadTs, async () => {
       try {
-        const reply = toMrkdwn(
+        let reply = toMrkdwn(
           await withRoute("light", () =>
             this.agent.investigate(rel.incident.threadTs, question, {
               mode: "conversation",
@@ -748,6 +766,8 @@ export class SlackApp {
             })
           )
         );
+        // Always conversation mode on this path — see conversationReply's `reformat` contract.
+        reply = await this.conversationReply(reply, rel.incident.threadTs, true);
         for (const part of splitForSlack(reply)) {
           await this.app.client.chat.postMessage({ channel: rel.incident.channel, thread_ts: rel.incident.threadTs, text: part, mrkdwn: true });
         }

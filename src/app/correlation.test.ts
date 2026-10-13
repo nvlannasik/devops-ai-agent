@@ -32,6 +32,7 @@ function harness(opts: {
   callTool?: (name: string, input: Record<string, unknown>) => Promise<string>;
   postMessage?: (m: any) => Promise<any>;
   openRelatable?: () => Promise<any[]>;
+  investigate?: () => Promise<string>;
 } = {}) {
   const posted: any[] = [];
   const stored: any[] = [];
@@ -46,7 +47,8 @@ function harness(opts: {
         stored.push(a);
         return 9;
       },
-      investigate: async () => "fits: orders-api latency is the cause",
+      investigate: opts.investigate ?? (async () => "fits: orders-api latency is the cause"),
+      reformatToConversation: async (t: string) => t,
     },
     app: { client: { chat: { postMessage: opts.postMessage ?? (async (m: any) => { posted.push(m); return {}; }) } } },
     threadQueue: {
@@ -57,6 +59,8 @@ function harness(opts: {
       },
     },
   };
+  // correlate()'s follow-up calls this.conversationReply(...) — not an instance, so wire it in.
+  self.conversationReply = (SlackApp.prototype as any).conversationReply;
   const correlate = (channel: string, groupLabels: Record<string, string>, firing: any[], issueText: string, alertSeverity: string | null) =>
     (SlackApp.prototype as any).correlate.call(self, channel, groupLabels, firing, issueText, alertSeverity);
   return { self, posted, stored, threadQueueCalls, correlate, waitFollowUp: () => pending };
@@ -142,6 +146,27 @@ test("no service-level subject skips correlation without calling MCP", async () 
 
   assert.equal(result, false);
   assert.equal(called, false);
+});
+
+// Fix round 1: the correlation follow-up never makes a card, so a sentence promising one is as
+// false here as it would be on the mention path — conversationReply (shared with handleMention)
+// must scrub it before the follow-up reply is posted. Sentence verbatim from dropCardPromises'
+// own "a sentence promising a card is dropped" test.
+test("a card-promise sentence is dropped from the correlation follow-up reply", async () => {
+  resetServiceGraphCache();
+  const cardPromiseReply =
+    "The deletion of `devops-tools/devops-agent-redis` cannot be executed directly — it requires approval through the remediation workflow. " +
+    "An action card to remove this orphaned Service will be posted for your approval shortly.";
+  const h = harness({ investigate: async () => cardPromiseReply });
+  h.self.unstored.set("100.1", { ...PARENT });
+
+  await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "issue", "warning");
+  await h.waitFollowUp();
+
+  assert.equal(h.posted.length, 2);
+  const followUp = h.posted[1].text;
+  assert.doesNotMatch(followUp, /shortly/);
+  assert.match(followUp, /cannot be executed directly/);
 });
 
 // Review Focus 4: a resolve of the CHILD group (the merged alert's own alertname+namespace,
