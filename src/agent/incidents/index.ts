@@ -331,8 +331,10 @@ export class IncidentMemory {
      *  stored so a later group can be recognised as "the same service, again". `child: true`
      *  means this row is a merge into an already-open incident on the same thread: its
      *  `parent_id` is resolved from the thread's TOP_LEVEL row rather than passed in, because
-     *  the caller knows the thread, not the id. */
-    opts?: { subjects?: string[]; child?: boolean }
+     *  the caller knows the thread, not the id. `alertStartedAt`: the alert's own start
+     *  (Alertmanager's `startsAt`, not when this row happened to be inserted) — the relatability
+     *  window in topology.ts's `relatedIncident` is measured against it. */
+    opts?: { subjects?: string[]; child?: boolean; alertStartedAt?: Date }
   ): Promise<number | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
@@ -345,8 +347,8 @@ export class IncidentMemory {
         ? `(SELECT id FROM incidents WHERE channel = $8 AND thread_ts = $9 AND ${TOP_LEVEL} ORDER BY id LIMIT 1)`
         : "NULL";
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes, subjects, parent_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, ${parentIdExpr})
+        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes, subjects, parent_id, alert_started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, ${parentIdExpr}, $13)
          RETURNING id`,
         [
           alertname,
@@ -372,12 +374,15 @@ export class IncidentMemory {
           // mid-emoji upstream can carry a lone surrogate or \u0000, and jsonb rejects either.
           changes ? JSON.stringify(cleanDeep(changes)) : null,
           opts?.subjects ? JSON.stringify(opts.subjects) : null,
+          opts?.alertStartedAt ?? null,
         ]
       );
       const id = Number(rows[0].id);
       // fire-and-forget: links this investigation's llm_usage rows to the incident they
-      // produced. Best-effort by contract — see UsageStore.
-      if (slack?.threadTs) this.onStored?.(id, slack.threadTs);
+      // produced. Best-effort by contract — see UsageStore. NEVER for a child: its row carries
+      // no LLM calls of its own ("Merged into…"), and matching on thread_ts alone would steal
+      // the parent's still-in-flight usage rows out from under it.
+      if (slack?.threadTs && !opts?.child) this.onStored?.(id, slack.threadTs);
       // A child never anchors a thread, so it never links anything. A non-child INSERT, by
       // contrast, may have just landed on a thread that already carries unlinked children —
       // rows merged while this investigation was still open, so they predate this row and
@@ -410,23 +415,30 @@ export class IncidentMemory {
     if (!this.pool) return [];
     try {
       const { rows } = await this.pool.query(
-        `SELECT id, channel, thread_ts, alertname, namespace, subjects, created_at
+        `SELECT id, channel, thread_ts, alertname, namespace, subjects, created_at, alert_started_at
            FROM incidents
           WHERE namespace = $1 AND resolved_at IS NULL AND ${TOP_LEVEL}
             AND created_at > now() - ($2::int * interval '1 minute')
           ORDER BY created_at DESC LIMIT 20`,
         [namespace, sinceMinutes]
       );
-      return rows.map((r: Record<string, any>) => ({
-        id: Number(r.id),
-        channel: r.channel,
-        threadTs: r.thread_ts,
-        alertname: r.alertname,
-        namespace: r.namespace,
-        subjects: r.subjects ?? [],
-        startedAt: r.created_at instanceof Date ? r.created_at.getTime() : Date.parse(r.created_at),
-        resolved: false,
-      }));
+      return rows.map((r: Record<string, any>) => {
+        // alert_started_at is the alert's own start (Alertmanager's startsAt); created_at is
+        // only when this row happened to be inserted. Older rows (pre-migration 013) have no
+        // alert_started_at, so fall back to created_at — same shape as the id/created_at
+        // Date-or-string handling below, pg may hand either back.
+        const started = r.alert_started_at ?? r.created_at;
+        return {
+          id: Number(r.id),
+          channel: r.channel,
+          threadTs: r.thread_ts,
+          alertname: r.alertname,
+          namespace: r.namespace,
+          subjects: r.subjects ?? [],
+          startedAt: started instanceof Date ? started.getTime() : Date.parse(started),
+          resolved: false,
+        };
+      });
     } catch (err) {
       logger.error(`[incidents] openRelatable failed: ${err instanceof Error ? err.message : err}`);
       return [];

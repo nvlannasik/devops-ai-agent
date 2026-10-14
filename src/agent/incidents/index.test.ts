@@ -69,8 +69,9 @@ test("store returns the inserted id and persists the Slack thread link", async (
   const insert = calls.find((c) => /RETURNING id/.test(c.sql))!;
   // channel, thread_ts, the group identity the dedup claim was taken under (without that
   // one nothing outside the resolved webhook can release the claim), the change timeline
-  // (null here — no changes argument was passed), and subjects (null — no opts passed)
-  assert.deepEqual(insert.params.slice(-5), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null, null]);
+  // (null here — no changes argument was passed), subjects (null — no opts passed), and
+  // alert_started_at (null — no opts.alertStartedAt passed; migration 013)
+  assert.deepEqual(insert.params.slice(-6), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null, null, null]);
   // a non-child store with a Slack thread links that thread's unlinked children — best-effort,
   // and here a no-op since the fake pool has no real rows to match.
   const update = calls.find((c) => c !== insert)!;
@@ -109,6 +110,47 @@ test("store fires onStored with the inserted id and thread ts (the usage backfil
 
   assert.equal(id, 42);
   assert.deepEqual(calls, [[42, "1720.99"]]);
+});
+
+// Finding 3 (final review): a child's llm_usage rows belong to the PARENT's investigation — the
+// child row is just "merged into…", it ran no LLM calls of its own to link. Without this guard
+// a child store steals the parent's in-flight usage rows away from it via onStored's thread match.
+test("store does NOT fire onStored for a child row — its llm_usage rows must stay linked to the parent", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "99" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store(
+    { alertname: "X", namespace: "ns" },
+    SAMPLE_RCA,
+    { channel: "C123", threadTs: "1720.99" },
+    undefined,
+    undefined,
+    { child: true }
+  );
+
+  assert.equal(id, 99);
+  assert.deepEqual(calls, []);
+});
+
+// A non-child store on the same thread must still fire onStored as before — the guard above is
+// scoped to `child`, not to "a thread that happens to carry children".
+test("store still fires onStored for a non-child row even when opts carries subjects", async () => {
+  const fakePool = { query: async () => ({ rows: [{ id: "100" }] }) } as any;
+  const calls: Array<[number, string]> = [];
+  const mem = new IncidentMemory(fakePool, (id, ts) => calls.push([id, ts]));
+
+  const id = await mem.store(
+    { alertname: "X", namespace: "ns" },
+    SAMPLE_RCA,
+    { channel: "C123", threadTs: "1720.99" },
+    undefined,
+    undefined,
+    { subjects: ["orders-api"] }
+  );
+
+  assert.equal(id, 100);
+  assert.deepEqual(calls, [[100, "1720.99"]]);
 });
 
 test("store does NOT fire onStored without a Slack thread — nothing to link", async () => {
@@ -247,6 +289,60 @@ test("openRelatable returns [] on error without throwing", async () => {
   assert.deepEqual(await mem.openRelatable("sample-apps", 30), []);
 });
 
+// Finding 4 (final review): alert_started_at is the alert's own start, not the row's insert
+// time — a correlation match needs the WINDOW_MS check against when the alert actually fired,
+// and a row stored minutes into the investigation must not look like it started late.
+test("store(..., { alertStartedAt }) writes it as a param and the INSERT names the column", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [{ id: "55" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+  const alertStartedAt = new Date("2026-10-13T10:00:00Z");
+
+  await mem.store({ alertname: "X", namespace: "ns" }, SAMPLE_RCA, undefined, undefined, undefined, { alertStartedAt });
+  const insert = calls.find((c) => /RETURNING id/.test(c.sql))!;
+  assert.match(insert.sql, /alert_started_at/);
+  assert.ok(insert.params.includes(alertStartedAt), "the Date is passed through as its own param, not stringified");
+});
+
+test("openRelatable maps alert_started_at first, falling back to created_at when it is null", async () => {
+  const fakePool = {
+    query: async () => ({
+      rows: [
+        {
+          id: "5",
+          channel: "C1",
+          thread_ts: "100.1",
+          alertname: "A",
+          namespace: "ns",
+          subjects: [],
+          created_at: "2026-10-13T00:10:00.000Z",
+          alert_started_at: "2026-10-13T00:00:00.000Z",
+        },
+        {
+          id: "6",
+          channel: "C2",
+          thread_ts: "100.2",
+          alertname: "B",
+          namespace: "ns",
+          subjects: [],
+          created_at: "2026-10-13T00:20:00.000Z",
+          alert_started_at: null,
+        },
+      ],
+    }),
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+
+  const out = await mem.openRelatable("ns", 30);
+  assert.equal(out[0]!.startedAt, Date.parse("2026-10-13T00:00:00.000Z"), "alert_started_at wins when present");
+  assert.equal(out[1]!.startedAt, Date.parse("2026-10-13T00:20:00.000Z"), "falls back to created_at when alert_started_at is null");
+});
+
 test("TOP_LEVEL excludes children: a merged incident is never a parent, never recalled", () => {
   assert.equal(TOP_LEVEL, "parent_id IS NULL AND rca NOT LIKE 'Merged into%'");
 });
@@ -297,11 +393,12 @@ test("recallSimilar's cand CTE carries the TOP_LEVEL filter, aliased", async () 
   assert.match(captured, /i\.parent_id IS NULL AND i\.rca NOT LIKE 'Merged into%'/);
 });
 
-test("migration 013 adds subjects and parent_id idempotently", () => {
+test("migration 013 adds subjects, parent_id (bigint, matching the BIGSERIAL id) and alert_started_at idempotently", () => {
   const path = fileURLToPath(new URL("../../../migrations/013_incident_correlation.sql", import.meta.url));
   const sql = readFileSync(path, "utf8");
   assert.match(sql, /ADD COLUMN IF NOT EXISTS subjects jsonb/);
-  assert.match(sql, /ADD COLUMN IF NOT EXISTS parent_id integer REFERENCES incidents\(id\)/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS parent_id bigint REFERENCES incidents\(id\)/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS alert_started_at timestamptz/);
 });
 
 test("recall returns '' without an alertname to key on", async () => {

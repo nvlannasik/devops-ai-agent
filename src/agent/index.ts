@@ -1507,8 +1507,9 @@ export class DevOpsAgent {
     /** The group's Alertmanager severity as the Slack card rendered it — see store(). */
     alertSeverity?: string | null,
     changes?: ChangeTimeline | null,
-    /** Cross-alert correlation (agent/correlation): subjects + child, passed straight through. */
-    opts?: { subjects?: string[]; child?: boolean }
+    /** Cross-alert correlation (agent/correlation): subjects + child + alertStartedAt, passed
+     *  straight through. */
+    opts?: { subjects?: string[]; child?: boolean; alertStartedAt?: Date }
   ): Promise<number | null> {
     return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes, opts);
   }
