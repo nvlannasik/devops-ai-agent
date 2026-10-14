@@ -191,6 +191,11 @@ export const config = {
     // symptom (a login page that keeps reappearing) points nowhere near the cause. Browsers
     // exempt localhost, so a port-forward needs no change — only a plain-HTTP hostname does.
     cookieSecure: process.env.DASHBOARD_COOKIE_SECURE !== "false",
+    // Optional, not secret — used only to build the link `@agent postmortem` posts to Slack
+    // (docs/superpowers/specs/2026-10-14-postmortem-draft-design.md §6). Unset posts the bare
+    // `/incidents/:id/postmortem` path instead. Trailing slashes stripped so the path never
+    // doubles one.
+    publicUrl: process.env.DASHBOARD_PUBLIC_URL?.replace(/\/+$/, "") || undefined,
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),

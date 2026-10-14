@@ -7,6 +7,8 @@ import { AlertDeduplicator } from "../agent/dedup/index.js";
 import { parseConfidence } from "../agent/confidence/index.js";
 import { mentionBudget, wantsInvestigation, wantsTour } from "../agent/intent/index.js";
 import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
+import { postmortemIntent } from "../agent/postmortem/intent.js";
+import { sectionOf } from "../agent/postmortem/draft.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, buildAlertProposalContext, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
@@ -364,6 +366,18 @@ export class SlackApp {
       return;
     }
 
+    // `@agent postmortem` — draft + store a postmortem for this thread's incident (spec
+    // 2026-10-14-postmortem-draft-design.md). Same decline shape as `learn`.
+    const pm = postmortemIntent(text);
+    if (pm === "declined") {
+      await say({ text: "👍 OK — no postmortem for now.", thread_ts: threadId });
+      return;
+    }
+    if (pm === "postmortem") {
+      await this.handlePostmortem(event, client, threadId);
+      return;
+    }
+
     // `@agent resolved` / `@agent reopen` — on-call's word on the incident's status, which
     // beats both the webhook and the sweeper. Only inside a thread that maps to a stored
     // incident: anywhere else "resolved" is just a word in a sentence, and the mention falls
@@ -605,6 +619,85 @@ export class SlackApp {
         .postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true })
         .catch((e) => logger.error(`[slack] could not deliver the learn-failure notice to thread ${threadId}: ${errDetail(e)}`));
     }
+  }
+
+  /**
+   * `@agent postmortem` (spec 2026-10-14-postmortem-draft-design.md §1). Queued on the thread
+   * like a mention, so it can't interleave with another turn writing this thread's memory.
+   * The incident lookup is `findIncidentForThread`, which is top-level only — a child (merged)
+   * incident shares its parent's thread, so this naturally resolves to the parent.
+   */
+  private async handlePostmortem(
+    event: SlackEventMiddlewareArgs<"app_mention">["event"],
+    client: AllMiddlewareArgs["client"],
+    threadId: string
+  ): Promise<void> {
+    await this.threadQueue.run(threadId, async () => {
+      const incidentId = await this.agent.findIncidentForThread(event.channel, threadId).catch(() => null);
+      if (incidentId === null) {
+        await client.chat.postMessage({
+          channel: event.channel,
+          thread_ts: threadId,
+          text: "🤷 This thread is not an incident thread — `postmortem` works in the thread of an alert.",
+        });
+        return;
+      }
+
+      const progress = await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadId,
+        text: "📝 Drafting the postmortem…",
+      });
+      const progressTs = progress.ts as string | undefined;
+      const updateProgress = (text: string): Promise<void> =>
+        progressTs
+          ? client.chat
+              .update({ channel: event.channel, ts: progressTs, text })
+              .then(() => {})
+              .catch((e) => { logger.debug(`[slack] postmortem progress update failed for thread ${threadId}: ${errDetail(e)}`); })
+          : Promise.resolve();
+
+      // Read by SlackApp (it owns the client) — agent.postmortemFacts only ever sees the result.
+      // A failed read is `humans: null`, not `[]`: "nobody said anything" and "couldn't check"
+      // are different facts, and only the first means there is nothing to quote.
+      let humans: string[] | null;
+      try {
+        const replies = await client.conversations.replies({ channel: event.channel, ts: threadId, limit: 100 });
+        humans = humanStatements(replies.messages ?? [], event.ts);
+      } catch (err) {
+        logger.warn(`[slack] postmortem: could not read thread ${threadId}: ${errDetail(err)}`);
+        humans = null;
+      }
+
+      try {
+        const facts = await this.agent.postmortemFacts(incidentId, humans);
+        // The incident row itself couldn't be read — treated like any other draft failure:
+        // no LLM call, nothing stored.
+        if (!facts) {
+          await updateProgress(`❌ Could not draft the postmortem: incident #${incidentId} could not be read`);
+          return;
+        }
+        const { markdown, backend } = await this.agent.draftPostmortem(facts);
+        const storedId = await this.agent.storePostmortem(incidentId, event.user ?? null, markdown, backend);
+
+        const link = config.dashboard.publicUrl
+          ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
+          : `/incidents/${incidentId}/postmortem`;
+        await updateProgress(`📝 Postmortem draft ready — ${link}`);
+
+        const summary = sectionOf(markdown, "Summary") ?? "_Not drafted._";
+        const actionItems = sectionOf(markdown, "Action items") ?? "_Not drafted._";
+        let text = toMrkdwn(`*Summary*\n${summary}\n\n*Action items*\n${actionItems}`);
+        if (storedId === null) text += "\n\n_(not stored — the dashboard will not have it)_";
+
+        for (const part of splitForSlack(text)) {
+          await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+        }
+      } catch (err) {
+        logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);
+        await updateProgress(`❌ Could not draft the postmortem: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
   }
 
   // Returns false when this thread isn't a stored incident, so the caller can fall through to
