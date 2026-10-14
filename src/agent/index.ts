@@ -61,6 +61,9 @@ import { pickRevertCommit } from "./gitops/revert.js";
 import type { GitOpsDrift } from "./gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "./gitops/overlay.js";
 import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
+import { PostmortemStore, type LatestDraft } from "./postmortem/store.js";
+import type { PostmortemFacts } from "./postmortem/facts.js";
+import { buildPostmortemPrompt, assemblePostmortem, POSTMORTEM_SYSTEM } from "./postmortem/draft.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import type { LLMClient, LLMResponse, ContentBlock, Message, TokenUsage, ToolDefinition } from "./llm/types.js";
@@ -1297,6 +1300,7 @@ export class DevOpsAgent {
   private usage: UsageStore;
   private remediations: RemediationStore;
   private checks: RemediationCheckStore;
+  private postmortems: PostmortemStore;
   private gitops: SqsGitOpsClient | null;
   private readonly skills: SkillRegistry;
   private readonly threadSkills: ThreadSkills = new Map();
@@ -1320,6 +1324,7 @@ export class DevOpsAgent {
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
     this.remediations = deps.remediations ?? new RemediationStore(null); // no-op until initialize() wires Postgres
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
+    this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
 
     // Throws here rather than at first request: a malformed skill file must be a pod that
@@ -1365,6 +1370,7 @@ export class DevOpsAgent {
       this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
       this.checks = new RemediationCheckStore(pool);
+      this.postmortems = new PostmortemStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
@@ -2372,6 +2378,48 @@ export class DevOpsAgent {
       .map((c) => c.text ?? "")
       .join("\n")
       .trim();
+  }
+
+  // ---- Postmortem draft (agent/postmortem, spec 2026-10-14-postmortem-draft-design.md) ----
+
+  /**
+   * Everything a draft is built from: Postgres facts (PostmortemStore.facts) plus the Slack
+   * thread's human statements, which only SlackApp can read (it owns the client). `humans: null`
+   * means that read failed — the thread is unreadable, not "nobody said anything" — and adds
+   * "Slack thread" to `unavailable` so `## Sources` says so rather than silently going quiet.
+   */
+  async postmortemFacts(incidentId: number, humans: string[] | null): Promise<PostmortemFacts | null> {
+    const stored = await this.postmortems.facts(incidentId);
+    if (!stored) return null;
+    return {
+      ...stored,
+      humans: humans ?? [],
+      unavailable: [...stored.unavailable, ...(humans === null ? ["Slack thread"] : [])],
+    };
+  }
+
+  /**
+   * The ONE LLM call a postmortem costs: no tools, light route — a Markdown write-up of facts
+   * already gathered, not an investigation. Usage is recorded the way proposeRemediationRun's
+   * call does: `threadTs: null`, because this method's signature carries no Slack thread to
+   * attribute it to (never invent one — see recordUsage's own comment).
+   */
+  async draftPostmortem(f: PostmortemFacts): Promise<{ markdown: string; backend: string }> {
+    const r = await withRoute("light", () => this.llm.chat([{ role: "user", content: buildPostmortemPrompt(f) }], [], POSTMORTEM_SYSTEM));
+    this.recordUsage(null, r);
+    const text = this.extractText(r.content);
+    // response.backend is set only by the router (RouterLLMClient); a direct single-backend
+    // provider leaves it undefined, and llm_usage stores NULL for the same reason — "light
+    // route" names what actually ran without inventing a backend identity nothing configured.
+    return { markdown: assemblePostmortem(f, text, new Date()), backend: r.backend ?? "light route" };
+  }
+
+  async storePostmortem(incidentId: number, requestedBy: string | null, markdown: string, backend: string): Promise<number | null> {
+    return this.postmortems.store(incidentId, requestedBy, markdown, backend);
+  }
+
+  async latestPostmortem(incidentId: number): Promise<LatestDraft | null> {
+    return this.postmortems.latest(incidentId);
   }
 
   // ---- Guarded Remediation (docs/DESIGN_guarded_remediation.md) ----
