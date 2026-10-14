@@ -401,6 +401,12 @@ test("migration 013 adds subjects, parent_id (bigint, matching the BIGSERIAL id)
   assert.match(sql, /ADD COLUMN IF NOT EXISTS alert_started_at timestamptz/);
 });
 
+test("migration 014 carries alert_started_at to databases that ran the original 013", () => {
+  const path = fileURLToPath(new URL("../../../migrations/014_incident_alert_start.sql", import.meta.url));
+  const sql = readFileSync(path, "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS alert_started_at timestamptz/);
+});
+
 test("recall returns '' without an alertname to key on", async () => {
   // a fake pool would never be hit because the alertname guard returns first
   const mem = new IncidentMemory({ query: async () => assert.fail("should not query") } as any);

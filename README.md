@@ -454,7 +454,7 @@ npm run migrate          # dev (tsx)
 npm run migrate:prod     # prod (node dist/src/db/migrate-cli.js)
 ```
 
-The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`013` exist; next is `migrations/014_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
+The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`014` exist; next is `migrations/015_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
 
 ## Incident Dashboard
 
@@ -659,7 +659,7 @@ src/
     ├── truncate/index.ts
     └── slack/                    # blocks.ts, rca-tables.ts, tour-tables.ts, remediation-card.ts, split.ts
 
-migrations/    001…011 — run at pod startup, advisory-locked
+migrations/    001…014 — run at pod startup, advisory-locked
 prompts/       system.md + skills/*.md — editable without a rebuild
 bench/         cases/ + results/history.jsonl (committed)
 replay/        cases/ — recorded production runs, redacted
