@@ -39,3 +39,10 @@ test("Sources names what was unavailable; sectionOf reads one section", () => {
   assert.equal(sectionOf(FULL, "Impact"), "I");
   assert.equal(sectionOf(FULL, "Timeline"), null);
 });
+test("a fenced model answer (```markdown ... ```) is unwrapped before sectioning", () => {
+  const fenced = "```markdown\n" + FULL + "\n```";
+  const mdFenced = assemblePostmortem(F, fenced, new Date("2026-10-14T00:00:00Z"));
+  const mdPlain = assemblePostmortem(F, FULL, new Date("2026-10-14T00:00:00Z"));
+  assert.doesNotMatch(mdFenced, /```/);
+  assert.equal(sectionOf(mdFenced, "Action items"), sectionOf(mdPlain, "Action items"));
+});
