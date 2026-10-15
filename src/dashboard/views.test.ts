@@ -1518,20 +1518,16 @@ test("postmortemPage renders a facts.ts-shaped Timeline table as a real <table>,
   assert.doesNotMatch(html, /\| 2026-10-14 10:00 \| alert fired \|/);
 });
 
-// Readable line length (explicit requirement for this page): the prose gets a measure the way
-// the RCA's prose does, WITHOUT widening that rule onto /prompt or /skill, which share the same
-// .card.md renderer for much wider reference content (24,000 chars on /prompt).
-test("postmortemPage scopes a reading measure to its own prose, and only this page", () => {
+// The draft's prose runs the full width of its card, like /prompt and /skill: a 68ch cap was
+// tried and taken back out after the user saw the paragraphs stop short of the card's edge.
+test("postmortemPage prose is not capped narrower than its card", () => {
   const html = postmortemPage(7, {
     id: 1, createdAt: new Date("2026-10-14T10:20:00Z"), requestedBy: "U1", backend: "claude", markdown: "x",
   });
   assert.match(html, /<div class="doc pm-doc">/);
-  const rule = /^\.pm-doc \.md > p, \.pm-doc \.md > ul, \.pm-doc \.md > ol \{([^}]*)\}/m.exec(STYLES);
-  assert.ok(rule, "no .pm-doc measure rule in styles.ts");
-  assert.match(rule![1], /max-width: 68ch/);
-  // the Timeline table is a <div class="table-wrap">, not a p/ul/ol, so this selector cannot
-  // reach it — it keeps the full column exactly as the RCA's own tables do beside capped prose
-  assert.doesNotMatch(STYLES, /\.pm-doc \.md .*table-wrap/);
+  assert.doesNotMatch(STYLES, /\.pm-doc[^{]*\{[^}]*max-width/);
+  // the Timeline's time column shrinks to its timestamp instead of taking half the table
+  assert.match(STYLES, /\.pm-doc \.md \.table-wrap td:first-child[^{]*\{[^}]*white-space: nowrap[^}]*width: 1%/);
 });
 
 test("postmortemPage says 'unknown' rather than nothing when requestedBy/backend were never recorded", () => {
