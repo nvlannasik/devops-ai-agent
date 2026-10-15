@@ -53,8 +53,15 @@ const MENTION = /<@[A-Z0-9]+>/g;
 /** Shorter than this is an acknowledgement ("ok", "thanks"), not a statement of cause. */
 const MIN_STATEMENT = 12;
 
+/**
+ * "jangan lupa" ("don't forget") and "don't skip" READ like a decline word but negate one, so the
+ * whole phrase is dropped before DECLINE runs. `['’]?` takes the straight, curly (Slack mobile)
+ * and missing apostrophe alike. Shared with postmortemIntent.
+ */
+export const NEGATED_DECLINE = /\b(jangan\s+lupa|don['’]?t\s+forget|don['’]?t\s+skip)\b/gi;
+
 export function learnIntent(text: string): "learn" | "declined" {
-  return DECLINE.test(text.replace(LEARN_PREFIX, "")) ? "declined" : "learn";
+  return DECLINE.test(text.replace(LEARN_PREFIX, "").replace(NEGATED_DECLINE, "")) ? "declined" : "learn";
 }
 
 /**

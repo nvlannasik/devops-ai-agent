@@ -272,3 +272,24 @@ test("blocks refused by Slack: the same card goes out as plain mrkdwn instead of
   assert.match(final.text, /\*⚡ Summary\*/);
   assert.doesNotMatch(h.updated.at(-1).text, /Could not draft/, "a refused card is not a failed draft");
 });
+
+test("queued behind a running investigation: an immediate ack, before the draft starts", async () => {
+  const h = harness({ incidentId: 7, storedId: 3 });
+  let release!: () => void;
+  const blocker = h.self.threadQueue.run("100.0", () => new Promise<void>((r) => { release = r; }));
+  const done = h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.posted.length, 1, "nothing posted while the investigation still runs");
+  assert.match(h.posted[0].text, /queued/i);
+  assert.equal(h.calls.draftCount, 0);
+  release();
+  await blocker;
+  await done;
+  assert.equal(h.calls.draftCount, 1);
+});
+
+test("an idle thread gets no queued ack", async () => {
+  const h = harness({ incidentId: 7, storedId: 3 });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+  assert.ok(h.posted.every((m: any) => !/queued/i.test(m.text ?? "")));
+});

@@ -72,3 +72,13 @@ test("a very long section is split into several sections, never one Slack would 
   const blocks = postmortemSlackBlocks(F, long, null) as any[];
   assert.ok(blocks.filter((b) => b.type === "section").every((b) => b.text.text.length <= 2900));
 });
+
+test("names the draft flagged as ungrounded are flagged on the Slack card too", () => {
+  const md = assemblePostmortem(F, NARRATIVE.replace("`checkout-gateway` timed out", "`payment-svc-xyz` timed out"), new Date());
+  assert.match(md, /Names not found/, "precondition: the draft carries the grounding note");
+  const blocks = postmortemSlackBlocks(F, md, null) as any[];
+  const ctx = blocks.filter((b) => b.type === "context").map((b) => b.elements[0].text).join("\n");
+  assert.match(ctx, /⚠️ Names not found in this incident's evidence: .*payment-svc-xyz/);
+  assert.match(postmortemSlackText(F, md, null), /⚠️ Names not found in this incident's evidence/);
+  assert.doesNotMatch(postmortemSlackText(F, MD, null), /Names not found/, "a grounded draft carries no warning");
+});

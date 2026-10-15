@@ -6,6 +6,8 @@
 // in passing, about something else, and must fall through to the normal investigation path
 // rather than being read as a postmortem command. The grammar: optional polite lead-in, optional
 // verb, optional article, then the ask word itself.
+import { NEGATED_DECLINE } from "../feedback/index.js";
+
 // One or more polite lead-ins ("tolong", "bisa", "minta", "mohon" …) may stack: "bisa tolong bikin postmortem".
 const LEADIN = "(?:(?:please|tolong|can you|could you|pls|bisa|minta|mohon)\\s+)+";
 // Indonesian verbs take a passive "di-" and a "-kan"/"-in" suffix: buatkan, bikinin, dibuatkan.
@@ -29,13 +31,9 @@ const NO_POSTMORTEM_ANCHOR = /^\s*no\s+post[- ]?mortem\b/i;
 // nanti aja", "postmortem later". Bare "jangan" is deliberately NOT here: see JANGAN_ANCHOR above.
 const DECLINE_REST = /\b(nanti|later|skip|not now|ga usah|gak usah|nggak usah)\b/i;
 
-// "jangan lupa" ("don't forget") and "don't skip" READ like a decline word but negate one — drop
-// the whole phrase before testing anything else so the word it negates ("lupa"/"jangan", "skip")
-// isn't left behind to trip a decline anchor or DECLINE_REST on its own. `'?` covers "don't"/"dont".
-const NEUTRALIZE = /\b(jangan\s+lupa|don'?t\s+forget|don'?t\s+skip)\b/gi;
 
 export function postmortemIntent(text: string): "postmortem" | "declined" | null {
-  const stripped = text.replace(NEUTRALIZE, "").trim();
+  const stripped = text.replace(NEGATED_DECLINE, "").trim();
   if (JANGAN_ANCHOR.test(stripped) || SKIP_ANCHOR.test(stripped) || NO_POSTMORTEM_ANCHOR.test(stripped)) return "declined";
   if (!ASK_ANCHOR.test(stripped)) return null;
   return DECLINE_REST.test(stripped) ? "declined" : "postmortem";

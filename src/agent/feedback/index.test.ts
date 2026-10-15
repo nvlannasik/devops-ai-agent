@@ -93,3 +93,11 @@ test("an extracted cause whose names appear only in the bot's messages is droppe
   const half = { confirmed_root_cause: "workload-cert was renewed", action_taken: "raised orders-api memory to 512Mi", outcome: "mitigated" as const };
   assert.deepEqual(tracesToHumans(half, "we raised memory on orders-api to 512Mi"), { ...half, confirmed_root_cause: null });
 });
+
+test("learnIntent: 'jangan lupa' / 'don't forget' negate a decline word, they are not one", async () => {
+  const { learnIntent } = await import("./index.js");
+  for (const t of ["learn jangan lupa root cause-nya TIMEOUT_MS", "learn: don't forget the root cause was the TIMEOUT_MS change", "learn don’t forget it was the pool size"]) {
+    assert.equal(learnIntent(t), "learn", t);
+  }
+  assert.equal(learnIntent("learn nanti aja"), "declined");
+});

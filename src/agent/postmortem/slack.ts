@@ -23,7 +23,11 @@ function numbered(body: string): string {
 }
 
 /** The card's pieces, shared by the Block Kit card and its plain-text fallback. */
-function cardParts(f: PostmortemFacts, markdown: string, link: string | null): { title: string; parts: string[]; footer: string } {
+// assemblePostmortem writes this line under the title when the narrative names something no
+// evidence holds; the Slack card carries the same warning, as the RCA path does (warnIfUngrounded).
+const GROUNDING_NOTE = /^> (⚠️ Names not found in this incident's evidence: .+)$/m;
+
+function cardParts(f: PostmortemFacts, markdown: string, link: string | null): { title: string; parts: string[]; footer: string; warning: string | null } {
   const i = f.incident;
   const n = numbersOf(f);
   const sec = (h: string): string => sectionOf(markdown, h) ?? "_Not drafted._";
@@ -43,6 +47,7 @@ function cardParts(f: PostmortemFacts, markdown: string, link: string | null): {
       `*🔧 Action items*\n${numbered(sec("Action items"))}`,
     ].map(toMrkdwn),
     footer,
+    warning: GROUNDING_NOTE.exec(markdown)?.[1] ?? null,
   };
 }
 
@@ -52,16 +57,17 @@ function cardParts(f: PostmortemFacts, markdown: string, link: string | null): {
  * URL is configured, or null when the draft was not stored and there is nothing to link to.
  */
 export function postmortemSlackText(f: PostmortemFacts, markdown: string, link: string | null): string {
-  const { parts, footer } = cardParts(f, markdown, link);
-  return [`*📝 Postmortem draft* — ${parts[0]}`, ...parts.slice(1), footer].join("\n\n");
+  const { parts, footer, warning } = cardParts(f, markdown, link);
+  return [`*📝 Postmortem draft* — ${parts[0]}`, ...parts.slice(1), ...(warning ? [warning] : []), footer].join("\n\n");
 }
 
 /** The RCA card's shape: a header, a divider after every section, the link in a context footer. */
 export function postmortemSlackBlocks(f: PostmortemFacts, markdown: string, link: string | null): Block[] {
-  const { title, parts, footer } = cardParts(f, markdown, link);
+  const { title, parts, footer, warning } = cardParts(f, markdown, link);
   // A header's plain_text is capped at 150 characters by Slack, and an alertname is free text.
   const blocks: Block[] = [header(Array.from(title).slice(0, 150).join("")), divider()];
   for (const p of parts) blocks.push(...section(p), divider());
+  if (warning) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: warning }] });
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: footer }] });
   return blocks;
 }
