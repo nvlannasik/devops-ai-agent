@@ -61,6 +61,9 @@ Out of scope:
 - an onboarding document download;
 - per-claim clickable evidence in the UI (evidence is kept in the model and shown per edge in the
   tables, not as links).
+- multi-cluster: this is built for the local cluster. Its multi-cluster adaptation (a cluster target,
+  a `(cluster, namespace)` cache key, a `/cluster` selector, the "which clusters are there?" answer)
+  belongs to multi-cluster part 2 and is recorded in `2026-10-15-multi-cluster-sqs-bridge-design.md`.
 
 ## Components
 

@@ -40,6 +40,22 @@ Out of scope (later parts): which cluster a thread talks to, routing tool calls 
 PromQL/LogQL cluster guard, `cluster` columns in Postgres, GitOps path mapping, chart and IAM changes
 for real workload clusters.
 
+Part 2 also adapts cluster onboarding (`2026-10-16-cluster-onboarding-flow-design.md`, built
+single-cluster first), decided 2026-10-16:
+- `buildClusterModel({ cluster, namespace })` takes a cluster target: its MCP client (bridge or
+  central), its Prometheus `cluster` label, and its GitOps `pathPrefix`. The model cache is keyed by
+  `(cluster, namespace)`.
+- The inventory, including env dependencies, runs in that cluster's bridge, so env values never
+  cross SQS.
+- The call graph queries the central Prometheus with `cluster="<name>"`.
+- `locate` uses the cluster's overlay `pathPrefix`.
+- An unreachable bridge is an unknowns line for that cluster only.
+- `/cluster` gets a cluster selector. The Slack tour requires the cluster to be named, except
+  "which clusters are there?", which answers from the registry (clusters, bridge reachability,
+  namespace/workload counts) and offers one to tour.
+- Cross-cluster edges (an env host that is another registered cluster's Ingress host) stay out of
+  scope.
+
 ## Components
 
 ### 1. The contract (agent ↔ bridge)
