@@ -42,3 +42,11 @@ test("renderFacts escapes table cells and carries the two fixed headings", () =>
   assert.match(md, /\n## Numbers\n/);
   assert.match(md, /a \\\| b c/);
 });
+
+test("the resolve event says what resolved_by means, so the narrative cannot read 'reconciler' as self-healing", () => {
+  const ev = (by: string | null) => timelineOf({ ...F, incident: { ...F.incident, resolvedBy: by } }).at(-1)!.event;
+  assert.equal(ev("reconciler"), "marked resolved by the agent's reconciler (the alert stopped firing)");
+  assert.equal(ev("alertmanager"), "resolved (Alertmanager reported the alert cleared)");
+  assert.equal(ev("U1"), "marked resolved by U1");
+  assert.equal(ev(null), "resolved");
+});

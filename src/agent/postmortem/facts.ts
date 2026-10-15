@@ -31,6 +31,14 @@ export interface TimelineEvent { at: string; event: string }
 
 const alertAt = (f: PostmortemFacts): string => f.incident.alertStartedAt ?? f.incident.createdAt;
 
+// `resolved_by` is who flipped the status, not what fixed the fault. A bare "resolved by
+// reconciler" read to the model (live, incident 267) as the system healing itself.
+function resolvedEvent(by: string | null): string {
+  if (by === "reconciler") return "marked resolved by the agent's reconciler (the alert stopped firing)";
+  if (by === "alertmanager") return "resolved (Alertmanager reported the alert cleared)";
+  return by ? `marked resolved by ${by}` : "resolved";
+}
+
 export function timelineOf(f: PostmortemFacts): TimelineEvent[] {
   // A createdAt fallback is the agent noticing the incident, not Alertmanager's own alertStartedAt
   // — saying "alert fired" for it invents a start time the data never gave us.
@@ -56,7 +64,7 @@ export function timelineOf(f: PostmortemFacts): TimelineEvent[] {
       events.push({ at: r.executedAt, event: `executed (approved by ${r.approvedBy ?? "?"}) · ${r.status} · verdict ${r.verdict ?? "pending"}${prSuffix}` });
     }
   }
-  if (f.incident.resolvedAt) events.push({ at: f.incident.resolvedAt, event: `resolved by ${f.incident.resolvedBy ?? "?"}` });
+  if (f.incident.resolvedAt) events.push({ at: f.incident.resolvedAt, event: resolvedEvent(f.incident.resolvedBy) });
 
   return events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
