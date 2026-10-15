@@ -3,11 +3,14 @@ import { esc } from "./html.js";
 // A CommonMark SUBSET, sized to what `prompts/` actually contains and nothing else. Counted
 // across the core prompt and all 14 skills before writing a line: 124 bullets (one nesting
 // level), 72 `**bold**`, 52 inline-code spans, 38 headings over three levels, ~45 ordered
-// items, 3 fenced blocks — and every pipe-table row in THOSE files already lives inside a
+// items, 3 fenced blocks — and at the time every pipe-table row in those files lived inside a
 // fence, so for years there was no table support here and nothing to add until one appeared
 // outside one. The postmortem draft's `## Timeline` (`agent/postmortem/facts.ts`,
 // `renderFacts`) is that one: a real pipe table, outside a fence, rendered on
-// `/incidents/:id/postmortem` — so pipe-table support was added, minimally (below).
+// `/incidents/:id/postmortem` — so pipe-table support was added, minimally (below). It is NOT
+// the only one any more once added: `prompts/system.md`'s "Pod State Awareness" table also
+// sits outside a fence and now renders as a real `<table>` on `/prompt` too — kept rather than
+// special-cased away, because it reads better there as well (`markdown.test.ts` pins it).
 //
 // Hand-rolled rather than a dependency for the reason `rca.ts` is: a parser is 40KB and a
 // transitive tree to solve six constructs on two read-only internal pages, and the one thing
@@ -22,13 +25,33 @@ import { esc } from "./html.js";
 // mrkdwn — DIFFERENT SYNTAX, deliberately not shared: Slack bold is a single `*` and italics
 // are `_underscores_`, so one renderer for both would get one of them wrong.
 
-/** `**bold**` and `` `code` ``, applied to text that is ALREADY escaped. */
+// `**bold**` and `_italic_`/`*italic*`, applied to text that is NOT a code span. Guarded with a
+// non-word boundary (or line start/end) immediately outside each delimiter, or `TIMEOUT_MS` and
+// `snake_case` in prose would grow an <em> around their own inner underscore. Bold runs first:
+// `**x**` is two single-asterisk delimiters stacked, and running italics first would consume the
+// outer pair and leave `*<em>x</em>*` — a stray asterisk either side of the emphasis.
+function emphasize(text: string): string {
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?!\*)(?=[^\w*]|$)/gm, "$1<em>$2</em>")
+    .replace(/(^|[^\w_])_([^_\s][^_]*?)_(?!_)(?=[^\w_]|$)/gm, "$1<em>$2</em>");
+}
+
+/**
+ * `**bold**`, `_italic_`/`*italic*` and `` `code` ``, applied to text that is ALREADY escaped.
+ *
+ * Code spans are split out FIRST and never see `emphasize()` at all — a span of code is a tool
+ * name or a query, rendered byte-identical, and `**k8s_describe_pod**` or `field_selector` must
+ * never grow a `<strong>`/`<em>` around its own punctuation. `escaped.split(/(`[^`]+`)/)`
+ * alternates plain-text / code-span / plain-text / ...: the capturing group keeps the delimited
+ * matches in the result, at every ODD index, so the two cases are told apart by position rather
+ * than by re-matching the backticks a second time.
+ */
 function inline(escaped: string): string {
   return escaped
-    // Code first: a span of code may contain asterisks, and running bold first would eat them.
-    // `[^`]+` cannot span a backtick, so an unmatched one is left as the literal it is.
-    .replace(/`([^`]+)`/g, '<code translate="no">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    .split(/(`[^`]+`)/)
+    .map((part, i) => (i % 2 === 1 ? `<code translate="no">${part.slice(1, -1)}</code>` : emphasize(part)))
+    .join("");
 }
 
 /** One `- ` / `1. ` item, or null. `indent` is how deep, counted in leading spaces. */
