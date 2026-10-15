@@ -477,3 +477,51 @@ test("an incident's LLM usage is grouped per backend, by its incident id or its 
   assert.match(sql.sql, /incident_id = \$1 OR thread_ts = \$2/);
   assert.deepEqual(sql.params, [7, "1.1"]);
 });
+
+// Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). The dashboard
+// reads Postgres directly here — it does NOT import agent/postmortem/store.ts's PostmortemStore,
+// which is the agent's own write-side helper for the Slack flow.
+test("postmortem reads the latest draft for an incident", async () => {
+  const calls: Call[] = [];
+  const createdAt = new Date("2026-10-14T10:20:00Z");
+  const q = new DashboardQueries(
+    stub(calls, () => [{ id: 3, created_at: createdAt, requested_by: "U1", backend: "claude", markdown: "# Draft" }])
+  );
+  const pm = await q.postmortem(7);
+  assert.deepEqual(pm, { id: 3, createdAt, requestedBy: "U1", backend: "claude", markdown: "# Draft" });
+  assert.match(calls[0]!.sql, /FROM postmortems/);
+  assert.match(calls[0]!.sql, /ORDER BY created_at DESC/);
+  assert.match(calls[0]!.sql, /\bLIMIT\b/i);
+  assert.deepEqual(calls[0]!.params, [7]);
+});
+
+test("postmortem is null when nothing was ever drafted, and with no database", async () => {
+  const q = await new DashboardQueries(stub([], () => [])).postmortem(7);
+  assert.equal(q, null);
+  assert.equal(await new DashboardQueries(null).postmortem(7), null);
+});
+
+// hasPostmortem is what detailPage uses to decide whether to render "Postmortem draft →" — it
+// must be a cheap existence check, not the markdown itself, which detail() has no use for.
+test("detail reports whether a postmortem draft exists, without fetching its markdown", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(
+    stub(calls, (sql) =>
+      /FROM incidents WHERE id/.test(sql) ? [{ id: 7, thread_ts: null }]
+        : /FROM postmortems/.test(sql) ? [{ exists: true }]
+        : []
+    )
+  );
+  const d = await q.detail(7);
+  assert.equal(d!.hasPostmortem, true);
+  const pmCall = calls.find((c) => /FROM postmortems/.test(c.sql));
+  assert.ok(pmCall, "detail() must check postmortems");
+  assert.doesNotMatch(pmCall!.sql, /markdown/, "detail only needs existence, never the markdown body");
+  assert.match(pmCall!.sql, /\bLIMIT\b/i);
+});
+
+test("detail reports hasPostmortem false when none was ever drafted", async () => {
+  const q = new DashboardQueries(stub([], (sql) => (/FROM incidents WHERE id/.test(sql) ? [{ id: 7, thread_ts: null }] : [])));
+  const d = await q.detail(7);
+  assert.equal(d!.hasPostmortem, false);
+});

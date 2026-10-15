@@ -72,6 +72,34 @@ test("ordered and unordered lists do not bleed into each other", () => {
 // Every tag this module opens has to close, or the page's own layout comes apart below it.
 // Asserted over the REAL prompt and every shipped skill, not a fixture — the same trick
 // skills/real.test.ts uses, and the only thing that catches a construct nobody anticipated.
+// facts.ts's escCell writes `\|` for a literal pipe inside a cell and newlines replaced with
+// spaces — so a postmortem's Timeline table (the one place this dashboard renders a pipe table)
+// needs the inverse: `\|` must come back as a literal `|` in the cell, not stay a visible
+// backslash and not re-open as a column.
+test("a pipe table renders as a real table, header/separator/body, cells escaped", () => {
+  const html = renderMarkdown(
+    ["## Timeline", "", "| Time (UTC) | Event |", "|---|---|", "| 2026-10-14 10:00 | alert fired |", "| 2026-10-14 10:05 | `<script>` ran |"].join("\n")
+  );
+  assert.match(html, /<div class="table-wrap"><table><thead><tr><th>Time \(UTC\)<\/th><th>Event<\/th><\/tr><\/thead>/);
+  assert.match(html, /<tbody>.*<td>2026-10-14 10:00<\/td><td>alert fired<\/td>/);
+  // esc() first: a literal `<script>` in a cell must never become a tag.
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;code translate="no"&gt;.*&lt;\/code&gt;|<code translate="no">&lt;script&gt;<\/code>/);
+});
+
+test("an escaped pipe inside a cell stays a literal pipe, not a new column", () => {
+  const html = renderMarkdown(["| A | B |", "|---|---|", "| one \\| two | three |"].join("\n"));
+  const rows = html.match(/<tr><td>.*?<\/td><\/tr>/g) ?? [];
+  assert.equal(rows.length, 1);
+  assert.match(html, /<td>one \| two<\/td><td>three<\/td>/);
+});
+
+test("prose with a bare pipe but no separator row stays a paragraph, not a one-cell table", () => {
+  const html = renderMarkdown("a | b is not a table");
+  assert.doesNotMatch(html, /<table>/);
+  assert.match(html, /<p>a \| b is not a table<\/p>/);
+});
+
 test("the shipped prompt and every skill render to balanced markup", async () => {
   const dir = new URL("../../prompts/", import.meta.url);
   const files = [new URL("system.md", dir)];

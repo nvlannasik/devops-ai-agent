@@ -17,7 +17,7 @@ import { DEFAULT_RANGE, PAGE_SIZE, RANGES } from "./filters.js";
 import type { Filters, Range } from "./filters.js";
 import { NAV_COUNT_CAP } from "./queries.js";
 import type {
-  ChildIncident, FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, RemediationRow, TimelineEvent, Tokens, TokenLine,
+  ChildIncident, FeedbackRow, GateDrill, GateStat, HarnessView, IncidentDetail, IncidentPage, IncidentRow, Overview, PostmortemRow, RemediationRow, TimelineEvent, Tokens, TokenLine,
 } from "./queries.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
@@ -1011,6 +1011,9 @@ export function detailPage(
     usage?: TokenLine[];
     /** Related alerts correlate() merged into this incident's thread (agent/correlation). */
     children?: ChildIncident[];
+    /** Whether a postmortem draft exists for this incident (migrations/015) — never the draft
+     *  itself, which the dashboard reads directly on its own route rather than here. */
+    hasPostmortem?: boolean;
   },
   now: Date = new Date(),
   openIncidents?: number,
@@ -1025,6 +1028,13 @@ export function detailPage(
     i.channel && i.thread_ts
       ? `<a class="standalone" href="${esc(`https://slack.com/app_redirect?channel=${encodeURIComponent(i.channel)}&message_ts=${encodeURIComponent(i.thread_ts)}`)}">Open the Slack thread →</a>`
       : "";
+
+  // Read-only on this page too: the draft itself (and its request) only ever happens in Slack
+  // (`@agent postmortem`) — this is a link to the already-stored draft, shown only when one
+  // exists so a page with nothing to show does not advertise a dead end.
+  const postmortemLink = d.hasPostmortem
+    ? `<a class="standalone" href="/incidents/${esc(i.id)}/postmortem">Postmortem draft →</a>`
+    : "";
 
   // Both of these are records of five fields, not lists to scan, so below 46rem they stack into
   // captioned pairs rather than scrolling sideways — five columns on a phone put Result and
@@ -1173,6 +1183,7 @@ export function detailPage(
        ${stateBadge(i.resolved_at)}
        ${mergedInto}
        ${slack}
+       ${postmortemLink}
      </div>
      ${statList(
        [
@@ -1209,6 +1220,37 @@ export function detailPage(
      ${feedback}
      ${usageSection(d.usage ?? [], prices)}
      ${timelineSection(d.timeline ?? [])}
+     </div>`,
+    { current: "/incidents", openIncidents }
+  );
+}
+
+/**
+ * The stored postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5) —
+ * read-only, same as every other page here. The draft itself is only ever produced by
+ * `@agent postmortem` in the incident's Slack thread; this page and the `.md` download route
+ * next to it are the only two ways the dashboard touches the feature. A missing draft is the
+ * route's 404 (`errorPage`), never this function — it always renders a real row.
+ *
+ * `.doc` is the same wrapper `detailPage`/`skillPage` use: a long document laid straight into
+ * `<main>` would be a run of full-width bands with nothing declaring it one page.
+ */
+export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncidents?: number): string {
+  return layout(
+    "Postmortem draft",
+    `<div class="doc">
+     <p class="eyebrow">Incident #${esc(incidentId)}</p>
+     <h1>Postmortem draft</h1>
+     <div class="title-meta">
+       <span class="meta">Generated ${timeTag(pm.createdAt)} by ${esc(pm.requestedBy ?? "unknown")} · backend ${esc(pm.backend ?? "unknown")}</span>
+       <a class="standalone" href="/incidents/${esc(incidentId)}">← Incident #${esc(incidentId)}</a>
+       <a class="standalone" href="/incidents/${esc(incidentId)}/postmortem.md">Download Markdown →</a>
+     </div>
+     <p class="meta">A draft: facts (timeline, durations) are rendered from data and the model never
+       writes them; the narrative sections are drafted by the model and marked as a draft for
+       review. Review before sharing.</p>
+
+     <div class="card md">${renderMarkdown(pm.markdown)}</div>
      </div>`,
     { current: "/incidents", openIncidents }
   );

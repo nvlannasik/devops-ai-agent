@@ -5,7 +5,7 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, postmortemPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -30,6 +30,8 @@ export type Route =
   | { kind: "trace"; threadTs: string }
   | { kind: "asset"; path: string }
   | { kind: "detail"; id: number }
+  | { kind: "postmortem"; id: number }
+  | { kind: "postmortemMd"; id: number }
   | { kind: "skill"; name: string };
 
 export function matchRoute(pathname: string): Route {
@@ -84,6 +86,21 @@ export function matchRoute(pathname: string): Route {
   if (m) {
     const id = Number(m[1]);
     if (Number.isSafeInteger(id)) return { kind: "detail", id };
+  }
+  // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5): the page and
+  // its Markdown download. Same digit cap and Number.isSafeInteger guard as the plain detail
+  // route above, for the same reason — an absurd id must 404 here rather than reach
+  // queries.postmortem() as a bound parameter Postgres would reject with a 500.
+  const pmMd = /^\/incidents\/(\d{1,15})\/postmortem\.md$/.exec(p);
+  if (pmMd) {
+    const id = Number(pmMd[1]);
+    if (Number.isSafeInteger(id)) return { kind: "postmortemMd", id };
+    return { kind: "notfound" };
+  }
+  const pm = /^\/incidents\/(\d{1,15})\/postmortem$/.exec(p);
+  if (pm) {
+    const id = Number(pm[1]);
+    if (Number.isSafeInteger(id)) return { kind: "postmortem", id };
   }
   return { kind: "notfound" };
 }
@@ -534,6 +551,32 @@ export class DashboardServer {
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
           return send(200, detailPage(d, now, open, this.prices));
+        }
+        // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). Both
+        // routes read the SAME latest-draft row; the page renders it and the .md route hands it
+        // back raw. Read-only like every other page here — the draft itself is only ever
+        // produced by `@agent postmortem` in the incident's Slack thread.
+        case "postmortem": {
+          const [pm, open] = await Promise.all([this.queries.postmortem(route.id), this.openCount()]);
+          if (!pm) {
+            return send(
+              404,
+              errorPage("No postmortem draft", "No postmortem draft yet — ask `@agent postmortem` in the incident thread.")
+            );
+          }
+          return send(200, postmortemPage(route.id, pm, open));
+        }
+        case "postmortemMd": {
+          const pm = await this.queries.postmortem(route.id);
+          if (!pm) {
+            return send(
+              404,
+              errorPage("No postmortem draft", "No postmortem draft yet — ask `@agent postmortem` in the incident thread.")
+            );
+          }
+          return send(200, pm.markdown, "text/markdown; charset=utf-8", {
+            "content-disposition": `attachment; filename="postmortem-${route.id}.md"`,
+          });
         }
         case "harness": {
           const [v, open] = await Promise.all([this.queries.harness(), this.openCount()]);

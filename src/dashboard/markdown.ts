@@ -3,8 +3,11 @@ import { esc } from "./html.js";
 // A CommonMark SUBSET, sized to what `prompts/` actually contains and nothing else. Counted
 // across the core prompt and all 14 skills before writing a line: 124 bullets (one nesting
 // level), 72 `**bold**`, 52 inline-code spans, 38 headings over three levels, ~45 ordered
-// items, 3 fenced blocks — and every pipe-table row already lives inside a fence, so there is
-// no table support here and nothing to add until a table appears outside one.
+// items, 3 fenced blocks — and every pipe-table row in THOSE files already lives inside a
+// fence, so for years there was no table support here and nothing to add until one appeared
+// outside one. The postmortem draft's `## Timeline` (`agent/postmortem/facts.ts`,
+// `renderFacts`) is that one: a real pipe table, outside a fence, rendered on
+// `/incidents/:id/postmortem` — so pipe-table support was added, minimally (below).
 //
 // Hand-rolled rather than a dependency for the reason `rca.ts` is: a parser is 40KB and a
 // transitive tree to solve six constructs on two read-only internal pages, and the one thing
@@ -33,6 +36,33 @@ function listItem(line: string): { ordered: boolean; indent: number; text: strin
   const m = /^(\s*)(?:([-*])|(\d+)\.)\s+(.*)$/.exec(line);
   if (!m) return null;
   return { ordered: !m[2], indent: m[1]!.length, text: m[4]! };
+}
+
+// Pipe tables: added for the postmortem draft's `## Timeline` (facts.ts's renderFacts), the
+// only place this dashboard renders one. Deliberately minimal — header row, separator row, body
+// rows, no alignment colons honoured, no column-count enforcement — because that is the whole
+// shape `renderFacts` ever emits. `|` splits on an UNESCAPED pipe only: facts.ts's `escCell`
+// writes `\|` for a literal pipe inside a cell (and strips newlines), so `\|` has to come back
+// as a literal `|` in the rendered cell rather than staying a visible backslash or reopening a
+// column — the inverse of what escCell did going in.
+//
+// A table is recognised only when the NEXT line is a separator row (cells of `-`, optionally
+// `:`-bound) — a bare "|" in prose must not become a one-cell table just because it contains the
+// character.
+function splitTableRow(line: string): string[] {
+  const parts = line.trim().split(/(?<!\\)\|/);
+  // A row is `| a | b |`: splitting on every unescaped pipe produces a leading and a trailing
+  // empty string from the OUTER delimiters, never from an inner one — drop those two, not every
+  // empty entry, so a genuinely empty cell in the middle still counts as one.
+  if (parts.length > 0 && parts[0]!.trim() === "") parts.shift();
+  if (parts.length > 0 && parts[parts.length - 1]!.trim() === "") parts.pop();
+  return parts.map((c) => c.trim());
+}
+
+function isTableSeparatorRow(line: string): boolean {
+  if (!line.includes("|")) return false;
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
 }
 
 /**
@@ -83,6 +113,26 @@ export function renderMarkdown(src: string): string {
       const level = Math.min(heading[1]!.length + 2, 6);
       out.push(`<h${level}>${inline(esc(heading[2]!))}</h${level}>`);
       i++;
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1]!)) {
+      closeLists();
+      // esc() before inline() before the surrounding tag, the same order every other branch
+      // here uses — and the unescape of `\|` happens FIRST, on the raw cell, so the literal
+      // pipe it restores is never re-interpreted as markup or as a column delimiter: esc()
+      // does not touch `|` at all, so this is purely "undo escCell", not a second escaping pass.
+      const cellHtml = (c: string): string => inline(esc(c.replace(/\\\|/g, "|")));
+      const head = splitTableRow(line);
+      i += 2; // the header row and the separator row
+      const bodyRows: string[][] = [];
+      while (i < lines.length && lines[i]!.trim().length > 0 && lines[i]!.includes("|")) {
+        bodyRows.push(splitTableRow(lines[i]!));
+        i++;
+      }
+      const thead = head.map((c) => `<th>${cellHtml(c)}</th>`).join("");
+      const tbody = bodyRows.map((r) => `<tr>${r.map((c) => `<td>${cellHtml(c)}</td>`).join("")}</tr>`).join("");
+      out.push(`<div class="table-wrap"><table><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>`);
       continue;
     }
 

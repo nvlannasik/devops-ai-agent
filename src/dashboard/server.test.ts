@@ -113,13 +113,13 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 // resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
 async function withServer<T>(
   fn: (port: number) => Promise<T>,
-  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string> } = {}
+  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string>; queries?: DashboardQueries } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory);
+  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -581,4 +581,92 @@ test("/cluster turns a failing or non-JSON inventory into a note, never a 500", 
   await withServer(async (port) => {
     assert.match(await raw(port, "GET /cluster HTTP/1.1", authed), /MCP server not connected/);
   });
+});
+
+// ---------- Postmortem draft routes (migrations/015, spec 2026-10-14-postmortem-draft-design §5) ----------
+
+test("matchRoute recognises the postmortem page and the markdown download, GET-only like every other page", () => {
+  assert.deepEqual(matchRoute("/incidents/7/postmortem"), { kind: "postmortem", id: 7 });
+  assert.deepEqual(matchRoute("/incidents/7/postmortem.md"), { kind: "postmortemMd", id: 7 });
+  assert.deepEqual(matchRoute("/incidents/x/postmortem"), { kind: "notfound" });
+  assert.deepEqual(matchRoute("/incidents/x/postmortem.md"), { kind: "notfound" });
+  // same absurd-digit-count rejection the plain detail route gets, so a huge id can't reach
+  // the query layer as a bound parameter.
+  assert.deepEqual(matchRoute(`/incidents/${"9".repeat(40)}/postmortem`), { kind: "notfound" });
+  assert.equal("postmortem" in METHODS, false);
+  assert.equal("postmortemMd" in METHODS, false);
+});
+
+// A tiny stub pool, shaped like queries.test.ts's `stub()`, so these can boot a real
+// DashboardServer with canned postmortem rows and no actual Postgres.
+type Call = { sql: string; params: unknown[] };
+const stubPool = (rowsFor: (sql: string) => unknown[]) =>
+  ({
+    query: async (sql: string, params: unknown[] = []) => ({ rows: rowsFor(sql) }),
+    end: async () => {},
+    on: () => {},
+  }) as never;
+
+const DRAFT_MD = "# Postmortem draft — X (incident #7)\n\n## Summary\nAll good.";
+
+test("/incidents/:id/postmortem renders the stored draft", async () => {
+  const queries = new DashboardQueries(
+    stubPool((sql) =>
+      /FROM postmortems/.test(sql)
+        ? [{ id: 3, created_at: new Date("2026-10-14T10:20:00Z"), requested_by: "U1", backend: "claude", markdown: DRAFT_MD }]
+        : []
+    )
+  );
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /incidents/7/postmortem HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(res, /Postmortem draft/);
+    assert.match(res, /by U1/);
+    // behind the password like every other page
+    assert.match(status(await raw(port, "GET /incidents/7/postmortem HTTP/1.1")), /^HTTP\/1\.1 303\b/);
+  }, { queries });
+});
+
+test("/incidents/:id/postmortem is a 404 with the Slack hint when no draft was ever stored", async () => {
+  const queries = new DashboardQueries(stubPool(() => []));
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /incidents/7/postmortem HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 404\b/);
+    assert.match(res, /ask `@agent postmortem` in the incident thread/);
+  }, { queries });
+});
+
+test("/incidents/:id/postmortem.md downloads the raw markdown with the right type and filename", async () => {
+  const queries = new DashboardQueries(
+    stubPool((sql) =>
+      /FROM postmortems/.test(sql)
+        ? [{ id: 3, created_at: new Date("2026-10-14T10:20:00Z"), requested_by: "U1", backend: "claude", markdown: DRAFT_MD }]
+        : []
+    )
+  );
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /incidents/7/postmortem.md HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(header(res, "content-type") ?? "", /text\/markdown; charset=utf-8/);
+    assert.equal(header(res, "content-disposition"), `attachment; filename="postmortem-7.md"`);
+    const [, body] = res.split("\r\n\r\n");
+    assert.ok(body?.includes("# Postmortem draft — X (incident #7)"), "the raw markdown, not rendered HTML");
+    assert.doesNotMatch(body ?? "", /<h1>/);
+  }, { queries });
+});
+
+test("/incidents/:id/postmortem.md is also a 404 when nothing was ever drafted", async () => {
+  const queries = new DashboardQueries(stubPool(() => []));
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /incidents/7/postmortem.md HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 404\b/);
+  }, { queries });
+});
+
+test("postmortem routes are GET-only", async () => {
+  const queries = new DashboardQueries(stubPool(() => []));
+  await withServer(async (port) => {
+    assert.match(status(await raw(port, "POST /incidents/7/postmortem HTTP/1.1", authed)), /^HTTP\/1\.1 405\b/);
+    assert.match(status(await raw(port, "POST /incidents/7/postmortem.md HTTP/1.1", authed)), /^HTTP\/1\.1 405\b/);
+  }, { queries });
 });

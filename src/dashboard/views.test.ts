@@ -2,7 +2,7 @@ import { test } from "node:test";
 import type { BenchRun } from "./bench.js";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, postmortemPage, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
@@ -171,6 +171,21 @@ test("detailPage renders Merged into #N for a child incident, linking to the par
 test("detailPage omits the Merged into line for a top-level incident", () => {
   const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null, parent_id: null };
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /Merged into/);
+});
+
+// Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). The dashboard
+// never writes one — `hasPostmortem` is the only thing this page knows, read by queries.ts
+// directly, never through agent/postmortem/store.ts's PostmortemStore.
+test("detailPage shows a Postmortem draft link only when one exists", () => {
+  const incident: IncidentDetail = { ...row, rca: "x", channel: null, thread_ts: null };
+  const withDraft = detailPage({ incident, remediations: [], feedback: [], hasPostmortem: true });
+  assert.match(withDraft, /Postmortem draft/);
+  assert.match(withDraft, /href="\/incidents\/1\/postmortem"/);
+
+  const without = detailPage({ incident, remediations: [], feedback: [] });
+  assert.doesNotMatch(without, /Postmortem draft/);
+  const explicitFalse = detailPage({ incident, remediations: [], feedback: [], hasPostmortem: false });
+  assert.doesNotMatch(explicitFalse, /Postmortem draft/);
 });
 
 test("listPage keeps the active filters in the form and in the pager link", () => {
@@ -1464,6 +1479,51 @@ test("a skill body and a regex are escaped, not rendered, on the skill page", ()
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /5xx\|&lt;b&gt;\|&quot;q&quot;/);
   assert.doesNotMatch(html, /<script>alert/);
+});
+
+// ---------- Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5) ----------
+// The dashboard stays read-only: this page only ever renders a draft that already exists.
+// 404 ("ask `@agent postmortem`") is the server route's job (errorPage), not this function's —
+// postmortemPage always takes a real draft row.
+
+test("postmortemPage renders the stored markdown through renderMarkdown, escaped, and says who/what generated it", () => {
+  const html = postmortemPage(7, {
+    id: 3,
+    createdAt: new Date("2026-10-14T10:20:00Z"),
+    requestedBy: "U1",
+    backend: "claude",
+    markdown: "# Postmortem draft — X (incident #7)\n\n<script>alert(1)</script>\n\n## Summary\nAll good.",
+  });
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /Generated.*by U1 · backend claude/s);
+  assert.match(html, /<div class="card md">/);
+  // Both the download and the way back to the incident itself.
+  assert.match(html, /href="\/incidents\/7\/postmortem\.md"/);
+  assert.match(html, /href="\/incidents\/7"/);
+});
+
+// facts.ts's `## Timeline` is a pipe table — the one reason markdown.ts needed table support at
+// all. If this rendered as a raw-pipe paragraph instead, the Timeline would be unreadable.
+test("postmortemPage renders a facts.ts-shaped Timeline table as a real <table>, not a pipe paragraph", () => {
+  const html = postmortemPage(7, {
+    id: 1,
+    createdAt: new Date("2026-10-14T10:20:00Z"),
+    requestedBy: "U1",
+    backend: "claude",
+    markdown: ["## Timeline", "", "| Time (UTC) | Event |", "|---|---|", "| 2026-10-14 10:00 | alert fired |"].join("\n"),
+  });
+  assert.match(html, /<table>/);
+  assert.match(html, /<td>alert fired<\/td>/);
+  assert.doesNotMatch(html, /\| 2026-10-14 10:00 \| alert fired \|/);
+});
+
+test("postmortemPage says 'unknown' rather than nothing when requestedBy/backend were never recorded", () => {
+  const html = postmortemPage(7, {
+    id: 1, createdAt: new Date("2026-10-14T10:20:00Z"), requestedBy: null, backend: null, markdown: "x",
+  });
+  assert.match(html, /by unknown/);
+  assert.match(html, /backend unknown/);
 });
 
 test("the nav offers Context and marks it current on its own page", () => {

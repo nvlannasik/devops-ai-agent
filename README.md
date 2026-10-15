@@ -151,6 +151,7 @@ Covered areas, grouped:
 | `DASHBOARD_PORT` | | `3001` |
 | `DASHBOARD_PASSWORD` | Single shared password. **Unset ⇒ every page answers `503`**, never anonymous content (`/healthz` stays open). Keep it in a Secret, never a ConfigMap | — |
 | `DASHBOARD_COOKIE_SECURE` | Set `false` only for plain-HTTP local dev | `true` |
+| `DASHBOARD_PUBLIC_URL` | Base URL of the dashboard, no trailing slash. Not secret — used only to build the `/incidents/<id>/postmortem` link posted into Slack by `@agent postmortem`; unset posts the bare path instead | — |
 | `TRACE_ENABLED` | Record every investigation into `agent_events` (needs `DB_HOST`). `false` disables | `true` |
 | `GIT_SHA` | Baked in by CI; stamped on every trace so a run can be tied to the build that made it | `unknown` |
 | `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
@@ -206,6 +207,26 @@ confirmed knowledge is injected as a strong prior — see Incident Memory below.
 Alternatively, react ✅ (`SLACK_LEARN_REACTION`) on any message inside the investigated
 thread — same flow, silent outside investigated threads. Needs the `reactions:read`
 scope + `reaction_added` event subscription.
+
+### Postmortem draft
+
+In an incident's Slack thread, ask for a write-up (English or Indonesian):
+
+```
+@devops-agent postmortem
+@devops-agent bikin postmortem
+```
+
+The agent assembles one LLM call's narrative (Summary, Impact, Root cause, What went well, What
+went poorly, Action items) around a **Timeline and Numbers section rendered entirely from
+Postgres data** — the model never writes either, so a hallucinated event or duration can't reach
+the document. A human-confirmed root cause (`learn`) outranks the agent's own RCA, and a
+disagreement between the two is stated rather than hidden. It posts the Summary and Action items
+into the thread plus a link to the full draft, and stores the draft (`postmortems` table,
+migration `015`) so it survives on the dashboard at `/incidents/<id>/postmortem`, downloadable as
+Markdown at `/incidents/<id>/postmortem.md`. The dashboard never writes one — this is a Slack-only
+trigger, and regenerating adds a new row rather than editing the last one. Design:
+[`docs/superpowers/specs/2026-10-14-postmortem-draft-design.md`](docs/superpowers/specs/2026-10-14-postmortem-draft-design.md).
 
 ### Resolved alerts
 
@@ -454,7 +475,7 @@ npm run migrate          # dev (tsx)
 npm run migrate:prod     # prod (node dist/src/db/migrate-cli.js)
 ```
 
-The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`014` exist; next is `migrations/015_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
+The runner tracks applied versions in a `schema_migrations` table and wraps each file in a transaction. It takes a **Postgres advisory lock**, so multiple agent pods starting at once (autoscaling) serialize instead of racing on DDL. The agent also runs migrations on startup, so a separate step is optional — but for a clean rollout you can run it as a Kubernetes `Job` or `initContainer` (`command: ["node","dist/src/db/migrate-cli.js"]`) before the Deployment. Add a new change as the next numbered file (`001`–`015` exist; next is `migrations/016_*.sql`). Because migrations run at pod startup, a migration that fails is a pod that won't start — so avoid anything needing a privilege the app role may not have (`CREATE EXTENSION`, for one).
 
 ## Incident Dashboard
 
@@ -465,6 +486,8 @@ set `DASHBOARD_ENABLED=true` and a `DASHBOARD_PASSWORD`.
 /                overview — counts, recent incidents, remediation outcomes, model activity + cost per backend
 /incidents       filterable list, 10 rows a page
 /incidents/N     one incident: the RCA parsed into sections, its remediations & verdicts, LLM usage + cost
+/incidents/N/postmortem      the latest postmortem draft for incident N, rendered (see Usage below)
+/incidents/N/postmortem.md   the same draft as a raw Markdown download
 /topology        the agent stack's own map: LLM backends, MCP tools, Postgres/Redis/SQS stores
 /cluster         the cluster inventory as a map: namespaces, then host → Service → workload → managed by
 /harness         every gate's activity across recorded runs, LLM latency per backend
@@ -573,6 +596,7 @@ prompt cache.
 | Incident Dashboard | Optional read-only web view (own listener, own port, shared-password cookie) over the same Postgres — overview, filterable incident list, per-incident RCA + remediation verdicts + LLM cost, the stack's topology, the cluster map, gate activity (`/harness`) and benchmark history |
 | Change timeline | Before an alert's investigation, what changed in its namespace in the previous 24h — rollouts with the pod-template diff, HelmRelease upgrades, ConfigMap updates, GitOps commits — goes to the model as data, onto the RCA card as `🕑 Recent changes`, and into the incident row; a source that could not be read says so |
 | Cross-alert correlation | A new alert group whose service is the same as, or one call-graph edge from, an open incident's in the same namespace within the last 30 minutes is posted as `🔗 Related alert` into that incident's thread instead of opening a new one — stored as a child row (never its own card, one follow-up question), and the dashboard's incident page lists a parent's children under Related alerts and links a child back with Merged into #N. Fails open to today's path on any failure (no graph, no subject, a failed post) |
+| Postmortem draft | `@agent postmortem` in an incident thread assembles a Summary/Impact/Root cause/What went well/What went poorly/Action items narrative (one LLM call) around a Timeline and Numbers section rendered entirely from Postgres — the model can never rewrite either. A human-confirmed root cause outranks the agent's hypothesis, with any disagreement stated. Posted to Slack as a summary + link; stored (`postmortems` table) and readable/downloadable on the dashboard at `/incidents/<id>/postmortem` |
 | MCP Reconnect | Exponential backoff + mutex-protected |
 | Context Assembly | Every request is assembled, not accumulated: tool results compacted to 8000 chars, conversation history trimmed to 50 messages, then the whole thing fitted to a per-backend token budget (`fitToBudget()`) that drops oldest-first rather than letting the provider reject the call |
 | Skills | Per-symptom playbooks in `prompts/skills/*.md`, selected by a `when` regex and injected as a separate message — top 3 per turn, system prompt stays byte-identical so the prompt cache holds |

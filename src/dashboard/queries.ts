@@ -44,6 +44,21 @@ export interface IncidentDetail extends IncidentRow {
 }
 
 /**
+ * The latest postmortem draft for one incident (migrations/015, spec
+ * 2026-10-14-postmortem-draft-design §5). The dashboard reads Postgres directly for this —
+ * deliberately NOT a reuse of `agent/postmortem/store.ts`'s `PostmortemStore`, which belongs to
+ * the agent's write-side (Slack) flow and would pull that module's dependencies into the
+ * dashboard for a plain SELECT.
+ */
+export interface PostmortemRow {
+  id: number;
+  createdAt: Date;
+  requestedBy: string | null;
+  backend: string | null;
+  markdown: string;
+}
+
+/**
  * A related alert group that correlate() filed as a CHILD of this incident — same Slack thread,
  * `rca` starting "Merged into…" (agent/correlation). `subjects` is the service-level identity it
  * was matched on, the same field `distinctSubjects()` fills on the parent.
@@ -543,7 +558,7 @@ export class DashboardQueries {
       [id]
     );
     if (rows.length === 0) return null;
-    const [remediations, feedback, timeline, usage, children] = await Promise.all([
+    const [remediations, feedback, timeline, usage, children, postmortemExists] = await Promise.all([
       this.pool.query(
         // LEFT JOIN, not an inner one: a remediation that was proposed and never approved has
         // no check, and a remediation approved seconds ago has one that has not run. Both must
@@ -582,6 +597,9 @@ export class DashboardQueries {
       // Related alerts correlate() filed as children of THIS row (agent/correlation). Never the
       // other direction — a child's own detail page does not list its siblings.
       this.children(id),
+      // Existence only — detailPage's "Postmortem draft →" link needs a boolean, never the
+      // markdown body, so this is a plain existence probe rather than postmortem()'s SELECT.
+      this.pool.query(`SELECT 1 FROM postmortems WHERE incident_id = $1 LIMIT 1`, [id]),
     ]);
     return {
       incident: rows[0] as IncidentDetail,
@@ -593,6 +611,26 @@ export class DashboardQueries {
         input: num(r.input), output: num(r.output), cacheRead: num(r.cache_read), cacheCreation: num(r.cache_creation),
       })),
       children,
+      hasPostmortem: postmortemExists.rows.length > 0,
+    };
+  }
+
+  /** The latest postmortem draft for one incident, or null if none was ever stored. */
+  async postmortem(incidentId: number): Promise<PostmortemRow | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(
+      `SELECT id, created_at, requested_by, backend, markdown FROM postmortems
+        WHERE incident_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [incidentId]
+    );
+    if (rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      id: num(r.id),
+      createdAt: r.created_at,
+      requestedBy: r.requested_by ?? null,
+      backend: r.backend ?? null,
+      markdown: r.markdown,
     };
   }
 
