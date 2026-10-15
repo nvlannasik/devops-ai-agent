@@ -37,3 +37,7 @@ test("a decline word elsewhere in the sentence, not anchoring the ask itself, do
   // precedes it — only "jangan" directly before the verb/ask word is a decline (see the other test).
   assert.equal(postmortemIntent("bikin postmortem, jangan sebut nama orang"), "postmortem");
 });
+
+test("Indonesian verb suffixes and lead-ins still ask", () => {
+  for (const t of ["tolong buatkan postmortem", "bikinin postmortem", "buatin postmortem ya", "bisa bikin postmortem?", "minta postmortem", "mohon dibuatkan postmortem"]) assert.equal(postmortemIntent(t), "postmortem", t);
+});

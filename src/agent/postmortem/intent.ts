@@ -6,8 +6,10 @@
 // in passing, about something else, and must fall through to the normal investigation path
 // rather than being read as a postmortem command. The grammar: optional polite lead-in, optional
 // verb, optional article, then the ask word itself.
-const LEADIN = "(?:please|tolong|can you|could you|pls)\\s+";
-const VERB = "(?:bikin|buat|make|write|draft|generate|create|do)\\s+";
+// One or more polite lead-ins ("tolong", "bisa", "minta", "mohon" …) may stack: "bisa tolong bikin postmortem".
+const LEADIN = "(?:(?:please|tolong|can you|could you|pls|bisa|minta|mohon)\\s+)+";
+// Indonesian verbs take a passive "di-" and a "-kan"/"-in" suffix: buatkan, bikinin, dibuatkan.
+const VERB = "(?:(?:di)?(?:bikin|buat)(?:kan|in)?|make|write|draft|generate|create|do)\\s+";
 const ARTICLE = "(?:a|an|the)\\s+";
 // "write up" (unhyphenated) is the ask word only when it is NOT followed by a WH-word — "write up
 // why the checkout pod restarts" is a request to explain, not a request for a postmortem document.
