@@ -2405,7 +2405,10 @@ export class DevOpsAgent {
    * a future non-Slack trigger) stays exactly as before; handlePostmortem passes its own.
    */
   async draftPostmortem(f: PostmortemFacts, threadId: string | null = null): Promise<{ markdown: string; backend: string }> {
-    const r = await withRoute("light", () => this.llm.chat([{ role: "user", content: buildPostmortemPrompt(f) }], [], POSTMORTEM_SYSTEM));
+    // The writing rules are the `postmortem-format` skill and ride in the user message, like every
+    // skill: the system prompt stays the constant heading contract (cache-safe).
+    const guide = this.skills.all().find((s) => s.name === "postmortem-format")?.body;
+    const r = await withRoute("light", () => this.llm.chat([{ role: "user", content: buildPostmortemPrompt(f, guide) }], [], POSTMORTEM_SYSTEM));
     this.recordUsage(threadId, r);
     const text = this.extractText(r.content);
     // response.backend is set only by the router (RouterLLMClient); a direct single-backend

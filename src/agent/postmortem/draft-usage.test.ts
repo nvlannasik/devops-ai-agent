@@ -32,3 +32,23 @@ test("draftPostmortem with no threadId still records usage, with threadTs: null 
   assert.equal(usageCalls.length, 1);
   assert.equal(usageCalls[0].threadTs, null);
 });
+
+// The writing rules live in prompts/skills/postmortem-format.md (editable, shown on /context) and
+// ride in the USER message like every other skill — never in the system prompt, which stays the
+// constant heading contract so it caches.
+test("draftPostmortem carries the postmortem-format skill in the user message, not the system prompt", async () => {
+  const seen: { messages: any[]; system?: string }[] = [];
+  const llm: LLMClient = {
+    chat: async (messages: any, _tools: any, system?: string) => {
+      seen.push({ messages, system });
+      return { content: [{ type: "text", text: "## Summary\nok" }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } };
+    },
+  };
+  const agent = new DevOpsAgent({ llm, mcp: fakeMcp() });
+  (agent as any).usage = { record: async () => {} };
+  await agent.draftPostmortem(F);
+  const user = String(seen[0].messages[0].content);
+  assert.match(user, /`Related alerts: 0` means no other alert joined this incident/);
+  assert.ok(user.indexOf("Related alerts: 0` means") < user.indexOf("Incident #"), "the guide comes before the facts");
+  assert.doesNotMatch(seen[0].system ?? "", /Related alerts: 0/);
+});

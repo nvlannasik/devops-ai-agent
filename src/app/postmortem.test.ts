@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp, ThreadQueue } from "./index.js";
 import { config } from "../config/index.js";
+import { FIXTURE } from "../agent/postmortem/fixtures.js";
 
 // `@agent postmortem` wiring (spec 2026-10-14-postmortem-draft-design.md §1 Trigger, §6 Config,
 // Error handling table). Fake-`this` pattern from resolved-early.test.ts.
@@ -50,7 +51,7 @@ interface Overrides {
   repliesPages?: Array<{ messages: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>; next_cursor?: string }>;
 }
 
-const FACTS = { incident: { id: 7 }, humans: [] };
+const FACTS = FIXTURE;
 
 function harness(overrides: Overrides = {}) {
   const posted: any[] = [];
@@ -150,9 +151,10 @@ test("an incident thread: humans from the human message only, draft stored, summ
     assert.match(h.updated[0].text, /https:\/\/dash\.example\/incidents\/7\/postmortem/);
 
     const final = h.posted[h.posted.length - 1].text;
-    assert.match(final, /\*Summary\*/);
+    assert.match(final, /\*⚡ Summary\*/);
     assert.match(final, /Everything broke because of pool exhaustion\./);
-    assert.match(final, /\*Action items\*/);
+    assert.match(final, /\*🔧 Action items\*/);
+    assert.match(final, /<https:\/\/dash\.example\/incidents\/7\/postmortem\|Full draft on the dashboard>/);
     assert.match(final, /increase pool size/);
     assert.doesNotMatch(final, /not stored/);
   } finally {
@@ -199,7 +201,7 @@ test("storePostmortem returns null: summary still posted, with a not-stored note
 
   assert.equal(h.calls.store.length, 1);
   const final = h.posted[h.posted.length - 1].text;
-  assert.match(final, /\*Summary\*/);
+  assert.match(final, /\*⚡ Summary\*/);
   assert.match(final, /not stored/);
 
   assert.equal(h.updated[0].text, "📝 Postmortem drafted — not stored (the dashboard will not have it)");

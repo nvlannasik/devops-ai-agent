@@ -8,7 +8,7 @@ import { parseConfidence } from "../agent/confidence/index.js";
 import { mentionBudget, wantsInvestigation, wantsTour } from "../agent/intent/index.js";
 import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
 import { postmortemIntent } from "../agent/postmortem/intent.js";
-import { sectionOf } from "../agent/postmortem/draft.js";
+import { postmortemSlackText } from "../agent/postmortem/slack.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, buildAlertProposalContext, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
@@ -702,21 +702,17 @@ export class SlackApp {
         const { markdown, backend } = await this.agent.draftPostmortem(facts, threadId);
         const storedId = await this.agent.storePostmortem(incidentId, event.user ?? null, markdown, backend);
 
-        if (storedId === null) {
-          await updateProgress("📝 Postmortem drafted — not stored (the dashboard will not have it)");
-        } else {
-          const link = config.dashboard.publicUrl
-            ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
-            : `/incidents/${incidentId}/postmortem`;
-          await updateProgress(`📝 Postmortem draft ready — ${link}`);
-        }
+        const link =
+          storedId === null
+            ? null
+            : config.dashboard.publicUrl
+              ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
+              : `/incidents/${incidentId}/postmortem`;
+        await updateProgress(
+          link === null ? "📝 Postmortem drafted — not stored (the dashboard will not have it)" : `📝 Postmortem draft ready — ${link}`
+        );
 
-        const summary = sectionOf(markdown, "Summary") ?? "_Not drafted._";
-        const actionItems = sectionOf(markdown, "Action items") ?? "_Not drafted._";
-        let text = toMrkdwn(`*Summary*\n${summary}\n\n*Action items*\n${actionItems}`);
-        if (storedId === null) text += "\n\n_(not stored — the dashboard will not have it)_";
-
-        for (const part of splitForSlack(text)) {
+        for (const part of splitForSlack(postmortemSlackText(facts, markdown, link))) {
           await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
         }
       } catch (err) {
