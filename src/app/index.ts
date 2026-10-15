@@ -60,6 +60,28 @@ export function frameChangeTimeline(
   return content;
 }
 
+// A postmortem's "what did humans say" read must not silently drop statements past the first
+// page: `conversations.replies` caps at 1000 messages per call and `limit: 100` alone truncates
+// any thread longer than that. Five pages (500 messages) is a generous ceiling for an incident
+// thread — if a thread outgrows that, the draft is missing from the tail, not silently empty.
+const POSTMORTEM_REPLY_PAGES = 5;
+
+export async function fetchThreadReplies(
+  client: AllMiddlewareArgs["client"],
+  channel: string,
+  ts: string
+): Promise<Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>> {
+  const messages: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }> = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < POSTMORTEM_REPLY_PAGES; page++) {
+    const resp = await client.conversations.replies({ channel, ts, limit: 100, cursor });
+    messages.push(...((resp.messages ?? []) as typeof messages));
+    cursor = resp.response_metadata?.next_cursor;
+    if (!cursor) break;
+  }
+  return messages;
+}
+
 export function buildProposalContext(userText: string, reply: string, offer: string | null, previousReply: string): string {
   const prior = previousReply.trim()
     ? `Previous turn — the agent's own findings, which this request is answering:\n${truncate(previousReply.trim(), PREVIOUS_TURN_CHARS)}\n\n`
@@ -632,7 +654,7 @@ export class SlackApp {
     client: AllMiddlewareArgs["client"],
     threadId: string
   ): Promise<void> {
-    await this.threadQueue.run(threadId, async () => {
+    await this.inFlight.track({ channel: event.channel, threadTs: threadId, kind: "mention" }, this.threadQueue.run(threadId, async () => {
       const incidentId = await this.agent.findIncidentForThread(event.channel, threadId).catch(() => null);
       if (incidentId === null) {
         await client.chat.postMessage({
@@ -662,8 +684,8 @@ export class SlackApp {
       // are different facts, and only the first means there is nothing to quote.
       let humans: string[] | null;
       try {
-        const replies = await client.conversations.replies({ channel: event.channel, ts: threadId, limit: 100 });
-        humans = humanStatements(replies.messages ?? [], event.ts);
+        const messages = await fetchThreadReplies(client, event.channel, threadId);
+        humans = humanStatements(messages, event.ts);
       } catch (err) {
         logger.warn(`[slack] postmortem: could not read thread ${threadId}: ${errDetail(err)}`);
         humans = null;
@@ -677,13 +699,17 @@ export class SlackApp {
           await updateProgress(`❌ Could not draft the postmortem: incident #${incidentId} could not be read`);
           return;
         }
-        const { markdown, backend } = await this.agent.draftPostmortem(facts);
+        const { markdown, backend } = await this.agent.draftPostmortem(facts, threadId);
         const storedId = await this.agent.storePostmortem(incidentId, event.user ?? null, markdown, backend);
 
-        const link = config.dashboard.publicUrl
-          ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
-          : `/incidents/${incidentId}/postmortem`;
-        await updateProgress(`📝 Postmortem draft ready — ${link}`);
+        if (storedId === null) {
+          await updateProgress("📝 Postmortem drafted — not stored (the dashboard will not have it)");
+        } else {
+          const link = config.dashboard.publicUrl
+            ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
+            : `/incidents/${incidentId}/postmortem`;
+          await updateProgress(`📝 Postmortem draft ready — ${link}`);
+        }
 
         const summary = sectionOf(markdown, "Summary") ?? "_Not drafted._";
         const actionItems = sectionOf(markdown, "Action items") ?? "_Not drafted._";
@@ -697,7 +723,7 @@ export class SlackApp {
         logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);
         await updateProgress(`❌ Could not draft the postmortem: ${err instanceof Error ? err.message : String(err)}`);
       }
-    });
+    }));
   }
 
   // Returns false when this thread isn't a stored incident, so the caller can fall through to

@@ -32,7 +32,9 @@ export interface TimelineEvent { at: string; event: string }
 const alertAt = (f: PostmortemFacts): string => f.incident.alertStartedAt ?? f.incident.createdAt;
 
 export function timelineOf(f: PostmortemFacts): TimelineEvent[] {
-  const events: TimelineEvent[] = [{ at: alertAt(f), event: "alert fired" }];
+  // A createdAt fallback is the agent noticing the incident, not Alertmanager's own alertStartedAt
+  // — saying "alert fired" for it invents a start time the data never gave us.
+  const events: TimelineEvent[] = [{ at: alertAt(f), event: f.incident.alertStartedAt ? "alert fired" : "incident recorded" }];
 
   for (const c of f.changes?.changes ?? []) {
     const d = c.diff?.[0];
@@ -60,16 +62,20 @@ export function timelineOf(f: PostmortemFacts): TimelineEvent[] {
 }
 
 export function numbersOf(f: PostmortemFacts): { timeToRcaMs: number | null; timeToMitigationMs: number | null; durationMs: number | null; relatedAlerts: number; remediations: number } {
+  // Every duration here is measured FROM the alert firing. Without a real alertStartedAt the
+  // only "start" we have is createdAt — when the agent noticed, not when the problem began — so
+  // a duration computed from it would be a guess dressed as a measurement. Null, not a number.
+  const hasRealStart = f.incident.alertStartedAt != null;
   const startMs = Date.parse(alertAt(f));
   const endedAt = f.investigation?.endedAt;
-  const timeToRcaMs = endedAt ? Date.parse(endedAt) - startMs : null;
+  const timeToRcaMs = hasRealStart && endedAt ? Date.parse(endedAt) - startMs : null;
 
   const recoveredAt = f.remediations
     .filter((r) => r.verdict === "recovered" && r.executedAt)
     .map((r) => Date.parse(r.executedAt as string));
-  const timeToMitigationMs = recoveredAt.length > 0 ? Math.min(...recoveredAt) - startMs : null;
+  const timeToMitigationMs = hasRealStart && recoveredAt.length > 0 ? Math.min(...recoveredAt) - startMs : null;
 
-  const durationMs = f.incident.resolvedAt ? Date.parse(f.incident.resolvedAt) - startMs : null;
+  const durationMs = hasRealStart && f.incident.resolvedAt ? Date.parse(f.incident.resolvedAt) - startMs : null;
 
   return { timeToRcaMs, timeToMitigationMs, durationMs, relatedAlerts: f.related.length, remediations: f.remediations.length };
 }

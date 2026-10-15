@@ -47,6 +47,7 @@ interface Overrides {
   storedId?: number | null;
   messages?: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>;
   repliesThrows?: string;
+  repliesPages?: Array<{ messages: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>; next_cursor?: string }>;
 }
 
 const FACTS = { incident: { id: 7 }, humans: [] };
@@ -54,18 +55,21 @@ const FACTS = { incident: { id: 7 }, humans: [] };
 function harness(overrides: Overrides = {}) {
   const posted: any[] = [];
   const updated: any[] = [];
-  const calls = { facts: [] as any[], draftCount: 0, store: [] as any[] };
+  const calls = { facts: [] as any[], draftCount: 0, draftArgs: [] as any[], store: [] as any[] };
 
+  const inFlightCalls: any[] = [];
   const self: any = {
     threadQueue: new ThreadQueue(),
+    inFlight: { track: (key: any, p: Promise<unknown>) => { inFlightCalls.push(key); return p; } },
     agent: {
       findIncidentForThread: async () => (overrides.incidentId === undefined ? null : overrides.incidentId),
       postmortemFacts: async (id: number, humans: string[] | null) => {
         calls.facts.push({ id, humans });
         return overrides.facts === undefined ? FACTS : overrides.facts;
       },
-      draftPostmortem: async (_f: unknown) => {
+      draftPostmortem: async (_f: unknown, threadId?: string) => {
         calls.draftCount++;
+        calls.draftArgs.push(threadId);
         if (overrides.draftThrows) throw new Error(overrides.draftThrows);
         return overrides.draft ?? { markdown: FULL_MD, backend: "claude" };
       },
@@ -87,8 +91,15 @@ function harness(overrides: Overrides = {}) {
       },
     },
     conversations: {
-      replies: async () => {
+      // repliesPages[0]'s own next_cursor is the literal cursor value the fake hands back and
+      // expects on the next call — page index doesn't matter, only that the cursor is threaded.
+      replies: async (args: { cursor?: string }) => {
         if (overrides.repliesThrows) throw new Error(overrides.repliesThrows);
+        if (overrides.repliesPages) {
+          const idx = args.cursor ? overrides.repliesPages.findIndex((p) => p.next_cursor === args.cursor) + 1 : 0;
+          const page = overrides.repliesPages[idx];
+          return { messages: page.messages, response_metadata: page.next_cursor ? { next_cursor: page.next_cursor } : undefined };
+        }
         return { messages: overrides.messages ?? [] };
       },
     },
@@ -99,7 +110,7 @@ function harness(overrides: Overrides = {}) {
     return (SlackApp.prototype as any).handlePostmortem.call(self, event, client, threadId);
   };
 
-  return { self, client, posted, updated, calls, run };
+  return { self, client, posted, updated, calls, run, inFlightCalls };
 }
 
 test("no top-level incident for this thread: one refusal line, draftPostmortem never called", async () => {
@@ -190,6 +201,40 @@ test("storePostmortem returns null: summary still posted, with a not-stored note
   const final = h.posted[h.posted.length - 1].text;
   assert.match(final, /\*Summary\*/);
   assert.match(final, /not stored/);
+
+  assert.equal(h.updated[0].text, "📝 Postmortem drafted — not stored (the dashboard will not have it)");
+  assert.doesNotMatch(h.updated[0].text, /https?:\/\//);
+  assert.doesNotMatch(h.updated[0].text, /\/incidents\//);
+});
+
+test("draftPostmortem is called with the Slack thread id, for usage attribution", async () => {
+  const h = harness({ incidentId: 7 });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+
+  assert.deepEqual(h.calls.draftArgs, ["100.0"]);
+});
+
+test("a postmortem run is tracked in InFlightWork like a mention, for shutdown drain", async () => {
+  const h = harness({ incidentId: 7 });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+
+  assert.deepEqual(h.inFlightCalls, [{ channel: "C1", threadTs: "100.0", kind: "mention" }]);
+});
+
+test("conversations.replies is paginated: humans from both pages reach postmortemFacts", async () => {
+  const h = harness({
+    incidentId: 7,
+    repliesPages: [
+      { messages: [{ ts: "100.1", user: "U1", text: "connection pool exhausted causing errors" }], next_cursor: "cursor1" },
+      { messages: [{ ts: "100.2", user: "U2", text: "it started after the timeout change deployed" }] },
+    ],
+  });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+
+  assert.deepEqual(h.calls.facts[0].humans, [
+    "connection pool exhausted causing errors",
+    "it started after the timeout change deployed",
+  ]);
 });
 
 test("conversations.replies throws: postmortemFacts receives humans: null", async () => {

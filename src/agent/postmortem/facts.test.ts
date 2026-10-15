@@ -19,6 +19,17 @@ test("numbersOf: time to RCA, to mitigation (first recovered), duration", () => 
   assert.equal(n.relatedAlerts, 1);
   assert.equal(n.remediations, 1);
 });
+test("no real alert start: all three durations are null, and the fallback event reads 'incident recorded'", () => {
+  const f = { ...F, incident: { ...F.incident, alertStartedAt: null } };
+  const n = numbersOf(f);
+  assert.equal(n.timeToRcaMs, null);
+  assert.equal(n.timeToMitigationMs, null);
+  assert.equal(n.durationMs, null);
+
+  const t = timelineOf(f);
+  const fallbackEvent = t.find((e) => e.at === f.incident.createdAt);
+  assert.equal(fallbackEvent?.event, "incident recorded");
+});
 test("an open incident and missing sources give nulls, never a guess", () => {
   const n = numbersOf({ ...F, incident: { ...F.incident, resolvedAt: null }, investigation: null, remediations: [] });
   assert.equal(n.durationMs, null);

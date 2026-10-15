@@ -2400,13 +2400,13 @@ export class DevOpsAgent {
 
   /**
    * The ONE LLM call a postmortem costs: no tools, light route — a Markdown write-up of facts
-   * already gathered, not an investigation. Usage is recorded the way proposeRemediationRun's
-   * call does: `threadTs: null`, because this method's signature carries no Slack thread to
-   * attribute it to (never invent one — see recordUsage's own comment).
+   * already gathered, not an investigation. `threadId` is the Slack thread the draft was
+   * requested in — optional (and defaulted to null) so a caller with no Slack thread (replay,
+   * a future non-Slack trigger) stays exactly as before; handlePostmortem passes its own.
    */
-  async draftPostmortem(f: PostmortemFacts): Promise<{ markdown: string; backend: string }> {
+  async draftPostmortem(f: PostmortemFacts, threadId: string | null = null): Promise<{ markdown: string; backend: string }> {
     const r = await withRoute("light", () => this.llm.chat([{ role: "user", content: buildPostmortemPrompt(f) }], [], POSTMORTEM_SYSTEM));
-    this.recordUsage(null, r);
+    this.recordUsage(threadId, r);
     const text = this.extractText(r.content);
     // response.backend is set only by the router (RouterLLMClient); a direct single-backend
     // provider leaves it undefined, and llm_usage stores NULL for the same reason — "light
