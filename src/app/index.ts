@@ -8,7 +8,7 @@ import { parseConfidence } from "../agent/confidence/index.js";
 import { mentionBudget, wantsInvestigation, wantsTour } from "../agent/intent/index.js";
 import { buildTranscript, humanStatements, learnIntent } from "../agent/feedback/index.js";
 import { postmortemIntent } from "../agent/postmortem/intent.js";
-import { postmortemSlackText } from "../agent/postmortem/slack.js";
+import { postmortemSlackBlocks, postmortemSlackText } from "../agent/postmortem/slack.js";
 import { parseStatusCommand, type StatusCommand } from "../agent/incidents/reconcile.js";
 import { answerAsksForInput, buildAlertProposalContext, dropCardPromises, explainGate, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
@@ -712,8 +712,20 @@ export class SlackApp {
           link === null ? "📝 Postmortem drafted — not stored (the dashboard will not have it)" : `📝 Postmortem draft ready — ${link}`
         );
 
-        for (const part of splitForSlack(postmortemSlackText(facts, markdown, link))) {
-          await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+        const text = postmortemSlackText(facts, markdown, link);
+        try {
+          await client.chat.postMessage({
+            channel: event.channel, thread_ts: threadId,
+            text: `📝 Postmortem draft — ${facts.incident.alertname}`,
+            blocks: postmortemSlackBlocks(facts, markdown, link),
+          });
+        } catch (err) {
+          // `invalid_blocks` refuses the WHOLE message — the same card goes out as plain mrkdwn
+          // rather than the draft reaching nobody (the RCA card's rule, postRca).
+          logger.warn(`[slack] postmortem card refused, posting as text: ${errDetail(err)}`);
+          for (const part of splitForSlack(text)) {
+            await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
+          }
         }
       } catch (err) {
         logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);

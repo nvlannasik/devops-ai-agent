@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { postmortemSlackText } from "./slack.js";
+import { postmortemSlackText, postmortemSlackBlocks } from "./slack.js";
 import { assemblePostmortem } from "./draft.js";
 import { FIXTURE as F } from "./fixtures.js";
 
@@ -50,4 +50,25 @@ test("a section the model did not write still renders a placeholder, not a bare 
   const md = assemblePostmortem(F, "## Summary\nonly this", new Date());
   const t = postmortemSlackText(F, md, null);
   assert.match(t, /\*🔧 Action items\*\n_Not drafted/);
+});
+
+test("Block Kit card: header, a divider between every section, the link in a context footer", () => {
+  const blocks = postmortemSlackBlocks(F, MD, "https://dash.example/incidents/7/postmortem") as any[];
+  assert.equal(blocks[0].type, "header");
+  assert.match(blocks[0].text.text, /📝 Postmortem draft — SampleAppHighLatency/);
+  assert.equal(blocks[1].type, "divider");
+  const sections = blocks.filter((b) => b.type === "section").map((b) => b.text.text);
+  for (const label of ["⏱️ Numbers", "⚡ Summary", "📍 Root cause", "🔧 Action items"]) assert.ok(sections.some((t) => t.includes(label)), label);
+  // every section is followed by a divider (the RCA card's rule), and the card ends in the footer
+  blocks.forEach((b, i) => { if (b.type === "section" && blocks[i + 1].type !== "section") assert.equal(blocks[i + 1].type, "divider", `after block ${i}`); });
+  const last = blocks.at(-1);
+  assert.equal(last.type, "context");
+  assert.match(last.elements[0].text, /<https:\/\/dash\.example\/incidents\/7\/postmortem\|Full draft on the dashboard>/);
+  assert.ok(sections.every((t) => t.length <= 2900), "Slack rejects a section over 3000 chars");
+});
+
+test("a very long section is split into several sections, never one Slack would reject", () => {
+  const long = assemblePostmortem(F, NARRATIVE.replace("Checkout failed", "x").replace("`checkout-gateway` timed out", "word ".repeat(1500)), new Date());
+  const blocks = postmortemSlackBlocks(F, long, null) as any[];
+  assert.ok(blocks.filter((b) => b.type === "section").every((b) => b.text.text.length <= 2900));
 });

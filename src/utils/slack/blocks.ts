@@ -61,7 +61,7 @@ export function extractSection(text: string, label: string): string {
   return match ? match[1].trim() : "";
 }
 
-function divider(): Block {
+export function divider(): Block {
   return { type: "divider" };
 }
 
@@ -79,14 +79,14 @@ function divider(): Block {
  */
 const SLACK_SECTION_MAX = 2900;
 
-function section(text: string): Block[] {
+export function section(text: string): Block[] {
   return splitForSlack(text, SLACK_SECTION_MAX).map((part) => ({
     type: "section",
     text: { type: "mrkdwn", text: part },
   }));
 }
 
-function header(text: string): Block {
+export function header(text: string): Block {
   return { type: "header", text: { type: "plain_text", text, emoji: true } };
 }
 

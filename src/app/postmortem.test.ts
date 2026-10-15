@@ -40,6 +40,11 @@ const FULL_MD = [
   "Read: incident row",
 ].join("\n");
 
+
+// A posted message's readable content: its blocks' text when it is a card, else its text.
+const cardText = (m: any): string =>
+  m.blocks ? m.blocks.map((b: any) => b.text?.text ?? (b.elements ?? []).map((e: any) => e.text).join(" ")).join("\n") : m.text;
+
 interface Overrides {
   incidentId?: number | null;
   facts?: unknown;
@@ -48,6 +53,7 @@ interface Overrides {
   storedId?: number | null;
   messages?: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>;
   repliesThrows?: string;
+  blocksRejected?: boolean;
   repliesPages?: Array<{ messages: Array<{ ts?: string; user?: string; bot_id?: string; text?: string }>; next_cursor?: string }>;
 }
 
@@ -84,6 +90,7 @@ function harness(overrides: Overrides = {}) {
   const client: any = {
     chat: {
       postMessage: async (m: any) => {
+        if (overrides.blocksRejected && m.blocks) throw new Error("invalid_blocks");
         posted.push(m);
         return { ts: `p${posted.length}` };
       },
@@ -150,7 +157,7 @@ test("an incident thread: humans from the human message only, draft stored, summ
     assert.equal(h.updated[0].ts, "p1");
     assert.match(h.updated[0].text, /https:\/\/dash\.example\/incidents\/7\/postmortem/);
 
-    const final = h.posted[h.posted.length - 1].text;
+    const final = cardText(h.posted[h.posted.length - 1]);
     assert.match(final, /\*⚡ Summary\*/);
     assert.match(final, /Everything broke because of pool exhaustion\./);
     assert.match(final, /\*🔧 Action items\*/);
@@ -200,7 +207,7 @@ test("storePostmortem returns null: summary still posted, with a not-stored note
   await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
 
   assert.equal(h.calls.store.length, 1);
-  const final = h.posted[h.posted.length - 1].text;
+  const final = cardText(h.posted[h.posted.length - 1]);
   assert.match(final, /\*⚡ Summary\*/);
   assert.match(final, /not stored/);
 
@@ -245,4 +252,23 @@ test("conversations.replies throws: postmortemFacts receives humans: null", asyn
 
   assert.equal(h.calls.facts.length, 1);
   assert.equal(h.calls.facts[0].humans, null);
+});
+
+test("the summary is a Block Kit card with dividers, like the RCA", async () => {
+  const h = harness({ incidentId: 7, storedId: 3 });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+  const card = h.posted[h.posted.length - 1];
+  assert.ok(Array.isArray(card.blocks), "posted without blocks");
+  assert.equal(card.blocks[0].type, "header");
+  assert.ok(card.blocks.filter((b: any) => b.type === "divider").length >= 5);
+  assert.match(card.text, /Postmortem draft/, "a notification/fallback text rides with the blocks");
+});
+
+test("blocks refused by Slack: the same card goes out as plain mrkdwn instead of nothing", async () => {
+  const h = harness({ incidentId: 7, storedId: 3, blocksRejected: true });
+  await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
+  const final = h.posted[h.posted.length - 1];
+  assert.equal(final.blocks, undefined);
+  assert.match(final.text, /\*⚡ Summary\*/);
+  assert.doesNotMatch(h.updated.at(-1).text, /Could not draft/, "a refused card is not a failed draft");
 });
