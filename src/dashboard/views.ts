@@ -1238,7 +1238,10 @@ export function detailPage(
 export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncidents?: number): string {
   return layout(
     "Postmortem draft",
-    `<div class="doc">
+    // "pm-doc" (styles.ts) gives the prose a reading measure the way the RCA's own prose has
+    // one — scoped so /prompt and /skill, which share this same .card.md renderer for much
+    // wider reference content, are unaffected.
+    `<div class="doc pm-doc">
      <p class="eyebrow">Incident #${esc(incidentId)}</p>
      <h1>Postmortem draft</h1>
      <div class="title-meta">

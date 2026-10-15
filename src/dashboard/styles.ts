@@ -1475,6 +1475,14 @@ form.signout button {
 }
 .md pre.md-code code { background: none; padding: 0; font-size: inherit; }
 .md strong { font-weight: 650; }
+/* The postmortem draft is read start to finish, unlike /prompt and /skill — reference material
+   scanned for one section — so its prose earns the RCA's own rule: a measure goes on the TEXT,
+   never on .doc or .card.md themselves (both of those run the full column for /prompt's 24,000
+   chars and a skill's tool list). Scoped to .pm-doc so /prompt and /skill, which share the same
+   .md renderer, are untouched. The Timeline table (same renderMarkdown pipeline) is a <div
+   class="table-wrap"> — not a <p>/<ul>/<ol> — so it is not matched here and keeps the full
+   column, exactly as the RCA's own tables do beside its capped prose. */
+.pm-doc .md > p, .pm-doc .md > ul, .pm-doc .md > ol { max-width: 68ch; }
 
 .skill-body {
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.6;
