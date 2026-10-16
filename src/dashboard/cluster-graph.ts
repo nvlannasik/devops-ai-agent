@@ -8,14 +8,14 @@
  * Every edge comes from a relation the mcp-server computed — `serves` (selector ↔ pod-template
  * labels) and `backends` (Ingress → Service) — or from `managedBy`. Nothing is inferred from names.
  */
-import type { ClusterInventory, ClusterNamespace, ManagedBy } from "./cluster-types.js";
+import type { ClusterInventory, ClusterNamespace, DashboardClusterModel, ManagedBy } from "./cluster-types.js";
 
 // `panel` is added by the layout (client/cluster-layout.ts), never here: it frames an open
 // namespace's cards and carries its column headings.
 export type ClusterNodeKind = "namespace" | "host" | "service" | "workload" | "owner" | "panel" | "panelHead";
 export interface ClusterNodeData { kind: ClusterNodeKind; label: string; sub?: string; namespace: string; tone?: "warning"; expanded?: boolean; [k: string]: unknown }
 export interface ClusterNode { id: string; data: ClusterNodeData }
-export interface ClusterEdge { id: string; source: string; target: string; kind: "routes" | "manages" }
+export interface ClusterEdge { id: string; source: string; target: string; kind: "routes" | "manages" | "calls" | "depends" }
 export interface ClusterGraph { nodes: ClusterNode[]; edges: ClusterEdge[] }
 
 export const nsId = (ns: string): string => `ns/${ns}`;
@@ -47,7 +47,13 @@ function card(n: ClusterNamespace, open: boolean): ClusterNode {
   };
 }
 
-export function buildClusterGraph(inv: ClusterInventory, expanded: ReadonlySet<string>, showSystem: boolean): ClusterGraph {
+export function buildClusterGraph(
+  inv: ClusterInventory,
+  expanded: ReadonlySet<string>,
+  showSystem: boolean,
+  model: DashboardClusterModel | null = null,
+  showTelemetry = false
+): ClusterGraph {
   const nodes = new Map<string, ClusterNode>();
   const edges = new Map<string, ClusterEdge>();
   const node = (id: string, data: ClusterNodeData) => { if (!nodes.has(id)) nodes.set(id, { id, data }); };
@@ -84,6 +90,22 @@ export function buildClusterGraph(inv: ClusterInventory, expanded: ReadonlySet<s
         edge("routes", hostId(ns, b.host), svcId(ns, b.service));
       }
     }
+  }
+  // The cluster model's flow (spec 2026-10-16-cluster-onboarding-flow §4): only inside an OPEN
+  // namespace, from its workloads. A target in another namespace gets a card in THIS panel — its id
+  // unchanged, its label naming its namespace — because the panel it lives in may be closed.
+  for (const e of model?.edges ?? []) {
+    if (e.kind === "routes" || (e.role === "telemetry" && !showTelemetry)) continue;
+    const from = nodes.get(e.from);
+    if (!from || from.data.kind !== "workload" || !expanded.has(nsId(from.data.namespace))) continue;
+    const ns = from.data.namespace;
+    if (!nodes.has(e.to)) {
+      const t = model!.nodes.find((n) => n.id === e.to);
+      if (!t || t.kind === "host") continue;
+      const local = t.namespace === ns;
+      node(e.to, { kind: t.kind === "workload" ? "workload" : "service", label: local ? t.name : `${t.namespace}/${t.name}`, namespace: ns, ...(local ? {} : { sub: "other namespace" }) });
+    }
+    edge(e.kind, e.from, e.to);
   }
   return { nodes: [...nodes.values()], edges: [...edges.values()] };
 }

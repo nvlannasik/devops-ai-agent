@@ -3088,3 +3088,16 @@ test("a commit link renders only for http(s) URLs; any other scheme is plain tex
   assert.match(body, /abc1234/);
   assert.match(body, /def7654/);
 });
+
+test("clusterPage embeds the cluster model and its unknowns, or says the flow is still being computed", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "shop", system: false, workloads: [], services: [], ingresses: [] }] };
+  const assets = { js: { path: "/assets/topology.a.js" }, css: { path: "/assets/topology.b.css" }, clusterJs: { path: "/assets/cluster.c.js" } } as any;
+  const model: any = { snapshot: { at: "t", appliedRevision: null, repoRevision: null }, nodes: [], edges: [], external: [], changeAt: {}, unknowns: ["call graph unavailable (Prometheus) <b>x</b>"] };
+  const withModel = clusterPage(inv, null, undefined, "n", assets, model);
+  assert.match(withModel, /id="cluster-model"/);
+  assert.match(withModel, /call graph unavailable \(Prometheus\) &lt;b&gt;x&lt;\/b&gt;/);
+  const without = clusterPage(inv, null, undefined, "n", assets, null);
+  assert.match(without, /Request flow is being computed — reload in a few seconds/);
+  assert.doesNotMatch(without, /id="cluster-model"/);
+});

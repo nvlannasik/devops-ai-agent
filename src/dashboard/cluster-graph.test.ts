@@ -57,3 +57,33 @@ test("expanding and collapsing is stable — same ids, no duplicates", () => {
   assert.equal(new Set(ids(a)).size, a.nodes.length);
   assert.deepEqual(ids(buildClusterGraph(inv, new Set(), false)), [nsId("other"), nsId("shop")]);
 });
+
+// Onboarding v2 (spec 2026-10-16-cluster-onboarding-flow §4): the cluster model's flow on the map.
+const MODEL: any = {
+  snapshot: { at: "2026-10-16T10:00:00.000Z", appliedRevision: null, repoRevision: null },
+  nodes: [
+    { id: "wl/shop/web", kind: "workload", namespace: "shop", name: "web", workloadKind: "Deployment" },
+    { id: "wl/shop/api", kind: "workload", namespace: "shop", name: "api", workloadKind: "Deployment" },
+    { id: "svc/db/postgres", kind: "service", namespace: "db", name: "postgres" },
+    { id: "svc/monitoring/jaeger", kind: "service", namespace: "monitoring", name: "jaeger" },
+  ],
+  edges: [
+    { from: "wl/shop/web", to: "wl/shop/api", kind: "calls", certainty: "observed", evidence: [{ type: "metric", query: "q" }] },
+    { from: "wl/shop/api", to: "svc/db/postgres", kind: "depends", certainty: "configured", role: "app", evidence: [{ type: "env", workload: "api", via: "DB_HOST" }] },
+    { from: "wl/shop/api", to: "svc/monitoring/jaeger", kind: "depends", certainty: "configured", role: "telemetry", evidence: [{ type: "env", workload: "api", via: "OTEL_EXPORTER_OTLP_ENDPOINT" }] },
+  ],
+  external: [], changeAt: {}, unknowns: [],
+};
+
+test("model edges join only an open namespace; telemetry hidden unless asked; a cross-namespace target gets a card in this panel", () => {
+  const g = buildClusterGraph(inv, new Set([nsId("shop")]), false, MODEL);
+  assert.ok(g.edges.some((e) => e.kind === "calls" && e.source === "wl/shop/web" && e.target === "wl/shop/api"));
+  assert.ok(g.edges.some((e) => e.kind === "depends" && e.target === "svc/db/postgres"));
+  const pg = g.nodes.find((n) => n.id === "svc/db/postgres");
+  assert.equal(pg?.data.namespace, "shop");
+  assert.equal(pg?.data.label, "db/postgres");
+  assert.equal(pg?.data.sub, "other namespace");
+  assert.ok(!g.edges.some((e) => e.target === "svc/monitoring/jaeger"));
+  assert.ok(buildClusterGraph(inv, new Set([nsId("shop")]), false, MODEL, true).edges.some((e) => e.target === "svc/monitoring/jaeger"));
+  assert.ok(!buildClusterGraph(inv, new Set(), false, MODEL).edges.some((e) => e.kind === "calls"), "a collapsed namespace draws no flow");
+});

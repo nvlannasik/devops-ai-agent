@@ -1,4 +1,4 @@
-import type { Edge, Node } from "@xyflow/react";
+import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type { ClusterGraph, ClusterNodeData, ClusterNodeKind } from "../cluster-graph.js";
 
 // One size table, read by the layout and the cards alike — the layout needs the box before React
@@ -130,6 +130,13 @@ export function layoutClusterGraph(graph: ClusterGraph, cols = 4): { nodes: Clus
     target: e.kind === "manages" ? e.source : e.target,
     type: "smoothstep",
     ...(e.kind === "manages" ? { style: { strokeDasharray: "6 4" } } : {}),
+    // The cluster model's flow. Both stay on the structure ramp (--mark-line, React Flow's edge
+    // override in styles.ts): the meaning is the stroke and the word, never a colour (dashboard
+    // CLAUDE.md — --accent already means the SQS hop on /topology). calls: solid with an arrowhead,
+    // caller → callee, and a curve, because both ends sit in the workload lane where a smoothstep
+    // between two cards in one column loops around both. depends: DOTTED — `manages` owns the dash.
+    ...(e.kind === "calls" ? { type: "default", markerEnd: { type: MarkerType.ArrowClosed }, label: "calls" } : {}),
+    ...(e.kind === "depends" ? { type: "default", style: { strokeDasharray: "2 4" } } : {}),
   }));
   return { nodes, edges };
 }

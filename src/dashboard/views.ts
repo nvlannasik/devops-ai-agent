@@ -1,4 +1,4 @@
-import type { ClusterInventory, ManagedBy } from "./cluster-types.js";
+import type { ClusterInventory, DashboardClusterModel, ManagedBy } from "./cluster-types.js";
 import { costUsd, type Price } from "../agent/llm/pricing.js";
 
 /** `$1.21`; under a cent is "<$0.01", never a rounded "$0.00" that reads as free. */
@@ -2169,7 +2169,7 @@ const managed = (m: ManagedBy): string => {
  * mount holding the no-JS sentence, the inventory as an escaped JSON block, the script under the
  * response's nonce. No bundle (`npm run dev`) is a note, not an empty frame.
  */
-function clusterFrame(inv: ClusterInventory, nonce: string, assets: Assets | null): string {
+function clusterFrame(inv: ClusterInventory, nonce: string, assets: Assets | null, model: DashboardClusterModel | null): string {
   if (!assets) {
     return (
       `<div class="card topo-frame">` +
@@ -2184,6 +2184,7 @@ function clusterFrame(inv: ClusterInventory, nonce: string, assets: Assets | nul
     `</div>` +
     `</div>` +
     jsonBlock("cluster-data", nonce, inv) +
+    (model ? jsonBlock("cluster-model", nonce, model) : "") +
     `<script src="${esc(assets.clusterJs.path)}" nonce="${esc(nonce)}" defer></script>`
   );
 }
@@ -2193,8 +2194,16 @@ export function clusterPage(
   error: string | null,
   openIncidents?: number,
   nonce = "",
-  assets: Assets | null = null
+  assets: Assets | null = null,
+  model: DashboardClusterModel | null = null
 ): string {
+  // The cluster model's flow (agent/onboarding) rides beside the inventory. The page never waits for
+  // it — a cold cache says so and the next load has it; what could not be read is listed, not hidden.
+  const flowNote = !model
+    ? `<p class="meta">Request flow is being computed — reload in a few seconds.</p>`
+    : model.unknowns.length
+      ? `<p class="meta"><strong>Not known</strong></p><ul class="meta">${model.unknowns.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`
+      : "";
   const nsBlock = (ns: ClusterInventory["namespaces"][number]): string => {
     if (ns.workloads.length === 0) {
       return `${section(ICON.layers, ns.name)}${empty("Nothing deployed here.", "No Deployment, StatefulSet, DaemonSet or CronJob in this namespace.", ICON.layers)}`;
@@ -2231,7 +2240,8 @@ export function clusterPage(
       (inv.scanned.complete
         ? ""
         : `<p class="meta"><strong>Partial inventory</strong> — the scan hit its ceiling after ${fmtInt(inv.scanned.namespaces)} namespace(s); what is missing is not shown as empty.</p>`) +
-      clusterFrame(inv, nonce, assets) +
+      clusterFrame(inv, nonce, assets, model) +
+      flowNote +
       user.map(nsBlock).join("") +
       (system.length
         ? `${section(ICON.layers, "System namespaces")}` +

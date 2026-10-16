@@ -6,6 +6,7 @@ import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
 import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, postmortemPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import type { DashboardClusterModel } from "./cluster-types.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -148,6 +149,8 @@ export class DashboardServer {
   private readonly skills: () => readonly SkillView[];
   // k8s_cluster_inventory's raw result. A whole-cluster scan, so it is cached: a reload must not rescan.
   private readonly inventory: (() => Promise<string>) | undefined;
+  // The onboarding cluster model (agent/onboarding), PEEKED: never waits, null until the first build lands.
+  private readonly clusterModel: (() => unknown) | undefined;
   private inventoryCache: { at: number; inv: ClusterInventory | null; error: string | null } | null = null;
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
@@ -166,12 +169,14 @@ export class DashboardServer {
     queries?: DashboardQueries,
     mcpTools?: () => readonly McpTool[],
     skills?: () => readonly SkillView[],
-    inventory?: () => Promise<string>
+    inventory?: () => Promise<string>,
+    clusterModel?: () => unknown
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
     this.skills = skills ?? (() => []);
     this.inventory = inventory;
+    this.clusterModel = clusterModel;
   }
 
   async start(): Promise<void> {
@@ -512,7 +517,7 @@ export class DashboardServer {
       const { inv, error } = await this.clusterInventory();
       // The map's bundle runs under this response's nonce, exactly as /topology's does.
       const nonce = newNonce();
-      return send(200, clusterPage(inv, error, await this.openCount(), nonce, this.assets), "text/html; charset=utf-8", {
+      return send(200, clusterPage(inv, error, await this.openCount(), nonce, this.assets, (this.clusterModel?.() ?? null) as DashboardClusterModel | null), "text/html; charset=utf-8", {
         "content-security-policy": csp(nonce),
       });
     }
