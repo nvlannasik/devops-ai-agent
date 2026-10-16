@@ -4,7 +4,10 @@ import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
-import type { OpenIncident } from "./correlation/topology.js";
+import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
+import { buildClusterModel, ClusterModelCache } from "./onboarding/index.js";
+import { namespaceNamed } from "./onboarding/model.js";
+import type { ClusterModel } from "./onboarding/types.js";
 import {
   alertsReadable,
   decideReconcile,
@@ -1302,6 +1305,8 @@ export class DevOpsAgent {
   private checks: RemediationCheckStore;
   private postmortems: PostmortemStore;
   private gitops: SqsGitOpsClient | null;
+  // The onboarding cluster model (agent/onboarding), 5 min per namespace scope — see clusterModel().
+  private readonly clusterModels: ClusterModelCache;
   private readonly skills: SkillRegistry;
   private readonly threadSkills: ThreadSkills = new Map();
   // threadId -> (tool call key -> in-flight or settled result). One entry per INVESTIGATION,
@@ -1326,6 +1331,19 @@ export class DevOpsAgent {
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
+    const gitops = this.gitops;
+    this.clusterModels = new ClusterModelCache((ns) =>
+      buildClusterModel(
+        {
+          inventory: (n) => this.mcp.callTool("k8s_cluster_inventory", n ? { namespace: n } : { detail: true }),
+          callGraph: () => serviceGraph((name, input) => this.mcp.callTool(name, input)),
+          locate: gitops ? (pathPrefix, targets) => gitops.request({ op: "locate", targets, ...(pathPrefix ? { pathPrefix } : {}) }) : undefined,
+          overlayPath: (hr) => this.resolveOverlayPath(hr),
+          now: Date.now,
+        },
+        ns
+      )
+    );
 
     // Throws here rather than at first request: a malformed skill file must be a pod that
     // refuses to start. src/agent/skills/real.test.ts loads this same directory, so a bad file
@@ -1395,6 +1413,27 @@ export class DevOpsAgent {
   }
 
   /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
+  /** The onboarding cluster model (agent/onboarding) — called outside any investigation, like collectChanges. */
+  async clusterModel(namespace?: string): Promise<ClusterModel | null> {
+    return this.clusterModels.get(namespace);
+  }
+
+  /** The whole-cluster model for /cluster: never waits; a cold or stale cache kicks a background build. */
+  peekClusterModel(): ClusterModel | null {
+    return this.clusterModels.peek();
+  }
+
+  /** The namespace a tour mention names, matched against the live namespace list; null when it names none. */
+  async tourNamespace(text: string): Promise<string | null> {
+    const raw = await this.mcp.callTool("k8s_cluster_inventory", {}).catch(() => "");
+    try {
+      const names = ((JSON.parse(raw) as { namespaces?: Array<{ name: string }> }).namespaces ?? []).map((n) => n.name);
+      return namespaceNamed(text, names);
+    } catch {
+      return null;
+    }
+  }
+
   async clusterInventory(): Promise<string> {
     return this.mcp.callTool("k8s_cluster_inventory", { detail: true });
   }
