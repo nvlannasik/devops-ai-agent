@@ -61,3 +61,14 @@ test("cache: warm within 5 min; stale is served while rebuilding; peek never wai
   assert.equal(builds, 2);
   assert.equal(cache.peek("a")!.snapshot.at, "2");
 });
+
+test("locate targets are sent in chunks of at most 50 — the worker drops a bigger request as poison", async () => {
+  const many = JSON.stringify({
+    scanned: { namespaces: 1, complete: true }, fluxRevisions: [],
+    namespaces: [{ name: "big", system: false, services: [], ingresses: [], workloads: Array.from({ length: 120 }, (_, i) => (
+      { kind: "Deployment", name: `w${i}`, ready: 1, desired: 1, images: ["x:1"], managedBy: { type: "helmrelease", name: `w${i}`, namespace: "flux-app" }, dependsOn: [], externalHosts: [], unresolved: [] })) }],
+  });
+  const s = sources({ inventory: async () => many });
+  await buildClusterModel(s, "big");
+  assert.deepEqual(s.locateCalls.map((c) => c.targets.length), [50, 50, 20]);
+});

@@ -85,3 +85,12 @@ test("tourContext: a namespace tour prefetches the model as framed data; anythin
   assert.equal((await ctx(notTour, "why is the pod crashing?")).text, "");
   assert.equal(asked, false, "a non-tour mention never pays for the model");
 });
+
+test("tourContext is bounded: a model build that hangs (a down worker) never holds the tour", async () => {
+  const s = { agent: { tourNamespace: async () => "sample-apps", clusterModel: () => new Promise(() => {}) } };
+  const t0 = Date.now();
+  const r = await (SlackApp.prototype as any).tourContext.call(s, "jelasin namespace sample-apps", 50);
+  assert.equal(r.text, "");
+  assert.equal(r.model, null);
+  assert.ok(Date.now() - t0 < 1000, "returned at the bound, not when the build gave up");
+});

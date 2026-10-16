@@ -15,6 +15,9 @@ export interface ModelSources {
   now(): number;
 }
 
+/** The worker's `locate` parser ceiling (devops-ai-agent-worker src/gitops/message.ts). */
+export const LOCATE_MAX_TARGETS = 50;
+
 function parseInventory(raw: string): InventoryDetail | null {
   try {
     const v = JSON.parse(raw) as InventoryDetail;
@@ -50,8 +53,14 @@ export async function buildClusterModel(src: ModelSources, namespace?: string): 
         byPrefix.set(prefix, list);
       }
     }
+    // The worker's parser refuses a request of more than LOCATE_MAX_TARGETS as poison — dropped, not
+    // answered — so a bigger prefix goes in chunks rather than as one request that waits out its timeout.
+    const chunks: Array<[string | undefined, LocateTarget[]]> = [];
+    for (const [pathPrefix, targets] of byPrefix) {
+      for (let i = 0; i < targets.length; i += LOCATE_MAX_TARGETS) chunks.push([pathPrefix, targets.slice(i, i + LOCATE_MAX_TARGETS)]);
+    }
     locate = await Promise.all(
-      [...byPrefix].map(async ([pathPrefix, targets]): Promise<LocateOutcome> => {
+      chunks.map(async ([pathPrefix, targets]): Promise<LocateOutcome> => {
         try {
           const payload = await locateFn(pathPrefix, targets);
           if (payload.ok && payload.op === "locate") return { pathPrefix, payload };

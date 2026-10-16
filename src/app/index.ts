@@ -357,11 +357,19 @@ export class SlackApp {
    * A namespace tour's cluster model (agent/onboarding), prefetched before the investigation so the
    * reply can cite the flow and the flow tables come from the same model. Best-effort: no namespace
    * named, or a failed build, is today's tour. A non-tour mention never pays for it.
+   * Bounded: a cold build waits on `locate` over SQS (up to SQS_GITOPS_TIMEOUT_SECONDS — 240 s live),
+   * so a down worker would hold every tour reply that long. Past the bound the tour goes on without
+   * the model; the build keeps running and fills the cache for the next tour.
    */
-  private async tourContext(text: string): Promise<{ ns: string | null; model: ClusterModel | null; text: string }> {
+  private async tourContext(text: string, boundMs = 20_000): Promise<{ ns: string | null; model: ClusterModel | null; text: string }> {
     if (!wantsTour(text)) return { ns: null, model: null, text: "" };
     const ns = await this.agent.tourNamespace(text).catch(() => null);
-    const model = ns ? await this.agent.clusterModel(ns).catch(() => null) : null;
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), boundMs); });
+    const model = ns
+      ? await Promise.race([this.agent.clusterModel(ns).catch(() => null), bound]).finally(() => clearTimeout(timer))
+      : null;
+    if (ns && !model) logger.info(`[onboarding] tour went on without the cluster model for ${ns} (not ready within ${boundMs / 1000}s or failed)`);
     return { ns, model, text: model && ns ? renderModelText(model, ns) : "" };
   }
 
