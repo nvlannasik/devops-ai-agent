@@ -12,7 +12,8 @@ export function wantsInvestigation(text: string): boolean {
 // A newcomer's "what runs here" (spec 2026-10-07-cluster-tour). Explain vocabulary AND a subject —
 // "jelasin dong" alone is a reply to the last turn, not a tour. An investigation wins: "jelasin
 // kenapa X crash" asks why, and why is an investigation.
-const TOUR_VERB = /\b(jelas\w*|explain\w*|describe|overview|gambaran|onboard\w*|walk ?me ?through|apa aja yang (jalan|ada)|what (runs|is running|'s running)|workload apa)\b/i;
+// `(di|men|ter)?` because Indonesian prefixes the verb: "dijelasin" missed `\bjelas` live (2026-10-17).
+const TOUR_VERB = /\b((di|men|ter)?jelas\w*|explain\w*|describe|overview|gambaran|onboard\w*|walk ?me ?through|apa aja yang (jalan|ada)|what (runs|is running|'s running)|workload apa)\b/i;
 const TOUR_SUBJECT = /\b(cluster|klaster|namespace\w*|workload\w*|deploy\w*|service\w*|apa aja|what runs|onboard\w*)\b/i;
 
 export function wantsTour(text: string): boolean {

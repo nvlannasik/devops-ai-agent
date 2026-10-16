@@ -417,7 +417,9 @@ test("every sentence wantsTour accepts also selects cluster-tour", async () => {
   const selectedFor = (text: string, mode: string) => registry.select(`[mode:${mode}]\n${text}`, new Set()).selected.map((s) => s.name);
   const sentences = ["jelasin cluster ini dong", "workload apa aja yang jalan di cluster?", "explain this cluster to me, I just joined",
                      "gambaran namespace devops-tools", "onboarding cluster dong", "jelaskan workload di namespace sample-apps",
-                     "give me an overview of the namespaces"];
+                     "give me an overview of the namespaces",
+                     // Live 2026-10-17: subject before verb, and the verb with the di- prefix.
+                     "saya masih ga tau flow dari namespace sample-apps, coba dijelasin dong"];
   for (const s of sentences) {
     assert.equal(wantsTour(s), true, s);
     assert.ok(selectedFor(s, "conversation").includes("cluster-tour"), `cluster-tour not selected for: ${s}`);

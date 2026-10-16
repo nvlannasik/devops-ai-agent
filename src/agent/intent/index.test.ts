@@ -22,7 +22,8 @@ test("plain data requests are not investigations", () => {
 test("tour questions are detected (en + id) and need explain vocabulary plus a subject", () => {
   for (const t of ["jelasin cluster ini dong", "jelaskan workload di namespace sample-apps", "workload apa aja yang jalan di cluster?",
                    "explain this cluster to me, I just joined", "give me an overview of the namespaces", "onboarding cluster dong",
-                   "gambaran namespace devops-tools"]) assert.equal(wantsTour(t), true, t);
+                   "gambaran namespace devops-tools",
+                   "saya masih ga tau flow dari namespace sample-apps, coba dijelasin dong", "tolong menjelaskan cluster ini"]) assert.equal(wantsTour(t), true, t);
   for (const t of ["check status semua pod di devops-tools", "halo, kamu bisa apa?", "jelasin dong"]) assert.equal(wantsTour(t), false, t);
 });
 

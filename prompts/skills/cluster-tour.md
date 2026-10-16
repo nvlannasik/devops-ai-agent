@@ -1,7 +1,7 @@
 ---
 name: cluster-tour
 description: Onboarding — what runs in the cluster and how each workload is deployed, from one inventory call
-when: jelas\w* [^\n]{0,30}(cluster|klaster|namespace|workload|deploy|service)|explain\w* [^\n]{0,20}(cluster|namespace|workload)|overview|gambaran|onboard\w*|walk ?me ?through|apa aja yang (jalan|ada)|what (runs|is running|'s running)|workload apa
+when: jelas\w* [^\n]{0,30}(cluster|klaster|namespace|workload|deploy|service)|(cluster|klaster|namespace|workload)[^\n]{0,60}jelas\w*|explain\w* [^\n]{0,20}(cluster|namespace|workload)|overview|gambaran|onboard\w*|walk ?me ?through|apa aja yang (jalan|ada)|what (runs|is running|'s running)|workload apa
 ---
 
 Someone new is asking what runs here and how it gets deployed. The facts reach them as TABLES the
