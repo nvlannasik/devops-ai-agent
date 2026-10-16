@@ -38,7 +38,19 @@ export interface GitOpsRevertBody {
   incident?: { summary?: string; threadUrl?: string };
 }
 
-export type GitOpsRequestBody = GitOpsChangeBody | GitOpsHistoryBody | GitOpsRevertBody;
+// Read-only and batched (onboarding's "where to change it"): several HelmReleases answered from one
+// listing. `current` is what runs, so the line found is the one holding it. Mirrors the worker's
+// GitOpsLocateRequest / LocateResultMsg.
+export interface LocateTarget { name: string; namespace: string; current: { image?: string; replicas?: number }; component?: string }
+export interface GitKey { path: string; line: number; key: string; gitValue: string; drift: boolean }
+export interface LocateResult { name: string; namespace: string; files: Array<{ path: string; role: "overlay" | "base" }>; keys: { image?: GitKey; replicas?: GitKey }; notes: string[] }
+export interface GitOpsLocateBody {
+  op: "locate";
+  targets: LocateTarget[];
+  pathPrefix?: string;
+}
+
+export type GitOpsRequestBody = GitOpsChangeBody | GitOpsHistoryBody | GitOpsRevertBody | GitOpsLocateBody;
 
 // The repo declares this key, but the cluster is running a different value — somebody
 // changed the cluster outside GitOps. The repo is the source of truth, so the answer is a
@@ -56,4 +68,5 @@ export type GitOpsPayload =
   | { ok: true; op: "history"; commits: Array<{ sha: string; at: string; author: string; message: string; url: string; paths: string[] }> }
   | { ok: true; op: "revert_pr"; dryRun: true; paths: string[]; diff: string }
   | { ok: true; op: "revert_pr"; dryRun: false; paths: string[]; prUrl: string }
+  | { ok: true; op: "locate"; revision: string; releases: LocateResult[] }
   | { ok: false; reason: string; drift?: GitOpsDrift };
