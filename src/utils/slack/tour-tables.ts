@@ -13,6 +13,7 @@
  */
 import type { KnownBlock } from "@slack/types";
 import { toSpans } from "./rca-tables.js";
+import type { ClusterModel } from "../../agent/onboarding/types.js";
 
 type ManagedBy =
   | { type: "helmrelease"; name: string; namespace: string; chart?: string }
@@ -153,7 +154,7 @@ const DUGAAN = /dugaan/i;
  * ponytail: line-level heuristics over prose; a restatement that names neither a fact nor a kind
  * survives — harmless, it is the reply as it was.
  */
-export function stripRepeatedInventory(reply: string, raw: string | null): string {
+export function stripRepeatedInventory(reply: string, raw: string | null, extraFacts: string[] = []): string {
   const inv = parse(raw);
   if (!inv) return reply;
   const facts: string[] = [];
@@ -180,6 +181,8 @@ export function stripRepeatedInventory(reply: string, raw: string | null): strin
     if (inDugaan || DUGAAN.test(t)) return;
     if (t.startsWith("|")) drop[i] = true;
     else if (facts.some((f) => f && line.includes(f))) drop[i] = true;
+    // the cluster model's flow rows and file:line strings (flowFacts) — compared without backticks
+    else if (extraFacts.some((f) => f && line.replace(/`/g, "").includes(f))) drop[i] = true;
     else if (BULLET.test(line) && KIND.test(t) && names.some((nm) => t.includes(nm))) drop[i] = true;
   });
   // A dropped bullet with a kept guess nested under it keeps its name, or the guess names nothing.
@@ -216,4 +219,63 @@ export function stripRepeatedInventory(reply: string, raw: string | null): strin
     }
   }
   return lines.filter((_, i) => !drop[i]).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+const where = (m: ClusterModel, id: string, ns: string): string => {
+  const n = m.nodes.find((x) => x.id === id);
+  if (!n) return code(id);
+  if (n.kind === "host") return code(n.host);
+  return code(n.namespace === ns ? n.name : `${n.namespace}/${n.name}`);
+};
+
+/**
+ * The tour's request flow and where-to-change as TWO messages, one table each (a message's blocks are
+ * refused whole, so a defect in one table must not cost the other). Built from the cluster model
+ * (agent/onboarding) — every row is an edge with evidence; an empty side says why it is empty.
+ */
+export function flowMessages(m: ClusterModel, ns: string): Array<{ blocks: KnownBlock[]; text: string }> {
+  type Edge = ClusterModel["edges"][number];
+  const touches = (e: Edge) => [e.from, e.to].some((id) => m.nodes.find((n) => n.id === id)?.namespace === ns);
+  const flow = m.edges.filter((e) => e.kind !== "routes" && touches(e));
+  const app = flow.filter((e) => e.role !== "telemetry");
+  const telemetry = flow.length - app.length;
+  const ev = (e: Edge) => e.evidence.map((x) => (x.type === "env" ? `env ${x.via}` : x.type === "metric" ? "metric" : x.ref)).join(", ");
+  const unknownLines = m.unknowns.map((u) => `• _${u}_`).join("\n");
+
+  const flowTitle = `*Request flow* — ${code(ns)}${telemetry ? ` · ${telemetry} telemetry dependenc${telemetry === 1 ? "y" : "ies"} hidden` : ""}`;
+  let flowMsg: { blocks: KnownBlock[]; text: string };
+  if (app.length) {
+    flowMsg = {
+      blocks: [
+        section(flowTitle),
+        ...tables(["From", "To", "Kind", "Evidence"], app.map((e) => [where(m, e.from, ns), where(m, e.to, ns), `${e.kind} · ${e.certainty}`, ev(e)]), [true, true, false, true]),
+        ...(m.unknowns.length ? [section(unknownLines)] : []),
+      ],
+      text: [flowTitle, ...app.map((e) => `• ${where(m, e.from, ns)} → ${where(m, e.to, ns)} · ${e.kind} (${e.certainty}) · ${ev(e)}`), ...(m.unknowns.length ? [unknownLines] : [])].join("\n"),
+    };
+  } else {
+    const t = [flowTitle, `No calls observed and no dependencies configured in ${code(ns)}.`, ...(m.unknowns.length ? [unknownLines] : [])].join("\n");
+    flowMsg = { blocks: [section(t)], text: t };
+  }
+
+  const rows = Object.entries(m.changeAt)
+    .filter(([id]) => m.nodes.find((n) => n.id === id)?.namespace === ns)
+    .flatMap(([id, k]) =>
+      (["image", "replicas"] as const)
+        .filter((w) => k[w])
+        .map((w) => [where(m, id, ns), w, code(`${k[w]!.path}:${k[w]!.line}`), `${code(k[w]!.key)}${k[w]!.drift ? ` · drift: Git says ${code(k[w]!.gitValue)}` : ""}`])
+    );
+  const whereTitle = `*Where to change it* — Git${m.snapshot.repoRevision ? ` at ${code(m.snapshot.repoRevision.slice(0, 7))}` : ""}`;
+  const gitUnknowns = m.unknowns.filter((u) => /GitOps|HelmRelease|declared|ahead|locate/.test(u)).map((u) => `• _${u}_`).join("\n");
+  let whereMsg: { blocks: KnownBlock[]; text: string };
+  if (rows.length) {
+    whereMsg = {
+      blocks: [section(whereTitle), ...tables(["Workload", "What", "File", "Key"], rows, [true, false, true, true])],
+      text: [whereTitle, ...rows.map((r) => `• ${r[0]} ${r[1]} → ${r[2]} ${r[3]}`)].join("\n"),
+    };
+  } else {
+    const t = [whereTitle, "Nothing located in Git for this namespace.", ...(gitUnknowns ? [gitUnknowns] : [])].join("\n");
+    whereMsg = { blocks: [section(t)], text: t };
+  }
+  return [flowMsg, whereMsg];
 }

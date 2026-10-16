@@ -17,6 +17,10 @@ each, Services, Ingress. So the call is mandatory, and your reply must NOT repea
    • *Dugaan fungsi* — what the main workloads are probably FOR, inferred from name, image or
      labels, one line each, every line marked as a guess (`_dugaan dari nama/image_`). Names in
      backticks exactly as the tool returned them; never a name the inventory did not contain.
+     When a `[CLUSTER MODEL …]` block is in the message, a guess may cite its flow ("the entry
+     point: `shop.example.com` routes to `storefront`"; "`orders-api` keeps its data in
+     `postgresql/postgresql`"), still marked `_dugaan_` — but never restate its Request flow or
+     Where to change lines: they are posted as tables.
    • What they can ask next — a namespace to detail.
 4. `scanned.complete` false: say the inventory is partial.
 5. Health is not the question: do not diagnose a not-ready count, and do not offer a change.

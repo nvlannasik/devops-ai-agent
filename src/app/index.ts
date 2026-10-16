@@ -17,7 +17,9 @@ import { delegationHint } from "../agent/subagent/index.js";
 import { timingSafeEqualStr, bearerToken, slackUserAllowed } from "../utils/auth/index.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, leaksRcaStructure, formatRunFooter, type Block } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
-import { stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
+import { flowMessages, stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
+import { flowFacts, renderModelText } from "../agent/onboarding/model.js";
+import type { ClusterModel } from "../agent/onboarding/types.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
@@ -351,6 +353,32 @@ export class SlackApp {
     return raw;
   }
 
+  /**
+   * A namespace tour's cluster model (agent/onboarding), prefetched before the investigation so the
+   * reply can cite the flow and the flow tables come from the same model. Best-effort: no namespace
+   * named, or a failed build, is today's tour. A non-tour mention never pays for it.
+   */
+  private async tourContext(text: string): Promise<{ ns: string | null; model: ClusterModel | null; text: string }> {
+    if (!wantsTour(text)) return { ns: null, model: null, text: "" };
+    const ns = await this.agent.tourNamespace(text).catch(() => null);
+    const model = ns ? await this.agent.clusterModel(ns).catch(() => null) : null;
+    return { ns, model, text: model && ns ? renderModelText(model, ns) : "" };
+  }
+
+  /** The cluster model's flow and where-to-change, one message each; a refused table re-posts as text. */
+  private async postFlowTables(channel: string, threadTs: string, client: AllMiddlewareArgs["client"], model: ClusterModel, ns: string): Promise<void> {
+    for (const msg of flowMessages(model, ns)) {
+      try {
+        await client.chat.postMessage({ channel, thread_ts: threadTs, text: msg.text, blocks: msg.blocks });
+      } catch (err) {
+        logger.warn(`[slack] flow table refused, posting it as text (thread ${threadTs}): ${errDetail(err)}`);
+        await client.chat
+          .postMessage({ channel, thread_ts: threadTs, text: msg.text, mrkdwn: true })
+          .catch((e) => logger.warn(`[slack] flow text post failed (thread ${threadTs}): ${errDetail(e)}`));
+      }
+    }
+  }
+
   private async handleMention(args: AllMiddlewareArgs & SlackEventMiddlewareArgs<"app_mention">): Promise<void> {
     const { event, say, client } = args;
     const threadId = event.thread_ts ?? event.ts;
@@ -436,6 +464,10 @@ export class SlackApp {
       // Captured before the investigation appends this turn's own messages: a bare "ya" is an
       // approval only if the agent put a change on the table in the turn before it.
       const previousReply = await this.agent.lastAssistantText(threadId).catch(() => "");
+      // A namespace tour gets the cluster model PREFETCHED, outside the investigation like the change
+      // timeline (so replay never re-runs it) — see tourContext.
+      const tour = await this.tourContext(text);
+      const tourMessage = tour.text ? `${tour.text}\n\n---\n\n${message}` : message;
       try {
         // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
         // format detection when the model bolds the RCA labels with **
@@ -471,8 +503,8 @@ export class SlackApp {
         const mode = investigation ? "investigation" : "conversation";
         let reply = toMrkdwn(
           investigation
-            ? await this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress })
-            : await withRoute("light", () => this.agent.investigate(threadId, message, { ...budget, mode, onComplete, onProgress }))
+            ? await this.agent.investigate(threadId, tourMessage, { ...budget, mode, onComplete, onProgress })
+            : await withRoute("light", () => this.agent.investigate(threadId, tourMessage, { ...budget, mode, onComplete, onProgress }))
         );
 
         // Deleted, not updated to "done": in a conversation the notice has no value once the
@@ -495,8 +527,9 @@ export class SlackApp {
           // model's reply below is what only it can write — what each workload is probably for.
           if (wantsTour(text)) {
             const inventory = await this.postTourTables(event.channel, threadId, client);
+            if (tour.model && tour.ns) await this.postFlowTables(event.channel, threadId, client, tour.model, tour.ns);
             // The tables carry the facts; what the model restated of them goes (stripRepeatedInventory).
-            if (inventory) reply = stripRepeatedInventory(reply, inventory) || reply;
+            if (inventory) reply = stripRepeatedInventory(reply, inventory, tour.model && tour.ns ? flowFacts(tour.model, tour.ns) : []) || reply;
           }
           // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
           // fence-safe, so displayed logs keep rendering as code blocks
@@ -522,7 +555,8 @@ export class SlackApp {
         // evidence. No incident row to link (no alert labels), so incidentId is null.
         // The gate is what keeps a read-only "status check" on a healthy cluster from
         // spending a heavy LLM call to be told {"action": null} — see worthProposing.
-        await this.warnIfUngrounded(event.channel, threadId, reply);
+        // The tour's cluster model is evidence too: every name in it came from a tool (agent/onboarding).
+        await this.warnIfUngrounded(event.channel, threadId, reply, tour.text);
         await this.notifyIfLowConfidence(event.channel, threadId, reply);
         // AWAITED, and last. Fire-and-forget put the card wherever the backend's latency
         // happened to land it — on a slow private LLM, 40 seconds later and under the NEXT

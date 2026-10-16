@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tourBlocks, stripRepeatedInventory } from "./tour-tables.js";
+import { tourBlocks, stripRepeatedInventory, flowMessages } from "./tour-tables.js";
 import { readFileSync } from "node:fs";
 
 // The cluster tour's facts come straight from k8s_cluster_inventory — the model never writes them,
@@ -152,4 +152,57 @@ test("a dropped bullet whose guess is nested under it keeps the workload's name"
   assert.doesNotMatch(out, /nginx:1\.27-alpine|\*\/30/);
   assert.match(out, /^• `catalog-api`\s*\n\s+_dugaan dari nama\/image_: kemungkinan layanan katalog/m);
   assert.match(out, /^• `price-sync`\s*\n\s+_dugaan dari nama\/image_: sinkronisasi/m);
+});
+
+const FLOW_MODEL: any = {
+  snapshot: { at: "2026-10-16T10:00:00.000Z", appliedRevision: "main@sha1:aca660bb", repoRevision: "aca660bb" },
+  nodes: [
+    { id: "wl/sample-apps/checkout-gateway", kind: "workload", namespace: "sample-apps", name: "checkout-gateway", workloadKind: "Deployment" },
+    { id: "wl/sample-apps/orders-api", kind: "workload", namespace: "sample-apps", name: "orders-api", workloadKind: "Deployment" },
+    { id: "svc/postgresql/postgresql", kind: "service", namespace: "postgresql", name: "postgresql" },
+    { id: "svc/monitoring/jaeger", kind: "service", namespace: "monitoring", name: "jaeger" },
+  ],
+  edges: [
+    { from: "wl/sample-apps/checkout-gateway", to: "wl/sample-apps/orders-api", kind: "calls", certainty: "observed", evidence: [{ type: "metric", query: "q" }] },
+    { from: "wl/sample-apps/orders-api", to: "svc/postgresql/postgresql", kind: "depends", certainty: "configured", role: "app", evidence: [{ type: "env", workload: "orders-api", via: "DB_HOST" }] },
+    { from: "wl/sample-apps/orders-api", to: "svc/monitoring/jaeger", kind: "depends", certainty: "configured", role: "telemetry", evidence: [{ type: "env", workload: "orders-api", via: "OTEL_EXPORTER_OTLP_ENDPOINT" }] },
+  ],
+  external: [],
+  changeAt: { "wl/sample-apps/orders-api": { replicas: { path: "apps/dev/applications/orders-api/release.yaml", line: 7, key: "spec.values.replicaCount", gitValue: "2", drift: false } } },
+  unknowns: [],
+};
+
+test("flowMessages: two messages, one table each — the flow rows and where to change; telemetry counted, not listed", () => {
+  const [flow, where] = flowMessages(FLOW_MODEL, "sample-apps");
+  const tables = (m: any) => m.blocks.filter((b: any) => b.type === "table");
+  assert.equal(tables(flow).length, 1);
+  assert.equal(tables(where).length, 1);
+  assert.match(flow!.text, /`checkout-gateway` → `orders-api` · calls \(observed\)/);
+  assert.match(flow!.text, /`orders-api` → `postgresql\/postgresql` · depends \(configured\) · env DB_HOST/);
+  assert.doesNotMatch(flow!.text, /jaeger/);
+  assert.match(flow!.text, /1 telemetry dependency hidden/);
+  assert.match(where!.text, /`orders-api` replicas → `apps\/dev\/applications\/orders-api\/release\.yaml:7` `spec\.values\.replicaCount`/);
+});
+
+test("flowMessages: an empty flow says so with its unknowns, never a bare empty table", () => {
+  const empty = { ...FLOW_MODEL, edges: [], changeAt: {}, unknowns: ["call graph unavailable (Prometheus) — no observed calls are shown", "GitOps is not configured — where-to-change is unavailable"] };
+  const [flow, where] = flowMessages(empty, "sample-apps");
+  assert.equal(flow!.blocks.filter((b: any) => b.type === "table").length, 0);
+  assert.match(flow!.text, /No calls observed and no dependencies configured/);
+  assert.match(flow!.text, /call graph unavailable/);
+  assert.match(where!.text, /GitOps is not configured/);
+});
+
+test("stripRepeatedInventory drops a restated flow row or file:line, but keeps Dugaan fungsi whole", () => {
+  const reply = [
+    "• `checkout-gateway` → `orders-api` (observed)",
+    "• replicas: apps/dev/applications/orders-api/release.yaml:7",
+    "*Dugaan fungsi*",
+    "• `orders-api` checkout-gateway → orders-api — backend pesanan _dugaan_",
+  ].join("\n");
+  const inv = '{"scanned":{"namespaces":1,"complete":true},"namespaces":[{"name":"x","system":false,"workloads":["Deployment orders-api — unmanaged"]}]}';
+  const out = stripRepeatedInventory(reply, inv, ["checkout-gateway → orders-api", "apps/dev/applications/orders-api/release.yaml:7"]);
+  assert.doesNotMatch(out, /\(observed\)/);
+  assert.doesNotMatch(out, /release\.yaml:7/);
+  assert.match(out, /backend pesanan/);
 });
