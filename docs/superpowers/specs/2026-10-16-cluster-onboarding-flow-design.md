@@ -88,7 +88,8 @@ unresolved: Array<{ host: string; via: string }>;
   - from `scheme://[userinfo@]host[:port][/…]`, or a bare `host[:port]`;
   - userinfo is dropped before anything else sees the value;
   - a candidate must look like a hostname (DNS-1123 labels, at least one letter).
-- **Matching to a Service that exists in the inventory:**
+- **Matching to a Service that exists in the cluster** (every Service cluster-wide, even on a
+  namespace-scoped call, so `postgresql.postgresql` resolves while only `sample-apps` is toured):
   - `svc` resolves in the workload's own namespace;
   - `svc.ns`, `svc.ns.svc` and `svc.ns.svc.cluster.local` resolve to `ns/svc`.
 - **What is not a match:**
@@ -108,12 +109,15 @@ unresolved: Array<{ host: string; via: string }>;
 
 ### 2. `locate` — where a HelmRelease's image and replicas live (devops-ai-agent-worker)
 
-A fifth op on the existing gitops request queue. It is read-only, like `history`:
+A fifth op on the existing gitops request queue. It is read-only, like `history`, and **batched**
+(decided in the plan: one tree listing costs 3–14 s of GitHub calls, so one request per HelmRelease
+would multiply it). The agent sends one request per distinct overlay `pathPrefix`, in chunks of at
+most 50 targets — the worker's parser drops a bigger one as poison:
 
 ```ts
-{ requestId, op: "locate", helmRelease: { name, namespace }, pathPrefix?, current: { image?: string; replicas?: number }, component? }
-→ { ok: true, op: "locate", revision: string, files: Array<{ path: string; role: "overlay" | "base" }>,
-    keys: { image?: GitKey; replicas?: GitKey } }
+{ requestId, op: "locate", targets: Array<{ name, namespace, current: { image?: string; replicas?: number }, component? }>, pathPrefix? }
+→ { ok: true, op: "locate", revision: string,
+    releases: Array<{ name, namespace, files: Array<{ path: string; role: "overlay" | "base" }>, keys: { image?: GitKey; replicas?: GitKey }, notes: string[] }> }
 GitKey = { path: string; line: number; key: string; gitValue: string; drift: boolean }
 ```
 
@@ -169,10 +173,11 @@ interface ClusterModel {
 - **`changeAt`.** One `locate` per HelmRelease-managed workload, through `SqsGitOpsClient`, with
   `current` taken from the inventory (the first image, `desired` replicas). It is skipped, with an
   unknowns line, when GitOps is not configured. A refusal or timeout adds its reason to unknowns.
-- **Freeze identity.** `appliedRevision` is the owning Kustomization's
-  `status.lastAppliedRevision`. The inventory already lists Kustomizations for their `spec.path`,
-  and now also reports that field as `managedBy.appliedRevision` on Kustomization-managed and
-  HelmRelease-managed workloads. `repoRevision` is `locate`'s `revision`.
+- **Freeze identity.** The inventory reports `fluxRevisions` cluster-wide — every Kustomization's
+  `status.lastAppliedRevision` (a HelmRelease-managed workload does not carry its Kustomization's
+  label, so a per-workload revision would need an extra HelmRelease list). `appliedRevision` is the
+  single distinct revision; when Kustomizations differ it is null and unknowns says so.
+  `repoRevision` is `locate`'s `revision`.
   When they differ: `"the repo is ahead of what Flux applied (<applied> vs <repo>) — line numbers
   are for the repo head"`.
 - **Validation** (pure, `validateClusterModel`):
@@ -187,13 +192,15 @@ interface ClusterModel {
 
 - `cluster-graph.ts` maps model edges to React Flow edges:
   - `calls`: solid, labelled `calls`;
-  - `depends`: dashed, labelled with the env name;
+  - `depends`: DOTTED (`manages` already owns the dash), on the structure ramp like every edge — the
+    meaning is the stroke and the legend, never a colour;
   - `routes`: as today;
   - `telemetry`: hidden unless a "Show telemetry" toggle is on.
 - **Clicking a workload node** opens a side panel. For image and replicas it shows `path:line`, the
   key and the Git value, with a drift badge when `drift`, and the snapshot revisions. With no
   `changeAt` entry it shows the unknowns line that explains why.
-- `unknowns` render as a small list under the map.
+- `unknowns` render as a small list under the map. The page never waits for the model: a cold cache
+  says "Request flow is being computed — reload in a few seconds", and the next load has it.
 - The tables below stay unchanged. The page stays LLM-free and GET-only.
 
 ### 5. Slack tour (devops-ai-agent)
@@ -216,10 +223,14 @@ interface ClusterModel {
   - `cluster-tour.md` gains one rule: *Dugaan fungsi* may cite the flow ("the entry point:
     `shop.example.com` routes to `storefront`"), still marked as inference;
   - the reply must not restate the tables, and `stripRepeatedInventory` extends to the flow rows.
-- **Grounding with one repair.** `groundingGaps(reply, [], modelText)` runs on the narrative. If it
-  finds gaps, the reply is regenerated once with the gaps named. A second failure posts the reply
-  with the existing ungrounded-names warning. The pattern is the one `proposeWithRetry` and the
-  RCA-completeness gate already use.
+- **Grounding.** The model text is passed to the existing `warnIfUngrounded` as evidence, so a name
+  the narrative invents gets the ungrounded-names warning every other mention path posts. No
+  regeneration (decided in the plan: no other mention path rewrites, and a rewrite doubles the light
+  route's cost).
+- **Bounded.** The prefetch waits at most 20 s; past that the tour goes on without the model and the
+  build keeps running to fill the cache (a cold build waits on `locate` over SQS, 240 s live).
+- **Trigger.** The prefetch is gated by `wantsTour`, like the tour's tables: "jelasin namespace
+  sample-apps" is a tour, a bare "jelasin sample-apps" is not.
 - The tour still never produces a remediation card.
 
 ## Error handling
