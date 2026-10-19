@@ -205,6 +205,9 @@ export class SlackApp {
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
   private readonly threadQueue = new ThreadQueue();
+  // Threads that had a cluster tour: there a follow-up naming a namespace is a tour too.
+  // ponytail: in-memory, a restart forgets it — the next "jelasin namespace X" starts over.
+  private readonly tourThreads = new Set<string>();
   private readonly inFlight = new InFlightWork<Accepted>();
   /**
    * Alert threads whose incident is not stored yet, and a resolve that arrived for one meanwhile
@@ -361,20 +364,26 @@ export class SlackApp {
    * so a down worker would hold every tour reply that long. Past the bound the tour goes on without
    * the model; the build keeps running and fills the cache for the next tour.
    */
-  private async tourContext(text: string, boundMs = 20_000): Promise<{ ns: string | null; model: ClusterModel | null; text: string }> {
-    if (!wantsTour(text)) return { ns: null, model: null, text: "" };
+  private async tourContext(text: string, boundMs = 20_000, threadId?: string): Promise<{ isTour: boolean; ns: string | null; model: ClusterModel | null; text: string }> {
+    const none = { isTour: false, ns: null, model: null, text: "" };
+    const asked = wantsTour(text);
+    // "how about the devops-tools namespace?" carries no tour vocabulary; after a tour it is one.
+    const followUp = !asked && !!threadId && this.tourThreads.has(threadId) && !wantsInvestigation(text);
+    if (!asked && !followUp) return none;
     const ns = await this.agent.tourNamespace(text).catch(() => null);
+    if (followUp && !ns) return none;
+    if (threadId) this.tourThreads.add(threadId);
     let timer: NodeJS.Timeout | undefined;
     const bound = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), boundMs); });
     const model = ns
       ? await Promise.race([this.agent.clusterModel(ns).catch(() => null), bound]).finally(() => clearTimeout(timer))
       : null;
     if (ns && !model) logger.info(`[onboarding] tour went on without the cluster model for ${ns} (not ready within ${boundMs / 1000}s or failed)`);
-    if (!ns) return { ns, model, text: "" };
+    if (!ns) return { isTour: true, ns, model, text: "" };
     // Live 2026-10-17: the namespace was known, yet the model called the cluster-wide overview and
     // the tour posted 21 namespaces. Said once, outside the data frame, model or no model.
     const scope = `[TOUR SCOPE] The user asked about namespace \`${ns}\`: call \`k8s_cluster_inventory\` with namespace \`${ns}\`, not the cluster-wide overview.`;
-    return { ns, model, text: model ? `${renderModelText(model, ns)}\n${scope}` : scope };
+    return { isTour: true, ns, model, text: model ? `${renderModelText(model, ns)}\n${scope}` : scope };
   }
 
   /** The cluster model's flow and where-to-change, one message each; a refused table re-posts as text. */
@@ -478,7 +487,9 @@ export class SlackApp {
       const previousReply = await this.agent.lastAssistantText(threadId).catch(() => "");
       // A namespace tour gets the cluster model PREFETCHED, outside the investigation like the change
       // timeline (so replay never re-runs it) — see tourContext.
-      const tour = await this.tourContext(text);
+      const tour = await this.tourContext(text, undefined, threadId);
+      // A follow-up tour gets the tour budget too; mentionBudget sees only this message's words.
+      const turnBudget = tour.isTour && !investigation ? { maxToolRounds: config.tourToolRounds } : budget;
       const tourMessage = tour.text ? `${tour.text}\n\n---\n\n${message}` : message;
       try {
         // normalize Markdown **bold** to Slack mrkdwn *bold* up front — also fixes
@@ -515,8 +526,8 @@ export class SlackApp {
         const mode = investigation ? "investigation" : "conversation";
         let reply = toMrkdwn(
           investigation
-            ? await this.agent.investigate(threadId, tourMessage, { ...budget, mode, onComplete, onProgress })
-            : await withRoute("light", () => this.agent.investigate(threadId, tourMessage, { ...budget, mode, onComplete, onProgress }))
+            ? await this.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress })
+            : await withRoute("light", () => this.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress }))
         );
 
         // Deleted, not updated to "done": in a conversation the notice has no value once the
@@ -537,7 +548,7 @@ export class SlackApp {
         } else {
           // A cluster tour's facts are tables built from the tool's own result, posted first; the
           // model's reply below is what only it can write — what each workload is probably for.
-          if (wantsTour(text)) {
+          if (tour.isTour) {
             const inventory = await this.postTourTables(event.channel, threadId, client);
             if (tour.model && tour.ns) await this.postFlowTables(event.channel, threadId, client, tour.model, tour.ns);
             // The tables carry the facts; what the model restated of them goes (stripRepeatedInventory).

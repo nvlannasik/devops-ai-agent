@@ -419,7 +419,8 @@ test("every sentence wantsTour accepts also selects cluster-tour", async () => {
                      "gambaran namespace devops-tools", "onboarding cluster dong", "jelaskan workload di namespace sample-apps",
                      "give me an overview of the namespaces",
                      // Live 2026-10-17: subject before verb, and the verb with the di- prefix.
-                     "saya masih ga tau flow dari namespace sample-apps, coba dijelasin dong"];
+                     "saya masih ga tau flow dari namespace sample-apps, coba dijelasin dong",
+                     "im new in here, i have no idea about the cluster, can you guide me for understanding of these cluster ?"];
   for (const s of sentences) {
     assert.equal(wantsTour(s), true, s);
     assert.ok(selectedFor(s, "conversation").includes("cluster-tour"), `cluster-tour not selected for: ${s}`);

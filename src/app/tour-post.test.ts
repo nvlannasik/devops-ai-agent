@@ -99,3 +99,21 @@ test("tourContext is bounded: a model build that hangs (a down worker) never hol
   assert.equal(r.model, null);
   assert.ok(Date.now() - t0 < 1000, "returned at the bound, not when the build gave up");
 });
+
+// Live 2026-10-19: "how about the devops-tools namespace?" after a tour carried no tour vocabulary,
+// so the follow-up — the step the skill calls the usual one — posted no tables at all.
+test("tourContext: in a thread that had a tour, a follow-up naming a namespace is a tour too", async () => {
+  const self = (tourThreads: Set<string>, ns: string | null) =>
+    ({ tourThreads, agent: { tourNamespace: async () => ns, clusterModel: async () => FLOW_MODEL } });
+  const ctx = (s: any, text: string, thread: string) => (SlackApp.prototype as any).tourContext.call(s, text, 50, thread);
+  const toured = () => new Set(["t1"]);
+  const follow = await ctx(self(toured(), "devops-tools"), "how about the devops-tools namespace?", "t1");
+  assert.equal(follow.isTour, true);
+  assert.match(follow.text, /\[TOUR SCOPE\][^\n]*`devops-tools`/);
+  assert.equal((await ctx(self(new Set(), "devops-tools"), "how about the devops-tools namespace?", "t2")).isTour, false, "no tour before: an ordinary question");
+  assert.equal((await ctx(self(toured(), null), "ok thanks", "t1")).isTour, false, "a follow-up naming no namespace is a reply, not a tour");
+  assert.equal((await ctx(self(toured(), "devops-tools"), "why is devops-tools crashing?", "t1")).isTour, false, "why is an investigation");
+  const marked = new Set<string>();
+  await ctx(self(marked, null), "jelasin cluster ini", "t3");
+  assert.ok(marked.has("t3"), "a tour marks its thread, overview included");
+});
