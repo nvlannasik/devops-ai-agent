@@ -110,6 +110,18 @@ test("renderModelText: framed as data; flow and where-to-change lines; telemetry
   assert.doesNotMatch(t, /jaeger/);
 });
 
+// Live 2026-10-19: "explain in detail of sampe-app namespace" named no namespace exactly, so the
+// tour went out without its flow tables.
+test("namespaceNamed: a typo within 2 edits of exactly one name still names it", () => {
+  const names = ["default", "sample-apps", "monitoring", "devops-tools", "kube-system", "kube-public"];
+  assert.equal(namespaceNamed("can u explain in detail of sampe-app namespace?", names), "sample-apps");
+  assert.equal(namespaceNamed("jelasin namespace monitorng", names), "monitoring");
+  assert.equal(namespaceNamed("jelasin namespace kube-systm", names), "kube-system");
+  assert.equal(namespaceNamed("jelasin namespace kube-pub", names), null, "3 edits is not a typo");
+  assert.equal(namespaceNamed("jelasin namespace orders-apx", ["orders-api", "orders-app"]), null, "two candidates: guessing is worse than no tables");
+  assert.equal(namespaceNamed("explain the cluster", ["cluster-a"]), null, "edits scale with the name: 2 is too many for a 9-letter name");
+});
+
 test("namespaceNamed: the longest registered name present as a word; null when none", () => {
   assert.equal(namespaceNamed("jelasin sample-apps dong", ["default", "sample-apps", "sample"]), "sample-apps");
   assert.equal(namespaceNamed("jelasin cluster ini", ["default", "sample-apps"]), null);

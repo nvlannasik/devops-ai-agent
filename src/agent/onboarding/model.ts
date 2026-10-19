@@ -149,7 +149,23 @@ export function renderModelText(m: ClusterModel, namespace?: string): string {
 export function namespaceNamed(text: string, names: string[]): string | null {
   const t = text.toLowerCase();
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return [...names].sort((a, b) => b.length - a.length).find((n) => new RegExp(`(^|[^a-z0-9-])${esc(n)}($|[^a-z0-9-])`).test(t)) ?? null;
+  const exact = [...names].sort((a, b) => b.length - a.length).find((n) => new RegExp(`(^|[^a-z0-9-])${esc(n)}($|[^a-z0-9-])`).test(t));
+  if (exact) return exact;
+  // A typo ("sampe-app") still names a namespace — when exactly one is within reach. The reach
+  // scales with the name so "cluster" never reads as `cluster-a`.
+  const words = t.split(/[^a-z0-9-]+/).filter(Boolean);
+  const near = names.filter((n) => words.some((w) => editDistance(w, n) <= Math.min(2, Math.floor(n.length / 5))));
+  return near.length === 1 ? near[0] : null;
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
 }
 
 export function flowFacts(m: ClusterModel, namespace: string): string[] {
