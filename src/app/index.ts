@@ -370,7 +370,11 @@ export class SlackApp {
       ? await Promise.race([this.agent.clusterModel(ns).catch(() => null), bound]).finally(() => clearTimeout(timer))
       : null;
     if (ns && !model) logger.info(`[onboarding] tour went on without the cluster model for ${ns} (not ready within ${boundMs / 1000}s or failed)`);
-    return { ns, model, text: model && ns ? renderModelText(model, ns) : "" };
+    if (!ns) return { ns, model, text: "" };
+    // Live 2026-10-17: the namespace was known, yet the model called the cluster-wide overview and
+    // the tour posted 21 namespaces. Said once, outside the data frame, model or no model.
+    const scope = `[TOUR SCOPE] The user asked about namespace \`${ns}\`: call \`k8s_cluster_inventory\` with namespace \`${ns}\`, not the cluster-wide overview.`;
+    return { ns, model, text: model ? `${renderModelText(model, ns)}\n${scope}` : scope };
   }
 
   /** The cluster model's flow and where-to-change, one message each; a refused table re-posts as text. */

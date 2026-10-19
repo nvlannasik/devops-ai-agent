@@ -79,7 +79,12 @@ test("tourContext: a namespace tour prefetches the model as framed data; anythin
   assert.equal(ok.ns, "sample-apps");
   assert.match(ok.text, /^\[CLUSTER MODEL/);
   assert.equal((await ctx(self(null, FLOW_MODEL), "jelasin cluster ini")).text, "");
-  assert.equal((await ctx(self("sample-apps", null), "jelasin namespace sample-apps")).text, "");
+  // Live 2026-10-17: with the namespace known the model still called the cluster-wide overview, so
+  // the scope rides along — outside the data frame — whether or not the model was ready.
+  assert.match(ok.text, /\n\[TOUR SCOPE\][^\n]*`k8s_cluster_inventory` with namespace `sample-apps`/);
+  const noModel = (await ctx(self("sample-apps", null), "jelasin namespace sample-apps")).text;
+  assert.doesNotMatch(noModel, /CLUSTER MODEL/);
+  assert.match(noModel, /^\[TOUR SCOPE\][^\n]*namespace `sample-apps`/);
   let asked = false;
   const notTour = { agent: { tourNamespace: async () => { asked = true; return "x"; }, clusterModel: async () => FLOW_MODEL } };
   assert.equal((await ctx(notTour, "why is the pod crashing?")).text, "");
@@ -90,7 +95,7 @@ test("tourContext is bounded: a model build that hangs (a down worker) never hol
   const s = { agent: { tourNamespace: async () => "sample-apps", clusterModel: () => new Promise(() => {}) } };
   const t0 = Date.now();
   const r = await (SlackApp.prototype as any).tourContext.call(s, "jelasin namespace sample-apps", 50);
-  assert.equal(r.text, "");
+  assert.doesNotMatch(r.text, /CLUSTER MODEL/, "no model past the bound — the scope line alone");
   assert.equal(r.model, null);
   assert.ok(Date.now() - t0 < 1000, "returned at the bound, not when the build gave up");
 });
