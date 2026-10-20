@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import type { BenchRun } from "./bench.js";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, postmortemPage, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
@@ -2015,13 +2015,17 @@ test("the rhythm does not loosen the lockups inside a document page", () => {
 // from quoting a CSS keyword the way prose quotes code. This is the cheap guard: the source
 // must contain exactly one backtick after the opening one, and it must be the closing one.
 test("no comment in the stylesheet contains a backtick", async () => {
-  const src = await readFile(new URL("./styles.ts", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("export const STYLES = `") + "export const STYLES = `".length);
-  assert.equal(
-    (body.match(/`/g) ?? []).length,
-    1,
-    "a backtick inside the CSS ends the template literal — quote CSS keywords with ' instead"
-  );
+  // The sheet is one template literal per file in ./styles/ since the 2026-10-21 split.
+  const dir = new URL("./styles/", import.meta.url);
+  for (const f of await readdir(dir)) {
+    const src = await readFile(new URL(f, dir), "utf8");
+    const body = src.slice(src.indexOf("_CSS = `") + "_CSS = `".length);
+    assert.equal(
+      (body.match(/`/g) ?? []).length,
+      1,
+      `${f}: a backtick inside the CSS ends the template literal — quote CSS keywords with ' instead`
+    );
+  }
 });
 
 // Two cards side by side are one row and must end on the same line. `align-items: start` made
