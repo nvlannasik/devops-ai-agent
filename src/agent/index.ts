@@ -23,14 +23,10 @@ import { groundingGaps, observedText } from "./grounding/index.js";
 import { flagInjection } from "./injection/index.js";
 import { DELEGATE_TOOL, DELEGATE_MARKER, capFanout, childDeadline, hypothesisOf, subThreadId, withDelegateTool } from "./subagent/index.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM, tracesToHumans } from "./feedback/index.js";
-import { capConfidence, admitsLogGap, parseConfidence } from "./confidence/index.js";
-import { stripTemplateEcho } from "./template-echo/index.js";
-import { historyContent, stripFabricatedNote } from "./fabricated-note/index.js";
-import { stripMutatingCommands } from "./runbook/index.js";
+import { historyContent } from "./fabricated-note/index.js";
 import { rcaGaps, rcaGapNotice } from "./rca-completeness/index.js";
 import { isRcaResponse } from "../utils/slack/blocks.js";
 import { RemediationStore } from "./remediation/index.js";
-import { stripOffer } from "./remediation/proposal.js";
 import { RemediationCheckStore, alertState } from "./remediation/verify.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
@@ -39,7 +35,7 @@ import { type PostmortemFacts } from "./postmortem/facts.js";
 import { buildPostmortemPrompt, assemblePostmortem, POSTMORTEM_SYSTEM } from "./postmortem/draft.js";
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
-import { type LLMClient, type LLMResponse, type ContentBlock, type Message, type TokenUsage, type ToolDefinition } from "./llm/types.js";
+import { type LLMClient, type LLMResponse, type ContentBlock, type Message, type ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../db/redis.js";
 import logger from "../utils/logger/index.js";
 import { errDetail } from "../utils/logger/index.js";
@@ -48,16 +44,19 @@ import { TraceRecorder, instrumentLLM, instrumentMCP, type GateName } from "./tr
 import { TraceStore } from "./trace/store.js";
 import { LOG_TOOLS, returnedLogLines, memoSawLogLines, nudgeLostRca, LOG_GAP_NOTICE, demandsLogs, logGapAction } from "./loop/log-gap.js";
 import { lastToolResultIn, imageGapRepo, IMAGE_GAP_NOTICE } from "./remediation/evidence-refusals.js";
-import { MAX_ITERATIONS, MAX_LOG_FANOUT, TOOL_BUDGET_NOTICE, NO_EVIDENCE_NOTICE, FABRICATED_EVIDENCE_NOTICE, needsEvidence, forcedFinalAnswer, noToolRoundLeft, MAX_TRACKED_THREADS, windowOf, memoCovers, toolCallKey, placeholderIn, PLACEHOLDER_REFUSAL, REPEAT_NOTICE, reportProgress, RunMode, modeTag, evidenceStamp, staleEvidenceNotice, evidenceTexts } from "./loop/control.js";
+import { MAX_ITERATIONS, MAX_LOG_FANOUT, TOOL_BUDGET_NOTICE, NO_EVIDENCE_NOTICE, FABRICATED_EVIDENCE_NOTICE, needsEvidence, forcedFinalAnswer, noToolRoundLeft, MAX_TRACKED_THREADS, windowOf, memoCovers, toolCallKey, placeholderIn, PLACEHOLDER_REFUSAL, REPEAT_NOTICE, reportProgress, modeTag, evidenceStamp, staleEvidenceNotice, evidenceTexts } from "./loop/control.js";
 import { ThreadSkills, SkillView, selectForThread, decayThreadSkills, resolveSkillNames } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
 import { extractText } from "./loop/control.js";
+import { newRunState, addUsage, type InvestigateOptions, type RunCtx } from "./loop/run-state.js";
+import { finalizeAnswer } from "./loop/finalize.js";
 
 // Moved out in the 2026-10-20 housekeeping; re-exported so every import site stays valid.
 export * from "./loop/log-gap.js";
 export * from "./remediation/evidence-refusals.js";
 export * from "./loop/control.js";
 export * from "./skills/thread.js";
+export * from "./loop/run-state.js";
 
 // One incident the sweeper closed: what to say, and the label set whose dedup claim has to be
 // released. channel/thread_ts are nullable on the row, so there may be nothing to post — the
@@ -81,70 +80,6 @@ const fallbackLabels = (alertname: string, namespace: string | null): Record<str
 // age so a thread nobody revisits does not leak forever, and capped by count as a hard backstop.
 const TIMELINE_MAX_AGE_MS = 24 * 3_600_000;
 const TIMELINE_MAX_ENTRIES = 500;
-
-export interface InvestigateOptions {
-  maxToolRounds?: number;
-  trigger?: string;
-  /** Defaults to "alert" — the strictest of the three, so an unconverted caller loses nothing. */
-  mode?: RunMode;
-  /** Defaults to MAX_ITERATIONS. */
-  maxIterations?: number;
-  /** Absolute epoch ms. Defaults to now + config.investigationTimeoutMs. */
-  deadline?: number;
-  /** 0 = the lead investigation, 1 = a delegate. Only depth 0 is offered the delegate tool. */
-  depth?: number;
-  /**
-   * The namespace the alert labels name, quoted back in the placeholder refusal.
-   * Telling the model to "use the real namespace" was not enough — on 2026-09-22 it answered the
-   * alert by asking the human which namespace to use. Naming it leaves nothing to ask.
-   */
-  namespace?: string;
-  /**
-   * Called once per tool round, before the tools run, with the round number and the tool
-   * names that round will actually execute. Optional and fire-and-forget: the loop ignores
-   * whatever it returns and never awaits it, because a progress update is not worth failing
-   * an investigation over.
-   *
-   * It exists for perceived latency, not real latency. One round against a slow backend is
-   * tens of seconds of nothing, and an alert thread that sits on a single static notice for
-   * minutes is indistinguishable from an agent that has crashed — which is what an on-call
-   * reader assumes. Only the alert path passes it; a delegate has no Slack message to update.
-   */
-  onProgress?: (round: number, tools: string[]) => void;
-  /**
-   * Run metadata for the Slack footer, delivered as a sink rather than a return value.
-   * investigate() returns the reply text and a dozen call sites depend on that; a sink also
-   * stays correct under INVESTIGATION_MAX_CONCURRENT, where a `lastRunMeta()` getter would
-   * hand one thread another thread's numbers.
-   */
-  onComplete?: (meta: RunMeta) => void;
-}
-
-/** What the Slack footer reports. Every field is measured, never estimated. */
-export interface RunMeta {
-  durationMs: number;
-  /** LLM calls, not tool rounds — the number that explains the latency. */
-  rounds: number;
-  toolCalls: number;
-  /** From the LAST response: on a failover it is the backend that actually answered. */
-  backend?: string;
-  model?: string;
-  route?: "light" | "heavy";
-}
-
-const zeroUsage = (): TokenUsage => ({
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheCreationTokens: 0,
-});
-
-const addUsage = (acc: TokenUsage, u: TokenUsage): TokenUsage => ({
-  inputTokens: acc.inputTokens + u.inputTokens,
-  outputTokens: acc.outputTokens + u.outputTokens,
-  cacheReadTokens: acc.cacheReadTokens + u.cacheReadTokens,
-  cacheCreationTokens: acc.cacheCreationTokens + u.cacheCreationTokens,
-});
 
 export interface AgentDeps {
   llm?: LLMClient;
@@ -517,22 +452,6 @@ export class DevOpsAgent {
     const maxIterations = opts.maxIterations ?? MAX_ITERATIONS;
     const depth = opts.depth ?? 0;
     const mode = opts.mode ?? "alert";
-    let toolRounds = 0;
-    let toolsDisabled = false;
-    let scopeNamespaces: Set<string> | null = null; // set by the first tool round (conversation mode)
-    let sawLogLines = false;   // any log tool returned content — see LOG_GAP_NOTICE
-    let logGapNudged = false;  // the nudge is spent once per investigation, never a loop
-    let imageGapNudged = false; // same, for IMAGE_GAP_NOTICE — one hold slot serves every gate
-    let noEvidenceNudged = false; // same, for NO_EVIDENCE_NOTICE
-    let rcaGapNudged = false;   // same, for an RCA that stopped before the template did
-    // WHICH gate is holding an answer, not merely that one is. The log-gap restore test reads
-    // "the extra round ran no tools" as failure, which is true of a nudge that asked for a fetch
-    // and false of the RCA-completeness one, whose whole request is a tool-free rewrite.
-    let heldBy: "tools" | "rca" | null = null;
-    // The answer the nudge interrupted, and the round count when it did. Kept so a nudge that
-    // produces no new evidence cannot downgrade an answer that was already complete.
-    let preNudgeSummary = "";
-    let toolRoundsAtNudge = -1;
 
     const isFollowUp = await this.memory.hasRca(threadId);
 
@@ -572,8 +491,8 @@ export class DevOpsAgent {
     // frontmatter instead of the loop hardcoding a skill name — `rca-format` is `when:
     // mode:(alert|investigation)`. No playbook regex matches the tag itself; skills/real.test.ts
     // pins that, because a `when` that happened to contain "alert" would load on every run.
-    let skills = selectForThread(this.skills, this.threadSkills, threadId, `${modeTag(mode)}\n${opts.trigger ?? userMessage}`);
-    this.persistThreadSkills(threadId, skills);
+    const s = newRunState(selectForThread(this.skills, this.threadSkills, threadId, `${modeTag(mode)}\n${opts.trigger ?? userMessage}`));
+    this.persistThreadSkills(threadId, s.skills);
 
     // SECURITY: [WRITE] tools never enter the agentic loop — the model must not be able
     // to execute state-changing actions on its own. Write tools are reachable only via
@@ -584,12 +503,6 @@ export class DevOpsAgent {
       { depth, maxToolRounds }
     );
     const systemPrompt = buildStaticSystemPrompt();
-    let iterations = 0;
-    let totalToolCalls = 0;
-    // The response that ANSWERED, not the first one tried: on a failover the backend that
-    // finally worked is the one the footer must name.
-    let lastResponse: LLMResponse | undefined;
-
     // Every exit from this loop goes through here, so the footer is never missing from the
     // paths that matter most — the timeout and the out-of-steps replies are exactly where a
     // reader wants to know how long it ran and on which model.
@@ -599,91 +512,15 @@ export class DevOpsAgent {
     // round logged "Investigation complete in 28451ms (2 LLM calls)" and then kept going, twice
     // in one thread on 2026-09-15. It also never fired at all on the deadline and out-of-steps
     // exits, which are the two a reader most wants the duration for.
-    const done = (text: string): string => {
-      const durationMs = Date.now() - investigationStart;
-      opts.onComplete?.({
-        durationMs,
-        rounds: iterations,
-        toolCalls: totalToolCalls,
-        backend: lastResponse?.backend,
-        model: lastResponse?.model,
-        route: lastResponse?.route,
-      });
-      logger.info(
-        `[${threadId}] Investigation complete in ${durationMs}ms (${iterations} LLM calls, ` +
-        `${totalToolCalls} tool calls) | total tokens — ` +
-        (totalUsage.inputTokens === 0 && totalUsage.outputTokens === 0
-          // Not "zero tokens" — the agent-builder/Langflow envelope reports no counts at all
-          // (devops-ai-agent-worker/src/agent-builder.ts), and printing in=0 out=0 cache_read=0
-          // read as "prompt caching is broken" for weeks when the truth was "not measurable here".
-          ? `not reported by ${lastResponse?.backend ?? "this backend"}`
-          : `in=${totalUsage.inputTokens} out=${totalUsage.outputTokens} ` +
-            `cache_read=${totalUsage.cacheReadTokens} cache_write=${totalUsage.cacheCreationTokens}`)
-      );
-      // An answer that says it could not read the logs cannot also be highly confident — see
-      // capConfidence. Here, so the alert path and a mention both pass through it.
-      const { text: rated, capped } = capConfidence(text, sawLogLines);
-      if (capped) {
-        logger.info(`[${threadId}] capped Confidence: High → Medium — the answer reports no logs`);
-        this.trace.gate(threadId, "confidence-cap", "capped");
-      } else if (parseConfidence(text) === "high") {
-        // Bench C03 attempt 1, 2026-09-24: every log result came back under LOG_RESULT_MIN_CHARS,
-        // and the stored answer matches admitsLogGap when tested offline — both conditions looked
-        // met, and the cap still declined. The artifacts could not say which input differed,
-        // because neither was ever written down. One line, only on a High rating, settles the next.
-        // Settled 2026-09-29 by this very line (sawLogLines=true): a memoised repeat call, measured
-        // WITH its repeat notice — see REPEAT_PREFIX.
-        logger.info(
-          `[${threadId}] Confidence: High kept — sawLogLines=${sawLogLines} admitsLogGap=${admitsLogGap(text)}`
-        );
-        this.trace.gate(threadId, "confidence-cap", "kept-high", `sawLogLines=${sawLogLines}`);
-      }
-      // A placeholder the model labelled instead of filling — see stripTemplateEcho. Done here
-      // rather than in the Slack renderer: the same text reaches Postgres and the next
-      // investigation's recall block, and "[Symptom]" is no more readable in either of those.
-      const { text: filled, dropped } = stripTemplateEcho(rated);
-      if (dropped > 0) {
-        logger.info(`[${threadId}] dropped ${dropped} echoed template placeholder(s) from the answer`);
-        this.trace.gate(threadId, "template-echo", "dropped", "", { count: dropped });
-      }
-      // A `[system note]` the MODEL wrote — see stripFabricatedNote. Here rather than in the Slack
-      // renderer for two reasons: the same text is what the proposal step reads as its evidence, and
-      // a fabricated "already executed" is exactly what makes it answer {"action": null}; and it
-      // also reaches Postgres and the next investigation's recall, where a false lifecycle fact is
-      // worse than an unreadable one. Logged at warn, not info: every other scrubber here is fixing
-      // formatting, this one caught the answer claiming work it never did.
-      const { text: honest, dropped: notes } = stripFabricatedNote(filled);
-      if (notes > 0) {
-        logger.warn(
-          `[${threadId}] dropped ${notes} fabricated [system note] line(s) — the answer claimed an execution that never happened`
-        );
-        this.trace.gate(threadId, "fabricated-note", "dropped", "", { count: notes });
-      }
-      // A Runbook command that would CHANGE something, or is not a command a human can run (our own
-      // tool calls, 2026-09-29) — see agent/runbook. Warn, like the note above.
-      const { text: readOnly, dropped: commands } = stripMutatingCommands(honest);
-      if (commands.length > 0) {
-        logger.warn(
-          `[${threadId}] dropped ${commands.length} Runbook line(s) that are not a read-only kubectl/helm/flux command: ` +
-          truncate(commands.join(" | "), 300)
-        );
-        this.trace.gate(threadId, "runbook", "dropped", truncate(commands.join(" | "), 300), { count: commands.length });
-      }
-      // The [OFFER] line is for the gate, never for a reader. Thread memory already holds the raw
-      // reply (appended above), which is where app/index.ts reads it back — see parseOffer.
-      const answer = stripOffer(readOnly);
-      if (answer !== readOnly) this.trace.gate(threadId, "offer", "stripped");
-      this.trace.end(threadId, { answer, ms: durationMs, llmCalls: iterations, toolCalls: totalToolCalls });
-      return answer;
-    };
-    let totalUsage = zeroUsage();
+    const done = (text: string): string => finalizeAnswer(ctx, s, this.trace, text);
 
     // A delegate inherits a deadline instead of taking a fresh one: its whole point is to finish
     // inside the parent's budget, and config.investigationTimeoutMs would hand it the full 300s
     // the parent is already spending.
     const deadline = opts.deadline ?? investigationStart + config.investigationTimeoutMs;
+    const ctx: RunCtx = { threadId, mode, depth, maxToolRounds, maxIterations, deadline, startedAt: investigationStart, tools, systemPrompt, opts };
 
-    while (iterations < maxIterations) {
+    while (s.iterations < maxIterations) {
       if (Date.now() > deadline) {
         // The budget is the deadline, not the configured timeout: a delegate is given what is
         // left of its parent's, so naming config.investigationTimeoutMs here reported 300s at a
@@ -702,37 +539,37 @@ export class DevOpsAgent {
         // taking it twice: on the next pass we are still past the deadline, so a model that
         // spent its answer turn asking for more tools falls through to the apology, which by
         // then is the honest reply.
-        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth, outOfTime: true });
-        if (notice && !toolsDisabled && toolRounds > 0) {
-          toolsDisabled = true;
+        const notice = forcedFinalAnswer({ toolRounds: s.toolRounds, maxToolRounds, iterations: s.iterations, maxIterations, depth, outOfTime: true });
+        if (notice && !s.toolsDisabled && s.toolRounds > 0) {
+          s.toolsDisabled = true;
           await this.memory.append(threadId, { role: "user", content: [{ type: "text", text: notice }] });
           logger.warn(
-            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
-            `and ${toolRounds} tool rounds — forcing a final answer from the evidence gathered`
+            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${s.iterations} LLM calls ` +
+            `and ${s.toolRounds} tool rounds — forcing a final answer from the evidence gathered`
           );
           this.trace.gate(threadId, "deadline", "forced");
         } else {
           // Nothing gathered, or the answer turn is already spent. Either way there is no
           // finding to salvage and the apology is the truthful reply.
           logger.warn(
-            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${iterations} LLM calls ` +
-            `(tool rounds: ${toolRounds}, answer turn ${toolsDisabled ? "already spent" : "not reachable"})`
+            `[${threadId}] Investigation exceeded its ${overBy}ms budget after ${s.iterations} LLM calls ` +
+            `(tool rounds: ${s.toolRounds}, answer turn ${s.toolsDisabled ? "already spent" : "not reachable"})`
           );
           this.trace.gate(threadId, "deadline", "apology");
           return done("⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.");
         }
       }
-      iterations++;
+      s.iterations++;
 
       const assembled = assembleRequest({
         history: await this.memory.get(threadId),
         systemPrompt,
-        tools: toolsDisabled ? [] : tools,
-        skills,
+        tools: s.toolsDisabled ? [] : tools,
+        skills: s.skills,
         budget: this.budget,
       });
       logger.debug(
-        `[${threadId}] LLM call #${iterations} (history: ${assembled.messages.length} messages, ` +
+        `[${threadId}] LLM call #${s.iterations} (history: ${assembled.messages.length} messages, ` +
         `-${assembled.messagesDropped} over budget, ~${assembled.estimatedTokens} tokens, ` +
         `skills: [${assembled.skillsUsed.join(", ") || "none"}]` +
         (assembled.skillsDropped.length > 0 ? `, dropped: [${assembled.skillsDropped.join(", ")}]` : "") + ")"
@@ -756,12 +593,12 @@ export class DevOpsAgent {
       const llmStart = Date.now();
       let response;
       try {
-        response = await this.llm.chat(assembled.messages, toolsDisabled ? [] : tools, assembled.systemPrompt);
-        lastResponse = response;
+        response = await this.llm.chat(assembled.messages, s.toolsDisabled ? [] : tools, assembled.systemPrompt);
+        s.lastResponse = response;
       } catch (err) {
         // the LLM call is the one hop that leaves this process; without this line a
         // worker/queue failure surfaced only as a generic Slack error with no context
-        logger.error(`[${threadId}] LLM call #${iterations} failed after ${Date.now() - llmStart}ms: ${errDetail(err)}`);
+        logger.error(`[${threadId}] LLM call #${s.iterations} failed after ${Date.now() - llmStart}ms: ${errDetail(err)}`);
         throw err;
       }
       const llmMs = Date.now() - llmStart;
@@ -769,15 +606,15 @@ export class DevOpsAgent {
       // what the model actually produced — the missing piece when Slack shows garbage but
       // the logs only say "stop=end_turn"
       logger.debug(
-        `[${threadId}] LLM #${iterations} content: [${response.content.map((c) => c.type).join(", ") || "empty"}]` +
+        `[${threadId}] LLM #${s.iterations} content: [${response.content.map((c) => c.type).join(", ") || "empty"}]` +
         (extractText(response.content) ? ` text="${truncate(extractText(response.content), 200)}"` : "")
       );
 
       if (response.usage) {
-        totalUsage = addUsage(totalUsage, response.usage);
+        s.totalUsage = addUsage(s.totalUsage, response.usage);
         this.recordUsage(threadId, response);
         logger.debug(
-          `[${threadId}] LLM #${iterations} ${llmMs}ms | ` +
+          `[${threadId}] LLM #${s.iterations} ${llmMs}ms | ` +
           `in=${response.usage.inputTokens} out=${response.usage.outputTokens} ` +
           `cache_read=${response.usage.cacheReadTokens} cache_write=${response.usage.cacheCreationTokens} ` +
           `stop=${response.stopReason}`
@@ -815,7 +652,7 @@ export class DevOpsAgent {
         // the time we get here — this branch is the backstop for the single-backend providers,
         // which have nothing to fall up to. Logged, not rewritten: a canned reply would hide a
         // misconfigured tool-call parser behind a friendly sentence.
-        if (namesToolOnly(summary, toolsDisabled ? [] : tools)) {
+        if (namesToolOnly(summary, s.toolsDisabled ? [] : tools)) {
           logger.warn(
             `[${threadId}] final answer is just the tool name \`${summary.trim()}\` — the backend named a ` +
             `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
@@ -823,11 +660,11 @@ export class DevOpsAgent {
         }
         // Before every other gate: an alert answered with no tool call at all has not been
         // investigated, and whatever the other gates would ask about is downstream of that.
-        const noFetch = noToolRoundLeft({ toolsDisabled, iterations, maxIterations });
-        if (needsEvidence({ mode, toolRounds, nudged: noEvidenceNudged, toolsDisabled: noFetch, answer: summary })) {
-          noEvidenceNudged = true;
-          preNudgeSummary = summary;
-          toolRoundsAtNudge = toolRounds;
+        const noFetch = noToolRoundLeft({ toolsDisabled: s.toolsDisabled, iterations: s.iterations, maxIterations });
+        if (needsEvidence({ mode, toolRounds: s.toolRounds, nudged: s.noEvidenceNudged, toolsDisabled: noFetch, answer: summary })) {
+          s.noEvidenceNudged = true;
+          s.preNudgeSummary = summary;
+          s.toolRoundsAtNudge = s.toolRounds;
           logger.warn(
             `[${threadId}] answered with zero tool calls — one more round to go and look` +
             (mode === "alert" ? "" : " (the answer presented tool output it never fetched)")
@@ -842,56 +679,56 @@ export class DevOpsAgent {
         // The last gate before an answer leaves — see logGapAction for all three outcomes.
         const gap = logGapAction({
           mode,
-          demandsLogs: demandsLogs(skills),
-          sawLogLines,
-          nudged: logGapNudged,
+          demandsLogs: demandsLogs(s.skills),
+          sawLogLines: s.sawLogLines,
+          nudged: s.logGapNudged,
           toolsDisabled: noFetch,
-          toolRounds,
-          toolRoundsAtNudge,
-          heldBy,
+          toolRounds: s.toolRounds,
+          toolRoundsAtNudge: s.toolRoundsAtNudge,
+          heldBy: s.heldBy,
         });
         if (gap === "restore") {
           // Gate-agnostic on purpose: both gates hold their answer in the same slot, so this
           // sentence has to be true of whichever one spent the round.
           logger.warn(
             `[${threadId}] the extra round fetched nothing — keeping the pre-nudge answer ` +
-            `(${preNudgeSummary.length} chars) over the retry's ${summary.length}`
+            `(${s.preNudgeSummary.length} chars) over the retry's ${summary.length}`
           );
           this.trace.resolveNudge(threadId, "restored");
-          return done(preNudgeSummary);
+          return done(s.preNudgeSummary);
         }
         if (gap === "nudge") {
-          logGapNudged = true;
-          preNudgeSummary = summary;
-          heldBy = "tools";
-          toolRoundsAtNudge = toolRounds;
+          s.logGapNudged = true;
+          s.preNudgeSummary = summary;
+          s.heldBy = "tools";
+          s.toolRoundsAtNudge = s.toolRounds;
           logger.info(
-            `[${threadId}] answered after ${toolRounds} tool round(s) with no log lines, while ` +
-            `[${skills.map((s) => s.name).join(", ")}] read logs — one more round`
+            `[${threadId}] answered after ${s.toolRounds} tool round(s) with no log lines, while ` +
+            `[${s.skills.map((s) => s.name).join(", ")}] read logs — one more round`
           );
-          this.trace.gate(threadId, "log-gap", "nudge", `after ${toolRounds} tool round(s)`);
+          this.trace.gate(threadId, "log-gap", "nudge", `after ${s.toolRounds} tool round(s)`);
           await this.memory.append(threadId, { role: "user", content: LOG_GAP_NOTICE });
           continue;
         }
-        if (nudgeLostRca({ mode, heldBy, before: preNudgeSummary, after: summary })) {
+        if (nudgeLostRca({ mode, heldBy: s.heldBy, before: s.preNudgeSummary, after: summary })) {
           logger.warn(
             `[${threadId}] the extra round replaced an RCA with something that is not one ` +
             `("${truncate(summary, 80)}") — keeping the RCA`
           );
           this.trace.gate(threadId, "nudge-lost-rca", "kept", truncate(summary, 200));
           this.trace.resolveNudge(threadId, "kept-earlier");
-          return done(preNudgeSummary);
+          return done(s.preNudgeSummary);
         }
         // Second gate, same hold slot: only one nudge may be outstanding, so this is reached only
         // when the log gap did not take the round. Evidence-driven, so it is safe in every mode —
         // the trigger is a pull failure in tool output, not a guess about the question.
-        if (!imageGapNudged && !noFetch && toolRounds > 0) {
+        if (!s.imageGapNudged && !noFetch && s.toolRounds > 0) {
           const repo = imageGapRepo(summary, observedText(await this.memory.get(threadId)));
           if (repo) {
-            imageGapNudged = true;
-            preNudgeSummary = summary;
-            heldBy = "tools";
-            toolRoundsAtNudge = toolRounds;
+            s.imageGapNudged = true;
+            s.preNudgeSummary = summary;
+            s.heldBy = "tools";
+            s.toolRoundsAtNudge = s.toolRounds;
             logger.info(`[${threadId}] answer names \`${repo}\` only as the image that failed to pull — one more round for the tag that works`);
             this.trace.gate(threadId, "image-gap", "nudge", repo);
             await this.memory.append(threadId, { role: "user", content: IMAGE_GAP_NOTICE });
@@ -902,13 +739,13 @@ export class DevOpsAgent {
         // see rca-completeness. The investigation is over; what is missing is writing. So it is
         // not gated on `toolsDisabled`: a tool-free turn is exactly the turn it asks for. It still
         // needs a call left to spend it on — on the last one the nudge fell out into the apology.
-        if (!rcaGapNudged && iterations < maxIterations && mode === "alert" && isRcaResponse(summary)) {
+        if (!s.rcaGapNudged && s.iterations < maxIterations && mode === "alert" && isRcaResponse(summary)) {
           const missing = rcaGaps(summary);
           if (missing.length > 0) {
-            rcaGapNudged = true;
-            preNudgeSummary = summary;
-            heldBy = "rca";
-            toolRoundsAtNudge = toolRounds;
+            s.rcaGapNudged = true;
+            s.preNudgeSummary = summary;
+            s.heldBy = "rca";
+            s.toolRoundsAtNudge = s.toolRounds;
             logger.info(`[${threadId}] RCA is missing ${missing.join(", ")} — one more round to complete it`);
             this.trace.gate(threadId, "rca-completeness", "nudge", missing.join(", "));
             await this.memory.append(threadId, { role: "user", content: rcaGapNotice(missing) });
@@ -918,19 +755,19 @@ export class DevOpsAgent {
         // The completion round replaces what it was given, so it can lose as well as gain. The
         // other gates decide that on whether the extra round ran any tools; this one can compare
         // the thing itself, which is the better test when it is available.
-        if (rcaGapNudged && preNudgeSummary !== "" && rcaGaps(summary).length > rcaGaps(preNudgeSummary).length) {
+        if (s.rcaGapNudged && s.preNudgeSummary !== "" && rcaGaps(summary).length > rcaGaps(s.preNudgeSummary).length) {
           logger.warn(
             `[${threadId}] the completion round came back with more missing than it was given ` +
             `(${rcaGaps(summary).join(", ")}) — keeping the earlier answer`
           );
           this.trace.resolveNudge(threadId, "kept-earlier");
-          return done(preNudgeSummary);
+          return done(s.preNudgeSummary);
         }
         return done(summary);
       }
 
       if (response.stopReason === "tool_use") {
-        if (toolsDisabled) {
+        if (s.toolsDisabled) {
           // model emitted tool_use even though no tools were offered — keep the
           // tool_use/tool_result pairing intact with synthesized errors and loop again
           const synth = response.content
@@ -967,17 +804,17 @@ export class DevOpsAgent {
           }
           const delegated = await this.runDelegates(threadId, run, deadline);
           delegateResults = [...delegated.results, ...overflow];
-          if (delegated.sawLogLines) sawLogLines = true;
+          if (delegated.sawLogLines) s.sawLogLines = true;
         }
 
         if (maxToolRounds !== Infinity) {
           // Namespace scope lock: the first tool round defines the question's namespaces.
-          if (scopeNamespaces === null) {
-            scopeNamespaces = namespacesOf(executable);
+          if (s.scopeNamespaces === null) {
+            s.scopeNamespaces = namespacesOf(executable);
           } else {
-            const drift = outOfScope(executable, scopeNamespaces);
+            const drift = outOfScope(executable, s.scopeNamespaces);
             if (drift.length > 0) {
-              const scopeList = [...scopeNamespaces].join(", ");
+              const scopeList = [...s.scopeNamespaces].join(", ");
               logger.info(`[${threadId}] blocked ${drift.length} out-of-scope tool call(s) — question scope is [${scopeList}]`);
               this.trace.gate(threadId, "scope-lock", "refused", scopeList, { count: drift.length });
               refusals.push(
@@ -1011,15 +848,15 @@ export class DevOpsAgent {
         // Reported here rather than after the LLM call: this is the last point at which we
         // know what the round will really do — the scope lock, the fan-out guard and the
         // delegate split have all had their say, so the names below are the ones that run.
-        reportProgress(opts.onProgress, toolRounds, [...executable, ...delegateCalls], (err) =>
+        reportProgress(opts.onProgress, s.toolRounds, [...executable, ...delegateCalls], (err) =>
           logger.debug(`[${threadId}] progress callback threw, ignored: ${errDetail(err)}`)
         );
 
-        totalToolCalls += executable.length;
+        s.totalToolCalls += executable.length;
         const executed = executable.length > 0 ? await this.executeToolCalls(threadId, executable, opts.namespace) : [];
-        if (!sawLogLines) {
+        if (!s.sawLogLines) {
           const logIds = new Set(executable.filter((t) => LOG_TOOLS.has(t.name ?? "")).map((t) => t.id));
-          sawLogLines = executed.some(
+          s.sawLogLines = executed.some(
             (r) => r.type === "tool_result" && logIds.has(r.tool_use_id) && returnedLogLines(String(r.content ?? ""))
           );
         }
@@ -1028,15 +865,15 @@ export class DevOpsAgent {
         // its user message, and a text block ahead of them is a 400.
         if (executed.length > 0) trimmedResults.push({ type: "text", text: evidenceStamp() });
 
-        toolRounds++;
-        const notice = forcedFinalAnswer({ toolRounds, maxToolRounds, iterations, maxIterations, depth });
+        s.toolRounds++;
+        const notice = forcedFinalAnswer({ toolRounds: s.toolRounds, maxToolRounds, iterations: s.iterations, maxIterations, depth });
         if (notice) {
-          toolsDisabled = true;
+          s.toolsDisabled = true;
           trimmedResults.push({ type: "text", text: notice });
           logger.info(
             notice === TOOL_BUDGET_NOTICE
               ? `[${threadId}] tool budget (${maxToolRounds} rounds) reached — forcing final answer`
-              : `[${threadId}] iteration ceiling (${maxIterations}) reached after ${toolRounds} tool rounds — forcing final answer`
+              : `[${threadId}] iteration ceiling (${maxIterations}) reached after ${s.toolRounds} tool rounds — forcing final answer`
           );
           this.trace.gate(threadId, notice === TOOL_BUDGET_NOTICE ? "tool-budget" : "iteration-ceiling", "forced");
         }
@@ -1051,11 +888,11 @@ export class DevOpsAgent {
         // (each gets its own trigger window rather than sharing one truncated concatenation).
         // selectForThread keeps what is already loaded, so this only ever adds.
         for (const text of evidenceTexts(trimmedResults)) {
-          const before = skills.length;
-          skills = selectForThread(this.skills, this.threadSkills, threadId, text);
-          const added = skills.slice(before).map((s) => s.name);
+          const before = s.skills.length;
+          s.skills = selectForThread(this.skills, this.threadSkills, threadId, text);
+          const added = s.skills.slice(before).map((s) => s.name);
           if (added.length > 0) {
-            this.persistThreadSkills(threadId, skills);
+            this.persistThreadSkills(threadId, s.skills);
             logger.info(`[${threadId}] playbook matched from tool evidence, not the alert text: ${added.join(", ")}`);
           }
         }
