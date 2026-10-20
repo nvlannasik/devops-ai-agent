@@ -14,7 +14,8 @@ import type { Message } from "../agent/llm/types.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
 import type { MemoryKeyDetail, MemoryKeyPage, MemoryKeyRow } from "./queries.js";
-import { ICON, empty, layout, pager, section } from "./views.js";
+import { ICON, empty, pager, section } from "./parts.js";
+import { layout } from "./layout.js";
 
 export interface MemoryFilters { page: number; alertname: string | null; namespace: string | null }
 

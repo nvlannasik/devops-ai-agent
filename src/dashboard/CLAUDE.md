@@ -5,6 +5,13 @@ maps, `/topology` and `/cluster`, which are the one thing here with a build step
 that cost live debugging to find; they were in the repo root's `CLAUDE.md` and moved down so
 they load when you are actually working on this directory.
 
+**One module per page, and the stylesheet in cascade order** (2026-10-21). `views.ts` is only a barrel
+(`server.ts` and the tests import it); a page lives in `<area>-views.ts` and imports `parts.ts` (atoms: icons,
+badges, `section`, `pager`) and `layout.ts` (the shell, sign-in, error page) — never the barrel, or ESM hands it a
+half-initialised cycle (`views-split.test.ts`). `STYLES` is `styles/*.ts` concatenated in `styles.ts`; the order is the
+cascade and `styles.test.ts` pins the exact bytes, so a new rule goes into the chunk for its area, and moving a
+chunk is a visual change even though nothing errors.
+
 **The build has three steps, not one.** `npm run build` = `tsc` (server) → `tsc -p
 tsconfig.client.json` (typechecks the browser bundle; esbuild strips types without checking
 them, so this is the only thing standing between `src/dashboard/client/` and unchecked code) →
