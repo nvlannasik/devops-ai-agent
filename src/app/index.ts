@@ -500,25 +500,8 @@ export class SlackApp {
         let meta: RunMeta | undefined;
         const onComplete = (m: RunMeta) => { meta = m; };
 
-        // The notice is created on the FIRST tool round, not up front. A one-round answer
-        // ("what can you do?") then posts nothing extra at all, while a scan that is about to
-        // spend minutes says so from the moment it starts spending them. No timer, and no
-        // "thinking..." message left hanging over a reply that already landed.
-        let noticeTs: string | undefined;
-        let noticePending = false;
-        const onProgress = (round: number, tools: string[]) => {
-          const text = `:spinthinking: Round ${round}${tools.length > 0 ? ` — ${tools.join(", ")}` : ""}`;
-          if (noticeTs) {
-            void client.chat.update({ channel: event.channel, ts: noticeTs, text })
-              .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
-            return;
-          }
-          if (noticePending) return; // first post still in flight — the next round updates it
-          noticePending = true;
-          void client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text })
-            .then((r) => { noticeTs = r.ts as string | undefined; })
-            .catch((e) => logger.debug(`[slack] progress notice failed for thread ${threadId}: ${errDetail(e)}`));
-        };
+        const progress = this.progressNotifier(client, event.channel, threadId);
+        const onProgress = progress.onProgress;
 
         // The mode keeps `rca-format` off a casual mention and the log-gap gate off a question
         // with no affected pod — see RunMode. It is NOT derivable from `budget`: an explicit
@@ -530,12 +513,7 @@ export class SlackApp {
             : await withRoute("light", () => this.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress }))
         );
 
-        // Deleted, not updated to "done": in a conversation the notice has no value once the
-        // answer is under it, and a leftover "Round 3" line reads like the agent is still going.
-        if (noticeTs) {
-          await client.chat.delete({ channel: event.channel, ts: noticeTs })
-            .catch((e) => logger.debug(`[slack] could not remove the progress notice for thread ${threadId}: ${errDetail(e)}`));
-        }
+        await progress.clear();
         // !investigation: the mention path's own gate on the reformat half — see conversationReply.
         reply = await this.conversationReply(reply, threadId, !investigation);
         // The reply investigate() returned has the [OFFER] line stripped; memory still has it.
@@ -546,28 +524,7 @@ export class SlackApp {
         if (isRca) {
           await this.postRca(event.channel, threadId, reply, buildRcaBlocks(reply, footer));
         } else {
-          // A cluster tour's facts are tables built from the tool's own result, posted first; the
-          // model's reply below is what only it can write — what each workload is probably for.
-          if (tour.isTour) {
-            const inventory = await this.postTourTables(event.channel, threadId, client);
-            if (tour.model && tour.ns) await this.postFlowTables(event.channel, threadId, client, tour.model, tour.ns);
-            // The tables carry the facts; what the model restated of them goes (stripRepeatedInventory).
-            if (inventory) reply = stripRepeatedInventory(reply, inventory, tour.model && tour.ns ? flowFacts(tour.model, tour.ns) : []) || reply;
-          }
-          // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
-          // fence-safe, so displayed logs keep rendering as code blocks
-          const parts = splitForSlack(reply);
-          for (const [i, part] of parts.entries()) {
-            // Footer on the LAST part only, and appended to the text rather than added as a
-            // block: a conversation reply is posted as plain mrkdwn, and nothing parses it back.
-            const last = i === parts.length - 1;
-            await client.chat.postMessage({
-              channel: event.channel,
-              thread_ts: threadId,
-              text: last && footer ? `${part}\n\n_${footer}_` : part,
-              mrkdwn: true,
-            });
-          }
+          reply = await this.postConversation(event.channel, threadId, client, reply, footer, tour);
         }
         if (isRca) {
           await this.agent.markRcaSent(threadId);
@@ -581,40 +538,7 @@ export class SlackApp {
         // The tour's cluster model is evidence too: every name in it came from a tool (agent/onboarding).
         await this.warnIfUngrounded(event.channel, threadId, reply, tour.text);
         await this.notifyIfLowConfidence(event.channel, threadId, reply);
-        // AWAITED, and last. Fire-and-forget put the card wherever the backend's latency
-        // happened to land it — on a slow private LLM, 40 seconds later and under the NEXT
-        // question. Awaiting is what makes the ThreadQueue above mean anything: the turn is
-        // not over until its card is posted. withTrace so the proposal's own LLM call carries
-        // the threadId, which as a detached call it never did — the one log line you needed to
-        // join an orphan card back to its conversation was the one line that had no trace.
-        const gate = worthProposing(text, reply, isRca, previousReply, offer);
-        // Logged on BOTH branches now. Only the skip was logged before, so a card that should
-        // never have been proposed left no trace of why it was — which is exactly what happened
-        // on 2026-09-16, when a cleanup question produced a GitOps PR card and the log said
-        // nothing at all about the decision.
-        // The checks ride on the skip line: that is the branch whose cause used to need a trip
-        // into Redis to find (2026-09-22). The propose branch already names its reason.
-        logger.info(
-          `[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}` +
-          (gate.propose ? "" : ` | ${explainGate(text, reply, previousReply, offer)}`)
-        );
-        if (gate.propose) {
-          await withTrace(threadId, () =>
-            this.maybeProposeRemediation(
-              event.channel,
-              threadId,
-              null,
-              {},
-              // The offer names the exact object; on a bare "ya" the user text names nothing, and
-              // the evidence is a turn back — see buildProposalContext.
-              buildProposalContext(text, reply, offer, previousReply),
-              // worthProposing already decided this; it is the only place that knows whether the
-              // words came from a person or the fault vocabulary came from the agent's own answer.
-              gate.byUser,
-              offer
-            )
-          );
-        }
+        await this.proposeAfterMention(event.channel, threadId, text, reply, isRca, previousReply, offer);
       } catch (err) {
         logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
         await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
@@ -622,6 +546,105 @@ export class SlackApp {
         this.semaphore.release();
       }
     }));
+  }
+
+  /**
+   * The ":spinthinking: Round N" notice for one mention.
+   * The notice is created on the FIRST tool round, not up front. A one-round answer ("what can you
+   * do?") then posts nothing extra at all, while a scan that is about to spend minutes says so from
+   * the moment it starts spending them. No timer, and no "thinking..." message left hanging over a
+   * reply that already landed. `clear` deletes it rather than updating it to "done": in a
+   * conversation the notice has no value once the answer is under it, and a leftover "Round 3" line
+   * reads like the agent is still going.
+   */
+  private progressNotifier(client: AllMiddlewareArgs["client"], channel: string, threadId: string): { onProgress: (round: number, tools: string[]) => void; clear: () => Promise<void> } {
+    let noticeTs: string | undefined;
+    let noticePending = false;
+    const onProgress = (round: number, tools: string[]) => {
+      const text = `:spinthinking: Round ${round}${tools.length > 0 ? ` — ${tools.join(", ")}` : ""}`;
+      if (noticeTs) {
+        void client.chat.update({ channel, ts: noticeTs, text })
+          .catch((e) => logger.debug(`[slack] progress update failed for thread ${threadId}: ${errDetail(e)}`));
+        return;
+      }
+      if (noticePending) return; // first post still in flight — the next round updates it
+      noticePending = true;
+      void client.chat.postMessage({ channel, thread_ts: threadId, text })
+        .then((r) => { noticeTs = r.ts as string | undefined; })
+        .catch((e) => logger.debug(`[slack] progress notice failed for thread ${threadId}: ${errDetail(e)}`));
+    };
+    const clear = async () => {
+      if (noticeTs) {
+        await client.chat.delete({ channel, ts: noticeTs })
+          .catch((e) => logger.debug(`[slack] could not remove the progress notice for thread ${threadId}: ${errDetail(e)}`));
+      }
+    };
+    return { onProgress, clear };
+  }
+
+  /** A conversation reply: the tour's tables first, then the reply in Slack-sized parts. Returns the reply as posted. */
+  private async postConversation(channel: string, threadId: string, client: AllMiddlewareArgs["client"], reply: string, footer: string | undefined, tour: { isTour: boolean; ns: string | null; model: ClusterModel | null }): Promise<string> {
+    // A cluster tour's facts are tables built from the tool's own result, posted first; the
+    // model's reply below is what only it can write — what each workload is probably for.
+    if (tour.isTour) {
+      const inventory = await this.postTourTables(channel, threadId, client);
+      if (tour.model && tour.ns) await this.postFlowTables(channel, threadId, client, tour.model, tour.ns);
+      // The tables carry the facts; what the model restated of them goes (stripRepeatedInventory).
+      if (inventory) reply = stripRepeatedInventory(reply, inventory, tour.model && tour.ns ? flowFacts(tour.model, tour.ns) : []) || reply;
+    }
+    // Slack hard-splits >~4000 chars and breaks code fences — split ourselves,
+    // fence-safe, so displayed logs keep rendering as code blocks
+    const parts = splitForSlack(reply);
+    for (const [i, part] of parts.entries()) {
+      // Footer on the LAST part only, and appended to the text rather than added as a
+      // block: a conversation reply is posted as plain mrkdwn, and nothing parses it back.
+      const last = i === parts.length - 1;
+      await client.chat.postMessage({
+        channel,
+        thread_ts: threadId,
+        text: last && footer ? `${part}\n\n_${footer}_` : part,
+        mrkdwn: true,
+      });
+    }
+    return reply;
+  }
+
+  /** After a mention's reply: decide whether a remediation card is worth proposing, log why, and propose it. */
+  private async proposeAfterMention(channel: string, threadId: string, text: string, reply: string, isRca: boolean, previousReply: string, offer: ReturnType<typeof parseOffer>): Promise<void> {
+    // AWAITED, and last. Fire-and-forget put the card wherever the backend's latency
+    // happened to land it — on a slow private LLM, 40 seconds later and under the NEXT
+    // question. Awaiting is what makes the ThreadQueue above mean anything: the turn is
+    // not over until its card is posted. withTrace so the proposal's own LLM call carries
+    // the threadId, which as a detached call it never did — the one log line you needed to
+    // join an orphan card back to its conversation was the one line that had no trace.
+    const gate = worthProposing(text, reply, isRca, previousReply, offer);
+    // Logged on BOTH branches now. Only the skip was logged before, so a card that should
+    // never have been proposed left no trace of why it was — which is exactly what happened
+    // on 2026-09-16, when a cleanup question produced a GitOps PR card and the log said
+    // nothing at all about the decision.
+    // The checks ride on the skip line: that is the branch whose cause used to need a trip
+    // into Redis to find (2026-09-22). The propose branch already names its reason.
+    logger.info(
+      `[remediation] ${gate.propose ? "proposing" : "no proposal call"} for thread ${threadId} — ${gate.reason}` +
+      (gate.propose ? "" : ` | ${explainGate(text, reply, previousReply, offer)}`)
+    );
+    if (gate.propose) {
+      await withTrace(threadId, () =>
+        this.maybeProposeRemediation(
+          channel,
+          threadId,
+          null,
+          {},
+          // The offer names the exact object; on a bare "ya" the user text names nothing, and
+          // the evidence is a turn back — see buildProposalContext.
+          buildProposalContext(text, reply, offer, previousReply),
+          // worthProposing already decided this; it is the only place that knows whether the
+          // words came from a person or the fault vocabulary came from the agent's own answer.
+          gate.byUser,
+          offer
+        )
+      );
+    }
   }
 
   /**

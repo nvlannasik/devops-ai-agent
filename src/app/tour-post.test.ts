@@ -117,3 +117,22 @@ test("tourContext: in a thread that had a tour, a follow-up naming a namespace i
   await ctx(self(marked, null), "jelasin cluster ini", "t3");
   assert.ok(marked.has("t3"), "a tour marks its thread, overview included");
 });
+
+// handleMention split (housekeeping 2026-10-20): the conversation post keeps today's order —
+// inventory table, flow tables, then the reply parts, the footer on the last part only — and hands
+// back the reply as posted (stripped of restated facts), which the grounding check and gate read next.
+test("postConversation: tour tables, flow tables, then the reply with its footer last; returns what it posted", async () => {
+  const posted: any[] = [];
+  const client = { chat: { postMessage: async (m: any) => { posted.push(m); return { ts: String(posted.length) }; } } };
+  const self = Object.assign(Object.create(SlackApp.prototype), {
+    postTourTables: async () => { posted.push({ marker: "inventory" }); return null; },
+    postFlowTables: async () => { posted.push({ marker: "flow" }); },
+  });
+  const out = await (SlackApp.prototype as any).postConversation.call(self, "C1", "1.1", client, "the reply", "footer", { isTour: true, ns: "sample-apps", model: FLOW_MODEL });
+  assert.deepEqual(posted.map((p) => p.marker ?? "reply"), ["inventory", "flow", "reply"]);
+  assert.match(posted[2].text, /the reply\n\n_footer_$/);
+  assert.equal(out, "the reply");
+  posted.length = 0;
+  await (SlackApp.prototype as any).postConversation.call(self, "C1", "1.1", client, "plain", undefined, { isTour: false, ns: null, model: null });
+  assert.deepEqual(posted.map((p) => p.marker ?? p.text), ["plain"], "no tour: the reply alone, no footer");
+});
