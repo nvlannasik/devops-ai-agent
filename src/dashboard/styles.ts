@@ -1479,12 +1479,17 @@ form.signout button {
    and the event column gets the rest instead of an even split. */
 .pm-doc .md .table-wrap td:first-child, .pm-doc .md .table-wrap th:first-child { white-space: nowrap; width: 1%; }
 
-.skill-body {
+.skill-body, .mem-pre {
   font-family: var(--font-data); font-size: var(--fs-sm); line-height: 1.6;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r);
   padding: var(--sp-5); margin: 0;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+
+/* /memory: recall text keeps its line breaks; a conversation's text wraps anywhere (tokens, ids). */
+.mem-pre + .mem-pre { margin-top: var(--sp-3); }
+.mem-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-text + p, .mem-text + .mem-text { margin-top: var(--sp-2); }
 
 /* ---------- filter chips ---------- */
 /* For a filter with no field in the form. The form's six controls show their own state; this

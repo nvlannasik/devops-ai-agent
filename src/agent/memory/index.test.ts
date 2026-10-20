@@ -173,3 +173,43 @@ test("every Redis key this agent writes is named in REDIS_KEYS", async () => {
   // A negative control: without this, a regex that matched nothing would pass silently.
   assert.ok(declared.size >= 4, "the four known prefixes should be declared");
 });
+
+// Dashboard /memory/threads (2026-10-20): what each thread still holds, read-only. The window is
+// what the model reads next turn, so it is returned as stored — trimmed, issue pinned at [0].
+test("list() and inspect() report what a thread holds, newest thread first (in-memory)", async () => {
+  const m = new ConversationMemory();
+  await m.append("1700000000.000100", { role: "user", content: "old question" });
+  await m.append("1700000500.000200", { role: "user", content: "new question" });
+  await m.append("1700000500.000200", { role: "assistant", content: "answer" });
+  await m.markRcaSent("1700000500.000200");
+  await m.setSkills("1700000500.000200", ["cluster-tour"]);
+  const list = await m.list();
+  assert.deepEqual(list.map((t) => [t.threadId, t.messages, t.rcaSent, t.skills]), [
+    ["1700000500.000200", 2, true, ["cluster-tour"]],
+    ["1700000000.000100", 1, false, []],
+  ]);
+  assert.equal(list[0].ttlSeconds, null, "in-memory has no expiry to report");
+  const t = await m.inspect("1700000500.000200");
+  assert.equal(t?.messages[0].content, "new question");
+  assert.equal(await m.inspect("9.9"), null, "a thread with no conversation is absent, not empty");
+});
+
+test("list() and inspect() read Redis through REDIS_KEYS, with each key's TTL", async () => {
+  const store = new Map<string, string>([
+    ["conv:1700000000.000100", JSON.stringify([{ role: "user", content: "q" }])],
+    ["rca:1700000000.000100", "1"],
+    ["skills:1700000000.000100", JSON.stringify(["oomkilled"])],
+    ["dedup:abc", "x"],
+  ]);
+  const base = stubRedis(store) as Record<string, unknown>;
+  const redis = {
+    ...base,
+    scan: async (_cursor: string, _m: string, pattern: string) =>
+      ["0", [...store.keys()].filter((k) => k.startsWith(pattern.replace("*", "")))],
+    ttl: async (k: string) => (store.has(k) ? 4000 : -2),
+  } as never;
+  const m = new ConversationMemory(redis);
+  const list = await m.list();
+  assert.deepEqual(list, [{ threadId: "1700000000.000100", messages: 1, ttlSeconds: 4000, rcaSent: true, skills: ["oomkilled"] }]);
+  assert.equal((await m.inspect("1700000000.000100"))?.ttlSeconds, 4000);
+});

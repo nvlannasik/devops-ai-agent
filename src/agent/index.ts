@@ -3,7 +3,7 @@ import { SERIALIZED_BLOCKS, namesToolOnly } from "./llm/router.js";
 import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
-import { ConversationMemory } from "./memory/index.js";
+import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
 import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
 import { buildClusterModel, ClusterModelCache } from "./onboarding/index.js";
@@ -360,6 +360,26 @@ export class DevOpsAgent {
   // Durable cross-incident memory — recall returns "" when disabled or no prior match.
   // `queryText` (the alert body) unlocks the weakest tier, which matches on wording rather
   // than on the alert's identity; without it recall stays exact-match only.
+  // ---- Dashboard /memory (read-only) ----
+
+  /**
+   * Exactly what recall puts in front of the model for this key — the agent's own two calls, not
+   * a dashboard copy of them, so the page cannot show one thing while the model reads another.
+   * No alert text, so the "possibly related" tier (full-text on that text) is not part of it.
+   */
+  async memoryRecall(labels: Record<string, string>): Promise<{ incidents: string; remediations: string }> {
+    const [incidents, remediations] = await Promise.all([this.recallIncidents(labels), this.recallRemediations(labels)]);
+    return { incidents, remediations };
+  }
+
+  conversationThreads(): Promise<ThreadSummary[]> {
+    return this.memory.list();
+  }
+
+  conversationThread(threadId: string): Promise<ThreadMemory | null> {
+    return this.memory.inspect(threadId);
+  }
+
   recallIncidents(labels: Record<string, string>, queryText?: string): Promise<string> {
     return this.incidents.recall(labels, { queryText });
   }

@@ -6,6 +6,8 @@ import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
 import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, postmortemPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { memoryKeyPage, memoryListPage, threadPage, threadsPage } from "./memory-views.js";
+import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
@@ -26,7 +28,8 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" }
+  | { kind: "memoryThread"; threadTs: string }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
   | { kind: "asset"; path: string }
@@ -46,6 +49,14 @@ export function matchRoute(pathname: string): Route {
   if (p === "/bench") return { kind: "bench" };
   if (p === "/harness") return { kind: "harness" };
   if (p === "/cluster") return { kind: "cluster" };
+  // /memory (2026-10-20). A key is two query parameters, not a path: a namespace may be absent,
+  // and "absent" must stay distinguishable from any spelling of a name. A thread is a Slack ts
+  // and only that, as on /api/trace.
+  if (p === "/memory") return { kind: "memory" };
+  if (p === "/memory/alert") return { kind: "memoryKey" };
+  if (p === "/memory/threads") return { kind: "memoryThreads" };
+  const mt = /^\/memory\/threads\/(\d{1,12}\.\d{1,9})$/.exec(p);
+  if (mt) return { kind: "memoryThread", threadTs: mt[1]! };
   // A gate is routed only by its exact name from GATE_NAMES — the list is closed, so nothing a URL
   // says reaches a query unless it is one of those strings.
   const g = /^\/harness\/([a-z-]{1,40})$/.exec(p);
@@ -142,6 +153,18 @@ const csp = (nonce?: string): string =>
 // steps. base64url so the same string is legal both in the header and in the attribute.
 const newNonce = (): string => randomBytes(16).toString("base64url");
 
+
+/**
+ * The agent's memory as the dashboard reads it (/memory). Read-only by type: nothing here writes.
+ * `recall` is the agent's OWN recall for a key — the page shows what the model would read, so it
+ * must not be a second implementation of it.
+ */
+export interface MemorySource {
+  recall(labels: Record<string, string>): Promise<{ incidents: string; remediations: string }>;
+  threads(): Promise<ThreadSummary[]>;
+  thread(threadId: string): Promise<ThreadMemory | null>;
+}
+
 export class DashboardServer {
   private server: http.Server | null = null;
   private readonly queries: DashboardQueries;
@@ -151,6 +174,7 @@ export class DashboardServer {
   private readonly inventory: (() => Promise<string>) | undefined;
   // The onboarding cluster model (agent/onboarding), PEEKED: never waits, null until the first build lands.
   private readonly clusterModel: (() => unknown) | undefined;
+  private readonly memory?: MemorySource;
   private inventoryCache: { at: number; inv: ClusterInventory | null; error: string | null } | null = null;
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
@@ -170,13 +194,15 @@ export class DashboardServer {
     mcpTools?: () => readonly McpTool[],
     skills?: () => readonly SkillView[],
     inventory?: () => Promise<string>,
-    clusterModel?: () => unknown
+    clusterModel?: () => unknown,
+    memory?: MemorySource
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
     this.skills = skills ?? (() => []);
     this.inventory = inventory;
     this.clusterModel = clusterModel;
+    this.memory = memory;
   }
 
   async start(): Promise<void> {
@@ -526,6 +552,27 @@ export class DashboardServer {
       return send(200, benchPage(loadBenchHistory(), await this.openCount()), "text/html; charset=utf-8");
     }
 
+    // Before the database gate: a conversation lives in Redis (or in this process), so these
+    // answer while Postgres is down. The incident links are a bonus that degrades to none.
+    if (route.kind === "memoryThreads" || route.kind === "memoryThread") {
+      if (!this.memory) return send(200, errorPage("Memory not available", "This dashboard is not attached to an agent process."));
+      const threadTs = route.kind === "memoryThread" ? route.threadTs : null;
+      try {
+        const now = new Date();
+        if (threadTs === null) {
+          const threads = await this.memory.threads();
+          const links = await this.queries.threadIncidents(threads.map((t) => t.threadId)).catch(() => new Map<string, number>());
+          return send(200, threadsPage(threads, links, now, await this.openCount()));
+        }
+        const t = await this.memory.thread(threadTs);
+        const links = await this.queries.threadIncidents([threadTs]).catch(() => new Map<string, number>());
+        return send(200, threadPage(t, links.get(threadTs) ?? null, now, threadTs, await this.openCount()));
+      } catch (err) {
+        logger.error(`[dashboard] conversation memory read failed: ${errDetail(err)}`);
+        return send(503, errorPage("Conversation memory unavailable", "Redis could not be read. The trace still holds every run."));
+      }
+    }
+
     if (!this.queries.enabled) {
       return send(200, errorPage("No database configured", "Set DB_HOST to enable incident history."));
     }
@@ -550,6 +597,25 @@ export class DashboardServer {
           const f = parseFilters(url.searchParams);
           const [p, open] = await Promise.all([this.queries.list(f), this.openCount()]);
           return send(200, listPage(p, f, now, open));
+        }
+        case "memory": {
+          const f = parseFilters(url.searchParams);
+          const mf = { page: f.page, alertname: f.alertname, namespace: f.namespace };
+          const [p, open] = await Promise.all([this.queries.memoryKeys(mf), this.openCount()]);
+          return send(200, memoryListPage(p, mf, new Date(), open));
+        }
+        case "memoryKey": {
+          const name = url.searchParams.get("name");
+          if (!name || name.length > 200) return send(404, errorPage("Not found", "A memory key needs an alert name."));
+          const ns = url.searchParams.has("ns") ? (url.searchParams.get("ns") ?? "").slice(0, 200) : null;
+          // The same label shape an alert carries: no namespace label at all for the NULL key.
+          const labels: Record<string, string> = ns === null ? { alertname: name } : { alertname: name, namespace: ns };
+          const [recall, d, open] = await Promise.all([
+            this.memory ? this.memory.recall(labels).catch(() => null) : Promise.resolve(null),
+            this.queries.memoryKey(name, ns),
+            this.openCount(),
+          ]);
+          return send(200, memoryKeyPage({ alertname: name, namespace: ns }, recall, d, new Date(), open));
         }
         case "detail": {
           const now = new Date();

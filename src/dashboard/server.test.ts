@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { DashboardServer, matchRoute, METHODS } from "./server.js";
+import { DashboardServer, matchRoute, METHODS, type MemorySource } from "./server.js";
 import { DashboardQueries } from "./queries.js";
 import { config } from "../config/index.js";
 import { SESSION_COOKIE, mintSession } from "./auth.js";
@@ -113,13 +113,13 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 // resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
 async function withServer<T>(
   fn: (port: number) => Promise<T>,
-  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string>; queries?: DashboardQueries } = {}
+  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string>; queries?: DashboardQueries; memory?: MemorySource } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory);
+  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory, undefined, opts.memory);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -669,4 +669,48 @@ test("postmortem routes are GET-only", async () => {
     assert.match(status(await raw(port, "POST /incidents/7/postmortem HTTP/1.1", authed)), /^HTTP\/1\.1 405\b/);
     assert.match(status(await raw(port, "POST /incidents/7/postmortem.md HTTP/1.1", authed)), /^HTTP\/1\.1 405\b/);
   }, { queries });
+});
+
+// /memory (2026-10-20): the agent's memory, read through the agent's own source.
+test("matchRoute knows the memory pages, and a thread is a Slack ts and only that", () => {
+  assert.deepEqual(matchRoute("/memory"), { kind: "memory" });
+  assert.deepEqual(matchRoute("/memory/alert"), { kind: "memoryKey" });
+  assert.deepEqual(matchRoute("/memory/threads"), { kind: "memoryThreads" });
+  assert.deepEqual(matchRoute("/memory/threads/1792421141.306329"), { kind: "memoryThread", threadTs: "1792421141.306329" });
+  assert.deepEqual(matchRoute("/memory/threads/abc"), { kind: "notfound" });
+});
+
+test("conversation pages answer without a database; a key's recall is the agent's own, keyed exactly", async () => {
+  const seen: Record<string, string>[] = [];
+  const memory: MemorySource = {
+    recall: async (labels) => { seen.push(labels); return { incidents: "RECALLED-TEXT", remediations: "" }; },
+    threads: async () => [{ threadId: "1.1", messages: 2, ttlSeconds: 60, rcaSent: false, skills: [] }],
+    thread: async (id) => (id === "1.1" ? { threadId: "1.1", messages: [{ role: "user", content: "hello-thread" }], ttlSeconds: 60, rcaSent: false, skills: [] } : null),
+  };
+  await withServer(async (port) => {
+    const list = await raw(port, "GET /memory/threads HTTP/1.1", authed);
+    assert.match(status(list), /^HTTP\/1\.1 200\b/);
+    assert.match(list, /\/memory\/threads\/1\.1/);
+    assert.match(await raw(port, "GET /memory/threads/1.1 HTTP/1.1", authed), /hello-thread/);
+    assert.match(await raw(port, "GET /memory/threads/2.2 HTTP/1.1", authed), /no conversation any more/);
+    // No database here: the per-key pages say so rather than pretending to be empty.
+    assert.match(await raw(port, "GET /memory/alert?name=X HTTP/1.1", authed), /No database configured/);
+  }, { memory });
+});
+
+test("a key page asks the agent's recall for exactly that key; no ns is the NULL-namespace key", async () => {
+  const seen: Record<string, string>[] = [];
+  const memory: MemorySource = {
+    recall: async (labels) => { seen.push(labels); return { incidents: "RECALLED-TEXT", remediations: "" }; },
+    threads: async () => [], thread: async () => null,
+  };
+  const queries = new DashboardQueries({ query: async () => ({ rows: [] }), end: async () => {}, on: () => {} } as never);
+  await withServer(async (port) => {
+    const page = await raw(port, "GET /memory/alert?name=KubePodCrashLooping&ns=apps HTTP/1.1", authed);
+    assert.match(page, /RECALLED-TEXT/);
+    await raw(port, "GET /memory/alert?name=NodeNotReady HTTP/1.1", authed);
+    assert.deepEqual(seen, [{ alertname: "KubePodCrashLooping", namespace: "apps" }, { alertname: "NodeNotReady" }]);
+    assert.match(status(await raw(port, "GET /memory/alert HTTP/1.1", authed)), /^HTTP\/1\.1 404\b/, "a key page needs a name");
+    assert.match(status(await raw(port, "GET /memory HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
+  }, { memory, queries });
 });

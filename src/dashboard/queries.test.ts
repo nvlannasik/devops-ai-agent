@@ -525,3 +525,38 @@ test("detail reports hasPostmortem false when none was ever drafted", async () =
   const d = await q.detail(7);
   assert.equal(d!.hasPostmortem, false);
 });
+
+// /memory (2026-10-20): the agent's long-term memory, keyed the way recall() keys it.
+test("memoryKeys groups top-level incidents by alertname + namespace, filtered, and over-fetches a page", async () => {
+  const calls: Call[] = [];
+  const row = { alertname: "KubePodCrashLooping", namespace: "apps", rcas: 3, learned: 1, remediations: 2, recovered: 1, worse: 0, last_seen: "2026-10-19T00:00:00Z" };
+  const q = new DashboardQueries(stub(calls, (sql) => (sql.includes("count(*)::int AS n") ? [{ n: 1 }] : [row])));
+  const out = await q.memoryKeys({ page: 2, alertname: "Crash", namespace: "apps" });
+  assert.match(calls[0].sql, /parent_id IS NULL/, "children of a correlated incident are not memory of their own");
+  assert.match(calls[0].sql, /GROUP BY alertname, namespace/);
+  assert.deepEqual(calls[0].params.slice(0, 2), ["Crash", "apps"]);
+  assert.deepEqual(calls[0].params.slice(-2), [PAGE_SIZE + 1, PAGE_SIZE]);
+  assert.deepEqual(out.rows[0], { alertname: "KubePodCrashLooping", namespace: "apps", rcas: 3, learned: 1, remediations: 2, recovered: 1, worse: 0, lastSeen: "2026-10-19T00:00:00Z" });
+  assert.equal(out.hasMore, false);
+});
+
+test("memoryKey reads one key's tiers with the namespace matched exactly, NULL included", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, () => []));
+  const out = await q.memoryKey("NodeNotReady", null);
+  assert.equal(calls.length, 3, "learned, agent RCAs, remediations");
+  for (const c of calls) {
+    assert.match(c.sql, /namespace IS NOT DISTINCT FROM \$2/);
+    assert.deepEqual(c.params.slice(0, 2), ["NodeNotReady", null]);
+  }
+  assert.deepEqual(out, { learned: [], rcas: [], remediations: [] });
+});
+
+test("threadIncidents maps thread ts to its incident, and asks nothing for an empty list", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, () => [{ thread_ts: "1.1", id: 7 }]));
+  assert.deepEqual([...(await q.threadIncidents([]))], []);
+  assert.equal(calls.length, 0);
+  assert.deepEqual([...(await q.threadIncidents(["1.1", "2.2"]))], [["1.1", 7]]);
+  assert.deepEqual(calls[0].params, [["1.1", "2.2"]]);
+});

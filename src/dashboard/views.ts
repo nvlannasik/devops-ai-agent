@@ -41,7 +41,7 @@ const ico = (paths: string): string =>
   `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"` +
   ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
 
-const ICON = {
+export const ICON = {
   overview: ico(`<path d="M3 21h18"/><path d="M7 21v-7"/><path d="M12 21V4"/><path d="M17 21v-11"/>`),
   incidents: ico(
     `<path d="M10.3 4 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 4a1.9 1.9 0 0 0-3.4 0Z"/>` +
@@ -109,6 +109,10 @@ const ICON = {
       `<path d="M11 6.2 13 4.2a3.4 3.4 0 0 1 4.8 4.8l-2 2"/>` +
       `<path d="M13 17.8 11 19.8a3.4 3.4 0 0 1-4.8-4.8l2-2"/>`
   ),
+  // Memory (/memory): an archive box — what the agent keeps. New, because nothing else here means it.
+  memory: ico(`<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/>`),
+  // A thread's conversation memory: two bubbles. Not `speech` — that one means on-call.
+  chats: ico(`<path d="M14 9a2 2 0 0 1-2 2H7l-3 3V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2Z"/><path d="M18 9h1a2 2 0 0 1 2 2v9l-3-3h-5a2 2 0 0 1-2-2v-1"/>`),
 };
 
 // Two groups, because the four destinations are two different KINDS of thing and the rail was
@@ -129,6 +133,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/topology", label: "Topology", icon: ICON.topology },
       { href: "/cluster", label: "Cluster", icon: ICON.layers },
+      { href: "/memory", label: "Memory", icon: ICON.memory },
       { href: "/context", label: "Context", icon: ICON.context },
       { href: "/bench", label: "Benchmark", icon: ICON.bench },
       { href: "/harness", label: "Harness", icon: ICON.harness },
@@ -408,7 +413,7 @@ const breakable = (name: string): string => esc(name).replace(/([a-z0-9])(?=[A-Z
 // callers (the "nothing on page 7" notice, the error page) are not a section's contents.
 //
 // A <div>, not a <p>: the glyph rides in a chip, and a chip is a block.
-const empty = (headline: string, next: string, icon = ""): string =>
+export const empty = (headline: string, next: string, icon = ""): string =>
   `<div class="empty">` +
   (icon ? `<span class="kpi-icon" aria-hidden="true">${icon}</span>` : "") +
   `<strong>${esc(headline)}</strong><span>${esc(next)}</span></div>`;
@@ -416,7 +421,7 @@ const empty = (headline: string, next: string, icon = ""): string =>
 // A section heading with a glyph. The icon and the label are one flex item so h2's own gap —
 // which is sized for the distance out to the hairline — never lands between a picture and the
 // word it labels; a trailing link keeps working, it sorts past the hairline as before.
-const section = (icon: string, title: string, trailing = ""): string =>
+export const section = (icon: string, title: string, trailing = ""): string =>
   `<h2><span class="sec">${icon}${esc(title)}</span>${trailing}</h2>`;
 
 // The icon is markup, not text, so it is passed pre-built by the caller rather than escaped
@@ -823,7 +828,13 @@ export function pageWindow(current: number, last: number): (number | null)[] {
  * an answer, and a reader who filtered to nothing wants the count more than the controls.
  * The controls appear only when there is somewhere to go.
  */
-function pager(p: IncidentPage, f: Filters, qs: (page: number) => string): string {
+// Generic over what it pages (2026-10-20: /memory pages alert keys) — it reads rows, hasMore, total.
+export function pager(
+  p: { rows: readonly unknown[]; hasMore: boolean; total: number; capped?: boolean },
+  f: { page: number },
+  qs: (page: number) => string,
+  noun = "incident"
+): string {
   if (p.rows.length === 0) return "";
   const first = (f.page - 1) * PAGE_SIZE + 1;
   const shown = first + p.rows.length - 1;
@@ -832,7 +843,7 @@ function pager(p: IncidentPage, f: Filters, qs: (page: number) => string): strin
   const total = `${fmtInt(p.total)}${p.capped ? "+" : ""}`;
   const summary =
     `<p class="pager-count">Showing <b>${esc(fmtInt(first))}–${esc(fmtInt(shown))}</b> of ` +
-    `<b>${esc(total)}</b> incident${p.total === 1 ? "" : "s"}</p>`;
+    `<b>${esc(total)}</b> ${esc(noun)}${p.total === 1 ? "" : "s"}</p>`;
 
   const last = Math.max(1, Math.ceil(p.total / PAGE_SIZE), f.page);
   if (last === 1 && !p.hasMore) return `<nav class="pager" aria-label="Pagination">${summary}</nav>`;

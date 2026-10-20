@@ -14,7 +14,11 @@ async function main() {
     // The arrow is the point: the dashboard reads the tool list per request, so it reflects
     // whatever the agent is connected to now rather than what it had at boot (nothing, here —
     // initialize() runs further down).
-    const dashboard = new DashboardServer(undefined, () => agent.mcpTools(), () => agent.skillsView(), () => agent.clusterInventory(), () => agent.peekClusterModel());
+    const dashboard = new DashboardServer(undefined, () => agent.mcpTools(), () => agent.skillsView(), () => agent.clusterInventory(), () => agent.peekClusterModel(), {
+      recall: (labels) => agent.memoryRecall(labels),
+      threads: () => agent.conversationThreads(),
+      thread: (id) => agent.conversationThread(id),
+    });
 
     // graceful shutdown
     const shutdown = async (signal: string) => {

@@ -117,6 +117,26 @@ export interface Tokens {
 // cap it stops counting and `capped` says so, which the page renders as "5,000+". An exact
 // count over a filtered table is a full scan on the same event loop that handles alerts, and
 // nobody clicks to page 400 — the ceiling buys a flat cost and gives up a number no one reads.
+// --- Memory (/memory, 2026-10-20): the agent's long-term memory, keyed the way recall() keys it ---
+
+/** One (alertname, namespace) the agent can recall — the unit `IncidentMemory.recall()` reads by. */
+export interface MemoryKeyRow {
+  alertname: string;
+  namespace: string | null;
+  rcas: number;
+  learned: number;
+  remediations: number;
+  recovered: number;
+  worse: number;
+  lastSeen: string;
+}
+export interface MemoryKeyPage { rows: MemoryKeyRow[]; hasMore: boolean; total: number }
+export interface MemoryKeyDetail {
+  learned: Array<{ incidentId: number; slackUser: string | null; confirmedRootCause: string | null; actionTaken: string | null; outcome: string | null; createdAt: string }>;
+  rcas: Array<{ incidentId: number; createdAt: string; severity: string | null; confidence: string | null; rootCause: string | null }>;
+  remediations: Array<{ incidentId: number; summary: string; status: string; verdict: string | null; createdAt: string }>;
+}
+
 export interface IncidentPage {
   rows: IncidentRow[];
   hasMore: boolean;
@@ -795,6 +815,109 @@ export class DashboardQueries {
       [threadTs]
     );
     return rows;
+  }
+
+  /**
+   * The keys the agent remembers by, one row each. Top-level incidents only (TOP_LEVEL): a child
+   * of a correlated incident is not memory of its own. A remediation counts as memory only once it
+   * ran (`succeeded`/`failed`) — the rows `recallForAlert()` reads.
+   */
+  async memoryKeys(f: { page: number; alertname: string | null; namespace: string | null }): Promise<MemoryKeyPage> {
+    if (!this.pool) return { rows: [], hasMore: false, total: 0 };
+    const offset = (f.page - 1) * PAGE_SIZE;
+    const keys = `SELECT alertname, namespace, count(*)::int AS rcas, max(created_at) AS last_seen
+                    FROM incidents
+                   WHERE alertname IS NOT NULL AND ${TOP_LEVEL}
+                     AND ($1::text IS NULL OR alertname = $1)
+                     AND ($2::text IS NULL OR namespace = $2)
+                   GROUP BY alertname, namespace`;
+    const sameKey = `i.alertname = k.alertname AND i.namespace IS NOT DISTINCT FROM k.namespace`;
+    const ran = `FROM remediations r JOIN incidents i ON i.id = r.incident_id`;
+    const [page, count] = await Promise.all([
+      this.pool.query(
+        `WITH keys AS (${keys})
+         SELECT k.alertname, k.namespace, k.rcas, k.last_seen,
+                (SELECT count(*)::int FROM incident_feedback f JOIN incidents i ON i.id = f.incident_id
+                  WHERE ${sameKey}) AS learned,
+                (SELECT count(*)::int ${ran} WHERE ${sameKey} AND r.status IN ('succeeded', 'failed')) AS remediations,
+                (SELECT count(*)::int ${ran} JOIN remediation_checks c ON c.remediation_id = r.id
+                  WHERE ${sameKey} AND c.verdict = 'recovered') AS recovered,
+                (SELECT count(*)::int ${ran} JOIN remediation_checks c ON c.remediation_id = r.id
+                  WHERE ${sameKey} AND c.verdict = 'worse') AS worse
+           FROM keys k
+          ORDER BY learned DESC, k.last_seen DESC
+          LIMIT $3 OFFSET $4`,
+        [f.alertname, f.namespace, PAGE_SIZE + 1, offset]
+      ),
+      this.pool.query(`SELECT count(*)::int AS n FROM (${keys}) k`, [f.alertname, f.namespace]),
+    ]);
+    const hasMore = page.rows.length > PAGE_SIZE;
+    const rows = (hasMore ? page.rows.slice(0, PAGE_SIZE) : page.rows).map((r: Record<string, unknown>) => ({
+      alertname: String(r.alertname),
+      namespace: (r.namespace as string | null) ?? null,
+      rcas: num(r.rcas),
+      learned: num(r.learned),
+      remediations: num(r.remediations),
+      recovered: num(r.recovered),
+      worse: num(r.worse),
+      lastSeen: String(r.last_seen),
+    }));
+    return { rows, hasMore, total: Math.max(num(count.rows[0]?.n), offset + rows.length) };
+  }
+
+  /** One key's sources, tier by tier — the rows behind what recall() prints for it. */
+  async memoryKey(alertname: string, namespace: string | null): Promise<MemoryKeyDetail> {
+    if (!this.pool) return { learned: [], rcas: [], remediations: [] };
+    const key = `i.alertname = $1 AND i.namespace IS NOT DISTINCT FROM $2`;
+    const [learned, rcas, rems] = await Promise.all([
+      this.pool.query(
+        `SELECT f.incident_id, f.slack_user, f.confirmed_root_cause, f.action_taken, f.outcome, f.created_at
+           FROM incident_feedback f JOIN incidents i ON i.id = f.incident_id
+          WHERE ${key} ORDER BY f.created_at DESC LIMIT 20`,
+        [alertname, namespace]
+      ),
+      this.pool.query(
+        `SELECT i.id, i.created_at, i.severity, i.confidence, i.root_cause
+           FROM incidents i
+          WHERE ${key} AND i.parent_id IS NULL AND i.rca NOT LIKE 'Merged into%'
+          ORDER BY i.created_at DESC LIMIT 20`,
+        [alertname, namespace]
+      ),
+      this.pool.query(
+        `SELECT r.incident_id, r.params->>'summary' AS summary, r.status, c.verdict, r.created_at
+           FROM remediations r JOIN incidents i ON i.id = r.incident_id
+           LEFT JOIN remediation_checks c ON c.remediation_id = r.id
+          WHERE ${key} AND r.status IN ('succeeded', 'failed')
+          ORDER BY r.created_at DESC LIMIT 20`,
+        [alertname, namespace]
+      ),
+    ]);
+    return {
+      learned: learned.rows.map((r: Record<string, unknown>) => ({
+        incidentId: num(r.incident_id), slackUser: (r.slack_user as string | null) ?? null,
+        confirmedRootCause: (r.confirmed_root_cause as string | null) ?? null, actionTaken: (r.action_taken as string | null) ?? null,
+        outcome: (r.outcome as string | null) ?? null, createdAt: String(r.created_at),
+      })),
+      rcas: rcas.rows.map((r: Record<string, unknown>) => ({
+        incidentId: num(r.id), createdAt: String(r.created_at), severity: (r.severity as string | null) ?? null,
+        confidence: (r.confidence as string | null) ?? null, rootCause: (r.root_cause as string | null) ?? null,
+      })),
+      remediations: rems.rows.map((r: Record<string, unknown>) => ({
+        incidentId: num(r.incident_id), summary: (r.summary as string | null) ?? "(remediation)", status: String(r.status),
+        verdict: (r.verdict as string | null) ?? null, createdAt: String(r.created_at),
+      })),
+    };
+  }
+
+  /** thread ts → the top-level incident opened in it, for linking a conversation to its incident. */
+  async threadIncidents(threadTs: string[]): Promise<Map<string, number>> {
+    if (!this.pool || threadTs.length === 0) return new Map();
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT ON (thread_ts) thread_ts, id FROM incidents
+        WHERE thread_ts = ANY($1) AND ${TOP_LEVEL} ORDER BY thread_ts, created_at`,
+      [threadTs]
+    );
+    return new Map(rows.map((r: Record<string, unknown>) => [String(r.thread_ts), num(r.id)] as [string, number]));
   }
 
   async close(): Promise<void> {

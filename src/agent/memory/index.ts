@@ -21,6 +21,25 @@ export const REDIS_KEYS = {
   skills: { prefix: "skills", holds: "playbook names selected for a thread" },
 } as const;
 
+/** What one thread still holds — the dashboard's /memory/threads row. */
+export interface ThreadSummary {
+  threadId: string;
+  messages: number;
+  /** Seconds until Redis drops it; null in-memory, where nothing expires. */
+  ttlSeconds: number | null;
+  rcaSent: boolean;
+  skills: string[];
+}
+
+export interface ThreadMemory extends Omit<ThreadSummary, "messages"> {
+  /** The window as stored — what the model reads next turn, the original issue pinned at [0]. */
+  messages: Message[];
+}
+
+// Bounds the dashboard's walk over Redis; every thread here expires within 24h, so this is a
+// ceiling on a busy day, not a page.
+const LIST_LIMIT = 100;
+
 export class ConversationMemory {
   private store = new Map<string, Message[]>();
   private rcaThreads = new Set<string>(); // in-memory; Redis uses a separate key
@@ -111,6 +130,46 @@ export class ConversationMemory {
       return;
     }
     await this.redis.set(`${REDIS_KEYS.skills.prefix}:${threadId}`, JSON.stringify(names), "EX", REDIS_TTL_SEC);
+  }
+
+  /**
+   * Every thread that still holds a conversation, newest first (a thread id is a Slack ts).
+   * Read-only, for the dashboard: SCAN, never KEYS, so a large keyspace is walked in steps
+   * rather than blocking Redis for the agent's own reads.
+   */
+  async list(limit = LIST_LIMIT): Promise<ThreadSummary[]> {
+    const ids: string[] = [];
+    if (this.redis) {
+      const prefix = `${REDIS_KEYS.conv.prefix}:`;
+      let cursor = "0";
+      do {
+        const [next, keys] = await this.redis.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+        cursor = next;
+        for (const k of keys) if (ids.length < limit) ids.push(k.slice(prefix.length));
+      } while (cursor !== "0" && ids.length < limit);
+    } else {
+      ids.push(...[...this.store.keys()].slice(0, limit));
+    }
+    const out: ThreadSummary[] = [];
+    for (const id of ids) {
+      const t = await this.inspect(id);
+      if (t) out.push({ ...t, messages: t.messages.length });
+    }
+    return out.sort((a, b) => Number(b.threadId) - Number(a.threadId));
+  }
+
+  /** One thread's window plus its flags; null when nothing is held for it (never stored, or expired). */
+  async inspect(threadId: string): Promise<ThreadMemory | null> {
+    const messages = await this.get(threadId);
+    if (messages.length === 0) return null;
+    const ttl = this.redis ? await this.redis.ttl(`${REDIS_KEYS.conv.prefix}:${threadId}`) : null;
+    return {
+      threadId,
+      messages,
+      ttlSeconds: ttl !== null && ttl >= 0 ? ttl : null,
+      rcaSent: await this.hasRca(threadId),
+      skills: await this.getSkills(threadId),
+    };
   }
 
   async clear(threadId: string): Promise<void> {
