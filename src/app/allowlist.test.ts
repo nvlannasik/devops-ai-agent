@@ -2,7 +2,9 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp } from "./index.js";
 import { ThreadCommands } from "./commands.js";
+import { MentionFlow } from "./mention.js";
 
+const viaMention = (fake: object) => Object.assign(Object.create(MentionFlow.prototype), fake, { host: fake });
 const viaCommands = (fake: object) => Object.assign(Object.create(ThreadCommands.prototype), fake, { host: fake });
 import { config } from "../config/index.js";
 
@@ -26,7 +28,7 @@ const harness = () => {
   const proto = SlackApp.prototype as any;
   self.mayUseAgent = proto.mayUseAgent;
   const mention = (user: string | undefined, text: string, thread_ts?: string) =>
-    proto.handleMention.call(self, {
+    MentionFlow.prototype.handleMention.call(viaMention(self), {
       event: { user, text, channel: "C1", ts: "1.1", thread_ts },
       say: async (m: any) => void said.push(m),
       client,

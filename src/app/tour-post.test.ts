@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SlackApp } from "./index.js";
+import { MentionFlow } from "./mention.js";
+
+const viaMention = (fake: object) => Object.assign(Object.create(MentionFlow.prototype), fake, { host: fake });
 
 // The tour's tables are posted from the inventory the tool returned, before the model's prose.
 // A Slack refusal of the blocks costs the tables, never the facts: the same message goes again as
@@ -15,7 +17,7 @@ const harness = (inventory: string | null, fail = false) => {
     if (fail && m.blocks) throw Object.assign(new Error("invalid_blocks"), { data: { error: "invalid_blocks" } });
     posted.push(m);
   } } };
-  const post = () => (SlackApp.prototype as any).postTourTables.call(self, "C1", "1.1", client);
+  const post = () => (MentionFlow.prototype as any).postTourTables.call(viaMention(self), "C1", "1.1", client);
   return { posted, post };
 };
 
@@ -64,7 +66,7 @@ test("postFlowTables: two messages (flow, where to change); a refused table re-p
     if (refuse && m.blocks) { refuse = false; throw Object.assign(new Error("invalid_blocks"), { data: { error: "invalid_blocks" } }); }
     posted.push(m);
   } } };
-  await (SlackApp.prototype as any).postFlowTables.call({}, "C1", "1.1", client, FLOW_MODEL, "sample-apps");
+  await (MentionFlow.prototype as any).postFlowTables.call(viaMention({}), "C1", "1.1", client, FLOW_MODEL, "sample-apps");
   assert.equal(posted.length, 2);
   assert.equal(posted[0].blocks, undefined, "the refused one went again as text");
   assert.match(posted[0].text, /\*Request flow\*/);
@@ -74,7 +76,7 @@ test("postFlowTables: two messages (flow, where to change); a refused table re-p
 
 test("tourContext: a namespace tour prefetches the model as framed data; anything missing is today's tour", async () => {
   const self = (ns: string | null, model: any) => ({ agent: { tourNamespace: async () => ns, clusterModel: async () => model } });
-  const ctx = (s: any, text: string) => (SlackApp.prototype as any).tourContext.call(s, text);
+  const ctx = (s: any, text: string) => (MentionFlow.prototype as any).tourContext.call(viaMention(s), text);
   const ok = await ctx(self("sample-apps", FLOW_MODEL), "jelasin namespace sample-apps");
   assert.equal(ok.ns, "sample-apps");
   assert.match(ok.text, /^\[CLUSTER MODEL/);
@@ -94,7 +96,7 @@ test("tourContext: a namespace tour prefetches the model as framed data; anythin
 test("tourContext is bounded: a model build that hangs (a down worker) never holds the tour", async () => {
   const s = { agent: { tourNamespace: async () => "sample-apps", clusterModel: () => new Promise(() => {}) } };
   const t0 = Date.now();
-  const r = await (SlackApp.prototype as any).tourContext.call(s, "jelasin namespace sample-apps", 50);
+  const r = await (MentionFlow.prototype as any).tourContext.call(viaMention(s), "jelasin namespace sample-apps", 50);
   assert.doesNotMatch(r.text, /CLUSTER MODEL/, "no model past the bound — the scope line alone");
   assert.equal(r.model, null);
   assert.ok(Date.now() - t0 < 1000, "returned at the bound, not when the build gave up");
@@ -105,7 +107,7 @@ test("tourContext is bounded: a model build that hangs (a down worker) never hol
 test("tourContext: in a thread that had a tour, a follow-up naming a namespace is a tour too", async () => {
   const self = (tourThreads: Set<string>, ns: string | null) =>
     ({ tourThreads, agent: { tourNamespace: async () => ns, clusterModel: async () => FLOW_MODEL } });
-  const ctx = (s: any, text: string, thread: string) => (SlackApp.prototype as any).tourContext.call(s, text, 50, thread);
+  const ctx = (s: any, text: string, thread: string) => (MentionFlow.prototype as any).tourContext.call(viaMention(s), text, 50, thread);
   const toured = () => new Set(["t1"]);
   const follow = await ctx(self(toured(), "devops-tools"), "how about the devops-tools namespace?", "t1");
   assert.equal(follow.isTour, true);
@@ -124,15 +126,15 @@ test("tourContext: in a thread that had a tour, a follow-up naming a namespace i
 test("postConversation: tour tables, flow tables, then the reply with its footer last; returns what it posted", async () => {
   const posted: any[] = [];
   const client = { chat: { postMessage: async (m: any) => { posted.push(m); return { ts: String(posted.length) }; } } };
-  const self = Object.assign(Object.create(SlackApp.prototype), {
+  const self = viaMention({
     postTourTables: async () => { posted.push({ marker: "inventory" }); return null; },
     postFlowTables: async () => { posted.push({ marker: "flow" }); },
   });
-  const out = await (SlackApp.prototype as any).postConversation.call(self, "C1", "1.1", client, "the reply", "footer", { isTour: true, ns: "sample-apps", model: FLOW_MODEL });
+  const out = await (MentionFlow.prototype as any).postConversation.call(self, "C1", "1.1", client, "the reply", "footer", { isTour: true, ns: "sample-apps", model: FLOW_MODEL });
   assert.deepEqual(posted.map((p) => p.marker ?? "reply"), ["inventory", "flow", "reply"]);
   assert.match(posted[2].text, /the reply\n\n_footer_$/);
   assert.equal(out, "the reply");
   posted.length = 0;
-  await (SlackApp.prototype as any).postConversation.call(self, "C1", "1.1", client, "plain", undefined, { isTour: false, ns: null, model: null });
+  await (MentionFlow.prototype as any).postConversation.call(self, "C1", "1.1", client, "plain", undefined, { isTour: false, ns: null, model: null });
   assert.deepEqual(posted.map((p) => p.marker ?? p.text), ["plain"], "no tour: the reply alone, no footer");
 });

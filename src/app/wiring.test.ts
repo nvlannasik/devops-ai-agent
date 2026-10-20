@@ -4,6 +4,7 @@ import { SlackApp } from "./index.js";
 import { ThreadCommands } from "./commands.js";
 import { RemediationFlow } from "./remediation.js";
 import { AlertFlow } from "./alerts.js";
+import { MentionFlow } from "./mention.js";
 import { readFileSync } from "node:fs";
 
 // 2026-10-21: every flow reads SlackApp through one host object. A host function that calls itself
@@ -67,7 +68,7 @@ test("the poller's timer is SlackApp's own field, so stop() can clear it", () =>
   assert.equal(s.verifyTimer, t);
 });
 
-const FLOW_FILES = ["queue", "host", "commands", "remediation", "alerts"];
+const FLOW_FILES = ["queue", "host", "commands", "remediation", "alerts", "mention"];
 
 test("SlackApp builds an AlertFlow and no flow imports the app barrel as a value", () => {
   assert.ok(wired().alerts instanceof AlertFlow);
@@ -75,4 +76,10 @@ test("SlackApp builds an AlertFlow and no flow imports the app barrel as a value
     const src = readFileSync(new URL(`./${f}.ts`, import.meta.url), "utf8");
     assert.doesNotMatch(src, /^import (?!type)[^\n]*from "\.\/index\.js"/m, f);
   }
+});
+
+test("the mention flow is built, and the barrel holds only wiring and the shared posts", () => {
+  assert.ok(wired().mentions instanceof MentionFlow);
+  const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /private async (handleMention|handleAlert|correlate|handleLearn|maybeProposeRemediation)\(/);
 });
