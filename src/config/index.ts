@@ -20,6 +20,27 @@ export function dashboardPort(raw: string | undefined): number {
   return DASHBOARD_PORT_DEFAULT;
 }
 
+/**
+ * MCP_SQS_CLUSTERS="lab2=devops-mcp-lab2-request.fifo,prd=devops-mcp-prd-request.fifo" — the
+ * clusters reached through an SQS bridge (multi-cluster part 1). Unset = none = today's agent.
+ * Malformed fails boot: a cluster silently missing from the registry is a cluster whose alerts
+ * would be investigated against the wrong one later.
+ */
+export function parseSqsClusters(raw: string | undefined): Array<{ name: string; requestQueueName: string }> {
+  const out: Array<{ name: string; requestQueueName: string }> = [];
+  for (const part of (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) throw new Error(`MCP_SQS_CLUSTERS entry "${part}" is not name=queue`);
+    const name = part.slice(0, eq).trim();
+    const requestQueueName = part.slice(eq + 1).trim();
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`MCP_SQS_CLUSTERS: bad cluster name "${name}" (lowercase letters, digits, -)`);
+    if (!requestQueueName.endsWith(".fifo")) throw new Error(`MCP_SQS_CLUSTERS: queue for "${name}" must be a .fifo queue`);
+    if (out.some((c) => c.name === name)) throw new Error(`MCP_SQS_CLUSTERS: duplicate cluster "${name}"`);
+    out.push({ name, requestQueueName });
+  }
+  return out;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -125,6 +146,13 @@ export const config = {
     },
     // per-tool-call timeout (seconds) so a hung MCP server / upstream can't stall an investigation
     toolTimeoutMs: parseInt(process.env.MCP_TOOL_TIMEOUT_SECONDS ?? "45") * 1000,
+    // SQS bridges to clusters that accept no inbound traffic (spec 2026-10-15-multi-cluster-sqs-bridge-design).
+    sqs: {
+      clusters: parseSqsClusters(process.env.MCP_SQS_CLUSTERS),
+      // dedicated to MCP — never the LLM response queue (tens of tool calls per investigation
+      // would keep the LLM dispatcher releasing messages that aren't its own)
+      responseQueueName: process.env.MCP_SQS_RESPONSE_QUEUE ?? "devops-mcp-response.fifo",
+    },
   },
 
   // wall-clock budget (seconds) for a single investigation — bounds how long a semaphore slot is held
