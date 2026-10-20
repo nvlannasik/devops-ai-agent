@@ -1,7 +1,7 @@
 import { config } from "../../config/index.js";
 import { ClaudeClient } from "./claude.js";
 import { OpenAICompatibleClient } from "./openai-compatible.js";
-import { buildBackends, parseRegistry } from "./registry.js";
+import { buildBackends, routerRegistry } from "./registry.js";
 import { RouterLLMClient } from "./router.js";
 import { SQSLLMClient } from "./sqs.js";
 import { maskingClient } from "./mask.js";
@@ -21,7 +21,7 @@ function createUnmaskedClient(): LLMClient {
     case "router": {
       // parseRegistry throws on a bad registry, and this runs at boot — an env-var typo must
       // stop the pod, not the first alert of the day.
-      const { backends, heavy, light } = parseRegistry(process.env);
+      const { backends, heavy, light } = routerRegistry()!; // the case is "router": never null here
       // name -> configured model, so the router can attribute each response to the model
       // that actually answered (LLM_BACKEND_<N>_MODEL never reaches `config`, only here).
       const models = new Map(backends.map((b) => [b.name, b.model]));

@@ -1,6 +1,6 @@
 import { createLLMClient } from "./llm/index.js";
 import { SERIALIZED_BLOCKS, namesToolOnly } from "./llm/router.js";
-import { parseRegistry } from "./llm/registry.js";
+import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { ConversationMemory } from "./memory/index.js";
@@ -230,7 +230,7 @@ export class DevOpsAgent {
     // above 23448, naming a backend "router" that does not exist. Nothing reads this value (both
     // reads run after initialize()), so the only thing the null could still do was kill the pod.
     this.budget = resolveBudget({
-      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      registry: routerRegistry(),
       provider: config.llm.provider,
       maxTokens: config.llm.maxTokens, overheadTokens: estimateTokens(buildStaticSystemPrompt()),
     });
@@ -282,7 +282,7 @@ export class DevOpsAgent {
 
     const tools = this.mcp.getTools();
     this.budget = resolveBudget({
-      registry: config.llm.provider === "router" ? parseRegistry(process.env) : null,
+      registry: routerRegistry(),
       provider: config.llm.provider,
       maxTokens: config.llm.maxTokens,
       overheadTokens: estimateTokens(buildStaticSystemPrompt()) + estimateTokens(JSON.stringify(tools)),

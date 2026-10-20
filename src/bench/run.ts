@@ -32,7 +32,7 @@ import { appendHistory, axisTally, publishHistory, runMeta } from "./store.js";
 import { config } from "../config/index.js";
 import { mentionBudget, wantsTour } from "../agent/intent/index.js";
 import { stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
-import { parseRegistry } from "../agent/llm/registry.js";
+import { routerRegistry } from "../agent/llm/registry.js";
 import { closeSilence, openSilence } from "./silence.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
@@ -359,7 +359,7 @@ async function main(): Promise<void> {
 
   // The registry, not the env: this records what the router actually resolved.
   const meta = runMeta(
-    config.llm.provider === "router" ? parseRegistry(process.env).backends : [{ name: config.llm.provider }]
+    routerRegistry()?.backends ?? [{ name: config.llm.provider }]
   );
 
   mkdirSync(RESULTS_DIR, { recursive: true });

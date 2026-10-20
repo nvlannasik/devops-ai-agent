@@ -241,3 +241,12 @@ test("a non-numeric MAX_TOKENS is rejected at boot", () => {
   );
   assert.throws(() => parseRegistry({ ...valid, LLM_BACKEND_1_MAX_TOKENS: "0" }), /positive integer/);
 });
+
+// Housekeeping 2026-10-20: one place decides "router → parse the registry, otherwise none" —
+// the agent's budget (twice), createLLMClient and the topology page each spelled it out.
+test("routerRegistry: null unless the provider is router; parses the given env otherwise", async () => {
+  const { routerRegistry } = await import("./registry.js");
+  assert.equal(routerRegistry(valid, "claude"), null);
+  assert.deepEqual(routerRegistry(valid, "router"), parseRegistry(valid));
+  assert.throws(() => routerRegistry({ LLM_BACKEND_2_NAME: "gap" }, "router"), "throws what parseRegistry throws");
+});

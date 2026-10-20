@@ -1,5 +1,5 @@
 import { config } from "../config/index.js";
-import { parseRegistry, type BackendSpec } from "../agent/llm/registry.js";
+import { routerRegistry, type BackendSpec } from "../agent/llm/registry.js";
 import { rowId } from "./topology-types.js";
 import { postgresTables, redisNamespaces } from "./stores.js";
 import type { BackendNode, Capability, IconName, McpTool, Node, Store, Tool, Topology } from "./topology-types.js";
@@ -256,7 +256,7 @@ function routerBackends(): { backends: BackendNode[]; registryError: string | nu
   if (config.llm.provider !== "router") return { backends: [], registryError: null };
   let registry;
   try {
-    registry = parseRegistry(process.env);
+    registry = routerRegistry()!; // the early return above already left non-router
   } catch (err) {
     // unreachable in a running agent — createLLMClient() parses the same registry at boot and
     // the pod would not have started. Handled anyway: this page must render on any config.

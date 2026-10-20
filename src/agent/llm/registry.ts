@@ -2,6 +2,7 @@ import { ClaudeClient } from "./claude.js";
 import { OpenAICompatibleClient } from "./openai-compatible.js";
 import { SQSLLMClient } from "./sqs.js";
 import type { LLMClient } from "./types.js";
+import { config } from "../../config/index.js";
 
 // Backends are declared with indexed env vars — LLM_BACKEND_<N>_<FIELD>. The backend NAME is
 // a value, never part of a key, so adding one never means inventing new key names. Each field
@@ -81,6 +82,14 @@ function assertFields(spec: BackendSpec, i: number): void {
 
 // Everything throws here rather than at first request: an env-var typo must show up as a pod
 // that refuses to start, not as the first alert of the day failing.
+/**
+ * The registry when the agent runs `LLM_PROVIDER=router`, otherwise null — the one place that
+ * decides it. Not memoized: tests set LLM_BACKEND_* between cases. Throws what parseRegistry throws.
+ */
+export function routerRegistry(env: NodeJS.ProcessEnv = process.env, provider: string = config.llm.provider): Registry | null {
+  return provider === "router" ? parseRegistry(env) : null;
+}
+
 export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
   const backends: BackendSpec[] = [];
   let lastSetIndex = 0;
