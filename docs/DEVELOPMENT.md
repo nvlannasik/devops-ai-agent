@@ -100,8 +100,7 @@ src/
 │   └── client/                   # React Flow bundles (topology.js, cluster.js), built by esbuild
 ├── bench/                        # npm run bench — scenario runner + scoring
 ├── replay/                       # npm run replay — recorded runs through the current code
-├── redis.ts                      # Shared Redis singleton (conversation memory + alert dedup)
-├── db/                           # pool.ts (DB_* → pg.Pool), migrate.ts (advisory-locked runner), migrate-cli.ts
+├── db/                           # pool.ts (DB_* → pg.Pool), redis.ts (shared Redis: conversation memory + alert dedup), migrate.ts (advisory-locked runner), migrate-cli.ts
 └── utils/
     ├── auth/index.ts             # Constant-time secret comparison
     ├── logger/index.ts           # + errDetail()

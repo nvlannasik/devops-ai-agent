@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
-import { config } from "./config/index.js";
-import logger from "./utils/logger/index.js";
+import { config } from "../config/index.js";
+import logger from "../utils/logger/index.js";
 
 // Single process-wide Redis connection, shared by conversation memory and alert dedup.
 // ponytail: module singleton — one connection per pod is exactly what we want; no DI needed.

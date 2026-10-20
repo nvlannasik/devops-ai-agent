@@ -1,4 +1,4 @@
-import { getRedis } from "../../redis.js";
+import { getRedis } from "../../db/redis.js";
 
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours — matches Alertmanager repeat_interval
 

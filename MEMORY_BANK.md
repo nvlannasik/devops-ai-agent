@@ -446,7 +446,7 @@ for a section over the limit, a lone surrogate, or an outage at Slack.
 - Fingerprint: all labels sorted and joined → stable string
 - TTL: 12 hours (matches Alertmanager `repeat_interval`)
 - **Redis-backed when `MEMORY_BACKEND=redis`:** the claim is an atomic `SET dedup:{fp} 1 EX <ttl> NX` — returns `"OK"` only for the first pod to see the alert, so under autoscaling N pods can't all investigate the same alert. In-memory `Map` is the **single-pod fallback** when Redis isn't configured.
-- Reuses the **one shared Redis connection** (`src/redis.ts` singleton, `getRedis()`), same client as conversation memory — zero new deps, zero extra connection. `shouldProcess()` is now **async** (Redis call); caller `await`s it in `handleAlert`.
+- Reuses the **one shared Redis connection** (`src/db/redis.ts` singleton, `getRedis()`), same client as conversation memory — zero new deps, zero extra connection. `shouldProcess()` is now **async** (Redis call); caller `await`s it in `handleAlert`.
 - `dedup/index.test.ts` covers the in-memory fallback path (first-vs-repeat, label-order stability, TTL expiry).
 
 ### Alert Correlation (one investigation per Alertmanager group)

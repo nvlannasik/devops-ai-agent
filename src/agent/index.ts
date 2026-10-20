@@ -40,7 +40,7 @@ import { buildPostmortemPrompt, assemblePostmortem, POSTMORTEM_SYSTEM } from "./
 import { config } from "../config/index.js";
 import { truncate } from "../utils/truncate/index.js";
 import { type LLMClient, type LLMResponse, type ContentBlock, type Message, type TokenUsage, type ToolDefinition } from "./llm/types.js";
-import { initRedis, pingRedis } from "../redis.js";
+import { initRedis, pingRedis } from "../db/redis.js";
 import logger from "../utils/logger/index.js";
 import { errDetail } from "../utils/logger/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
