@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SlackApp } from "./index.js";
+import { RemediationFlow } from "./remediation.js";
+
+const viaRemediation = (fake: object) => Object.assign(Object.create(RemediationFlow.prototype), fake, { host: fake });
 
 // 2026-09-29, three checkout-gateway incidents: every thread ended in ":denied: *Remediation not
 // proposed* — Setting the image to `registry.example.com/checkout-gateway:v1.2` is refused…",
@@ -20,7 +22,7 @@ const run = async (outcome: unknown, userRequested: boolean) => {
     },
     app: { client: { chat: { postMessage: async (m: any) => (posted.push(m), { ts: "9.9" }) } } },
   };
-  await (SlackApp.prototype as any).maybeProposeRemediation.call(self, "C1", "1.1", 42, {}, "rca", userRequested, null);
+  await RemediationFlow.prototype.maybeProposeRemediation.call(viaRemediation(self), "C1", "1.1", 42, {}, "rca", userRequested, null);
   return { posted, notes, gates };
 };
 

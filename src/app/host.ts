@@ -4,6 +4,7 @@ import type { AlertDeduplicator } from "../agent/dedup/index.js";
 import type { AlertItem } from "../agent/correlation/index.js";
 import type { Block } from "../utils/slack/blocks.js";
 import type { ThreadCommands } from "./commands.js";
+import type { RemediationFlow } from "./remediation.js";
 import type { Accepted, InFlightWork, Semaphore, ThreadQueue } from "./queue.js";
 
 /** An alert thread whose incident is not stored yet, and a resolve that arrived for it meanwhile. */
@@ -30,6 +31,7 @@ export interface SlackHost {
   conversationReply(reply: string, threadId: string, reformat: boolean): Promise<string>;
   warnIfUngrounded(channel: string, threadId: string, answer: string, trigger?: string): Promise<void>;
   notifyIfLowConfidence(channel: string, threadId: string, rca: string): Promise<void>;
+  maybeProposeRemediation: RemediationFlow["maybeProposeRemediation"];
   handleStatusCommand: ThreadCommands["handleStatusCommand"];
   handlePostmortem: ThreadCommands["handlePostmortem"];
   handleLearn: ThreadCommands["handleLearn"];

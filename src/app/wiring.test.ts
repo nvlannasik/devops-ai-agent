@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp } from "./index.js";
 import { ThreadCommands } from "./commands.js";
+import { RemediationFlow } from "./remediation.js";
 
 // 2026-10-21: every flow reads SlackApp through one host object. A host function that calls itself
 // (8c60b0a was exactly that, in DevOpsAgent) overflows here, on a real SlackApp prototype with
@@ -45,4 +46,21 @@ test("the command host functions reach ThreadCommands, not themselves", async ()
     await s.host[m]();
   }
   assert.deepEqual(reached, ["handleLearn", "handlePostmortem", "handleStatusCommand"]);
+});
+
+test("maybeProposeRemediation on the host reaches RemediationFlow", async () => {
+  const s = wired();
+  assert.ok(s.remediation instanceof RemediationFlow);
+  let reached = 0;
+  s.remediation.maybeProposeRemediation = async () => void reached++;
+  await s.host.maybeProposeRemediation();
+  assert.equal(reached, 1);
+});
+
+test("the poller's timer is SlackApp's own field, so stop() can clear it", () => {
+  const s = wired();
+  const t = setTimeout(() => {}, 0);
+  clearTimeout(t);
+  (s.remediation as any).host.verifyTimer = t;
+  assert.equal(s.verifyTimer, t);
 });
