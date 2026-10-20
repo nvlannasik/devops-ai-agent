@@ -46,8 +46,8 @@ The markers above pick the *format*; nothing picked the *topic*. A mention like 
 code ini" was answered as a normal coding question — the agent has a general-purpose LLM behind
 it and no rule said the DevOps role was exclusive. Three places, changed together:
 - `prompts/system.md` §**Scope of Work** (placed FIRST, before §Response Mode): in scope = the connected clusters, workloads, observability data, incidents, deploys, GitOps state. Out = source code, general programming, systems with no tools behind them, everything non-infra. Explicit rule that pasted code/stack traces don't make a request in scope — read what is being *asked* ("this pod keeps OOMKilling, here's the log" = in; "debug this function" = out, even if it runs in a pod). Decline = one line in the user's language, no partial help; mixed message = answer the in-scope half, decline the rest; genuinely unsure = one clarifying question.
-- `[USER MESSAGE ...]` marker (`app/index.ts`) carries the scope clause too — same reason the mode rules are duplicated there: a distant prompt section alone doesn't hold on a small model.
-- `[FOLLOW-UP ...]` marker (`agent/index.ts`) as well, so a thread can't drift off-topic after the first answer.
+- `[USER MESSAGE ...]` marker (`app/mention.ts`) carries the scope clause too — same reason the mode rules are duplicated there: a distant prompt section alone doesn't hold on a small model.
+- `[FOLLOW-UP ...]` marker (`agent/loop/runner.ts`) as well, so a thread can't drift off-topic after the first answer.
 
 No deterministic backstop here (unlike the RCA-format leak): classifying the *input* by regex
 would false-positive on legitimate asks ("debug the deployment"), and out-of-scope isn't
@@ -71,7 +71,7 @@ logs" question). Enforced in code instead:
 ### A group can span more than one subject, and the card used to hide it
 One HighErrorRate rule fired 4 alerts across 2 services. The Slack card read
 `Summary: ... (service checkout-gateway)` and `Affected pods (4)`. Both were wrong, and the text
-is not decoration — `app/index.ts:384` posts it to Slack **and** feeds it to `investigate()`, so
+is not decoration — `app/alerts.ts` posts it to Slack **and** feeds it to `investigate()`, so
 the RCA was built around one of the two services.
 
 - **`alerts[0].annotations` is never the group's voice.** Alertmanager's `commonAnnotations` is
@@ -133,7 +133,7 @@ observed and delegation still does not fire.
 - **Two independent gates; only the second is missing.** Gate 1 (`offersDelegation()` — is the tool
   registered) opened on every deploy: `tools=50` vs 49, +722 tokens = the 342-token prompt section
   plus the tool definition. Gate 2 (`delegationHint()` — is the model told to use it) never opened.
-- **The hint has exactly one call site, the webhook** (`app/index.ts`). A mention that
+- **The hint has exactly one call site, the webhook** (`app/alerts.ts`). A mention that
   `wantsInvestigation()` recognises gets `Infinity` and therefore the tool, but carries no alert
   labels to read — so that path rests entirely on the model's own initiative, which is the thing
   measured at zero across three incidents.
@@ -209,7 +209,7 @@ that is only 32k on the private LLM.
   incident is the parent's, and the original exact-match backfill left every delegated call
   unattributed forever, silently hiding the cost of the feature being evaluated.
 - **Delegates take no semaphore slot.** `maxConcurrentInvestigations` is enforced in
-  `app/index.ts` around the entry points; a child waiting on a permit its own parent holds is a
+  `app/alerts.ts` / `app/mention.ts` around the entry points; a child waiting on a permit its own parent holds is a
   deadlock.
 - **Refusals are synthesized `tool_result`s, never dropped calls** (fan-out cap, no time left, blank
   hypothesis, child threw). An unanswered `tool_use` is a 400 from Anthropic, not a smaller request.
@@ -320,7 +320,7 @@ whole chain re-sending the same broken bytes and logged three backend failures f
 - **`sanitizeForWire()` is called first in all three `LLMClient.chat()` implementations**
   (claude, openai-compatible, sqs), not at the producers. There are at least five fixed-offset
   slices over model-written text (`remediation/proposal.ts`, `context/compact.ts`,
-  `app/index.ts`'s memory slice, the recall snippets in `incidents/`) and the model itself can
+  `app/mention.ts`'s memory slice, the recall snippets in `incidents/`) and the model itself can
   emit a lone surrogate that no producer-side fix would ever see.
 - It walks **every** string in the payload, `input` on a `tool_use` included — those arguments are
   the model's too, and they ride back into history next turn. **Tools are deliberately not walked:**
@@ -464,7 +464,7 @@ N crashlooping pods used to spawn N threads / N investigations / N remediation c
 - `buildGroupAlertText` lists the affected pods (capped at 10, `+N more`) in the issue text so
   the investigation sees every target; the identity labels drop `pod` for a multi-pod group, so
   the pod list in the **text** is how the agent learns which pods to `describe_pod`.
-- **Its output has two readers: Slack and the LLM.** `app/index.ts` posts the string *and* feeds
+- **Its output has two readers: Slack and the LLM.** `app/alerts.ts` posts the string *and* feeds
   the same string to `investigate()` — so nothing may be dropped for looking ugly, only
   re-rendered. That is the rule behind the annotation cleanup: rule packs template
   `\n VALUE = …\n LABELS = map[…]` onto the description, and the Go map is cut (`ANNOTATION_NOISE`)
@@ -531,7 +531,7 @@ Reported as "the alert is `warning` in Slack but `critical` in the DB". Two defe
 - **`store()` preferred the RCA text over the alert's label**, and the two use incompatible
   vocabularies — Alertmanager emits `critical`/`warning`/`info`, the agent's Severity Guidelines
   say Critical/High/Medium/Low. One column held both, so it could not be filtered or aggregated;
-  the dashboard's filter (`views.ts`, offering exactly critical/warning/info) silently could not
+  the dashboard's filter (`incident-views.ts`, offering exactly critical/warning/info) silently could not
   reach rows written in the agent's vocabulary, and `recall()` fed the wrong level back into the
   next investigation of the same alert.
 
@@ -573,7 +573,7 @@ would extend it. That stopping line doubles as an Escalation Trigger.
 Impact used to sit *below* the actions, which is backwards — impact is what decides whether the
 actions are worth waking up for. `⚡ TL;DR` is the only new label; everything else was reordered,
 not renamed, because the labels are a contract read by four places: `blocks.ts`
-(`extractSection`/`isRcaResponse`), `app/index.ts` (the "is this an RCA" gate), `dashboard/rca.ts`,
+(`extractSection`/`isRcaResponse`), `app/alerts.ts` (the "is this an RCA" gate), `dashboard/rca.ts`,
 and `remediation/proposal.ts` (which looks for "Recommended Actions"). `buildRcaBlocks` extracts by
 label rather than position, so **RCAs already in Postgres render in the new order too**, and one
 missing its TL;DR just opens on Impact.
@@ -717,7 +717,7 @@ page says `5,000+` when it hits the ceiling. Two consequences worth keeping stra
 - **Next is driven by the over-fetch, not by the count.** Past the ceiling the count is a floor
   and would strand the reader; `hasMore` still knows there is another row.
 `Promise.all` order is load-bearing — rows first, count second; the tests read `calls[0]`.
-`pageWindow(current, last)` (`views.ts`) prints first, last, and ±2 around the current page,
+`pageWindow(current, last)` (`parts.ts`) prints first, last, and ±2 around the current page,
 eliding the rest with `null` → `…`, but a *lone* hidden page is printed rather than elided (an
 ellipsis standing in for one number is longer than the number). The pager renders **below the
 table**, links carry the active filters forward, and `page=1` is omitted so a shared URL shows
@@ -728,14 +728,14 @@ which is what you want — page 6 of the old result set means nothing in the new
 Alertmanager, so every interpolation goes through `esc()` in `html.ts`. That helper's test is the
 security-relevant one in this module.
 
-**The rail (`layout()` + `.rail` in `styles.ts`).** Navigation is a left sidebar, not a top bar:
+**The rail (`layout()` in `layout.ts` + `.rail` in `styles/chrome.ts`).** Navigation is a left sidebar, not a top bar:
 `<body>` is a two-column grid (`var(--rail-w) minmax(0, 1fr)`) and `body.bare` collapses it to
 one for sign-in and not-configured — without that class those pages would open 13.5rem short of
 the left edge. Everything about it is constrained by **zero client JS outside `/topology`**:
 - No hamburger, no toggle, no stored collapse state. The rail is CSS only, so it responds to the
   viewport and nothing else: a full sidebar wide, a horizontal bar under 60rem, icons-only under
   30rem.
-- Icons are hand-written inline `<svg>` (`ICON` in `views.ts`). `default-src 'none'` blocks an
+- Icons are hand-written inline `<svg>` (`ICON` in `parts.ts`). `default-src 'none'` blocks an
   icon font and a sprite `<use href>` alike, and a dependency for twelve paths is not worth it.
   Each is `aria-hidden="true" focusable="false"` beside a real `<span class="lbl">`.
 - The icons-only breakpoint **clips the label, it does not delete it**: `clip-path: inset(50%)`,
@@ -859,7 +859,7 @@ The three thresholds are staggered on purpose: cards at 46rem, stack/pairs at 40
 list carries five columns of which two are prose, so it runs out of room first; a table of counts
 survives a narrower box as a table, and a table is still the better reading of it while it fits.
 
-**`breakable()`** (`views.ts`) inserts `<wbr>` at the humps of a CamelCase alert name —
+**`breakable()`** (`parts.ts`) inserts `<wbr>` at the humps of a CamelCase alert name —
 `Kube<wbr>Pod<wbr>Crash<wbr>Looping`, at *every* hump — after escaping, never before. A browser takes an offered break
 before inventing one, so a long identifier wraps where it means something instead of mid-word. Its
 companion is `overflow-wrap: anywhere` rather than `break-word`: only `anywhere` lowers min-content
@@ -915,7 +915,7 @@ own width. Load-bearing details:
   a sliver of noise; the dot alone carries it. An all-zero series still draws its line, flat along
   the baseline, because the absence *is* the reading.
 
-**Section and stat glyphs (`ICON` + `section()` in `views.ts`).** The same inline-`<svg>`
+**Section and stat glyphs (`ICON` + `section()` in `parts.ts`).** The same inline-`<svg>`
 mechanism as the rail, extended to every `<h2>` and to the overview's stat cards, so a page of
 identically-styled uppercase mono captions has landmarks to scan by. Three rules hold it
 together:
@@ -1125,7 +1125,7 @@ write tools not even REGISTERED unless `MCP_ENABLE_WRITE_TOOLS=true`) → **agen
 - Requires Slack app **Interactivity ON** (Socket Mode — no public URL).
 - Statuses: proposed → executing → succeeded/failed, or rejected (incl. expiry). `approved_by`, `executed_at`, `result` = audit trail.
 - Rollout restart = patch `kubectl.kubernetes.io/restartedAt` annotation (honors rolling-update strategy + readiness probes; same as `kubectl rollout restart`).
-- **SECURITY — write tools never enter the agentic loop.** Auto-discovery would otherwise hand `k8s_rollout_restart` to the model during ANY investigation, bypassing the approval gate. Two layers in `agent/index.ts`: (1) tools whose description starts with **`[WRITE]`** are filtered out of the `llm.chat` tools list; (2) `executeToolCalls` refuses them with a synthesized error if the model hallucinates the name anyway. **Convention: every write tool's description MUST start with `[WRITE]`** (enforce when adding scale/rollback). Write tools are reachable only via `proposeRemediation` (dry-run) and `executeRemediation` (post-approval), both direct `callTool`.
+- **SECURITY — write tools never enter the agentic loop.** Auto-discovery would otherwise hand `k8s_rollout_restart` to the model during ANY investigation, bypassing the approval gate. Two layers in `agent/loop/runner.ts`: (1) tools whose description starts with **`[WRITE]`** are filtered out of the `llm.chat` tools list; (2) `executeToolCalls` refuses them with a synthesized error if the model hallucinates the name anyway. **Convention: every write tool's description MUST start with `[WRITE]`** (enforce when adding scale/rollback). Write tools are reachable only via `proposeRemediation` (dry-run) and `executeRemediation` (post-approval), both direct `callTool`.
 - **Mention-driven investigations get the same remediation flow**: `handleMention` calls `maybeProposeRemediation` with `incidentId=null` (no alert labels → no incident row; `remediations.incident_id` is nullable). Note: NULLs are distinct in the partial unique index, so the one-active-card guard only applies to alert-driven remediations.
 - **`worthProposing` gates the mention path** (`remediation/proposal.ts`, pure + unit-tested). Every mention used to spend a proposal LLM call, so a read-only "status check" on a healthy cluster burned a **heavy** call to be told `{"action": null}` — and on the day the heavy chain was down to one working backend it produced a page of stack traces instead. Propose when **any** of: the reply is an RCA (the template means a fault was diagnosed), the user asked for a change, or the answer carries fault evidence. Skip otherwise, logging the reason.
   - **Deliberately asymmetric**: a false positive costs exactly what today costs (one call answering null), a false negative silently drops a legitimate fix. So every rule is a reason to SPEND the call and skipping is only what's left over. When in doubt, extend the vocabulary rather than tighten it.
@@ -1161,7 +1161,7 @@ handled the approval click.
 - **Durable schedule, not a timer.** One row in `remediation_checks` per remediation
   (`one_check_per_remediation` unique index), claimed by whichever replica polls next — a
   restart between the click and the check costs nothing. The poller (`startVerificationPoller`
-  in `app/index.ts`) re-arms **after** the work, not on a fixed interval, so a slow tick can't
+  in `app/remediation.ts`) re-arms **after** the work, not on a fixed interval, so a slow tick can't
   overlap the next, and `unref()`s its timer so auxiliary work never keeps the process alive.
 - **`due_at` doubles as the lease** (the SQS visibility-timeout idea, in Postgres): claiming
   sets `status='running'` AND pushes `due_at = now() + LEASE_SECONDS`, so a pod that dies
@@ -1295,7 +1295,7 @@ tool made it).
 - **A light-tier answer that is only a tool NAME is a dead tool channel, and the router now
   falls up on it** (`llm/router.ts:namesToolOnly`). Found live 2026-09-10: "coba check cluster
   saat ini apakah ada unused resource yang bisa kita terminated?" is conversation mode, and
-  `app/index.ts:255` routes every conversation-mode mention to `light` — the small backend
+  `app/mention.ts` routes every conversation-mode mention to `light` — the small backend
   answered with the single string `` `k8s_find_unused_resources` ``, `stop=end_turn`, and it
   shipped to Slack as the reply. `failureOf()` only knew two shapes (empty text, serialized
   content blocks), and non-empty prose that is not JSON looked valid. Nothing to do with the new
@@ -1304,7 +1304,7 @@ tool made it).
     registered tool name is not a judgement call; "I'll use `x` to check" is, and escalating on
     it would buy a heavy call on most turns that mention a tool. `router.test.ts` pins both
     directions.
-  - `agent/index.ts` warns on the same symptom for the single-backend providers, which have
+  - `agent/loop/answer-gates.ts` warns on the same symptom for the single-backend providers, which have
     nothing to fall up to — same one-detector rule that already applies to `SERIALIZED_BLOCKS`.
 - **`resource-rightsizing.md` is the one playbook that is NOT only a failure mode**, and it is
   deliberately duplicated into `prompts/system.md` rather than living in the skill alone. A skill's
@@ -1414,7 +1414,7 @@ leaks the cause in the spec — was too generous. agus read the same spec and sa
 correctly: the spec tells you THAT it exits, not WHY the workload is misconfigured. **The C03
 fixture does not need replacing.**
 
-### An alert answered without reading anything (`agent/index.ts`, `needsEvidence`)
+### An alert answered without reading anything (`agent/loop/answer-gates.ts`, `needsEvidence`)
 
 Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from **one LLM call and
 zero tool calls** — fifteen thousand output tokens describing a cluster neither had looked at.
@@ -1473,7 +1473,7 @@ the sampling instant. The wider lesson for anything reading `k8s_list_pods`: **`
 "right now", `restarts` answers "over the window the alert covers", and a flapping pod needs the
 second one.**
 
-### The image-pull gate — the answer names the broken image and no working one (`agent/index.ts`, `imageGapRepo`)
+### The image-pull gate — the answer names the broken image and no working one (`agent/loop/answer-gates.ts`, `imageGapRepo`)
 
 Second gate on the same machinery as the log-gap one, and it shares its hold slot: only one nudge
 may be outstanding, so `preNudgeSummary` / `toolRoundsAtNudge` serve both and the `restore` branch
@@ -1500,7 +1500,7 @@ The notice names where to look and what to say when it is not there: a rollout t
 not delete the ReplicaSet it replaced, so read the image off the one still running — and if the
 previous ReplicaSet is gone, say so, because that is why no rollback target exists.
 
-### The log-gap gate — a selected playbook that gets ignored (`agent/index.ts`, `LOG_GAP_NOTICE`)
+### The log-gap gate — a selected playbook that gets ignored (`agent/loop/answer-gates.ts`, `LOG_GAP_NOTICE`)
 
 **A playbook is a prompt rule, and prompt rules do not hold on their own.** `crashloopbackoff.md`
 step 2 says to call `k8s_get_pod_logs` with `previous: true`, and it is not advice the model
@@ -1688,7 +1688,7 @@ rejected — markers are prompt text, so a rename would silently disable routing
 1. a thrown error (network, 5xx, timeout, SQS deadline);
 2. an empty response (small reasoning models exhausting their token budget on hidden thinking — see
    *Reasoning-model token exhaustion* above);
-3. a response that is raw serialized content-block JSON (the same regex detector `agent/index.ts`
+3. a response that is raw serialized content-block JSON (the same regex detector `agent/loop/answer-gates.ts`
    already used, reused not rewritten).
 
 A `stopReason: "tool_use"` response legitimately carries no text and is deliberately **not** treated

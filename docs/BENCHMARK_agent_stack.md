@@ -100,7 +100,7 @@ That last row is the only gap, and it is worth a trace sink **later**, not first
 worth doing, put it behind an env flag — off in production, no behaviour change when unset:
 
 `BENCH_TRACE_FILE=/path/run.ndjson` → append one JSON line per event from the existing call
-sites in `src/agent/index.ts`:
+sites in `src/agent/loop/runner.ts`:
 
 | event | fields |
 |---|---|

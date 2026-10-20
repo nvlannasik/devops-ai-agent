@@ -39,8 +39,12 @@ Two ways to measure a change before it ships, both driving the **real** loop:
 ```
 src/
 ├── agent/
-│   ├── index.ts                  # DevOpsAgent: the agentic loop, parallel tool calls; re-exports the helpers below
+│   ├── index.ts                  # DevOpsAgent: construction, initialize, recall/timeline/postmortem, delegators; re-exports the helpers below
 │   ├── loop/                     # control.ts (iteration/budget ceilings, tool memo, evidence stamps), log-gap.ts
+│   │   ├── runner.ts             # InvestigationRunner: the agentic loop, tool rounds, delegation, the tool memo
+│   │   ├── answer-gates.ts       # settleAnswer(): every gate that may hold an answer for one more round
+│   │   ├── finalize.ts           # finalizeAnswer(): footer meta, confidence cap, the scrubbers, [OFFER] strip
+│   │   └── run-state.ts          # InvestigateOptions, RunMeta, RunState, RunCtx
 │   ├── confidence/index.ts       # parseConfidence()
 │   ├── context/                  # Request assembly — the whole prompt is built per call
 │   │   ├── index.ts              # assembleRequest(), injectSkills(), trimToWindow(), sanitizeContentBlocks()
@@ -61,6 +65,7 @@ src/
 │   ├── feedback/index.ts         # On-call learning: transcript builder + extraction JSON parser
 │   ├── gitops/                   # PR remediation: overlay.ts (path detect), preview.ts, revert.ts, sqs.ts (worker bridge)
 │   ├── incidents/index.ts        # Durable incident memory (Postgres) — RCAs + confirmed feedback + similarity tier
+│   ├── incidents/lifecycle.ts    # IncidentLifecycle: missed-resolved sweeper, status commands, `@agent learn`
 │   ├── intent/index.ts           # wantsInvestigation(), wantsTour(), mentionBudget()
 │   ├── injection/index.ts        # Prompt-injection framing of tool results
 │   ├── trace/                    # Investigation recorder → agent_events (gates, LLM turns, tool calls)
@@ -84,12 +89,21 @@ src/
 │   ├── memory/index.ts           # Redis/in-memory + hasRca/markRcaSent
 │   ├── usage/index.ts            # Per-call token accounting → llm_usage
 │   └── prompts/system.ts         # Static prompt + time context
-├── app/index.ts                  # Slack Bolt + Alertmanager webhook, /health readiness
+├── app/
+│   ├── index.ts                  # SlackApp: Bolt + Alertmanager webhook, /health, lifecycle, the shared posts
+│   ├── host.ts                   # SlackHost — the one live object every flow reads SlackApp through
+│   ├── queue.ts                  # Semaphore, ThreadQueue (one turn per thread), InFlightWork (drain on SIGTERM)
+│   ├── alerts.ts                 # AlertFlow: dedup, correlation, background investigation, resolve
+│   ├── mention.ts                # MentionFlow: tours, conversation replies, proposals after a mention
+│   ├── commands.ts               # ThreadCommands: learn, postmortem, status
+│   └── remediation.ts            # RemediationFlow: approval buttons, proposals, the verification poller
 ├── config/index.ts
 ├── dashboard/                    # Read-only incident dashboard (own listener, own CSP)
 │   ├── server.ts, auth.ts        # Routing + per-route CSP; shared password → signed cookie
 │   ├── queries.ts, filters.ts    # Read-only SQL; filter parsing + fixed-size pagination
-│   ├── views.ts, html.ts, styles.ts, chart.ts, markdown.ts  # Server-rendered pages, esc(), inline SVG charts, prompt Markdown
+│   ├── views.ts                  # Barrel over the page modules: parts.ts, layout.ts, *-views.ts (one per page)
+│   ├── styles.ts, styles/        # The one stylesheet, as ordered chunks (order = cascade; bytes pinned)
+│   ├── html.ts, chart.ts, markdown.ts  # esc(), inline SVG charts, prompt Markdown
 │   ├── rca.ts                    # Slack-mrkdwn RCA → per-section cards
 │   ├── context.ts                # /context — loaded skills + resolved budget per backend
 │   ├── stores.ts                 # What Postgres and Redis actually hold

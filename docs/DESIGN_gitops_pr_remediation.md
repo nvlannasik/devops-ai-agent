@@ -302,7 +302,7 @@ picks `sha` from its change timeline, never from model output.
   flag/marker that it went the PR route, and `result` = the PR URL. `// ponytail:` store the
   PR URL in the existing `result` field, no schema change unless we later want to query PRs.
 - **No post-remediation verification** for PR remediations — nothing is live until merge+sync,
-  so there is no workload to re-check. `executeGitOpsPr` returns no `target`, and `app/index.ts`
+  so there is no workload to re-check. `executeGitOpsPr` returns no `target`, and `app/remediation.ts`
   only schedules a check when a target is present (`agent/remediation/verify.ts`,
   `migrations/006`). Instead a `[system note]` states verification happens post-merge, and the
   **resolved-alert loop** is the natural confirmation (alert stops firing → ✅). Optionally a
