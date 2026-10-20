@@ -1354,7 +1354,7 @@ export class DevOpsAgent {
   kindRefusalFor(...a: Parameters<Remediator["kindRefusalFor"]>): ReturnType<Remediator["kindRefusalFor"]> { return this.remediator.kindRefusalFor(...a); }
   noOpImageRefusalFor(...a: Parameters<Remediator["noOpImageRefusalFor"]>): ReturnType<Remediator["noOpImageRefusalFor"]> { return this.remediator.noOpImageRefusalFor(...a); }
   replacementRefusalFor(...a: Parameters<Remediator["replacementRefusalFor"]>): ReturnType<Remediator["replacementRefusalFor"]> { return this.remediator.replacementRefusalFor(...a); }
-  resolveOverlayPath(...a: Parameters<Remediator["resolveOverlayPath"]>): ReturnType<Remediator["resolveOverlayPath"]> { return this.resolveOverlayPath(...a); }
+  resolveOverlayPath(...a: Parameters<Remediator["resolveOverlayPath"]>): ReturnType<Remediator["resolveOverlayPath"]> { return this.remediator.resolveOverlayPath(...a); }
   executeRemediation(...a: Parameters<Remediator["executeRemediation"]>): ReturnType<Remediator["executeRemediation"]> { return this.remediator.executeRemediation(...a); }
   scheduleRemediationCheck(...a: Parameters<Remediator["scheduleRemediationCheck"]>): ReturnType<Remediator["scheduleRemediationCheck"]> { return this.remediator.scheduleRemediationCheck(...a); }
   runDueRemediationChecks(...a: Parameters<Remediator["runDueRemediationChecks"]>): ReturnType<Remediator["runDueRemediationChecks"]> { return this.remediator.runDueRemediationChecks(...a); }

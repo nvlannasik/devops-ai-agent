@@ -25,3 +25,19 @@ test("agent/index.ts no longer holds the remediation bodies", () => {
   const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(src, /private async (proposeGitOpsPr|executeGitOpsPr|resolveOverlayPath)\(/);
 });
+
+// Live 2026-10-20: a sed that pointed the agent's own resolveOverlayPath calls at its delegator
+// also rewrote the delegator's body to call itself — every cluster-model build died of a
+// RangeError, and every test passed, because every fake stubs resolveOverlayPath. A real agent:
+test("every DevOpsAgent delegator reaches the Remediator, not itself", async () => {
+  const agent = new DevOpsAgent({ mcp });
+  const reached: string[] = [];
+  const r = (agent as any).remediator;
+  for (const name of Object.getOwnPropertyNames(Remediator.prototype)) {
+    if (name === "constructor" || typeof (DevOpsAgent.prototype as any)[name] !== "function") continue;
+    r[name] = async () => { reached.push(name); return null; };
+    await (agent as any)[name]();
+  }
+  assert.ok(reached.includes("resolveOverlayPath"));
+  assert.ok(reached.includes("rejectRemediation"));
+});
