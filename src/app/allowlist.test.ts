@@ -1,6 +1,9 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp } from "./index.js";
+import { ThreadCommands } from "./commands.js";
+
+const viaCommands = (fake: object) => Object.assign(Object.create(ThreadCommands.prototype), fake, { host: fake });
 import { config } from "../config/index.js";
 
 // SLACK_ALLOWED_USERS: being in the channel is not enough to drive the agent. A refused user
@@ -28,7 +31,7 @@ const harness = () => {
       say: async (m: any) => void said.push(m),
       client,
     });
-  const react = (user: string) => proto.handleLearnByReaction.call(self, "C1", "1.1", user, client);
+  const react = (user: string) => ThreadCommands.prototype.handleLearnByReaction.call(viaCommands(self), "C1", "1.1", user, client);
   return { said, ephemeral, replies, mention, react };
 };
 

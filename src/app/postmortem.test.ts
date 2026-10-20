@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp, ThreadQueue } from "./index.js";
+import { ThreadCommands } from "./commands.js";
+
+const viaCommands = (fake: object) => Object.assign(Object.create(ThreadCommands.prototype), fake, { host: fake });
 import { config } from "../config/index.js";
 import { FIXTURE } from "../agent/postmortem/fixtures.js";
 
@@ -115,7 +118,7 @@ function harness(overrides: Overrides = {}) {
 
   const run = (event: { channel: string; ts: string; thread_ts?: string; user?: string }) => {
     const threadId = event.thread_ts ?? event.ts;
-    return (SlackApp.prototype as any).handlePostmortem.call(self, event, client, threadId);
+    return ThreadCommands.prototype.handlePostmortem.call(viaCommands(self), event, client, threadId);
   };
 
   return { self, client, posted, updated, calls, run, inFlightCalls };
