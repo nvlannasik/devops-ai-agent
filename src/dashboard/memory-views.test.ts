@@ -73,3 +73,18 @@ test("a thread page shows the window in order, pins the issue, and never prints 
 test("an expired or unknown thread says so", () => {
   assert.match(threadPage(null, null, now, "9.9"), /expired|no longer/i);
 });
+
+// Render check 2026-10-20: `.when` is `white-space: nowrap` (it is for timestamps), and the key and
+// thread pages used it on sentences and on tool input — 254–1440px of sideways scroll. Prose here
+// takes `.meta`, and a dim code span takes `.mem-dim`, which wraps.
+test("no sentence or tool text on the memory pages rides the nowrap timestamp class", () => {
+  const key = memoryKeyPage({ alertname: "A", namespace: null }, { incidents: "", remediations: "" }, { learned: [], rcas: [], remediations: [] }, now);
+  const thread = threadPage(
+    { threadId: "1.1", ttlSeconds: 1, rcaSent: false, skills: [], messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "x", input: { a: "b" } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "r" }] }] } as never,
+    null, now
+  );
+  for (const html of [key, thread]) {
+    assert.doesNotMatch(html, /<p class="when">/);
+    assert.doesNotMatch(html, /<code class="when">/);
+  }
+});

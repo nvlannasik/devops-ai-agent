@@ -95,10 +95,10 @@ export function memoryKeyPage(
   openIncidents?: number
 ): string {
   const pre = (text: string, none: string): string =>
-    text.trim() ? `<pre class="mem-pre" translate="no">${esc(text)}</pre>` : `<p class="when">${esc(none)}</p>`;
+    text.trim() ? `<pre class="mem-pre" translate="no">${esc(text)}</pre>` : `<p class="meta">${esc(none)}</p>`;
   const recallBlock =
     recall === null
-      ? `<p class="when">The agent's recall is not reachable from this process, so the text it would read cannot be shown.</p>`
+      ? `<p class="meta">The agent's recall is not reachable from this process, so the text it would read cannot be shown.</p>`
       : pre(recall.incidents, "No past incident or confirmed cause is recalled for this key.") +
         pre(recall.remediations, "No past remediations are recalled for this key.");
   const incidentLink = (id: number): string => `<a href="/incidents/${esc(id)}">#${esc(id)}</a>`;
@@ -150,7 +150,7 @@ export function memoryKeyPage(
      <h1 translate="no">${esc(key.alertname)}</h1>
      <p class="meta">Namespace ${nsLabel(key.namespace)}</p>
      ${section(ICON.memory, "What the agent will read")}
-     <p class="when">The text recall puts in front of the model when this alert fires again, produced by the agent's own recall. The weakest tier — <em>possibly related</em> incidents, matched on the words of the alert's own text — is computed from that text when an alert arrives, so it cannot be shown here.</p>
+     <p class="meta">The text recall puts in front of the model when this alert fires again, produced by the agent's own recall. The weakest tier — <em>possibly related</em> incidents, matched on the words of the alert's own text — is computed from that text when an alert arrives, so it cannot be shown here.</p>
      ${recallBlock}
      ${section(ICON.speech, "Confirmed by people")}
      ${learned}
@@ -204,14 +204,14 @@ function messageContent(m: Message): string {
       if (b.type === "text") return `<div class="mem-text">${esc(b.text ?? "")}</div>`;
       if (b.type === "tool_use") {
         const input = JSON.stringify(b.input ?? {});
-        return `<p>Called <code translate="no">${esc(b.name ?? "?")}</code> <code class="when">${esc(input.length > 300 ? `${input.slice(0, 300)}…` : input)}</code></p>`;
+        return `<p>Called <code translate="no">${esc(b.name ?? "?")}</code> <code class="mem-dim">${esc(input.length > 300 ? `${input.slice(0, 300)}…` : input)}</code></p>`;
       }
       if (b.type === "tool_result") {
         const text = typeof b.content === "string" ? b.content : JSON.stringify(b.content ?? "");
         const first = text.split("\n")[0] ?? "";
-        return `<p>Tool result, ${esc(fmtInt(text.length))} chars — <code class="when">${esc(first.length > 160 ? `${first.slice(0, 160)}…` : first)}</code></p>`;
+        return `<p>Tool result, ${esc(fmtInt(text.length))} chars — <code class="mem-dim">${esc(first.length > 160 ? `${first.slice(0, 160)}…` : first)}</code></p>`;
       }
-      return `<p class="when">(${esc(b.type)} block)</p>`;
+      return `<p class="meta">(${esc(b.type)} block)</p>`;
     })
     .join("");
 }
@@ -244,7 +244,7 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
      <p class="meta">Started ${timeTag(new Date(Number(t.threadId.split(".")[0]) * 1000), now)} · ${esc(fmtInt(t.messages.length))} messages · expires in ${esc(fmtTtl(t.ttlSeconds))} · RCA sent: ${t.rcaSent ? "yes" : "no"}` +
       `${t.skills.length ? ` · skills carried: ${t.skills.map((s) => `<code>${esc(s)}</code>`).join(" ")}` : ""}` +
       `${incidentId !== null ? ` · <a href="/incidents/${esc(incidentId)}">incident #${esc(incidentId)}</a>` : ""}</p>
-     <p class="when">The window the model reads on this thread's next turn, in order. The first message is pinned — trimming never drops it. Tool results show their size and first line only; the full run is in <a href="/api/trace/${esc(t.threadId)}">the trace</a>.</p>
+     <p class="meta">The window the model reads on this thread's next turn, in order. The first message is pinned — trimming never drops it. Tool results show their size and first line only; the full run is in <a href="/api/trace/${esc(t.threadId)}">the trace</a>.</p>
      ${section(ICON.chats, "Conversation window")}
      ${table(headers("#", "From", "Holds"), rows, "stack")}
      </div>`,

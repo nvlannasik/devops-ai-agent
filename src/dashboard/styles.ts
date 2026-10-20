@@ -1489,6 +1489,7 @@ form.signout button {
 /* /memory: recall text keeps its line breaks; a conversation's text wraps anywhere (tokens, ids). */
 .mem-pre + .mem-pre { margin-top: var(--sp-3); }
 .mem-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-dim { color: var(--text-dim); overflow-wrap: anywhere; }
 .mem-text + p, .mem-text + .mem-text { margin-top: var(--sp-2); }
 
 /* ---------- filter chips ---------- */
