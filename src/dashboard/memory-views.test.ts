@@ -88,3 +88,20 @@ test("no sentence or tool text on the memory pages rides the nowrap timestamp cl
     assert.doesNotMatch(html, /<code class="when">/);
   }
 });
+
+// Feedback 2026-10-20: the in-page "By alert | Conversations" switch read badly — the two are two
+// rail destinations now, and each page (and its detail pages) marks its own.
+test("alert memory and conversation memory are two rail destinations, not tabs on one page", () => {
+  const current = (html: string) => [...html.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
+  const list = memoryListPage({ rows: [], hasMore: false, total: 0 }, { page: 1, alertname: null, namespace: null }, now);
+  const key = memoryKeyPage({ alertname: "A", namespace: null }, null, { learned: [], rcas: [], remediations: [] }, now);
+  const threads = threadsPage([], new Map(), now);
+  const thread = threadPage(null, null, now, "1.1");
+  for (const html of [list, key, threads, thread]) assert.doesNotMatch(html, /aria-label="Memory"/, "no in-page switch");
+  assert.deepEqual(current(list), ["/memory"]);
+  assert.deepEqual(current(key), ["/memory"]);
+  assert.deepEqual(current(threads), ["/memory/threads"]);
+  assert.deepEqual(current(thread), ["/memory/threads"]);
+  assert.match(list, /<span class="lbl">Alert memory<\/span>/);
+  assert.match(list, /<span class="lbl">Conversation memory<\/span>/);
+});

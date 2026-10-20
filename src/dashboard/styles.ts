@@ -2034,9 +2034,12 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
      them it reads as a sixth and seventh destination. The grouping survives where it still
      costs nothing — the two lists stay two lists, so a screen reader keeps the captions
      through aria-labelledby, and the eye gets a slightly wider gap between the pairs. */
-  .rail nav { flex-direction: row; align-items: center; gap: var(--sp-4); flex: 1 1 auto; min-width: 0; }
+  /* And when the destinations outgrow one row they WRAP rather than spill: nine of them (the two
+     memory pages, 2026-10-20) measured 329px past the bar at 900px and dragged the page sideways.
+     A second row costs ~2.75rem of sticky bar; a clipped or icons-only label costs the word. */
+  .rail nav { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-4); flex: 1 1 auto; min-width: 0; }
   .rail-group { display: none; }
-  .rail nav ul { flex-direction: row; gap: var(--sp-1); margin: 0; }
+  .rail nav ul { flex-direction: row; flex-wrap: wrap; gap: var(--sp-1); margin: 0; }
   /* The foot stops being a foot: no rule above it, no column, and the session note gives up
      its place — a bar this short is not where a sentence about the session belongs, and the
      footer at the bottom of every page already carries it in full. */

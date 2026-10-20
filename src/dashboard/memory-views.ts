@@ -35,11 +35,6 @@ export const fmtTtl = (s: number | null): string => {
   return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m` : `${s}s`;
 };
 
-const tabs = (current: "keys" | "threads"): string =>
-  `<nav class="seg" aria-label="Memory">` +
-  `<a href="/memory"${current === "keys" ? ` aria-current="page"` : ""}>By alert</a>` +
-  `<a href="/memory/threads"${current === "threads" ? ` aria-current="page"` : ""}>Conversations</a>` +
-  `</nav>`;
 
 export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = new Date(), openIncidents?: number): string {
   const qs = (page: number): string => {
@@ -70,10 +65,9 @@ export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = n
         )
       : table(headers("Alert", "Namespace", "Learned", "Agent RCAs", "Remediations", "Last seen"), p.rows.map(row).join(""), "stack");
   return layout(
-    "Memory",
-    `<h1>Memory</h1>
+    "Alert memory",
+    `<h1>Alert memory</h1>
      <p class="meta">What the agent recalls when an alert fires again, keyed the way it recalls it — by alert name and namespace. Read-only.</p>
-     ${tabs("keys")}
      <form class="filters" method="get" action="/memory">
        <label>Alert<input type="text" name="alertname" value="${esc(f.alertname)}" placeholder="KubePodCrashLooping"
          autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -146,7 +140,7 @@ export function memoryKeyPage(
   return layout(
     title,
     `<div class="doc">
-     <p class="eyebrow"><a href="/memory">Memory</a></p>
+     <p class="eyebrow"><a href="/memory">Alert memory</a></p>
      <h1 translate="no">${esc(key.alertname)}</h1>
      <p class="meta">Namespace ${nsLabel(key.namespace)}</p>
      ${section(ICON.memory, "What the agent will read")}
@@ -187,12 +181,11 @@ export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<str
       )
     : empty("No conversation is held right now.", "A thread's conversation stays for 24 hours after its last message.", ICON.chats);
   return layout(
-    "Memory · conversations",
-    `<h1>Memory</h1>
+    "Conversation memory",
+    `<h1>Conversation memory</h1>
      <p class="meta">The conversation each Slack thread still holds — what the model reads on that thread's next turn. Kept 24 hours after the last message.</p>
-     ${tabs("threads")}
      ${body}`,
-    { current: "/memory", openIncidents }
+    { current: "/memory/threads", openIncidents }
   );
 }
 
@@ -219,11 +212,11 @@ function messageContent(m: Message): string {
 export function threadPage(t: ThreadMemory | null, incidentId: number | null, now: Date = new Date(), threadId = t?.threadId ?? "", openIncidents?: number): string {
   if (!t) {
     return layout(
-      "Memory · conversation",
-      `<div class="doc"><p class="eyebrow"><a href="/memory/threads">Conversations</a></p><h1 translate="no">${esc(threadId)}</h1>` +
+      "Conversation memory",
+      `<div class="doc"><p class="eyebrow"><a href="/memory/threads">Conversation memory</a></p><h1 translate="no">${esc(threadId)}</h1>` +
         empty("This thread holds no conversation any more.", "Conversations expire 24 hours after their last message; the trace keeps the full record.", ICON.chats) +
         `<p><a href="/api/trace/${esc(threadId)}">Open the trace</a></p></div>`,
-      { current: "/memory", openIncidents }
+      { current: "/memory/threads", openIncidents }
     );
   }
   const rows = t.messages
@@ -237,9 +230,9 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
     )
     .join("");
   return layout(
-    "Memory · conversation",
+    "Conversation memory",
     `<div class="doc">
-     <p class="eyebrow"><a href="/memory/threads">Conversations</a></p>
+     <p class="eyebrow"><a href="/memory/threads">Conversation memory</a></p>
      <h1 translate="no">${esc(t.threadId)}</h1>
      <p class="meta">Started ${timeTag(new Date(Number(t.threadId.split(".")[0]) * 1000), now)} · ${esc(fmtInt(t.messages.length))} messages · expires in ${esc(fmtTtl(t.ttlSeconds))} · RCA sent: ${t.rcaSent ? "yes" : "no"}` +
       `${t.skills.length ? ` · skills carried: ${t.skills.map((s) => `<code>${esc(s)}</code>`).join(" ")}` : ""}` +
@@ -248,6 +241,6 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
      ${section(ICON.chats, "Conversation window")}
      ${table(headers("#", "From", "Holds"), rows, "stack")}
      </div>`,
-    { current: "/memory", openIncidents }
+    { current: "/memory/threads", openIncidents }
   );
 }
