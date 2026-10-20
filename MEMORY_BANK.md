@@ -1815,14 +1815,14 @@ user text in the same turn.
 ## Environment Variables
 
 The full table — every variable, its default, and whether it is required — lives in
-[`README.md`](README.md#configuration) and in `.env.example`, both checked against
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and in `.env.example`, both checked against
 `src/config/index.ts`. The digest that used to sit here had fallen ~12 variables behind
 (dashboard, GitOps queues, `MENTION_TOOL_ROUNDS`, `INVESTIGATION_TIMEOUT_SECONDS`,
-`ALERT_WEBHOOK_TOKEN`, ...). Read the README; do not re-copy it here.
+`ALERT_WEBHOOK_TOKEN`, ...). Read that page; do not re-copy it here.
 
 ## File Structure
 
-The authoritative tree lives in [`README.md`](README.md#project-structure) and is kept in
+The authoritative tree lives in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#project-structure) and is kept in
 sync with the code — it covers every module, including the ones this section predates
 (`context/`, `skills/`, `dashboard/`, `gitops/`, `feedback/`, `intent/`, `scope/`,
 `usage/`, `utils/trace/`). Keeping a second copy here is what let it drift; do not
