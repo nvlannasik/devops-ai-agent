@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
+    "mcp:probe": "node --import tsx src/agent/mcp/probe.ts",
     "build": "tsc && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch index.ts",
