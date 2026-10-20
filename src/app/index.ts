@@ -27,6 +27,10 @@ import { buildMentionMarker } from "../agent/prompts/system.js";
 import { renderForModel, renderForSlack, RECENT_CHANGES_BLOCK } from "../agent/changes/index.js";
 import { flagInjection } from "../agent/injection/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
+import { Semaphore, ThreadQueue, InFlightWork, RESTART_NOTICE, type Accepted } from "./queue.js";
+import type { SlackHost, UnstoredAlert } from "./host.js";
+
+export { ThreadQueue, InFlightWork } from "./queue.js";
 
 /**
  * What the proposal call is asked to act on: this turn, plus the turn that set it up.
@@ -95,107 +99,6 @@ export function buildProposalContext(userText: string, reply: string, offer: str
 // them says the same thing as five of them — the answer is not standing on its evidence.
 const UNGROUNDED_SHOWN = 5;
 
-class Semaphore {
-  private running = 0;
-  private readonly queue: Array<() => void> = [];
-
-  constructor(private readonly limit: number) {}
-
-  async acquire(): Promise<void> {
-    if (this.running < this.limit) {
-      this.running++;
-      return;
-    }
-    return new Promise<void>((resolve) => this.queue.push(resolve));
-  }
-
-  release(): void {
-    const next = this.queue.shift();
-    if (next) {
-      next();
-    } else {
-      this.running--;
-    }
-  }
-}
-
-/**
- * Serialises work per Slack thread. The Semaphore above bounds how many investigations run
- * at once; this bounds how many run in ONE CONVERSATION, and the answer is one.
- *
- * A thread is a conversation, and its turns are ordered by the person having it. Running
- * two in parallel made the ordering an accident of latency: an approval card produced by
- * turn N arrived 40 seconds late, after the person had already asked turn N+1, and read as
- * a reply to a question it had never seen. It also let `lastAssistantText` — how a bare
- * "ya" is recognised as approving what the agent proposed in the turn before — read a reply
- * from a turn that had not finished being written.
- *
- * Cost, stated plainly: a follow-up asked mid-investigation now waits for that
- * investigation instead of running beside it. That is the trade this is: predictable order
- * over parallelism inside a single conversation. Different threads are untouched.
- */
-export class ThreadQueue {
-  private readonly tails = new Map<string, Promise<void>>();
-
-  /** True while a turn for this thread is queued or running. */
-  busy(key: string): boolean {
-    return this.tails.has(key);
-  }
-
-  run<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.tails.get(key) ?? Promise.resolve();
-    // .then(fn, fn) — a predecessor that REJECTED must still release its successor, or one
-    // failed turn wedges the thread for the lifetime of the process.
-    const result = prev.then(fn, fn);
-    const tail = result.then(() => {}, () => {});
-    this.tails.set(key, tail);
-    // Only the current tail clears the entry. Without the identity check a slow turn
-    // settling late would delete a newer turn's link and unserialise the thread.
-    void tail.then(() => {
-      if (this.tails.get(key) === tail) this.tails.delete(key);
-    });
-    return result;
-  }
-}
-
-/**
- * The work this pod has ACCEPTED and not yet finished — queued behind a thread's earlier turn or
- * running — so a shutdown can wait for it and name what it had to abandon.
- *
- * Live, 2026-09-29 07:00:44: a rollout's SIGTERM arrived mid-investigation ("unused resources for
- * mongodb"); shutdown closed MCP under it and exited, and the user heard nothing until they typed
- * "try again" 13 minutes later. An alert cut the same way never gets its RCA at all.
- */
-export class InFlightWork<T> {
-  private readonly work = new Map<Promise<unknown>, T>();
-
-  track<R>(meta: T, p: Promise<R>): Promise<R> {
-    this.work.set(p, meta);
-    const settle = () => void this.work.delete(p);
-    p.then(settle, settle);
-    return p;
-  }
-
-  /** Waits up to `budgetMs` for tracked work to settle; returns what is still running. */
-  async drain(budgetMs: number): Promise<T[]> {
-    if (this.work.size === 0) return [];
-    let timer: NodeJS.Timeout | undefined;
-    const budget = new Promise<void>((resolve) => (timer = setTimeout(resolve, budgetMs)));
-    await Promise.race([Promise.allSettled([...this.work.keys()]), budget]);
-    clearTimeout(timer);
-    return [...this.work.values()];
-  }
-}
-
-type Accepted = { channel: string; threadTs: string; kind: "mention" | "alert" };
-
-// Said in the thread that will otherwise never hear back. Nothing ran against the cluster that a
-// re-run would repeat — investigations are read-only and remediation needs a human's click.
-const RESTART_NOTICE: Record<Accepted["kind"], string> = {
-  mention: "⚠️ I restarted before I could answer this, so nothing was posted for it. Mention me again to re-run it.",
-  alert: "⚠️ I restarted before this investigation finished, so no RCA was posted. Mention me in this thread to investigate it again.",
-};
-
 /** What `markResolved` matches an incident on: alertname + namespace. */
 const incidentKey = (labels: Record<string, string>): string => `${labels.alertname ?? ""}\u0000${labels.namespace ?? ""}`;
 
@@ -214,16 +117,15 @@ export class SlackApp {
    * — see handleResolvedAlert. Also doubles as the in-flight half of correlate()'s candidate set:
    * an incident not stored yet is still an open incident another alert can be merged into.
    */
-  private readonly unstored = new Map<
-    string,
-    { key: string; resolved?: AlertItem[]; channel?: string; namespace?: string; subjects?: string[]; startedAt?: number; alertname?: string }
-  >();
+  private readonly unstored = new Map<string, UnstoredAlert>();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
+  protected host!: SlackHost;
 
   constructor(agent: DevOpsAgent) {
     this.agent = agent;
+    this.wire();
 
     if (config.slack.appToken) {
       // Socket Mode — Bolt connects outbound to Slack via WebSocket.
@@ -276,6 +178,32 @@ export class SlackApp {
     this.app.error(async (error) => {
       logger.error(`[slack] unhandled error: ${errDetail(error)}`);
     });
+  }
+
+  /**
+   * The one host object every flow reads SlackApp through (app/host.ts). ONE literal, never spread:
+   * a spread evaluates the getters once and freezes values that tests and initialize-time code swap.
+   */
+  private wire(): void {
+    const self = this;
+    this.host = {
+      get agent() { return self.agent; },
+      get app() { return self.app; },
+      get dedup() { return self.dedup; },
+      get semaphore() { return self.semaphore; },
+      get threadQueue() { return self.threadQueue; },
+      get inFlight() { return self.inFlight; },
+      get unstored() { return self.unstored; },
+      get tourThreads() { return self.tourThreads; },
+      get stopping() { return self.stopping; },
+      get verifyTimer() { return self.verifyTimer; },
+      set verifyTimer(t: NodeJS.Timeout | null) { self.verifyTimer = t; },
+      mayUseAgent: (user) => self.mayUseAgent(user),
+      postRca: (...a) => self.postRca(...a),
+      conversationReply: (...a) => self.conversationReply(...a),
+      warnIfUngrounded: (...a) => self.warnIfUngrounded(...a),
+      notifyIfLowConfidence: (...a) => self.notifyIfLowConfidence(...a),
+    };
   }
 
   // Mount /alert and /health onto any Express router (used by both modes)
