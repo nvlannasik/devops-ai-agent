@@ -1,8 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRevertCommit } from "./revert.js";
-import { DevOpsAgent } from "../index.js";
 import { buildRemediationCard } from "../../utils/slack/remediation-card.js";
+import { Remediator } from "../remediation/remediator.js";
+// The remediation methods live on Remediator (housekeeping 2026-10-20): the fake's agent fields
+// arrive as `host` (trace/traceStore as getters, as the agent wires them), its sibling methods stay on `this`.
+const viaHost = (fake: object) => {
+  const f = fake as Record<string, unknown>;
+  return Object.assign(Object.create(Remediator.prototype), f, { host: { ...f, trace: () => f.trace, traceStore: () => f.traceStore } });
+};
+
 
 const c = (sha: string, at: string, helmRelease: string) => ({ sha, at, author: "a", message: "m", url: "u", paths: ["p"], helmRelease });
 const specAt = (rev: string, at: string) => ({ at, source: "rollout", kind: "spec-change", workload: "Deployment/api", revision: rev, diff: [{ field: "api.env.MODE", from: "a", to: "b" }] });
@@ -27,7 +34,7 @@ test("proposeRevertPr takes the sha from the timeline, dry-runs first, and store
     resolveOverlayPath: async () => "apps/dev/applications",
     remediations: { propose: async (_i: unknown, _a: unknown, params: Record<string, unknown>) => { stored = params; return 7; } },
   };
-  const out = await (DevOpsAgent.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(fake, 1, proposal, preview, "thread");
+  const out = await (Remediator.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(viaHost(fake), 1, proposal, preview, "thread");
   assert.equal(out.id, 7);
   assert.deepEqual({ op: sent[0].op, sha: sent[0].sha, dryRun: sent[0].dryRun }, { op: "revert_pr", sha: "new2222", dryRun: true });
   assert.equal(stored!.revert, true);
@@ -44,7 +51,7 @@ test("proposeRevertPr takes the sha from the timeline, dry-runs first, and store
 test("proposeRevertPr with no commit for the HelmRelease refuses and never calls the worker", async () => {
   let called = false;
   const fake = { gitops: { request: async () => { called = true; return {}; } }, timelineFor: async () => T([]), resolveOverlayPath: async () => undefined, remediations: { propose: async () => 1 } };
-  const out = await (DevOpsAgent.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(fake, 1, proposal, preview, "thread");
+  const out = await (Remediator.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(viaHost(fake), 1, proposal, preview, "thread");
   assert.match(out.refused, /nothing to revert/);
   assert.equal(called, false);
 });
@@ -69,7 +76,7 @@ const revertFake = (timeline: ReturnType<typeof T>) => {
     remediations: { propose: async () => 9 },
   };
 };
-const callRevert = (fake: object) => (DevOpsAgent.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(fake, 1, proposal, preview, "thread");
+const callRevert = (fake: object) => (Remediator.prototype as never as { proposeRevertPr: Function }).proposeRevertPr.call(viaHost(fake), 1, proposal, preview, "thread");
 
 test("proposeRevertPr refuses when a commit for the HelmRelease is newer than the broken rollout", async () => {
   const fake = revertFake(T([c("bad1111", "2026-10-09T03:00:00Z", "api"), c("later22", "2026-10-09T04:00:00Z", "api")]));
@@ -105,8 +112,8 @@ test("executeRemediation on a stored revert card sends revert_pr with dryRun fal
     gitops: { request: async (b: Record<string, unknown>) => { sent.push(b); return { ok: true, op: "revert_pr", dryRun: false, prUrl: "https://ghe/pr/1" }; } },
     mcp: { callTool: async () => { mcpCalled = true; return "{}"; } },
   };
-  (fake as Record<string, unknown>).executeGitOpsPr = (DevOpsAgent.prototype as never as { executeGitOpsPr: Function }).executeGitOpsPr;
-  const out = await DevOpsAgent.prototype.executeRemediation.call(fake as never, 5, "U1");
+  (fake as Record<string, unknown>).executeGitOpsPr = (Remediator.prototype as never as { executeGitOpsPr: Function }).executeGitOpsPr;
+  const out = await Remediator.prototype.executeRemediation.call(viaHost(fake as never), 5, "U1");
   assert.match(out.text, /Revert PR opened/);
   assert.deepEqual({ op: sent[0].op, sha: sent[0].sha, dryRun: sent[0].dryRun, pathPrefix: sent[0].pathPrefix }, { op: "revert_pr", sha: "bad1111", dryRun: false, pathPrefix: "apps/dev" });
   assert.equal(mcpCalled, false);
@@ -119,9 +126,9 @@ const runFake = (dryRun: string, timeline: unknown) => {
   const fake = {
     calls,
     mcp: { getTools: () => [{ name: "k8s_rollout_undo", description: "[WRITE] roll back" }], callTool: async () => dryRun },
-    llm: { chat: async () => ({ content: [] }) },
+    // the model's answer arrives as a text block (extractText is a module function now, not a method to stub)
+    llm: { chat: async () => ({ content: [{ type: "text", text: JSON.stringify({ action: "k8s_rollout_undo", namespace: "apps", workload: "api", kind: "deployment", to_revision: 1, reason: "bad env" }) }] }) },
     recordUsage: () => {},
-    extractText: () => JSON.stringify({ action: "k8s_rollout_undo", namespace: "apps", workload: "api", kind: "deployment", to_revision: 1, reason: "bad env" }),
     refusalFor: async () => null,
     trace: { gate: () => {} },
     remediations: { pendingFor: async () => null, propose: async (_i: unknown, _a: unknown, params: Record<string, unknown>) => { calls.stored = params; return 11; } },
@@ -131,7 +138,7 @@ const runFake = (dryRun: string, timeline: unknown) => {
   };
   return fake;
 };
-const run = (fake: object) => (DevOpsAgent.prototype as never as { proposeRemediationRun: Function }).proposeRemediationRun.call(fake, 1, {}, "rca", { threadId: "t" });
+const run = (fake: object) => (Remediator.prototype as never as { proposeRemediationRun: Function }).proposeRemediationRun.call(viaHost(fake), 1, {}, "rca", { threadId: "t" });
 const tl = T([], [specAt("2", "2026-10-09T03:30:00Z")]);
 
 test("proposeRemediationRun sends a rollback preview to proposeRevertPr, not the values-PR flow", async () => {

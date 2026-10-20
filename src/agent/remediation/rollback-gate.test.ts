@@ -4,6 +4,14 @@ import { rollbackRefusal, staleRollbackRefusal, rollbackDryRunSummary } from "./
 import type { ChangeTimeline } from "../changes/index.js";
 import { DevOpsAgent } from "../index.js";
 import { parseProposal } from "./proposal.js";
+import { Remediator } from "./remediator.js";
+// The remediation methods live on Remediator (housekeeping 2026-10-20): the fake's agent fields
+// arrive as `host` (trace/traceStore as getters, as the agent wires them), its sibling methods stay on `this`.
+const viaHost = (fake: object) => {
+  const f = fake as Record<string, unknown>;
+  return Object.assign(Object.create(Remediator.prototype), f, { host: { ...f, trace: () => f.trace, traceStore: () => f.traceStore } });
+};
+
 
 const undo = (to: number, ns = "bench-a14") => ({ action: "k8s_rollout_undo", namespace: ns, name: "invoice-worker", reason: "r", summary: "s", toolParams: { namespace: ns, name: "invoice-worker", kind: "deployment", to_revision: to } }) as never;
 const T = (changes: ChangeTimeline["changes"], unread: string[] = []): ChangeTimeline => ({ namespace: "bench-a14", window: { from: "", to: "" }, changes, commits: [], unread, subjects: [] });
@@ -120,7 +128,7 @@ test("refusalFor runs the rollback gate even when the user asked for it themselv
     JSON.stringify({ action: "k8s_rollout_undo", namespace: "bench-a14", workload: "invoice-worker", kind: "deployment", to_revision: 1 })
   )!;
   const timeline = T([spec("3", "2026-10-09T01:00:00Z")]); // allowed target is 2, proposal asks for 1
-  const r = await DevOpsAgent.prototype.refusalFor.call(fakeForRollback(timeline), proposal, {
+  const r = await Remediator.prototype.refusalFor.call(viaHost(fakeForRollback(timeline)), proposal, {
     userRequested: true,
     threadId: "t",
     offer: null,

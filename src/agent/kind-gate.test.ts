@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DevOpsAgent } from "./index.js";
+import { Remediator } from "./remediation/remediator.js";
+// The remediation methods live on Remediator (housekeeping 2026-10-20): the fake's agent fields
+// arrive as `host` (trace/traceStore as getters, as the agent wires them), its sibling methods stay on `this`.
+const viaHost = (fake: object) => {
+  const f = fake as Record<string, unknown>;
+  return Object.assign(Object.create(Remediator.prototype), f, { host: { ...f, trace: () => f.trace, traceStore: () => f.traceStore } });
+};
+
 
 // The kind gate's wiring (bench B04): the proposed kind's listing is read first and, when it holds
 // the name, it is the ONLY read — that is the call a recorded run already has, so replay stays put.
@@ -19,8 +26,8 @@ const sts = JSON.stringify([{ name: "payments", containers: [{ name: "api", imag
 
 test("a StatefulSet proposed as a Deployment is refused, after reading the other kinds", async () => {
   const calls: string[] = [];
-  const r = await DevOpsAgent.prototype.kindRefusalFor.call(
-    { mcp: fakeMcp({ k8s_list_statefulsets: sts }, calls) } as never,
+  const r = await Remediator.prototype.kindRefusalFor.call(viaHost(
+    { mcp: fakeMcp({ k8s_list_statefulsets: sts }, calls) } as never),
     setImage("deployment") as never
   );
   assert.match(r ?? "", /is a StatefulSet, not a Deployment/);
@@ -30,8 +37,8 @@ test("a StatefulSet proposed as a Deployment is refused, after reading the other
 
 test("the right kind costs one read and refuses nothing", async () => {
   const calls: string[] = [];
-  const r = await DevOpsAgent.prototype.kindRefusalFor.call(
-    { mcp: fakeMcp({ k8s_list_statefulsets: sts }, calls) } as never,
+  const r = await Remediator.prototype.kindRefusalFor.call(viaHost(
+    { mcp: fakeMcp({ k8s_list_statefulsets: sts }, calls) } as never),
     setImage("statefulset") as never
   );
   assert.equal(r, null);
@@ -39,8 +46,8 @@ test("the right kind costs one read and refuses nothing", async () => {
 });
 
 test("a listing that cannot be read refuses nothing", async () => {
-  const r = await DevOpsAgent.prototype.kindRefusalFor.call(
-    { mcp: { callTool: async () => { throw new Error("timeout"); } } } as never,
+  const r = await Remediator.prototype.kindRefusalFor.call(viaHost(
+    { mcp: { callTool: async () => { throw new Error("timeout"); } } } as never),
     setImage() as never
   );
   assert.equal(r, null);

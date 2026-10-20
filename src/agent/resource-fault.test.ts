@@ -2,6 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DevOpsAgent, resourceFaultRefusal } from "./index.js";
 import { parseProposal } from "./remediation/proposal.js";
+import { Remediator } from "./remediation/remediator.js";
+// The remediation methods live on Remediator (housekeeping 2026-10-20): the fake's agent fields
+// arrive as `host` (trace/traceStore as getters, as the agent wires them), its sibling methods stay on `this`.
+const viaHost = (fake: object) => {
+  const f = fake as Record<string, unknown>;
+  return Object.assign(Object.create(Remediator.prototype), f, { host: { ...f, trace: () => f.trace, traceStore: () => f.traceStore } });
+};
+
 
 const resize = (ns: string, workload: string) =>
   parseProposal(JSON.stringify({ action: "k8s_set_resources", namespace: ns, workload, kind: "deployment", memory_limit: "512Mi" }))!;
@@ -55,14 +63,14 @@ const chainWith = (evidence: string) =>
   }) as unknown as DevOpsAgent;
 
 test("refusalFor runs the resource-fault gate", async () => {
-  const r = await DevOpsAgent.prototype.refusalFor.call(chainWith(configKeyMissing), resize("bench-a01", "payments-api"), {
+  const r = await Remediator.prototype.refusalFor.call(viaHost(chainWith(configKeyMissing)), resize("bench-a01", "payments-api"), {
     threadId: "t", offer: null, labels: { namespace: "bench-a01" }, rca: "",
   });
   assert.match(r?.reason ?? "", /no OOMKill, no throttling/);
 });
 
 test("a human's own request for a resize is not second-guessed by it", async () => {
-  const r = await DevOpsAgent.prototype.refusalFor.call(chainWith(configKeyMissing), resize("bench-a01", "payments-api"), {
+  const r = await Remediator.prototype.refusalFor.call(viaHost(chainWith(configKeyMissing)), resize("bench-a01", "payments-api"), {
     userRequested: true, threadId: "t", offer: null, labels: { namespace: "bench-a01" }, rca: "",
   });
   assert.equal(r, null);

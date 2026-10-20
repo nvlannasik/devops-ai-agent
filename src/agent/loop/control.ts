@@ -439,3 +439,12 @@ export function staleEvidenceNotice(history: readonly Message[], now: number = D
     `costs one round; a stale "everything is healthy" costs an incident.]`
   );
 }
+
+/** The text blocks of a model response, joined — what the agent and the remediator read as the answer. */
+export function extractText(content: ContentBlock[]): string {
+  return content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text ?? "")
+    .join("\n")
+    .trim();
+}

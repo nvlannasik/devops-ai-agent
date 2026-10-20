@@ -14,7 +14,6 @@ const flow = async (humanText: string, extraction: string) => {
     },
     llm: { chat: async () => (llmCalls++, { content: [{ type: "text", text: extraction }], stopReason: "end_turn" }) },
     recordUsage: () => {},
-    extractText: (DevOpsAgent.prototype as any).extractText,
   };
   const reply: string = await (DevOpsAgent.prototype as any).learnFromThread.call(self, "C1", "1.1", "U1", "2.2", "transcript", humanText);
   return { reply, stored, llmCalls };
