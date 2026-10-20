@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SlackApp } from "./index.js";
+import { AlertFlow } from "./alerts.js";
+
+const viaAlerts = (fake: object) => Object.assign(Object.create(AlertFlow.prototype), fake, { host: fake });
 
 // Live 2026-09-29: SampleAppHighErrorRate and AppErrorLogSpike resolved at 14:05, while both
 // investigations were still running. The incident row is written with the RCA, so the resolve found
@@ -18,10 +20,9 @@ const harness = (stored: () => boolean) => {
     agent: { resolveIncident: async () => (stored() ? { channel: "C1", threadTs: "111.1" } : null) },
     app: { client: { chat: { postMessage: async (m: any) => void posted.push(m) } } },
   };
-  const proto = SlackApp.prototype as any;
-  self.postResolved = proto.postResolved;
-  const resolve = () => proto.handleResolvedAlert.call(self, LABELS, RESOLVED);
-  const store = () => proto.closeIfResolvedEarly.call(self, "111.1", LABELS);
+  self.postResolved = (AlertFlow.prototype as any).postResolved;
+  const resolve = () => AlertFlow.prototype.handleResolvedAlert.call(viaAlerts(self), LABELS, RESOLVED);
+  const store = () => AlertFlow.prototype.closeIfResolvedEarly.call(viaAlerts(self), "111.1", LABELS);
   return { self, posted, resolve, store };
 };
 
@@ -46,7 +47,7 @@ test("a resolve for an alert nobody is investigating is not held for a later fir
   await h.resolve();
   assert.equal(h.self.unstored.get("222.2").resolved, undefined);
   h.self.agent.resolveIncident = async () => ({ channel: "C1", threadTs: "222.2" });
-  await (SlackApp.prototype as any).closeIfResolvedEarly.call(h.self, "222.2", { alertname: "OtherAlert", namespace: "sample-apps" });
+  await AlertFlow.prototype.closeIfResolvedEarly.call(viaAlerts(h.self), "222.2", { alertname: "OtherAlert", namespace: "sample-apps" });
   assert.equal(h.posted.length, 0, "the other investigation closes nothing on store");
 });
 

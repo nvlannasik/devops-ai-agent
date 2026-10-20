@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { SlackApp } from "./index.js";
 import { ThreadCommands } from "./commands.js";
 import { RemediationFlow } from "./remediation.js";
+import { AlertFlow } from "./alerts.js";
+import { readFileSync } from "node:fs";
 
 // 2026-10-21: every flow reads SlackApp through one host object. A host function that calls itself
 // (8c60b0a was exactly that, in DevOpsAgent) overflows here, on a real SlackApp prototype with
@@ -63,4 +65,14 @@ test("the poller's timer is SlackApp's own field, so stop() can clear it", () =>
   clearTimeout(t);
   (s.remediation as any).host.verifyTimer = t;
   assert.equal(s.verifyTimer, t);
+});
+
+const FLOW_FILES = ["queue", "host", "commands", "remediation", "alerts"];
+
+test("SlackApp builds an AlertFlow and no flow imports the app barrel as a value", () => {
+  assert.ok(wired().alerts instanceof AlertFlow);
+  for (const f of FLOW_FILES) {
+    const src = readFileSync(new URL(`./${f}.ts`, import.meta.url), "utf8");
+    assert.doesNotMatch(src, /^import (?!type)[^\n]*from "\.\/index\.js"/m, f);
+  }
 });

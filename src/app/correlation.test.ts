@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SlackApp } from "./index.js";
+import { AlertFlow } from "./alerts.js";
+
+const viaAlerts = (fake: object) => Object.assign(Object.create(AlertFlow.prototype), fake, { host: fake });
 import { resetServiceGraphCache } from "../agent/correlation/topology.js";
 import { config } from "../config/index.js";
 
@@ -83,7 +86,7 @@ function harness(opts: {
     warnIfUngroundedCalls.push({ channel, threadId, answer, trigger });
   };
   const correlate = (channel: string, groupLabels: Record<string, string>, firing: any[], issueText: string, alertSeverity: string | null) =>
-    (SlackApp.prototype as any).correlate.call(self, channel, groupLabels, firing, issueText, alertSeverity);
+    AlertFlow.prototype.correlate.call(viaAlerts(self), channel, groupLabels, firing, issueText, alertSeverity);
   return {
     self,
     posted,
@@ -293,7 +296,7 @@ test("handleAlert returns before the top-level post when correlate() has already
       ],
     };
 
-    await (SlackApp.prototype as any).handleAlert.call(self, payload);
+    await AlertFlow.prototype.handleAlert.call(viaAlerts(self), payload);
 
     assert.equal(correlateCalled, true, "correlate() should have been reached and asked to decide");
     assert.equal(posted.length, 0, "no message is posted once correlate() has already handled the alert");
@@ -319,9 +322,9 @@ test("a resolve of the merged child group still resolves by its own labels", asy
     },
     app: { client: { chat: { postMessage: async () => ({}) } } },
   };
-  self.postResolved = (SlackApp.prototype as any).postResolved;
+  self.postResolved = (AlertFlow.prototype as any).postResolved;
 
-  await (SlackApp.prototype as any).handleResolvedAlert.call(self, CHILD_LABELS, [
+  await AlertFlow.prototype.handleResolvedAlert.call(viaAlerts(self), CHILD_LABELS, [
     { labels: CHILD_LABELS, annotations: {}, endsAt: new Date(NOW).toISOString() },
   ]);
 
