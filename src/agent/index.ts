@@ -2,6 +2,7 @@ import { createLLMClient } from "./llm/index.js";
 import { SERIALIZED_BLOCKS, namesToolOnly } from "./llm/router.js";
 import { parseRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
+import type { McpTools } from "./mcp/types.js";
 import { ConversationMemory } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
 import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
@@ -1278,7 +1279,7 @@ const addUsage = (acc: TokenUsage, u: TokenUsage): TokenUsage => ({
 
 export interface AgentDeps {
   llm?: LLMClient;
-  mcp?: MCPClient;
+  mcp?: McpTools;
   /** Who is running this agent — the dashboard's Harness page shows `prod` only. */
   traceSource?: "prod" | "bench";
   /** Tests and replay inject one; production gets one with a store in initialize(). */
@@ -1292,7 +1293,7 @@ export interface AgentDeps {
 
 export class DevOpsAgent {
   private llm: LLMClient;
-  private mcp: MCPClient;
+  private mcp: McpTools;
   // Investigation traces (agent/trace, migrations/011). A recorder with no sink is a no-op, which
   // is what this is until initialize() has a pool.
   private trace: TraceRecorder;

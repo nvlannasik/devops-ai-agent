@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { config } from "../../config/index.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
 import type { ToolDefinition } from "../llm/types.js";
+import type { McpTools } from "./types.js";
 
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 1000;
@@ -24,7 +25,7 @@ class Mutex {
   }
 }
 
-export class MCPClient {
+export class MCPClient implements McpTools {
   private client: Client;
   private tools: ToolDefinition[] = [];
   private connected = false;
