@@ -8,7 +8,6 @@ import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
 import { buildClusterModel, ClusterModelCache } from "./onboarding/index.js";
 import { namespaceNamed } from "./onboarding/model.js";
 import { type ClusterModel } from "./onboarding/types.js";
-import { alertsReadable, decideReconcile, type StatusCommand, type UnresolvedIncident } from "./incidents/reconcile.js";
 import { UsageStore } from "./usage/index.js";
 import { createPool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
@@ -17,16 +16,14 @@ import { resolveBudget } from "./context/resolve-budget.js";
 import { estimateTokens, type Budget } from "./context/budget.js";
 import { loadSkills, resolveSkillsDir, type SkillRegistry } from "./skills/index.js";
 import { groundingGaps } from "./grounding/index.js";
-import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM, tracesToHumans } from "./feedback/index.js";
 import { RemediationStore } from "./remediation/index.js";
-import { RemediationCheckStore, alertState } from "./remediation/verify.js";
+import { RemediationCheckStore } from "./remediation/verify.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
 import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
 import { PostmortemStore, type LatestDraft } from "./postmortem/store.js";
 import { type PostmortemFacts } from "./postmortem/facts.js";
 import { buildPostmortemPrompt, assemblePostmortem, POSTMORTEM_SYSTEM } from "./postmortem/draft.js";
 import { config } from "../config/index.js";
-import { truncate } from "../utils/truncate/index.js";
 import { type LLMClient, type LLMResponse, type Message, type ToolDefinition } from "./llm/types.js";
 import { initRedis, pingRedis } from "../db/redis.js";
 import logger from "../utils/logger/index.js";
@@ -38,6 +35,7 @@ import { lastToolResultIn } from "./remediation/evidence-refusals.js";
 import { ThreadSkills, SkillView } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
 import { InvestigationRunner } from "./loop/runner.js";
+import { IncidentLifecycle } from "./incidents/lifecycle.js";
 import { extractText } from "./loop/control.js";
 import { type InvestigateOptions } from "./loop/run-state.js";
 
@@ -47,24 +45,7 @@ export * from "./remediation/evidence-refusals.js";
 export * from "./loop/control.js";
 export * from "./skills/thread.js";
 export * from "./loop/run-state.js";
-
-// One incident the sweeper closed: what to say, and the label set whose dedup claim has to be
-// released. channel/thread_ts are nullable on the row, so there may be nothing to post — the
-// claim still has to go.
-export type ReconciledIncident = {
-  channel: string | null;
-  threadTs: string | null;
-  groupLabels: Record<string, string>;
-  text: string;
-};
-
-// Rows stored before migrations/007 have no group_labels. alertname+namespace hashes to a
-// different dedup fingerprint than the claim was taken under, so clearing it is best-effort
-// on those — new incidents carry the exact identity.
-const fallbackLabels = (alertname: string, namespace: string | null): Record<string, string> => ({
-  alertname,
-  ...(namespace ? { namespace } : {}),
-});
+export * from "./incidents/lifecycle.js";
 
 // this.timelines (the rollback gate's per-process copy of a thread's change timeline): pruned by
 // age so a thread nobody revisits does not leak forever, and capped by count as a hard backstop.
@@ -102,6 +83,7 @@ export class DevOpsAgent {
   private gitops: SqsGitOpsClient | null;
   private readonly remediator: Remediator;
   private readonly runner: InvestigationRunner;
+  private readonly lifecycle: IncidentLifecycle;
   // The onboarding cluster model (agent/onboarding), 5 min per namespace scope — see clusterModel().
   private readonly clusterModels: ClusterModelCache;
   private readonly skills: SkillRegistry;
@@ -170,6 +152,12 @@ export class DevOpsAgent {
       trace: () => self.trace,
       traceStore: () => self.traceStore,
       timelineFor: (threadId) => self.timelineFor(threadId),
+      recordUsage: (threadTs, response) => self.recordUsage(threadTs, response),
+    });
+    this.lifecycle = new IncidentLifecycle({
+      get incidents() { return self.incidents; },
+      get mcp() { return self.mcp; },
+      get llm() { return self.llm; },
       recordUsage: (threadTs, response) => self.recordUsage(threadTs, response),
     });
     this.runner = new InvestigationRunner({
@@ -564,187 +552,14 @@ export class DevOpsAgent {
     return this.incidents.markResolved(labels);
   }
 
-  /**
-   * The missed-resolved sweeper. Alertmanager's resolved webhook fires once and is acked
-   * before it is processed, so a single failure (agent down, Slack down, pod killed mid-
-   * handler) strands the incident as firing forever and — worse — never releases its dedup
-   * claim, which suppresses the next real firing of the same alert for the claim's whole TTL.
-   * This asks Alertmanager directly instead of waiting for a POST that is never resent.
-   *
-   * Returns what to post and which dedup claims to release; the Slack client stays in the app
-   * layer, same as `runDueRemediationChecks`. Both run from the one poller.
-   */
-  async runIncidentReconcile(): Promise<ReconciledIncident[]> {
-    const cfg = config.incidents.reconcile;
-    if (!cfg.enabled) return [];
-
-    const confirmMs = cfg.confirmSeconds * 1000;
-    const candidates = await this.incidents.listUnresolved(cfg.minAgeSeconds, cfg.batchLimit);
-    if (candidates.length === 0) return [];
-
-    // One read for the whole batch. Any failure to read it ends the pass: absence from this
-    // response is the entire recovery signal, so an unreadable response is not evidence that
-    // anything recovered — it is no evidence at all.
-    let raw: string;
-    try {
-      raw = await this.mcp.callTool("alertmanager_get_alerts", {});
-    } catch (err) {
-      logger.warn(
-        `[reconcile] Alertmanager unreadable — ${candidates.length} unresolved incident(s) left untouched: ${errDetail(err)}`
-      );
-      return [];
-    }
-    if (!alertsReadable(raw)) {
-      logger.warn(`[reconcile] Alertmanager response truncated or unparseable — pass skipped, ${candidates.length} candidate(s) untouched`);
-      return [];
-    }
-
-    const confirming: number[] = [];
-    const reset: number[] = [];
-    const closing: UnresolvedIncident[] = [];
-    for (const inc of candidates) {
-      const state = alertState(raw, inc.alertname, inc.namespace);
-      switch (decideReconcile(state, inc.clearedSeenAt, confirmMs)) {
-        case "confirming":
-          confirming.push(inc.id);
-          break;
-        case "reset":
-          reset.push(inc.id);
-          break;
-        case "resolve":
-          closing.push(inc);
-          break;
-      }
-    }
-    await this.incidents.noteClearedSeen(confirming);
-    await this.incidents.resetClearedSeen(reset);
-    if (confirming.length > 0) logger.info(`[reconcile] ${confirming.length} incident(s) seen cleared — confirming over ${cfg.confirmSeconds}s`);
-
-    const out: ReconciledIncident[] = [];
-    for (const inc of closing) {
-      // Loses the race against another replica → no row back → that replica posts, not us.
-      const row = await this.incidents.markResolvedById(inc.id, "reconciler");
-      if (!row) continue;
-      logger.info(
-        `[reconcile] incident ${inc.id} (${row.alertname}${row.namespace ? ` in ${row.namespace}` : ""}) closed — ` +
-        `not held by Alertmanager since ${inc.clearedSeenAt}; the resolved webhook never arrived`
-      );
-      out.push({
-        channel: row.channel,
-        threadTs: row.threadTs,
-        groupLabels: row.groupLabels ?? fallbackLabels(row.alertname, row.namespace),
-        text:
-          `✅ *Alert resolved* — \`${row.alertname}\`${row.namespace ? ` in \`${row.namespace}\`` : ""}. ` +
-          `Alertmanager has not been holding it since \`${inc.clearedSeenAt}\`; its resolved notification never reached me, ` +
-          `so I reconciled this from Alertmanager's current state. ` +
-          `Wrong? Mention me with \`reopen\` in this thread. ` +
-          `If a manual fix did it, react :${config.slack.learnReaction}: on the message describing it (or mention me with \`learn\`) so I remember.`,
-      });
-    }
-    return out;
-  }
-
-  /**
-   * On-call's word overrides both the webhook and the sweeper: the engineer in the thread
-   * knows things neither of them can see. Deterministic, no LLM call — a state correction is
-   * the one message that must not be re-interpreted.
-   *
-   * Returns the reply plus, on a close, the dedup claim to release: leaving that claim held is
-   * what would suppress the alert's next firing.
-   */
-  async setIncidentStatus(
-    channel: string,
-    threadTs: string,
-    by: string,
-    command: StatusCommand
-  ): Promise<{ text: string; clearDedup?: Record<string, string> }> {
-    const incidentId = await this.incidents.findIncidentByThread(channel, threadTs);
-    if (incidentId === null) {
-      return { text: "🤷 This thread isn't linked to a stored incident — I can only change the status of alert threads I investigated (and stored)." };
-    }
-
-    if (command === "reopen") {
-      const row = await this.incidents.reopenById(incidentId, by);
-      if (!row) return { text: "ℹ️ This incident is already open (firing) — nothing to reopen." };
-      logger.info(`[status] incident ${incidentId} (${row.alertname}) reopened by ${by}`);
-      return {
-        text:
-          `🚨 *Reopened* — \`${row.alertname}\` is marked firing again on <@${by}>'s call. ` +
-          `Alertmanager may still consider it resolved, so the automatic sweeper will not close it again until it sees the alert clear twice on its own.`,
-      };
-    }
-
-    const row = await this.incidents.markResolvedById(incidentId, by);
-    if (!row) return { text: "ℹ️ This incident is already marked resolved." };
-    logger.info(`[status] incident ${incidentId} (${row.alertname}) resolved by ${by}`);
-    return {
-      text:
-        `✅ *Marked resolved* by <@${by}> — \`${row.alertname}\`${row.namespace ? ` in \`${row.namespace}\`` : ""}. ` +
-        `The dedup claim is released, so the next firing of this alert gets a fresh investigation. ` +
-        `Mention me with \`reopen\` if it comes back. ` +
-        `If a manual fix did it, mention me with \`learn\` so I remember what worked.`,
-      clearDedup: row.groupLabels ?? fallbackLabels(row.alertname, row.namespace),
-    };
-  }
+  // ---- Incident lifecycle — the bodies live in incidents/lifecycle.ts; these delegate. ----
+  runIncidentReconcile(...a: Parameters<IncidentLifecycle["runIncidentReconcile"]>): ReturnType<IncidentLifecycle["runIncidentReconcile"]> { return this.lifecycle.runIncidentReconcile(...a); }
+  setIncidentStatus(...a: Parameters<IncidentLifecycle["setIncidentStatus"]>): ReturnType<IncidentLifecycle["setIncidentStatus"]> { return this.lifecycle.setIncidentStatus(...a); }
+  learnFromThread(...a: Parameters<IncidentLifecycle["learnFromThread"]>): ReturnType<IncidentLifecycle["learnFromThread"]> { return this.lifecycle.learnFromThread(...a); }
 
   // E. reaction-learn needs to know silently whether a thread maps to a stored incident.
   async findIncidentForThread(channel: string, threadTs: string): Promise<number | null> {
     return this.incidents.findIncidentByThread(channel, threadTs);
-  }
-
-  // On-call feedback learning (`@agent learn`): map the thread to its incident, run one
-  // structured-output extraction call over the transcript, store the human-confirmed
-  // knowledge. Returns the user-facing result message for the thread.
-  /**
-   * `humanText` is what humans wrote in the thread (`humanStatements` — the bot's messages
-   * excluded, a ✅'d one included). It is both the precondition and the check: with nothing in it
-   * there is nothing to extract, and an extracted cause must trace back to it. Incident 208,
-   * 2026-10-03: neither was enforced, and the agent's own hallucinated RCA was stored here as
-   * "confirmed by on-call".
-   */
-  async learnFromThread(channel: string, threadTs: string, triggerUser: string, triggerTs: string, transcript: string, humanText: string): Promise<string> {
-    const incidentId = await this.incidents.findIncidentByThread(channel, threadTs);
-    if (incidentId === null) {
-      return "🤷 This thread isn't linked to a stored incident — I can only learn from alert threads I investigated (and stored).";
-    }
-    if (!humanText.trim()) {
-      logger.info(`[learn] incident ${incidentId}: nothing a human stated in the thread — no extraction`);
-      return "🤷 Nothing a human stated in this thread yet, so there is nothing to learn — I don't learn from my own analysis. Write the actual root cause or fix here (or ✅ the message that has it), then mention me with `learn`.";
-    }
-
-    const response = await this.llm.chat(
-      [{ role: "user", content: buildExtractionPrompt(transcript) }],
-      [],
-      EXTRACTION_SYSTEM
-    );
-    this.recordUsage(threadTs, response);
-    const parsed = parseFeedbackJson(extractText(response.content));
-    if (!parsed) {
-      return "🤷 I couldn't find a concrete conclusion in this thread yet. State the actual root cause / action taken in the thread, then mention me with `learn` again.";
-    }
-    const extracted = tracesToHumans(parsed, humanText);
-    if (!extracted) {
-      logger.warn(`[learn] incident ${incidentId}: extraction named nothing a human wrote — refused (${truncate(parsed.confirmed_root_cause ?? parsed.action_taken ?? "", 160)})`);
-      return "🤷 What I extracted came from my own messages, not from anything a human wrote here, so I did not store it as confirmed. State the root cause or fix in your own words, then mention me with `learn`.";
-    }
-
-    const result = await this.incidents.storeFeedback(incidentId, {
-      slackUser: triggerUser,
-      triggerKey: triggerTs, // ts of the learn message — same trigger can never store twice
-      rawExcerpt: transcript.slice(-2000), // provenance
-      ...extracted,
-    });
-    if (result === "duplicate") return "📚 Already learned from this exact trigger.";
-    if (result === "failed") return "⚠️ Failed to store the feedback — check the agent logs.";
-
-    logger.info(`[learn] incident ${incidentId}: cause=${!!extracted.confirmed_root_cause} action=${!!extracted.action_taken} outcome=${extracted.outcome}`);
-    return [
-      "📚 *Learned* — I'll recall this on future similar incidents:",
-      `• Root cause: ${extracted.confirmed_root_cause ?? "_not stated_"}`,
-      `• Action taken: ${extracted.action_taken ?? "_not stated_"}`,
-      `• Outcome: \`${extracted.outcome}\``,
-      "_Got it wrong? Correct it in the thread and mention me with `learn` again._",
-    ].join("\n");
   }
 
   // Format backstop for conversation-mode mentions: one tool-less LLM call that rewrites

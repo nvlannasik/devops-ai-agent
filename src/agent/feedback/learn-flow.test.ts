@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DevOpsAgent } from "../index.js";
+import { IncidentLifecycle } from "../incidents/lifecycle.js";
+
+const viaHost = (fake: object) => Object.assign(Object.create(IncidentLifecycle.prototype), fake, { host: fake });
 
 // learnFromThread end to end, through stubs (the class connects nothing until initialize()).
 // Incident 208: no human statement, and the extraction model returned the agent's own RCA.
@@ -15,7 +17,7 @@ const flow = async (humanText: string, extraction: string) => {
     llm: { chat: async () => (llmCalls++, { content: [{ type: "text", text: extraction }], stopReason: "end_turn" }) },
     recordUsage: () => {},
   };
-  const reply: string = await (DevOpsAgent.prototype as any).learnFromThread.call(self, "C1", "1.1", "U1", "2.2", "transcript", humanText);
+  const reply: string = await IncidentLifecycle.prototype.learnFromThread.call(viaHost(self), "C1", "1.1", "U1", "2.2", "transcript", humanText);
   return { reply, stored, llmCalls };
 };
 const BOT_RCA = '{"confirmed_root_cause":"Certificate workload-cert was renewed but workload-tls was not reloaded","action_taken":null,"outcome":"unknown"}';
