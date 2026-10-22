@@ -6,6 +6,8 @@ import { AlertFlow } from "./alerts.js";
 const viaAlerts = (fake: object) => Object.assign(Object.create(AlertFlow.prototype), fake, { host: fake });
 import { resetServiceGraphCache } from "../agent/correlation/topology.js";
 import { config } from "../config/index.js";
+import { InFlightRegistry } from "../agent/inflight/index.js";
+import { fakeRedis } from "../agent/inflight/fake-redis.test.js";
 
 // Cross-group correlation (agent/correlation/topology.ts, spec 2026-10-13). A related alert
 // merges into an open incident's thread instead of opening its own — see correlate() in
@@ -48,6 +50,7 @@ function harness(opts: {
   let pending: Promise<unknown> | null = null;
   const self: any = {
     unstored: new Map(),
+    inflight: new InFlightRegistry(() => null),
     agent: {
       callTool: opts.callTool ?? (async () => VECTOR),
       openRelatable: opts.openRelatable ?? (async () => []),
@@ -313,6 +316,7 @@ test("a resolve of the merged child group still resolves by its own labels", asy
   const resolvedCalls: any[] = [];
   const self: any = {
     unstored: new Map(),
+    inflight: new InFlightRegistry(() => null),
     dedup: { clear: async () => {} },
     agent: {
       resolveIncident: async (labels: any) => {
@@ -330,4 +334,28 @@ test("a resolve of the merged child group still resolves by its own labels", asy
 
   assert.equal(resolvedCalls.length, 1);
   assert.deepEqual(resolvedCalls[0], CHILD_LABELS);
+});
+
+// 2026-10-22: the parent's investigation runs on ANOTHER replica — not in this pod's `unstored`,
+// not yet a stored row. Its Redis mirror is what lets the related alert find it.
+test("a related alert merges into an investigation still running on another replica", async () => {
+  resetServiceGraphCache();
+  const redis = fakeRedis();
+  await new InFlightRegistry(() => redis).publish("100.1", { ...PARENT });
+  const h = harness();
+  h.self.inflight = new InFlightRegistry(() => redis);
+  const result = await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "issue text body", "warning");
+  await h.waitFollowUp();
+  assert.equal(result, true);
+  assert.equal(h.posted[0].thread_ts, "100.1");
+  assert.equal(h.posted[0].channel, "C1");
+});
+
+test("another replica's entry in another namespace is not a candidate", async () => {
+  resetServiceGraphCache();
+  const redis = fakeRedis();
+  await new InFlightRegistry(() => redis).publish("100.1", { ...PARENT, namespace: "other" });
+  const h = harness();
+  h.self.inflight = new InFlightRegistry(() => redis);
+  assert.equal(await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "t", "warning"), false);
 });

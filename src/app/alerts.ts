@@ -50,8 +50,8 @@ export class AlertFlow {
   // was merged into an open incident's thread and is fully handled; false = take today's path.
   // Fail open at every step: no subject, no graph, no match, or a failed post all return false,
   // so an alert is never lost to correlation.
-  // ponytail: in-flight parents are this process's `unstored` map only — a related alert landing
-  // on another replica before the parent's row is stored opens its own thread, as before.
+  // In-flight parents are this pod's `unstored` map plus every other replica's, mirrored to Redis
+  // (agent/inflight) — a parent still being investigated elsewhere has no stored row yet.
   async correlate(
     channel: string,
     groupLabels: Record<string, string>,
@@ -64,7 +64,9 @@ export class AlertFlow {
     if (!namespace || subjects.length === 0) return false;
     const graph = await serviceGraph((n, i) => this.host.agent.callTool(n, i));
     if (!graph) return false;
-    const inFlight: OpenIncident[] = [...this.host.unstored.entries()]
+    const remote = await this.host.inflight.remote();
+    const running = new Map([...remote, ...this.host.unstored]);
+    const inFlight: OpenIncident[] = [...running.entries()]
       .filter(([, u]) => u.namespace && u.startedAt !== undefined)
       .map(([threadTs, u]) => ({
         threadTs,
@@ -243,14 +245,17 @@ export class AlertFlow {
     );
     // Same queue as the mentions: a repeat alert on a thread someone is already talking in
     // must not interleave with that conversation.
-    this.host.unstored.set(threadId, {
+    const running = {
       key: incidentKey(groupLabels),
       channel,
       namespace: groupLabels.namespace,
       subjects: changeScope.serviceSubjects,
       startedAt: changeScope.alertAt.getTime(),
       alertname: alertName,
-    });
+    };
+    this.host.unstored.set(threadId, running);
+    // Mirrored so another replica can correlate against it and hand it a resolve (agent/inflight).
+    await this.host.inflight.publish(threadId, running);
     void this.host.inFlight.track(
       { channel, threadTs: threadId, kind: "alert" },
       this.host.threadQueue.run(threadId, () =>
@@ -277,6 +282,20 @@ export class AlertFlow {
           logger.info(`[slack] resolved alert ${alertName} arrived before its investigation finished — closing the incident once it is stored`);
           return;
         }
+        // Being investigated on another replica: hand the resolve over through Redis. Its row may
+        // have landed while we looked, after that pod checked for a held resolve — so look once
+        // more; markResolved is a single UPDATE … RETURNING, so only one of the two pods closes it.
+        const elsewhere = await this.host.inflight.markResolved(incidentKey(groupLabels), resolved);
+        if (elsewhere) {
+          const late = await this.host.agent.resolveIncident(groupLabels);
+          if (late) {
+            await this.postResolved(late, groupLabels, resolved);
+            logger.info(`[slack] alert resolved: ${alertName} — closed here, its row landed while the resolve was handed over`);
+            return;
+          }
+          logger.info(`[slack] resolved alert ${alertName} arrived while another replica investigates thread ${elsewhere} — handed over`);
+          return;
+        }
         logger.debug(`[slack] resolved alert ${alertName} has no stored unresolved incident — dedup cleared only`);
         return;
       }
@@ -301,7 +320,7 @@ export class AlertFlow {
 
   /** The other half of handleResolvedAlert's early branch: the incident exists now, so close it. */
   async closeIfResolvedEarly(threadId: string, labels: Record<string, string>): Promise<void> {
-    const early = this.host.unstored.get(threadId)?.resolved;
+    const early = (this.host.unstored.get(threadId)?.resolved ?? (await this.host.inflight.resolvedFor(threadId))) as AlertItem[] | undefined;
     if (!early) return;
     try {
       const thread = await this.host.agent.resolveIncident(labels);
@@ -472,6 +491,7 @@ export class AlertFlow {
         .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${errDetail(e)}`));
     } finally {
       this.host.unstored.delete(threadId);
+      await this.host.inflight.remove(threadId);
       this.host.semaphore.release();
     }
   }

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REDIS_KEYS as MEMORY_KEYS } from "../agent/memory/index.js";
 import { REDIS_KEYS as DEDUP_KEYS } from "../agent/dedup/index.js";
+import { REDIS_KEYS as INFLIGHT_KEYS } from "../agent/inflight/index.js";
 
 // What the agent's two stateful dependencies actually HOLD — the answer to "where did that
 // incident go" and "what is in Redis", which is a real 3am question and was nowhere on this
@@ -86,11 +87,11 @@ export function postgresTables(): Store[] {
 }
 
 /**
- * The Redis key namespaces this agent writes. Composed from the two modules that own them, so
+ * The Redis key namespaces this agent writes. Composed from the modules that own them, so
  * this is a view of the code rather than a copy of it.
  */
 export function redisNamespaces(): Store[] {
-  return [...Object.values(MEMORY_KEYS), ...Object.values(DEDUP_KEYS)].map((k) => ({
+  return [...Object.values(MEMORY_KEYS), ...Object.values(DEDUP_KEYS), ...Object.values(INFLIGHT_KEYS)].map((k) => ({
     label: `${k.prefix}:*`,
     detail: k.holds,
   }));

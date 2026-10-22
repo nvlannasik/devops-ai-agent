@@ -57,7 +57,11 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
   investigation still in flight (matched on alertname+namespace, like `markResolved`) and
   `closeIfResolvedEarly` applies it on store — without it the reconciler closed such incidents
   ~13 minutes later (2026-09-29). A resolve for a group nobody is investigating is NOT held: it
-  would close the next, unrelated firing on arrival.
+  would close the next, unrelated firing on arrival. Each `unstored` entry is mirrored to Redis
+  (`agent/inflight`, `inflight:<threadTs>`, 15m TTL) so ANOTHER replica can correlate against an
+  investigation still in flight and hand it a resolve; that replica re-checks for the row once after
+  the hand-off, and `markResolved`'s single `UPDATE … RETURNING` keeps the two pods from both closing
+  it. Without Redis, or on a Redis error, it is the single-pod behaviour, never a lost alert.
 - **System prompt** lives in `prompts/system.md` — editable without rebuild.
 - **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
   per investigation: flat `name`/`description`/`when` frontmatter, hand-parsed (no YAML dep), body

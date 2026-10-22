@@ -17,6 +17,7 @@ import { MentionFlow } from "./mention.js";
 import { AlertFlow, type AlertmanagerPayload } from "./alerts.js";
 import { RemediationFlow } from "./remediation.js";
 import { ThreadCommands } from "./commands.js";
+import { InFlightRegistry } from "../agent/inflight/index.js";
 
 export { ThreadQueue, InFlightWork } from "./queue.js";
 export { fetchThreadReplies } from "./commands.js";
@@ -43,6 +44,7 @@ export class SlackApp {
    * an incident not stored yet is still an open incident another alert can be merged into.
    */
   private readonly unstored = new Map<string, UnstoredAlert>();
+  private readonly inflight = new InFlightRegistry();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -123,6 +125,7 @@ export class SlackApp {
       get threadQueue() { return self.threadQueue; },
       get inFlight() { return self.inFlight; },
       get unstored() { return self.unstored; },
+      get inflight() { return self.inflight; },
       get tourThreads() { return self.tourThreads; },
       get stopping() { return self.stopping; },
       get verifyTimer() { return self.verifyTimer; },

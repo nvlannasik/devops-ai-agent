@@ -448,6 +448,7 @@ for a section over the limit, a lone surrogate, or an outage at Slack.
 - **Redis-backed when `MEMORY_BACKEND=redis`:** the claim is an atomic `SET dedup:{fp} 1 EX <ttl> NX` — returns `"OK"` only for the first pod to see the alert, so under autoscaling N pods can't all investigate the same alert. In-memory `Map` is the **single-pod fallback** when Redis isn't configured.
 - Reuses the **one shared Redis connection** (`src/db/redis.ts` singleton, `getRedis()`), same client as conversation memory — zero new deps, zero extra connection. `shouldProcess()` is now **async** (Redis call); caller `await`s it in `handleAlert`.
 - `dedup/index.test.ts` covers the in-memory fallback path (first-vs-repeat, label-order stability, TTL expiry).
+- **In-flight investigations are shared the same way (2026-10-22, `agent/inflight`).** The incident row only exists once the RCA is stored, so a second replica used to see nothing of a running investigation: a related alert opened its own thread, and an early resolve waited ~13 min for the reconciler. Each `unstored` entry is now also `SET inflight:{threadTs} <json> EX 900`; correlation reads them all (`SCAN` + `MGET`), a resolve with no row and no local entry is written onto the matching entry (`KEEPTTL`) and the investigating pod reads it in `closeIfResolvedEarly`. Every call fails open to the old single-pod behaviour.
 
 ### Alert Correlation (one investigation per Alertmanager group)
 `src/agent/correlation/index.ts` (pure, unit-tested). **One Alertmanager webhook = one group**

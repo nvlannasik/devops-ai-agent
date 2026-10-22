@@ -6,6 +6,7 @@ import type { Block } from "../utils/slack/blocks.js";
 import type { ThreadCommands } from "./commands.js";
 import type { RemediationFlow } from "./remediation.js";
 import type { Accepted, InFlightWork, Semaphore, ThreadQueue } from "./queue.js";
+import type { InFlightRegistry } from "../agent/inflight/index.js";
 
 /** An alert thread whose incident is not stored yet, and a resolve that arrived for it meanwhile. */
 export type UnstoredAlert = { key: string; resolved?: AlertItem[]; channel?: string; namespace?: string; subjects?: string[]; startedAt?: number; alertname?: string };
@@ -22,6 +23,8 @@ export interface SlackHost {
   readonly threadQueue: ThreadQueue;
   readonly inFlight: InFlightWork<Accepted>;
   readonly unstored: Map<string, UnstoredAlert>;
+  /** `unstored`, mirrored to Redis for the other replicas (agent/inflight). */
+  readonly inflight: InFlightRegistry;
   readonly tourThreads: Set<string>;
   readonly stopping: boolean;
   /** SlackApp's own field: the poller arms it, stop() clears it. */
