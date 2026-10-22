@@ -7,6 +7,7 @@ set `DASHBOARD_ENABLED=true` and a `DASHBOARD_PASSWORD` (see [CONFIGURATION.md](
 /                overview — counts, recent incidents, remediation outcomes, model activity + cost per backend
 /incidents       filterable list, 10 rows a page
 /incidents/N     one incident: the RCA parsed into sections, its remediations & verdicts, LLM usage + cost
+/postmortems     every incident with a draft, newest first: requester, backend, revision count (own rail item, under Monitor)
 /incidents/N/postmortem      the latest postmortem draft for incident N, rendered (see USAGE.md)
 /incidents/N/postmortem.md   the same draft as a raw Markdown download
 /topology        the agent stack's own map: LLM backends, MCP tools, Postgres/Redis/SQS stores

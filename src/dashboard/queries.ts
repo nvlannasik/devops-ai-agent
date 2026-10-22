@@ -58,6 +58,18 @@ export interface PostmortemRow {
   markdown: string;
 }
 
+/** One row of /postmortems: an incident's newest draft, without its body, and how many it has. */
+export interface PostmortemListRow {
+  incidentId: number;
+  alertname: string;
+  namespace: string | null;
+  severity: string | null;
+  createdAt: Date;
+  requestedBy: string | null;
+  backend: string | null;
+  revisions: number;
+}
+
 /**
  * A related alert group that correlate() filed as a CHILD of this incident — same Slack thread,
  * `rca` starting "Merged into…" (agent/correlation). `subjects` is the service-level identity it
@@ -652,6 +664,31 @@ export class DashboardQueries {
       backend: r.backend ?? null,
       markdown: r.markdown,
     };
+  }
+
+  /** Every incident with a draft, newest draft first: the /postmortems list. Never the markdown. */
+  async postmortems(): Promise<PostmortemListRow[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT * FROM (
+         SELECT p.incident_id, i.alertname, i.namespace, i.severity, p.created_at, p.requested_by, p.backend,
+                count(*) OVER (PARTITION BY p.incident_id) AS revisions,
+                row_number() OVER (PARTITION BY p.incident_id ORDER BY p.created_at DESC) AS rn
+           FROM postmortems p JOIN incidents i ON i.id = p.incident_id
+       ) d WHERE rn = 1
+       ORDER BY created_at DESC
+       LIMIT 100`
+    );
+    return rows.map((r) => ({
+      incidentId: num(r.incident_id),
+      alertname: r.alertname,
+      namespace: r.namespace ?? null,
+      severity: r.severity ?? null,
+      createdAt: r.created_at,
+      requestedBy: r.requested_by ?? null,
+      backend: r.backend ?? null,
+      revisions: num(r.revisions),
+    }));
   }
 
   /** Children of incident `parentId` — related alerts correlate() merged into its thread. */

@@ -95,6 +95,8 @@ export const ICON = {
   // Memory (/memory): an archive box — what the agent keeps. New, because nothing else here means it.
   memory: ico(`<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/>`),
   // A thread's conversation memory: two bubbles. Not `speech` — that one means on-call.
+  // A postmortem draft: a page with a folded corner and lines of text.
+  postmortem: ico(`<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8Z"/><path d="M14 3v5h5"/><path d="M9 13h6"/><path d="M9 17h4"/>`),
   chats: ico(`<path d="M14 9a2 2 0 0 1-2 2H7l-3 3V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2Z"/><path d="M18 9h1a2 2 0 0 1 2 2v9l-3-3h-5a2 2 0 0 1-2-2v-1"/>`),
 };
 

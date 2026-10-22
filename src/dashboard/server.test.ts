@@ -714,3 +714,22 @@ test("a key page asks the agent's recall for exactly that key; no ns is the NULL
     assert.match(status(await raw(port, "GET /memory HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
   }, { memory, queries });
 });
+
+// /postmortems (2026-10-22): the list page behind its own rail item.
+test("/postmortems lists the drafts, behind the password", async () => {
+  const queries = new DashboardQueries(
+    stubPool((sql) =>
+      /FROM postmortems p JOIN incidents/.test(sql)
+        ? [{ incident_id: 7, alertname: "KubePodCrashLooping", namespace: "sample-apps", severity: "critical",
+             created_at: new Date("2026-10-14T10:20:00Z"), requested_by: "U1", backend: "claude", revisions: 2 }]
+        : []
+    )
+  );
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /postmortems HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(res, /href="\/incidents\/7\/postmortem"/);
+    assert.match(status(await raw(port, "GET /postmortems HTTP/1.1")), /^HTTP\/1\.1 303\b/);
+    assert.match(status(await raw(port, "POST /postmortems HTTP/1.1", authed)), /^HTTP\/1\.1 405\b/);
+  }, { queries });
+});

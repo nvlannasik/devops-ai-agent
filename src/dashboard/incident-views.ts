@@ -2,7 +2,7 @@ import { costUsd, type Price } from "../agent/llm/pricing.js";
 import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, headers, table, timeTag } from "./html.js";
 import { renderRca } from "./rca.js";
 import type { Filters } from "./filters.js";
-import type { ChildIncident, FeedbackRow, IncidentDetail, IncidentPage, PostmortemRow, RemediationRow, TimelineEvent, TokenLine } from "./queries.js";
+import type { ChildIncident, FeedbackRow, IncidentDetail, IncidentPage, PostmortemListRow, PostmortemRow, RemediationRow, TimelineEvent, TokenLine } from "./queries.js";
 import { renderMarkdown } from "./markdown.js";
 import { ICON, badge, breakable, costCell, dash, empty, fmtUsd, pager, section, severityBadge, statList, stateBadge, toneAttr } from "./parts.js";
 import { layout } from "./layout.js";
@@ -385,6 +385,7 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
      <h1>Postmortem draft</h1>
      <div class="title-meta">
        <span class="meta">Generated ${timeTag(pm.createdAt)} by ${esc(pm.requestedBy ?? "unknown")} · backend ${esc(pm.backend ?? "unknown")}</span>
+       <a class="standalone" href="/postmortems">← All postmortems</a>
        <a class="standalone" href="/incidents/${esc(incidentId)}">← Incident #${esc(incidentId)}</a>
        <a class="standalone" href="/incidents/${esc(incidentId)}/postmortem.md">Download Markdown →</a>
      </div>
@@ -394,7 +395,7 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
 
      <div class="card md">${renderMarkdown(pm.markdown)}</div>
      </div>`,
-    { current: "/incidents", openIncidents }
+    { current: "/postmortems", openIncidents }
   );
 }
 
@@ -404,6 +405,43 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
  * /api/trace/<thread>. A delegate's events say which delegate.
  */
 /** What this investigation cost (2026-10-08): its llm_usage rows, priced by the operator's prices. */
+/**
+ * /postmortems: every incident that has a draft, newest draft first — one row per incident, with
+ * how many times `@agent postmortem` was run on it. Like the draft page, it only reads: a draft is
+ * made in the incident's Slack thread, so the empty state says that rather than offering a button.
+ */
+export function postmortemsPage(rows: PostmortemListRow[], now: Date = new Date(), openIncidents?: number): string {
+  const body = rows
+    .map(
+      (r) => `<tr role="row"${toneAttr(r.severity)}>
+      ${cell("Drafted", timeTag(r.createdAt, now), "when")}
+      ${cell("Incident", `<a href="/incidents/${esc(r.incidentId)}/postmortem">${breakable(r.alertname)}</a>` +
+        `<div class="sub"><a href="/incidents/${esc(r.incidentId)}">Incident #${esc(r.incidentId)}</a></div>`, "primary")}
+      ${cell("Namespace", esc(r.namespace ?? "—"), "ns mono")}
+      ${cell("Severity", severityBadge(r.severity), "sev")}
+      ${cell("Requested by", esc(r.requestedBy ?? "unknown"))}
+      ${cell("Backend", esc(r.backend ?? "unknown"), "mono")}
+      ${cell("Revisions", esc(r.revisions), "num")}
+    </tr>`
+    )
+    .join("");
+  const list = rows.length
+    ? table(headers("Drafted", "Incident", "Namespace", "Severity", "Requested by", "Backend", ["Revisions", "num"]), body, "stack")
+    : empty(
+        "No postmortem drafts yet.",
+        "Mention the agent with @agent postmortem in an incident's Slack thread, and the draft appears here.",
+        ICON.postmortem
+      );
+  return layout(
+    "Postmortems",
+    `<h1>Postmortems</h1>
+     <p class="meta">The newest draft for each incident. Facts (timeline, durations) come from recorded data; the
+       narrative is drafted by the model. Review before sharing.</p>
+     ${list}`,
+    { current: "/postmortems", openIncidents }
+  );
+}
+
 function usageSection(usage: TokenLine[], prices: ReadonlyMap<string, Price>): string {
   if (usage.length === 0) return "";
   const rows = usage

@@ -6,7 +6,7 @@ import * as views from "./views.js";
 // 2026-10-21 split: views.ts is a barrel over one module per page. server.ts and views.test.ts
 // import from it, so it must keep exporting every page; and no page module may import it back,
 // or ESM evaluates a half-initialised cycle.
-const PAGES = ["layout", "loginPage", "errorPage", "overviewPage", "listPage", "detailPage", "postmortemPage",
+const PAGES = ["layout", "loginPage", "errorPage", "overviewPage", "listPage", "detailPage", "postmortemPage", "postmortemsPage",
   "harnessPage", "harnessGatePage", "topologyPage", "promptPage", "skillPage", "contextPage", "benchPage",
   "clusterPage", "pager", "pageWindow", "section", "empty", "ICON", "REFRESH_SECONDS"];
 

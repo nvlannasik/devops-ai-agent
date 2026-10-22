@@ -818,14 +818,14 @@ test("every icon is decorative and every label stays in the markup", () => {
   const html = layout("Test", "<p>hi</p>");
   const icons = [...html.matchAll(/<svg class="ico"[^>]*>/g)];
   assert.equal(
-    icons.length, 13,
-    "the drawer's two states, the brand mark, nine destinations and the sign-out button"
+    icons.length, 14,
+    "the drawer's two states, the brand mark, ten destinations and the sign-out button"
   );
   for (const [tag] of icons) {
     assert.match(tag, /aria-hidden="true"/);
     assert.match(tag, /focusable="false"/, "IE-era focusability still ships in some engines");
   }
-  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 10);
+  assert.equal([...html.matchAll(/<span class="lbl">/g)].length, 11);
 });
 
 // ---------- section glyphs ----------
@@ -2056,8 +2056,8 @@ test("the rail groups its destinations, and each caption labels its own list", (
   const html = layout("Test", "<p>hi</p>", { current: "/" });
   assert.match(html, /<p class="rail-group" id="rail-g0">Monitor<\/p><ul aria-labelledby="rail-g0">/);
   assert.match(html, /<p class="rail-group" id="rail-g1">Agent<\/p><ul aria-labelledby="rail-g1">/);
-  // nine destinations (Cluster, then the two memory pages, joined Agent), and still exactly one marked
-  assert.equal([...html.matchAll(/<li><a href="/g)].length, 9);
+  // ten destinations (Cluster and the two memory pages joined Agent, Postmortems joined Monitor), and still exactly one marked
+  assert.equal([...html.matchAll(/<li><a href="/g)].length, 10);
   assert.equal([...html.matchAll(/<a href="[^"]*" aria-current="page">/g)].length, 1);
 });
 
