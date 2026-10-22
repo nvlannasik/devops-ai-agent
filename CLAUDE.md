@@ -62,6 +62,10 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
   investigation still in flight and hand it a resolve; that replica re-checks for the row once after
   the hand-off, and `markResolved`'s single `UPDATE … RETURNING` keeps the two pods from both closing
   it. Without Redis, or on a Redis error, it is the single-pod behaviour, never a lost alert.
+  A correlation follow-up on a thread ANOTHER pod is still investigating waits for that pod's
+  entry to go (`InFlightRegistry.waitGone`) before taking a semaphore slot: `ThreadQueue` only
+  serialises inside one pod, and running alongside interleaved the thread's memory and answered
+  before the RCA existed (live, 2026-10-22).
 - **System prompt** lives in `prompts/system.md` — editable without rebuild.
 - **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
   per investigation: flat `name`/`description`/`when` frontmatter, hand-parsed (no YAML dep), body

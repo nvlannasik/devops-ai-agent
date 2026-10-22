@@ -341,10 +341,12 @@ test("a resolve of the merged child group still resolves by its own labels", asy
 test("a related alert merges into an investigation still running on another replica", async () => {
   resetServiceGraphCache();
   const redis = fakeRedis();
-  await new InFlightRegistry(() => redis).publish("100.1", { ...PARENT });
+  const owner = new InFlightRegistry(() => redis);
+  await owner.publish("100.1", { ...PARENT });
   const h = harness();
-  h.self.inflight = new InFlightRegistry(() => redis);
+  h.self.inflight = new InFlightRegistry(() => redis, { pollMs: 5 });
   const result = await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "issue text body", "warning");
+  await owner.remove("100.1"); // the owner finishes; the deferred follow-up may now run
   await h.waitFollowUp();
   assert.equal(result, true);
   assert.equal(h.posted[0].thread_ts, "100.1");
@@ -358,4 +360,24 @@ test("another replica's entry in another namespace is not a candidate", async ()
   const h = harness();
   h.self.inflight = new InFlightRegistry(() => redis);
   assert.equal(await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "t", "warning"), false);
+});
+
+// 2026-10-22, live with two replicas: the follow-up ran on pod B while pod A was still writing the
+// parent's RCA in the same thread — both appended to its memory, and B answered "does it fit the
+// root cause already found?" before there was one. It now waits for A's entry to go.
+test("a follow-up on another replica's investigation waits until that investigation is gone", async () => {
+  resetServiceGraphCache();
+  const redis = fakeRedis();
+  const owner = new InFlightRegistry(() => redis);
+  await owner.publish("100.1", { ...PARENT });
+  const h = harness();
+  h.self.inflight = new InFlightRegistry(() => redis, { pollMs: 5 });
+  assert.equal(await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "t", "warning"), true);
+  assert.equal(h.posted.length, 1, "the related-alert notice is posted straight away");
+  await new Promise((res) => setTimeout(res, 40));
+  assert.equal(h.investigateCalls.length, 0, "no follow-up while the parent is still being investigated");
+  assert.equal(h.semaphoreCalls.acquire, 0, "and no investigation slot held while waiting");
+  await owner.remove("100.1");
+  await h.waitFollowUp();
+  assert.equal(h.investigateCalls.length, 1);
 });

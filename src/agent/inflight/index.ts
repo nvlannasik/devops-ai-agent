@@ -38,7 +38,16 @@ type RedisLike = Pick<Redis, "set" | "get" | "del" | "mget" | "scan">;
 const keyOf = (threadTs: string) => `${REDIS_KEYS.inflight.prefix}:${threadTs}`;
 
 export class InFlightRegistry {
-  constructor(private readonly redis: () => RedisLike | null = getRedis) {}
+  private readonly pollMs: number;
+  private readonly maxWaitMs: number;
+
+  constructor(
+    private readonly redis: () => RedisLike | null = getRedis,
+    opts: { pollMs?: number; maxWaitMs?: number } = {}
+  ) {
+    this.pollMs = opts.pollMs ?? 5_000;
+    this.maxWaitMs = opts.maxWaitMs ?? TTL_SECONDS * 1000;
+  }
 
   async publish(threadTs: string, entry: InFlightEntry): Promise<void> {
     await this.safely("publish", undefined, async (r) => {
@@ -94,6 +103,24 @@ export class InFlightRegistry {
       const v = await r.get(keyOf(threadTs));
       return v ? (JSON.parse(v) as InFlightEntry).resolved : undefined;
     });
+  }
+
+  /**
+   * Wait until another replica's investigation of `threadTs` is gone — its RCA stored, or the pod
+   * gone and the entry expired. True when it went, false after `maxWaitMs`. A thread's work is
+   * serialised only inside one pod (ThreadQueue), so a correlation follow-up on another pod's
+   * thread must wait here: run alongside, both append to the thread's memory and the follow-up
+   * asks about a root cause that does not exist yet (live, 2026-10-22). No Redis, or an error,
+   * returns true at once: nothing to wait on is the single-pod behaviour.
+   */
+  async waitGone(threadTs: string): Promise<boolean> {
+    const until = Date.now() + this.maxWaitMs;
+    for (;;) {
+      const present = await this.safely("waitGone", false, async (r) => (await r.get(keyOf(threadTs))) !== null);
+      if (!present) return true;
+      if (Date.now() >= until) return false;
+      await new Promise((res) => setTimeout(res, this.pollMs));
+    }
   }
 
   private async safely<T>(op: string, fallback: T, fn: (r: RedisLike) => Promise<T>): Promise<T> {
