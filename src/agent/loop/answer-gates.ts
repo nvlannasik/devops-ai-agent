@@ -1,7 +1,7 @@
 import logger from "../../utils/logger/index.js";
 import { truncate } from "../../utils/truncate/index.js";
 import { isRcaResponse } from "../../utils/slack/blocks.js";
-import { SERIALIZED_BLOCKS, namesToolOnly } from "../llm/router.js";
+import { SERIALIZED_BLOCKS, TEXT_TOOL_CALLS, namesToolOnly } from "../llm/router.js";
 import type { LLMResponse } from "../llm/types.js";
 import type { ConversationMemory } from "../memory/index.js";
 import { observedText } from "../grounding/index.js";
@@ -38,7 +38,7 @@ export async function settleAnswer(h: GateHost, ctx: RunCtx, s: RunState, respon
   // A model that echoes our own content-block JSON as prose means its tool-call
   // channel is not working (see toOpenAIMessages in the OpenAI-compatible clients).
   // Log it here — otherwise the only symptom is a wall of JSON in Slack.
-  if (SERIALIZED_BLOCKS.test(summary)) {
+  if (SERIALIZED_BLOCKS.test(summary) || TEXT_TOOL_CALLS.test(summary)) {
     logger.warn(
       `[${ctx.threadId}] final answer looks like a serialized content array — the backend is likely ` +
       `not emitting native tool_calls (check the LLM tool-call parser). Preview: ${truncate(summary, 200)}`

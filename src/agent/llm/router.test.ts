@@ -128,6 +128,38 @@ test("an answer that is only a tool name falls up", async () => {
   assert.equal(res.content[0].text, "H");
 });
 
+// Regression: observed live on 2026-10-22 (thread 1792685945.772259). private-llm-agus, asked to
+// go and look after answering with no tool call, wrote the calls it meant to make as a JSON
+// object in its text — malformed, too (`"limit":10"`) — with stop=end_turn. Neither detector
+// knew that shape, so the router kept the answer and Slack got the JSON.
+const TEXT_TOOL_CALLS =
+  '{"tool_calls":[{"id":"call_00_1","name":"prometheus_query","args":{"query":"up"}},' +
+  '{"id":"call_00_2","name":"loki_query_range","args":{"query":"{app=\\"x\\"}","limit":10"}}]}';
+
+test("tool calls written out as JSON text fall up", async () => {
+  const calls: string[] = [];
+  const r = build(calls, fake(answer(TEXT_TOOL_CALLS), calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  const res = await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["light1", "heavy1"]);
+  assert.equal(res.content[0].text, "H");
+});
+
+test("the same JSON inside a code fence falls up too", async () => {
+  const calls: string[] = [];
+  const fenced = answer("```json\n" + TEXT_TOOL_CALLS + "\n```");
+  const r = build(calls, fake(fenced, calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["light1", "heavy1"]);
+});
+
+test("prose that talks about tool_calls is NOT a failure", async () => {
+  const calls: string[] = [];
+  const prose = answer('The backend returned `{"tool_calls": []}` in its text, so nothing ran.');
+  const r = build(calls, fake(prose, calls, "light1"), fake(answer("H"), calls, "heavy1"));
+  await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["light1"]);
+});
+
 test("a real sentence that merely mentions a tool is NOT a failure", async () => {
   const calls: string[] = [];
   const tools = [{ name: "k8s_find_unused_resources", description: "", input_schema: { type: "object" as const } }];

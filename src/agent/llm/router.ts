@@ -12,6 +12,13 @@ import type { ContentBlock, LLMClient, LLMResponse, Message, ToolDefinition } fr
 // the two cannot drift apart.
 export const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
 
+// A third shape of the same dead channel: the model writes the calls it meant to make as an
+// OpenAI-style `{"tool_calls":[…]}` object in its TEXT, optionally fenced, and stops. Observed
+// live 2026-10-22 from private-llm-agus — malformed JSON at that — and shipped to Slack, because
+// it was neither of the two shapes above. Anchored at the start, so prose that mentions
+// `tool_calls` is left alone. Never parsed and run: a call the model wrote as prose is not a call.
+export const TEXT_TOOL_CALLS = /^\s*(?:```(?:json)?\s*)?\{\s*"tool_calls"\s*:\s*\[/;
+
 /**
  * Failures a retry cannot fix. Exhausted credit and a rejected key do not heal in 120 seconds,
  * and the default cool-off treats them as if they might: a bench run lost six attempts to
@@ -61,6 +68,7 @@ function failureOf(res: LLMResponse, tools: ToolDefinition[]): Failure | null {
   const text = textOf(res.content);
   if (!text) return { reason: `empty response (stop=${res.stopReason})`, toolChannelDead: false };
   if (SERIALIZED_BLOCKS.test(text)) return { reason: "serialized content blocks", toolChannelDead: true };
+  if (TEXT_TOOL_CALLS.test(text)) return { reason: "tool calls written out as text", toolChannelDead: true };
   if (namesToolOnly(text, tools)) {
     return { reason: `answered with a tool name instead of calling it (${text.trim()})`, toolChannelDead: true };
   }
