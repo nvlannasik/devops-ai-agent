@@ -81,7 +81,7 @@ export class ThreadCommands {
   ): Promise<void> {
     // Queued behind the alert's own investigation the draft can wait minutes, and the progress
     // line is posted only once the queue reaches it — say so now instead of going quiet.
-    if (this.host.threadQueue.busy(threadId)) {
+    if (await this.host.threadQueue.busy(threadId)) {
       await client.chat
         .postMessage({ channel: event.channel, thread_ts: threadId, text: "⏳ Postmortem queued — it starts when the investigation running in this thread finishes." })
         .catch((e) => { logger.debug(`[slack] postmortem queued ack failed for thread ${threadId}: ${errDetail(e)}`); });

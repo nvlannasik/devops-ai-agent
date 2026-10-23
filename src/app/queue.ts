@@ -1,3 +1,5 @@
+import type { ThreadLock } from "../agent/threadlock/index.js";
+
 // The work-queue primitives SlackApp runs every turn through (2026-10-21: out of app/index.ts):
 // how many investigations run at once, one turn per thread at a time, and what this pod has
 // accepted and not finished — so a shutdown can wait for it and say what it abandoned.
@@ -44,16 +46,31 @@ export class Semaphore {
 export class ThreadQueue {
   private readonly tails = new Map<string, Promise<void>>();
 
-  /** True while a turn for this thread is queued or running. */
-  busy(key: string): boolean {
-    return this.tails.has(key);
+  /**
+   * `lock` carries the same guarantee across pods (agent/threadlock): each turn holds the thread's
+   * Redis lease while it runs. Without one, this pod's turns are serialised and nothing else.
+   */
+  constructor(private readonly lock?: ThreadLock) {}
+
+  /** True while a turn for this thread is queued or running — here, or on another pod. */
+  async busy(key: string): Promise<boolean> {
+    return this.tails.has(key) || ((await this.lock?.held(key)) ?? false);
   }
 
   run<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.tails.get(key) ?? Promise.resolve();
-    // .then(fn, fn) — a predecessor that REJECTED must still release its successor, or one
+    // The lease is taken when this turn's local predecessor is done, and held until it finishes.
+    const turn = async (): Promise<T> => {
+      const release = this.lock ? await this.lock.acquire(key) : null;
+      try {
+        return await fn();
+      } finally {
+        await release?.();
+      }
+    };
+    // .then(turn, turn) — a predecessor that REJECTED must still release its successor, or one
     // failed turn wedges the thread for the lifetime of the process.
-    const result = prev.then(fn, fn);
+    const result = prev.then(turn, turn);
     const tail = result.then(() => {}, () => {});
     this.tails.set(key, tail);
     // Only the current tail clears the entry. Without the identity check a slow turn

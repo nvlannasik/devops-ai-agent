@@ -34,10 +34,10 @@ test("a table is listed once, under the migration that introduced it", () => {
 
 // Composed from the constants the writing modules own — `agent/memory/index.test.ts` is what
 // stops those constants falling behind the code. This asserts the composition, not the list.
-test("the Redis namespaces cover conversation memory, alert dedup and in-flight investigations", () => {
+test("the Redis namespaces cover conversation memory, alert dedup, in-flight investigations and thread locks", () => {
   const ns = redisNamespaces();
   const labels = ns.map((n) => n.label);
-  assert.deepEqual(labels, ["conv:*", "rca:*", "skills:*", "dedup:*", "inflight:*"]);
+  assert.deepEqual(labels, ["conv:*", "rca:*", "skills:*", "dedup:*", "inflight:*", "threadlock:*"]);
   for (const n of ns) assert.ok(n.detail.length > 0, `${n.label} should say what it holds`);
 });
 

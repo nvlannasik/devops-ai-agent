@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { REDIS_KEYS } from "./index.js";
 import { REDIS_KEYS as DEDUP_KEYS } from "../dedup/index.js";
 import { REDIS_KEYS as INFLIGHT_KEYS } from "../inflight/index.js";
+import { REDIS_KEYS as THREADLOCK_KEYS } from "../threadlock/index.js";
 import assert from "node:assert/strict";
 import { ConversationMemory } from "./index.js";
 import type { Message } from "../llm/types.js";
@@ -155,11 +156,13 @@ test("every Redis key this agent writes is named in REDIS_KEYS", async () => {
     new URL("./index.ts", import.meta.url),
     new URL("../dedup/index.ts", import.meta.url),
     new URL("../inflight/index.ts", import.meta.url),
+    new URL("../threadlock/index.ts", import.meta.url),
   ];
   const declared = new Set([
     ...Object.values(REDIS_KEYS).map((k) => k.prefix),
     ...Object.values(DEDUP_KEYS).map((k) => k.prefix),
     ...Object.values(INFLIGHT_KEYS).map((k) => k.prefix),
+    ...Object.values(THREADLOCK_KEYS).map((k) => k.prefix),
   ]);
 
   for (const file of files) {

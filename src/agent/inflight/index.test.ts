@@ -57,24 +57,3 @@ test("a failing Redis fails open: nothing throws, nothing is found", async () =>
   await r.remove("111.1");
 });
 
-// A follow-up on another replica's investigation waits for it to finish (2026-10-22 live test:
-// running both at once interleaved their conversation memory and answered before the RCA existed).
-test("waitGone resolves true once the entry is removed", async () => {
-  const redis = fakeRedis();
-  const r = new InFlightRegistry(() => redis, { pollMs: 5 });
-  await r.publish("111.1", ENTRY);
-  let done = false;
-  const waiting = r.waitGone("111.1").then((v) => { done = true; return v; });
-  await new Promise((res) => setTimeout(res, 30));
-  assert.equal(done, false, "still running: keep waiting");
-  await r.remove("111.1");
-  assert.equal(await waiting, true);
-});
-
-test("waitGone gives up after maxMs, and is immediate without Redis", async () => {
-  const redis = fakeRedis();
-  const r = new InFlightRegistry(() => redis, { pollMs: 5, maxWaitMs: 30 });
-  await r.publish("111.1", ENTRY);
-  assert.equal(await r.waitGone("111.1"), false);
-  assert.equal(await new InFlightRegistry(() => null).waitGone("111.1"), true);
-});

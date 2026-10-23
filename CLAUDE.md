@@ -62,10 +62,13 @@ stack — scenarios, scoring, rollout — in `docs/BENCHMARK_agent_stack.md`.
   investigation still in flight and hand it a resolve; that replica re-checks for the row once after
   the hand-off, and `markResolved`'s single `UPDATE … RETURNING` keeps the two pods from both closing
   it. Without Redis, or on a Redis error, it is the single-pod behaviour, never a lost alert.
-  A correlation follow-up on a thread ANOTHER pod is still investigating waits for that pod's
-  entry to go (`InFlightRegistry.waitGone`) before taking a semaphore slot: `ThreadQueue` only
-  serialises inside one pod, and running alongside interleaved the thread's memory and answered
-  before the RCA existed (live, 2026-10-22).
+- **One turn per Slack thread, across pods** (`agent/threadlock`). `ThreadQueue.run` — the one
+  path every mention, command, alert investigation and correlation follow-up takes — also holds a
+  Redis lease `threadlock:<threadTs>` (SET NX PX 60s, renewed every 20s, released by
+  compare-then-delete) for the turn. Before it, a correlation follow-up on the pod that was not
+  investigating ran beside the RCA, interleaved the thread's memory and answered first (live,
+  2026-10-22). The semaphore is still taken INSIDE the turn, so waiting for the lease holds no slot.
+  No Redis, an error, or a 15-minute wait all run the turn anyway — never a wedged thread.
 - **System prompt** lives in `prompts/system.md` — editable without rebuild.
 - **Skills** (`prompts/skills/*.md`, loaded by `src/agent/skills/`) are prompt content selected
   per investigation: flat `name`/`description`/`when` frontmatter, hand-parsed (no YAML dep), body

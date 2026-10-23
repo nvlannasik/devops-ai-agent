@@ -18,6 +18,7 @@ import { AlertFlow, type AlertmanagerPayload } from "./alerts.js";
 import { RemediationFlow } from "./remediation.js";
 import { ThreadCommands } from "./commands.js";
 import { InFlightRegistry } from "../agent/inflight/index.js";
+import { ThreadLock } from "../agent/threadlock/index.js";
 
 export { ThreadQueue, InFlightWork } from "./queue.js";
 export { fetchThreadReplies } from "./commands.js";
@@ -33,7 +34,7 @@ export class SlackApp {
   private agent: DevOpsAgent;
   private dedup = new AlertDeduplicator();
   private semaphore = new Semaphore(config.maxConcurrentInvestigations);
-  private readonly threadQueue = new ThreadQueue();
+  private readonly threadQueue = new ThreadQueue(new ThreadLock());
   // Threads that had a cluster tour: there a follow-up naming a namespace is a tour too.
   // ponytail: in-memory, a restart forgets it — the next "jelasin namespace X" starts over.
   private readonly tourThreads = new Set<string>();

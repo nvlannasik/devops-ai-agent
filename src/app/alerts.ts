@@ -89,9 +89,6 @@ export class AlertFlow {
     // child row and leaves the parent open forever. Not correlation, so take the normal path.
     if (rel.incident.alertname === alertName) return false;
     const via = describeVia(rel.via);
-    // Another replica is still writing this thread's RCA: our follow-up must wait for it (see
-    // InFlightRegistry.waitGone). Local parents are already serialised by threadQueue below.
-    const elsewhere = !this.host.unstored.has(rel.incident.threadTs) && remote.has(rel.incident.threadTs);
     try {
       await this.host.app.client.chat.postMessage({
         channel: rel.incident.channel,
@@ -127,9 +124,6 @@ export class AlertFlow {
     void this.host.inFlight.track(
       { channel: rel.incident.channel, threadTs: rel.incident.threadTs, kind: "mention" },
       this.host.threadQueue.run(rel.incident.threadTs, async () => {
-        if (elsewhere && !(await this.host.inflight.waitGone(rel.incident.threadTs))) {
-          logger.warn(`[correlation] thread ${rel.incident.threadTs} still in flight on another replica after the wait — following up anyway`);
-        }
         await this.host.semaphore.acquire();
         try {
           let reply = toMrkdwn(
