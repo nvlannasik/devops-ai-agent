@@ -21,7 +21,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
     "@aws-sdk/client-sqs": "3.1058.0",
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@slack/bolt": "4.7.3",
     "dotenv": "16.5.0",
     "ioredis": "^5.6.1",
