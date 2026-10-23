@@ -8,7 +8,10 @@ import { fakeRedis } from "../inflight/fake-redis.test.js";
 // conversation ran at once — interleaving its memory and answering out of order.
 
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const fast = { pollMs: 5, leaseMs: 60, renewMs: 20, maxWaitMs: 2_000 };
+// Leases far longer than the test's own waits: under a full parallel `npm test` the event loop can
+// stall for tens of ms, and a 60ms lease then expired mid-turn and failed "B must not start" (the
+// code was right; the margin was not). Only the tests ABOUT expiry use short leases, explicitly.
+const fast = { pollMs: 5, leaseMs: 2_000, renewMs: 500, maxWaitMs: 5_000 };
 
 test("a second pod waits for the first pod's turn on the same thread", async () => {
   const redis = fakeRedis();
@@ -34,9 +37,9 @@ test("other threads are not blocked", async () => {
 
 test("the lease is renewed while the turn runs, so a long turn keeps the thread", async () => {
   const redis = fakeRedis();
-  const a = new ThreadLock(() => redis, fast);
+  const a = new ThreadLock(() => redis, { ...fast, leaseMs: 300, renewMs: 50 });
   const release = await a.acquire("T1");
-  await tick(150); // well past the 60ms lease
+  await tick(900); // three leases' worth: only renewal keeps it
   assert.equal(await new ThreadLock(() => redis, fast).held("T1"), true);
   await release();
   assert.equal(await a.held("T1"), false);
@@ -52,9 +55,9 @@ test("a pod that dies without releasing frees the thread once its lease runs out
 
 test("a release never deletes a lock another pod now holds", async () => {
   const redis = fakeRedis();
-  const a = new ThreadLock(() => redis, { ...fast, renewMs: 10_000 });
+  const a = new ThreadLock(() => redis, { ...fast, leaseMs: 60, renewMs: 10_000 });
   const releaseA = await a.acquire("T1");
-  await tick(80); // A's lease expired (no renewal in time)…
+  await tick(120); // A's 60ms lease expired (no renewal in time)…
   const releaseB = await new ThreadLock(() => redis, fast).acquire("T1"); // …and B took the thread
   await releaseA(); // A's late release must not free B's turn
   assert.equal(await a.held("T1"), true);

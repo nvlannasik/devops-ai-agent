@@ -53,7 +53,7 @@ test("two pods' queues share one thread through the Redis lock", async () => {
   const { ThreadLock } = await import("../agent/threadlock/index.js");
   const { fakeRedis } = await import("../agent/inflight/fake-redis.test.js");
   const redis = fakeRedis();
-  const opts = { pollMs: 5, leaseMs: 200, renewMs: 50, maxWaitMs: 2_000 };
+  const opts = { pollMs: 5, leaseMs: 2_000, renewMs: 500, maxWaitMs: 5_000 }; // no expiry mid-test under load
   const podA = new ThreadQueue(new ThreadLock(() => redis, opts));
   const podB = new ThreadQueue(new ThreadLock(() => redis, opts));
   const order: string[] = [];
