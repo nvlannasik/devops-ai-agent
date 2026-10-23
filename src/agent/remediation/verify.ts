@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import logger from "../../utils/logger/index.js";
+import { canonicalImage } from "./noop-guard.js";
 
 // Post-remediation verification (schema: migrations/006). The question here is "did the
 // problem go away", not "what do the pods look like now" — the alert that paged is the
@@ -28,15 +29,65 @@ export type RemediationCheck = {
   threadTs: string;
   alertname: string | null;
   namespace: string | null;
-  target: { namespace: string; name: string };
+  target: { namespace: string; name: string; kind?: string };
   before: PodHealth | null;
   attempts: number;
   createdAt: string; // when the remediation ran — the verdict quotes the REAL wait, not the configured one
+  /** `awaiting` = a GitOps PR whose change is not running yet (migrations/016); else pending/running. */
+  status?: string;
+  expect?: ApplyExpectation | null;
+  applyBy?: string | null;
 };
+
+/** What a GitOps PR set, in the terms a live object can be read for (migrations/016). */
+export type ApplyExpectation = { image?: string; container?: string; replicas?: number };
+
+/**
+ * The part of a PR's `changes` the cluster can confirm: the image (on its container) and the
+ * replica count — the two fields open_pr writes for set_image and scale. Null when the PR changes
+ * nothing of the kind, so no check waits for a value it could never read.
+ */
+export function expectFromChanges(changes: Array<{ field: string; to: string | number }>, container?: string): ApplyExpectation | null {
+  const out: ApplyExpectation = {};
+  for (const c of changes) {
+    if (c.field === "image" && typeof c.to === "string" && c.to) Object.assign(out, { image: c.to }, container ? { container } : {});
+    if (c.field === "replicas" && Number.isFinite(Number(c.to))) out.replicas = Number(c.to);
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Whether a workload's live object runs what the PR set — the merge AND the Flux sync, which is
+ * what "applied" has to mean before a verdict can be about the change. Images compare canonically
+ * (canonicalImage), so `docker.io/library/x` and `x:latest` are the same. `unknown` when the
+ * object cannot be read: a wait, never a verdict.
+ */
+export function applyState(expect: ApplyExpectation, raw: string): "applied" | "not-yet" | "unknown" {
+  let obj: { spec?: { replicas?: unknown; template?: { spec?: { containers?: Array<{ name?: unknown; image?: unknown }> } } } };
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return "unknown";
+  }
+  const spec = obj?.spec;
+  if (!spec || typeof spec !== "object") return "unknown";
+  if (expect.replicas !== undefined && spec.replicas !== expect.replicas) return "not-yet";
+  if (expect.image) {
+    const containers = spec.template?.spec?.containers;
+    if (!Array.isArray(containers)) return "unknown";
+    const named = containers.filter((c) => c.name === expect.container);
+    const want = canonicalImage(expect.image);
+    if (!(named.length > 0 ? named : containers).some((c) => typeof c.image === "string" && canonicalImage(c.image) === want)) return "not-yet";
+  }
+  return "applied";
+}
 
 const LEASE_SECONDS = 180; // how long a claimed check is invisible to other pods
 const MAX_ATTEMPTS = 3; // after this many claims a check is abandoned as inconclusive
 const CLAIM_BATCH = 5;
+/** How often an `awaiting` GitOps check looks at the live object, and how long it waits for the merge. */
+export const AWAIT_POLL_SECONDS = 60;
+export const AWAIT_APPLY_SECONDS = 24 * 60 * 60;
 
 type PodRecord = { name?: unknown; status?: unknown; ready?: unknown; restarts?: unknown };
 
@@ -234,6 +285,67 @@ export class RemediationCheckStore {
     }
   }
 
+  // A GitOps PR's check (migrations/016): `awaiting` until the workload runs what the PR set, polled
+  // every `pollSeconds`, and given up at `apply_by`. No baseline yet — the "before" of a change that
+  // has not landed is taken when it lands (markApplied), or "worse" would compare against a pod that
+  // predates the fault the PR is for.
+  async scheduleAwaiting(
+    remediationId: number,
+    channel: string,
+    threadTs: string,
+    target: { namespace: string; name: string; kind: string },
+    expect: ApplyExpectation,
+    pollSeconds: number,
+    waitSeconds: number
+  ): Promise<boolean> {
+    if (!this.pool) return false;
+    try {
+      const { rows } = await this.pool.query(
+        `INSERT INTO remediation_checks
+           (remediation_id, incident_id, channel, thread_ts, alertname, namespace, target, status, expect, due_at, apply_by)
+         SELECT r.id, r.incident_id, $2, $3, i.alertname, i.namespace, $4::jsonb, 'awaiting', $5::jsonb,
+                now() + ($6::int * interval '1 second'), now() + ($7::int * interval '1 second')
+           FROM remediations r LEFT JOIN incidents i ON i.id = r.incident_id
+          WHERE r.id = $1
+         ON CONFLICT (remediation_id) DO NOTHING
+         RETURNING id`,
+        [remediationId, channel, threadTs, JSON.stringify(target), JSON.stringify(expect), pollSeconds, waitSeconds]
+      );
+      return rows.length > 0;
+    } catch (err) {
+      logger.error(`[remediation] scheduling the GitOps apply-watch for ${remediationId} failed: ${errText(err)}`);
+      return false;
+    }
+  }
+
+  /** The PR's change is running: take the baseline now and start the ordinary verification. */
+  async markApplied(id: number, before: PodHealth | null, delaySeconds: number): Promise<void> {
+    await this.update(
+      `UPDATE remediation_checks SET status = 'pending', attempts = 0, before_state = $2::jsonb,
+              due_at = now() + ($3::int * interval '1 second')
+        WHERE id = $1 AND status = 'awaiting'`,
+      [id, before ? JSON.stringify(before) : null, delaySeconds]
+    );
+  }
+
+  /** Not applied yet: look again after `seconds`. */
+  async waitMore(id: number, seconds = AWAIT_POLL_SECONDS): Promise<void> {
+    await this.update(
+      `UPDATE remediation_checks SET due_at = now() + ($2::int * interval '1 second') WHERE id = $1 AND status = 'awaiting'`,
+      [id, seconds]
+    );
+  }
+
+  /** Never applied: closed with NO verdict — recall must not read an unmerged PR as a fix that failed. */
+  async expire(id: number, detail: string): Promise<void> {
+    await this.update(`UPDATE remediation_checks SET status = 'expired', detail = $2, checked_at = now() WHERE id = $1`, [id, detail.slice(0, 2000)]);
+  }
+
+  private async update(sql: string, params: unknown[]): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(sql, params).catch((err) => logger.error(`[remediation] updating a check failed: ${errText(err)}`));
+  }
+
   // Claim what's due, for this pod only. FOR UPDATE SKIP LOCKED makes concurrent pollers
   // take disjoint rows; pushing due_at forward is the lease, so a pod that dies mid-check
   // hands the row back after LEASE_SECONDS instead of stranding it in 'running'.
@@ -242,17 +354,17 @@ export class RemediationCheckStore {
     try {
       const { rows } = await this.pool.query(
         `UPDATE remediation_checks c
-            SET status = 'running',
-                attempts = c.attempts + 1,
+            SET status = CASE WHEN c.status = 'awaiting' THEN 'awaiting' ELSE 'running' END,
+                attempts = CASE WHEN c.status = 'awaiting' THEN c.attempts ELSE c.attempts + 1 END,
                 due_at = now() + ($2::int * interval '1 second')
           WHERE c.id IN (
             SELECT id FROM remediation_checks
-             WHERE status IN ('pending', 'running') AND due_at <= now()
+             WHERE status IN ('pending', 'running', 'awaiting') AND due_at <= now()
              ORDER BY due_at
              LIMIT $1
              FOR UPDATE SKIP LOCKED)
         RETURNING c.id, c.remediation_id, c.channel, c.thread_ts, c.alertname, c.namespace,
-                  c.target, c.before_state, c.attempts, c.created_at`,
+                  c.target, c.before_state, c.attempts, c.created_at, c.status, c.expect, c.apply_by`,
         [limit, LEASE_SECONDS]
       );
       return rows.map((r: Record<string, any>) => ({
@@ -266,6 +378,9 @@ export class RemediationCheckStore {
         before: r.before_state ?? null,
         attempts: Number(r.attempts),
         createdAt: r.created_at,
+        status: r.status,
+        expect: r.expect ?? null,
+        applyBy: r.apply_by ? new Date(r.apply_by).toISOString() : null,
       }));
     } catch (err) {
       logger.error(`[remediation] claiming due verifications failed: ${errText(err)}`);

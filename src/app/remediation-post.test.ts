@@ -53,3 +53,30 @@ test("each proposal outcome is recorded as a gate", async () => {
   assert.deepEqual((await run({ id: 7, proposal: { summary: "rolling restart of `a/b`", reason: "x" }, dryRunSummary: "ok" }, false)).gates, ["proposal:posted"]);
   assert.deepEqual((await run(null, false)).gates, ["proposal:null"]);
 });
+
+// 2026-10-23: an approved GitOps PR has no live target yet; it hands back what to wait for, and
+// the click schedules the apply-watch instead of nothing.
+const click = async (result: Record<string, unknown>) => {
+  const scheduled: string[] = [];
+  const self = {
+    agent: {
+      executeRemediation: async () => result,
+      noteInThread: async () => {},
+      scheduleRemediationCheck: async () => void scheduled.push("verify"),
+      scheduleAwaitingApply: async (id: number, ch: string, ts: string, a: any) => void scheduled.push(`await ${id} ${ch} ${ts} ${a.target.name}`),
+    },
+  };
+  const client = { chat: { update: async () => ({}), postMessage: async () => ({}), postEphemeral: async () => ({}) } };
+  const body = { user: { id: "U1" }, channel: { id: "C1" }, message: { ts: "2.2", thread_ts: "1.1" } };
+  await RemediationFlow.prototype.handleRemediationAction.call(viaRemediation(self), true, body, "7", client as any);
+  return scheduled;
+};
+
+test("an opened GitOps PR schedules the apply-watch", async () => {
+  const awaitApply = { target: { namespace: "ns", name: "app", kind: "Deployment" }, expect: { replicas: 3 } };
+  assert.deepEqual(await click({ text: "✅ *GitOps PR opened*", awaitApply }), ["await 7 C1 1.1 app"]);
+});
+
+test("a live patch still schedules the ordinary verification, and nothing else", async () => {
+  assert.deepEqual(await click({ text: "✅ *Remediation executed*", target: { namespace: "ns", name: "app" } }), ["verify"]);
+});

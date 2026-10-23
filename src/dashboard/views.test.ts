@@ -1891,6 +1891,17 @@ test("a check that has not run says when it will, forwards", () => {
   assert.doesNotMatch(html, /next check just now/);
 });
 
+// 2026-10-23: a GitOps PR's check waits for the merge — "checking" would claim a verification that
+// has not started, and an expired one was never verified at all.
+test("a GitOps check still waiting for its PR says so, and an expired one says it never landed", () => {
+  const waiting = withRem(remRow({ check_status: "awaiting", due_at: new Date("2026-08-24T02:23:00Z") }), new Date("2026-08-24T02:22:00Z"));
+  assert.match(waiting, /<span class="badge">waiting for the PR<\/span>/);
+  assert.doesNotMatch(waiting, />checking</);
+  const expired = withRem(remRow({ check_status: "expired", verdict: null, verdict_detail: "the PR's change was never running" }));
+  assert.match(expired, /<span class="badge">not applied<\/span>/);
+  assert.match(expired, /was never running/);
+});
+
 test("a check whose time has passed says so rather than counting backwards", () => {
   const html = withRem(remRow({ due_at: new Date("2026-08-24T02:00:00Z") }), new Date("2026-08-24T02:22:00Z"));
   assert.match(html, /check overdue/);

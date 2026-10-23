@@ -125,6 +125,14 @@ function verdictCell(r: RemediationRow, now: Date): string {
       (r.verdict_detail ? `<div class="sub">${esc(r.verdict_detail)}</div>` : "")
     );
   }
+  // A GitOps PR's check (migrations/016): waiting for the merge + Flux sync is not "checking",
+  // and one that expired was never verified — no verdict, said plainly.
+  if (r.check_status === "awaiting") {
+    return `<span class="badge">waiting for the PR</span><div class="sub">verification starts once Flux runs the change</div>`;
+  }
+  if (r.check_status === "expired") {
+    return `<span class="badge">not applied</span>` + (r.verdict_detail ? `<div class="sub">${esc(r.verdict_detail)}</div>` : "");
+  }
   if (r.check_status) {
     // fmtAgo is no use here: due_at is in the FUTURE, and fmtAgo clamps a future instant to
     // "just now" so a check due in four minutes would read as one that already ran. The wait

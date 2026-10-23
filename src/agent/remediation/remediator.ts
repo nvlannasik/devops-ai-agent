@@ -8,7 +8,7 @@ import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal, type Refusal } from "
 import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSummary, rolloutFromRevision } from "./rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./noop-guard.js";
-import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict } from "./verify.js";
+import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
 import { SqsGitOpsClient } from "../gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "../gitops/preview.js";
 import { pickRevertCommit } from "../gitops/revert.js";
@@ -538,6 +538,7 @@ export class Remediator {
       path: payload.path,
       valuesKey: payload.valuesKey,
       target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      workload: preview.workload, // kind/namespace/name: what the apply-watch reads once the PR is open
       reason: proposal.reason,
       summary,
     });
@@ -675,7 +676,7 @@ export class Remediator {
   async executeRemediation(
     id: number,
     approvedBy: string
-  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown }> {
+  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown; awaitApply?: AwaitApply }> {
     const claim = await this.host.remediations.claimForExecution(id, approvedBy);
     if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
     if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
@@ -725,7 +726,7 @@ export class Remediator {
   // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
   // target — nothing is live until the PR merges + Flux syncs, so there is nothing for the
   // post-remediation verification to look at (app/index.ts only schedules when target exists).
-  private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string }> {
+  private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string; awaitApply?: AwaitApply }> {
     const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; component?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
     const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
     if (!this.host.gitops) {
@@ -760,7 +761,16 @@ export class Remediator {
         return { text: `❌ *PR not opened* — ${label}: unexpected worker response.` };
       }
       await this.host.remediations.finish(id, true, payload.prUrl);
-      return { text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.` };
+      // Not verifiable yet — but it will be once Flux runs it: hand back what to watch for, and the
+      // app schedules an awaiting check (scheduleAwaitingApply). A revert PR returns none: what it
+      // restores is the parent commit's content, not a value this side knows.
+      const workload = this.workloadOf(String(params.workload ?? "")) ?? targetOf(String(params.target ?? ""));
+      const expect = expectFromChanges(p.changes ?? [], p.container);
+      const awaitApply = workload && expect ? { target: { namespace: workload.namespace, name: workload.name, kind: kindName(workload.kind) }, expect } : undefined;
+      return {
+        text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}`,
+        ...(awaitApply ? { awaitApply } : {}),
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.host.remediations.finish(id, false, msg);
@@ -791,6 +801,50 @@ export class Remediator {
     if (stored) logger.info(`[remediation] verification for ${remediationId} due in ${delaySeconds}s (${target.namespace}/${target.name})`);
   }
 
+  // A GitOps PR's check: watch the workload until it runs what the PR set (migrations/016).
+  async scheduleAwaitingApply(remediationId: number, channel: string, threadTs: string, a: AwaitApply): Promise<void> {
+    if (!this.host.checks.enabled) return;
+    const stored = await this.host.checks.scheduleAwaiting(remediationId, channel, threadTs, a.target, a.expect, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS);
+    if (stored) logger.info(`[remediation] GitOps PR ${remediationId}: watching ${a.target.namespace}/${a.target.name} for ${describeExpect(a.expect)}`);
+  }
+
+  // One awaiting check, once: applied → baseline + the ordinary verification; past apply_by →
+  // expired, said once, no verdict; anything else (not merged, or unreadable) → look again later.
+  private async pollAwaitingApply(check: RemediationCheck): Promise<{ channel: string; threadTs: string; text: string } | null> {
+    const where = `\`${check.target.namespace}/${check.target.name}\``;
+    const kind = check.target.kind ?? "Deployment";
+    const raw = await this.host.mcp
+      .callTool("k8s_get_resource", { api_version: "apps/v1", kind, namespace: check.target.namespace, name: check.target.name })
+      .catch((err) => {
+        logger.warn(`[remediation] apply-watch read of ${check.target.namespace}/${check.target.name} failed: ${errDetail(err)}`);
+        return "";
+      });
+    const state = check.expect ? applyState(check.expect, raw) : "unknown";
+    if (state === "applied") {
+      const before = await this.podHealth(check.target).catch(() => null);
+      const delaySeconds = Math.round(config.remediation.verifyDelayMs / 1000);
+      await this.host.checks.markApplied(check.id, before, delaySeconds);
+      logger.info(`[remediation] GitOps PR ${check.remediationId} applied on ${check.target.namespace}/${check.target.name} — verification due in ${delaySeconds}s`);
+      return {
+        channel: check.channel,
+        threadTs: check.threadTs,
+        text: `🔄 *GitOps change applied* · ${where} now runs ${describeExpect(check.expect!)} — checking in ${Math.max(1, Math.round(delaySeconds / 60))}m whether it fixed the problem.`,
+      };
+    }
+    const deadline = Date.parse(check.applyBy ?? "");
+    if (!Number.isFinite(deadline) || Date.now() >= deadline) {
+      const detail = `the PR's change (${describeExpect(check.expect ?? {})}) was never running on ${check.target.namespace}/${check.target.name}`;
+      await this.host.checks.expire(check.id, detail);
+      return {
+        channel: check.channel,
+        threadTs: check.threadTs,
+        text: `⌛ *GitOps change not applied* · ${where} still does not run ${describeExpect(check.expect ?? {})}, 24h after the PR — so nothing was verified. Merge it (Flux syncs it) or close it.`,
+      };
+    }
+    await this.host.checks.waitMore(check.id);
+    return null;
+  }
+
   // One poller pass: claim whatever is due, verify it, record the verdict, and hand back the
   // thread messages for the caller to post. Returns messages instead of posting them so the
   // Slack client stays in the app layer — this class owns Postgres and MCP, not chat.
@@ -802,6 +856,14 @@ export class Remediator {
     const out: Array<{ channel: string; threadTs: string; text: string }> = [];
 
     for (const check of due) {
+      if (check.status === "awaiting") {
+        const msg = await this.pollAwaitingApply(check).catch((err) => {
+          logger.warn(`[remediation] apply-watch ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
+          return null;
+        });
+        if (msg) out.push(msg);
+        continue;
+      }
       if (maxAttemptsReached(check)) {
         const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Alertmanager could not be read`;
         await this.host.checks.abandon(check.id, detail);
@@ -852,4 +914,21 @@ export class Remediator {
     const flipped = await this.host.remediations.reject(id, by);
     return flipped ? `🚫 Remediation rejected by <@${by}>. Nothing was executed.` : "⚠️ Already handled (or expired).";
   }
+}
+
+/** What an opened GitOps PR leaves for the apply-watch: the workload, and what it should end up running. */
+export type AwaitApply = { target: { namespace: string; name: string; kind: string }; expect: ApplyExpectation };
+
+/** `deployment` → `Deployment`, the spelling k8s_get_resource's `kind` takes. */
+const kindName = (kind: string): string => ({ deployment: "Deployment", statefulset: "StatefulSet", daemonset: "DaemonSet" })[kind.toLowerCase()] ?? "Deployment";
+
+/** `k8s_scale:ns/name` — the card's target key — for rows proposed before `workload` was stored. */
+function targetOf(key: string): { kind: string; namespace: string; name: string } | null {
+  const m = /^[a-z0-9_]+:([^/\s]+)\/([^/\s]+)$/.exec(key);
+  return m ? { kind: "deployment", namespace: m[1]!, name: m[2]! } : null;
+}
+
+function describeExpect(e: ApplyExpectation): string {
+  const parts = [e.image ? `\`${e.image}\`${e.container ? ` on \`${e.container}\`` : ""}` : "", e.replicas !== undefined ? `${e.replicas} replicas` : ""];
+  return parts.filter(Boolean).join(" with ") || "the PR's change";
 }

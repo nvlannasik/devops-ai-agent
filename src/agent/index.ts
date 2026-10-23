@@ -534,6 +534,7 @@ export class DevOpsAgent {
   resolveOverlayPath(...a: Parameters<Remediator["resolveOverlayPath"]>): ReturnType<Remediator["resolveOverlayPath"]> { return this.remediator.resolveOverlayPath(...a); }
   executeRemediation(...a: Parameters<Remediator["executeRemediation"]>): ReturnType<Remediator["executeRemediation"]> { return this.remediator.executeRemediation(...a); }
   scheduleRemediationCheck(...a: Parameters<Remediator["scheduleRemediationCheck"]>): ReturnType<Remediator["scheduleRemediationCheck"]> { return this.remediator.scheduleRemediationCheck(...a); }
+  scheduleAwaitingApply(...a: Parameters<Remediator["scheduleAwaitingApply"]>): ReturnType<Remediator["scheduleAwaitingApply"]> { return this.remediator.scheduleAwaitingApply(...a); }
   runDueRemediationChecks(...a: Parameters<Remediator["runDueRemediationChecks"]>): ReturnType<Remediator["runDueRemediationChecks"]> { return this.remediator.runDueRemediationChecks(...a); }
   rejectRemediation(...a: Parameters<Remediator["rejectRemediation"]>): ReturnType<Remediator["rejectRemediation"]> { return this.remediator.rejectRemediation(...a); }
 
