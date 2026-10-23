@@ -31,6 +31,31 @@ test("with a container named, only that container counts", () => {
   assert.match(noOpImageRefusal("k8s_set_image", { name: "api", container: "app", image: "repo:v1" }, two) ?? "", /already running/);
 });
 
+// Live 2026-10-22, incident 271: cloudflared ran `cloudflare/cloudflared:latest` and the card set it to
+// `docker.io/cloudflare/cloudflared:latest` — the same image, spelled the long way. The exact-string
+// compare let it through, and Approve would have been a rollout onto the image already running.
+const hub = (image: string) => JSON.stringify([{ name: "cloudflared-deployment", containers: [{ name: "cloudflared", image }] }]);
+const propose = (image: string, running: string) =>
+  noOpImageRefusal("k8s_set_image", { name: "cloudflared-deployment", container: "cloudflared", image }, hub(running));
+
+test("the same Docker Hub image spelled with its registry is still a no-op", () => {
+  assert.match(propose("docker.io/cloudflare/cloudflared:latest", "cloudflare/cloudflared:latest") ?? "", /already running/);
+  assert.match(propose("cloudflare/cloudflared:latest", "index.docker.io/cloudflare/cloudflared:latest") ?? "", /already running/);
+});
+
+test("an official image is the same with or without library/, and with or without the default tag", () => {
+  assert.match(propose("docker.io/library/nginx:latest", "nginx") ?? "", /already running/);
+  assert.match(propose("nginx:latest", "library/nginx") ?? "", /already running/);
+});
+
+test("a different registry, tag or digest is a real change", () => {
+  assert.equal(propose("ghcr.io/cloudflare/cloudflared:latest", "cloudflare/cloudflared:latest"), null);
+  assert.equal(propose("cloudflare/cloudflared:2024.10.0", "cloudflare/cloudflared:latest"), null);
+  assert.equal(propose("cloudflare/cloudflared@sha256:abc", "cloudflare/cloudflared:latest"), null);
+  // a registry with a port is a registry, not an image with a tag
+  assert.equal(propose("localhost:5000/nginx", "nginx"), null);
+});
+
 test("no other action is this guard's business", () => {
   for (const a of ["k8s_rollout_restart", "k8s_scale", "k8s_set_resources", "k8s_delete_pod"]) {
     assert.equal(noOpImageRefusal(a, { name: "settlement-worker", image: "busybox:1.36" }, listing), null, a);

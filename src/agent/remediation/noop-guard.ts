@@ -93,6 +93,29 @@ export function wrongKindRefusal(
 }
 
 /**
+ * An image reference the way the container runtime resolves it, for comparing two of them:
+ * Docker Hub's implicit registry (`docker.io`, also spelled `index.docker.io`/`registry-1.docker.io`),
+ * its implicit `library/` namespace for official images, and the implicit `:latest` tag. A first
+ * segment with a `.` or `:`, or `localhost`, is a registry, so `localhost:5000/nginx` stays apart
+ * from `nginx`. Live 2026-10-22: `cloudflare/cloudflared:latest` running, `docker.io/cloudflare/
+ * cloudflared:latest` proposed — one image, and the exact-string compare below carded it.
+ */
+export function canonicalImage(ref: string): string {
+  let rest = ref.trim();
+  const at = rest.indexOf("@");
+  const digest = at >= 0 ? rest.slice(at) : "";
+  if (at >= 0) rest = rest.slice(0, at);
+  if (!digest && rest.lastIndexOf(":") <= rest.lastIndexOf("/")) rest += ":latest";
+  const first = rest.split("/")[0]!;
+  const hasRegistry = rest.includes("/") && (first.includes(".") || first.includes(":") || first === "localhost");
+  let registry = hasRegistry ? first.toLowerCase() : "docker.io";
+  let path = hasRegistry ? rest.slice(first.length + 1) : rest;
+  if (registry === "index.docker.io" || registry === "registry-1.docker.io") registry = "docker.io";
+  if (registry === "docker.io" && !path.includes("/")) path = `library/${path}`;
+  return `${registry}/${path}${digest}`;
+}
+
+/**
  * Why this image change is a no-op, or null to let it through.
  *
  * Tolerant like `parsePods`: the payload is another repo's output, and anything unreadable returns
@@ -121,7 +144,8 @@ export function noOpImageRefusal(
   // this image makes the write a no-op for the thing being changed.
   const named = containers.filter((c) => c.name === container);
   const relevant = named.length > 0 ? named : containers;
-  if (!relevant.some((c) => c.image === proposed)) return null;
+  const want = canonicalImage(proposed);
+  if (!relevant.some((c) => typeof c.image === "string" && canonicalImage(c.image) === want)) return null;
 
   return (
     `the image being proposed is the image \`${workload}\` is already running (\`${proposed}\`), so this ` +
