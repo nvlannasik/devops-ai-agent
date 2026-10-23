@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import logger from "../../utils/logger/index.js";
 import { canonicalImage } from "./noop-guard.js";
+import { parseQuantity } from "../../utils/quantity/index.js";
 
 // Post-remediation verification (schema: migrations/006). The question here is "did the
 // problem go away", not "what do the pods look like now" — the alert that paged is the
@@ -39,45 +40,130 @@ export type RemediationCheck = {
   applyBy?: string | null;
 };
 
-/** What a GitOps PR set, in the terms a live object can be read for (migrations/016). */
-export type ApplyExpectation = { image?: string; container?: string; replicas?: number };
+/**
+ * What a GitOps PR set, as the values the live workload must show once Flux has applied it
+ * (migrations/016). One vocabulary for every action — the change timeline's field names
+ * (devops-mcp-server `diffPodTemplates`): `replicas`, `<container>.image`, `<container>.env.KEY`,
+ * `<container>.resources.<requests|limits>.<cpu|memory>`, `<container>.command|args`,
+ * `<container>.readinessProbe|livenessProbe`, `container <name>`. `*` for the container means any
+ * container; `(none)` means absent, as the timeline writes it.
+ */
+export type ApplyExpectation = { fields: Array<{ field: string; value: string | number }> };
+
+const ABSENT = "(none)";
+const RESOURCE_CHANGE = /^(requests|limits)\.(cpu|memory)$/;
 
 /**
- * The part of a PR's `changes` the cluster can confirm: the image (on its container) and the
- * replica count — the two fields open_pr writes for set_image and scale. Null when the PR changes
- * nothing of the kind, so no check waits for a value it could never read.
+ * The fields an open_pr writes (set_image, scale, set_resources), as their new values. Null when
+ * the PR touches nothing of the kind, so no check waits for a value it could never read.
  */
 export function expectFromChanges(changes: Array<{ field: string; to: string | number }>, container?: string): ApplyExpectation | null {
-  const out: ApplyExpectation = {};
-  for (const c of changes) {
-    if (c.field === "image" && typeof c.to === "string" && c.to) Object.assign(out, { image: c.to }, container ? { container } : {});
-    if (c.field === "replicas" && Number.isFinite(Number(c.to))) out.replicas = Number(c.to);
+  const c = container || "*";
+  const fields: ApplyExpectation["fields"] = [];
+  for (const ch of changes) {
+    if (ch.field === "image" && typeof ch.to === "string" && ch.to) fields.push({ field: `${c}.image`, value: ch.to });
+    else if (ch.field === "replicas" && Number.isFinite(Number(ch.to))) fields.push({ field: "replicas", value: Number(ch.to) });
+    else if (RESOURCE_CHANGE.test(ch.field)) fields.push({ field: `${c}.resources.${ch.field}`, value: String(ch.to) });
   }
-  return Object.keys(out).length > 0 ? out : null;
+  return fields.length > 0 ? { fields } : null;
+}
+
+/** A revert PR restores the broken rollout's pod template: every field it changed, back at `from`. */
+export function expectFromRevert(diff: Array<{ field: string; from: string }> | undefined): ApplyExpectation | null {
+  const fields = (diff ?? []).filter((d) => d.field).map((d) => ({ field: d.field, value: d.from }));
+  return fields.length > 0 ? { fields } : null;
+}
+
+type LiveContainer = {
+  name?: unknown; image?: unknown; command?: unknown; args?: unknown;
+  env?: Array<{ name?: unknown; value?: unknown; valueFrom?: Record<string, any> }>;
+  resources?: Record<string, Record<string, unknown> | undefined>;
+  readinessProbe?: unknown; livenessProbe?: unknown;
+};
+
+// The same rendering as the timeline's envValue — a secret's value is never read, only its source.
+function envValue(e: NonNullable<LiveContainer["env"]>[number]): string {
+  if (e.value !== undefined) return String(e.value);
+  const f = e.valueFrom;
+  if (f?.secretKeyRef) return `secret:${f.secretKeyRef.name}/${f.secretKeyRef.key}`;
+  if (f?.configMapKeyRef) return `configmap:${f.configMapKeyRef.name}/${f.configMapKeyRef.key}`;
+  if (f?.fieldRef) return `field:${f.fieldRef.fieldPath}`;
+  return "(from source)";
+}
+
+/** One field of a live container, rendered as the timeline renders it; `(none)` when absent. */
+function containerField(c: LiveContainer | undefined, rest: string): unknown {
+  if (!c) return ABSENT;
+  if (rest === "image") return c.image ?? ABSENT;
+  if (rest === "command" || rest === "args" || rest === "readinessProbe" || rest === "livenessProbe") return c[rest] ?? ABSENT;
+  if (rest.startsWith("env.")) {
+    const e = (c.env ?? []).find((x) => x.name === rest.slice(4));
+    return e ? envValue(e) : ABSENT;
+  }
+  const r = /^resources\.(requests|limits)\.(.+)$/.exec(rest);
+  if (r) return c.resources?.[r[1]!]?.[r[2]!] ?? ABSENT;
+  return undefined; // a field this side cannot read
+}
+
+const sortKeys = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)])) : v;
+
+/** Equal as the runtime would read them: canonical images, quantities by value, JSON regardless of key order. */
+function sameValue(field: string, live: unknown, want: string | number): boolean {
+  if (typeof live === "object" && live !== null) {
+    try {
+      return JSON.stringify(sortKeys(live)) === JSON.stringify(sortKeys(JSON.parse(String(want))));
+    } catch {
+      return false;
+    }
+  }
+  const a = String(live);
+  const b = String(want);
+  if (a === b) return true;
+  if (field.endsWith(".image") && a !== ABSENT && b !== ABSENT) return canonicalImage(a) === canonicalImage(b);
+  if (/\.resources\./.test(field)) {
+    const qa = parseQuantity(a);
+    const qb = parseQuantity(b);
+    return qa !== null && qb !== null && Math.abs(qa - qb) < 1e-9 * Math.max(1, Math.abs(qb));
+  }
+  return false;
 }
 
 /**
- * Whether a workload's live object runs what the PR set — the merge AND the Flux sync, which is
- * what "applied" has to mean before a verdict can be about the change. Images compare canonically
- * (canonicalImage), so `docker.io/library/x` and `x:latest` are the same. `unknown` when the
- * object cannot be read: a wait, never a verdict.
+ * Whether a workload's live object shows every value the PR set — the merge AND the Flux sync,
+ * which is what "applied" has to mean before a verdict can be about the change. `unknown` when the
+ * object cannot be read, or a field is one this side cannot read: a wait, never a verdict.
  */
 export function applyState(expect: ApplyExpectation, raw: string): "applied" | "not-yet" | "unknown" {
-  let obj: { spec?: { replicas?: unknown; template?: { spec?: { containers?: Array<{ name?: unknown; image?: unknown }> } } } };
+  let obj: { spec?: { replicas?: unknown; template?: { spec?: { containers?: LiveContainer[] } } } };
   try {
     obj = JSON.parse(raw);
   } catch {
     return "unknown";
   }
   const spec = obj?.spec;
-  if (!spec || typeof spec !== "object") return "unknown";
-  if (expect.replicas !== undefined && spec.replicas !== expect.replicas) return "not-yet";
-  if (expect.image) {
-    const containers = spec.template?.spec?.containers;
-    if (!Array.isArray(containers)) return "unknown";
-    const named = containers.filter((c) => c.name === expect.container);
-    const want = canonicalImage(expect.image);
-    if (!(named.length > 0 ? named : containers).some((c) => typeof c.image === "string" && canonicalImage(c.image) === want)) return "not-yet";
+  const fields = expect?.fields;
+  if (!spec || typeof spec !== "object" || !Array.isArray(fields) || fields.length === 0) return "unknown";
+  const containers = Array.isArray(spec.template?.spec?.containers) ? spec.template!.spec!.containers! : null;
+  for (const { field, value } of fields) {
+    if (field === "replicas") {
+      if (spec.replicas !== Number(value)) return "not-yet";
+      continue;
+    }
+    if (!containers) return "unknown";
+    const presence = /^container (.+)$/.exec(field);
+    if (presence) {
+      if ((containers.some((c) => c.name === presence[1]) ? "present" : ABSENT) !== value) return "not-yet";
+      continue;
+    }
+    const dot = field.indexOf(".");
+    if (dot < 0) return "unknown";
+    const name = field.slice(0, dot);
+    const rest = field.slice(dot + 1);
+    const candidates = name === "*" ? containers : [containers.find((c) => c.name === name)];
+    const reads = candidates.map((c) => containerField(c, rest));
+    if (reads.some((r) => r === undefined)) return "unknown";
+    if (!reads.some((r) => sameValue(field, r, value))) return "not-yet";
   }
   return "applied";
 }

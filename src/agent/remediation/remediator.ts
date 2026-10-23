@@ -8,7 +8,7 @@ import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal, type Refusal } from "
 import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSummary, rolloutFromRevision } from "./rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./noop-guard.js";
-import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
+import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, expectFromRevert, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
 import { SqsGitOpsClient } from "../gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "../gitops/preview.js";
 import { pickRevertCommit } from "../gitops/revert.js";
@@ -595,6 +595,9 @@ export class Remediator {
       sha: commit.sha,
       pathPrefix,
       target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      // What the workload runs again once the revert is applied: the broken rollout's diff, at
+      // its `from` side — known only now, from the timeline, so stored with the card.
+      ...(expectFromRevert(broke?.diff) ? { applyExpect: expectFromRevert(broke?.diff) } : {}),
       reason: proposal.reason,
       summary,
     });
@@ -743,7 +746,13 @@ export class Remediator {
           return { text: `❌ *Revert PR not opened* — ${label}: ${truncate(reason, 300)}` };
         }
         await this.host.remediations.finish(id, true, payload.prUrl);
-        return { text: `✅ *Revert PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.` };
+        const workload = targetOf(String((params as { target?: unknown }).target ?? ""));
+        const expect = ((params as { applyExpect?: ApplyExpectation }).applyExpect ?? null);
+        const awaitApply = workload && expect?.fields?.length ? { target: { namespace: workload.namespace, name: workload.name, kind: "Deployment" }, expect } : undefined;
+        return {
+          text: `✅ *Revert PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}`,
+          ...(awaitApply ? { awaitApply } : {}),
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await this.host.remediations.finish(id, false, msg);
@@ -762,8 +771,8 @@ export class Remediator {
       }
       await this.host.remediations.finish(id, true, payload.prUrl);
       // Not verifiable yet — but it will be once Flux runs it: hand back what to watch for, and the
-      // app schedules an awaiting check (scheduleAwaitingApply). A revert PR returns none: what it
-      // restores is the parent commit's content, not a value this side knows.
+      // app schedules an awaiting check (scheduleAwaitingApply). The revert branch above does the
+      // same from the broken rollout's diff, stored with its card.
       const workload = this.workloadOf(String(params.workload ?? "")) ?? targetOf(String(params.target ?? ""));
       const expect = expectFromChanges(p.changes ?? [], p.container);
       const awaitApply = workload && expect ? { target: { namespace: workload.namespace, name: workload.name, kind: kindName(workload.kind) }, expect } : undefined;
@@ -833,12 +842,12 @@ export class Remediator {
     }
     const deadline = Date.parse(check.applyBy ?? "");
     if (!Number.isFinite(deadline) || Date.now() >= deadline) {
-      const detail = `the PR's change (${describeExpect(check.expect ?? {})}) was never running on ${check.target.namespace}/${check.target.name}`;
+      const detail = `the PR's change (${describeExpect(check.expect ?? null)}) was never running on ${check.target.namespace}/${check.target.name}`;
       await this.host.checks.expire(check.id, detail);
       return {
         channel: check.channel,
         threadTs: check.threadTs,
-        text: `⌛ *GitOps change not applied* · ${where} still does not run ${describeExpect(check.expect ?? {})}, 24h after the PR — so nothing was verified. Merge it (Flux syncs it) or close it.`,
+        text: `⌛ *GitOps change not applied* · ${where} still does not run ${describeExpect(check.expect ?? null)}, 24h after the PR — so nothing was verified. Merge it (Flux syncs it) or close it.`,
       };
     }
     await this.host.checks.waitMore(check.id);
@@ -928,7 +937,9 @@ function targetOf(key: string): { kind: string; namespace: string; name: string 
   return m ? { kind: "deployment", namespace: m[1]!, name: m[2]! } : null;
 }
 
-function describeExpect(e: ApplyExpectation): string {
-  const parts = [e.image ? `\`${e.image}\`${e.container ? ` on \`${e.container}\`` : ""}` : "", e.replicas !== undefined ? `${e.replicas} replicas` : ""];
-  return parts.filter(Boolean).join(" with ") || "the PR's change";
+function describeExpect(e: ApplyExpectation | null): string {
+  const fields = e?.fields ?? [];
+  if (fields.length === 0) return "the PR's change";
+  const shown = fields.slice(0, 3).map((f) => `\`${f.field}=${truncate(String(f.value), 60)}\``).join(", ");
+  return fields.length > 3 ? `${shown} and ${fields.length - 3} more` : shown;
 }
