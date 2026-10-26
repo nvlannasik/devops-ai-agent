@@ -154,6 +154,27 @@ function topoFrame(t: Topology, nonce: string, assets: Assets | null): string {
  * `assets` is nullable because the bundle is a build artifact, and its absence is a state this
  * page renders rather than a crash — see topoFrame().
  */
+/** What is wired, what is not, and what the agent can reach — the four counts the map draws. */
+function topologyShelf(t: Topology): string {
+  const deps = [...t.inbound, ...t.outbound];
+  const off = deps.filter((n) => !n.configured);
+  const tools = t.capabilities.flatMap((c) => c.tools);
+  const writes = tools.filter((x) => x.write).length;
+  const llm = t.provider === "router" ? t.backends.length : t.activeClient ? 1 : 0;
+  return statList([
+    { icon: ICON.inbound, label: "Inbound", value: fmtInt(t.inbound.length), sub: "how alerts and people reach the agent" },
+    {
+      icon: ICON.outbound,
+      label: "Not configured",
+      value: fmtInt(off.length),
+      sub: off.length ? off.slice(0, 2).map((n) => n.label).join(", ") + (off.length > 2 ? ` +${off.length - 2}` : "") : `all ${fmtInt(deps.length)} dependencies wired`,
+      tone: off.length ? "warning" : undefined,
+    },
+    { icon: ICON.plug, label: "MCP tools", value: fmtInt(tools.length), sub: `${fmtInt(t.capabilities.length)} families · ${fmtInt(writes)} can write` },
+    { icon: ICON.chip, label: "LLM backends", value: fmtInt(llm), sub: t.provider === "router" ? "routed light → heavy" : `provider ${t.provider}` },
+  ]);
+}
+
 export function topologyPage(
   t: Topology,
   nonce: string,
@@ -180,10 +201,14 @@ export function topologyPage(
 
   return layout(
     "Topology",
-    `<h1>Dependency map</h1>
-     <p class="meta">Read from this agent's own configuration, plus the tool list
-       <code translate="no">devops-mcp-server</code> sent when the agent connected. Nothing here is
-       probed — no call leaves the process.</p>
+    `<div class="doc">
+       <p class="eyebrow">Agent</p>
+       <h1>Dependency map</h1>
+       <p class="meta">Read from this agent's own configuration, plus the tool list
+         <code translate="no">devops-mcp-server</code> sent when the agent connected. Nothing here is
+         probed — no call leaves the process.</p>
+     </div>
+     ${topologyShelf(t)}
      ${topoFrame(t, nonce, assets)}
      ${section(ICON.inbound, "Inbound")}
      ${nodeRows(t.inbound, "in")}

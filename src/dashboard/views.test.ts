@@ -3201,3 +3201,31 @@ test("the context shelf warns only when the smallest window is nearly full, and 
   // the light backend's 32k window, split: 9,120 reserve → 28 (9120/32000*100 is 28.4999… in floats)
   assert.match(roomy, /<span data-k="reserve" style="--w:28"><\/span><span data-k="core" style="--w:25"><\/span>/);
 });
+
+test("the topology shelf counts what is not wired and which tools can write", () => {
+  const html = topologyPage({
+    ...baseTopology,
+    inbound: [{ label: "Slack", detail: "", meta: "", configured: false }],
+    outbound: [{ label: "Redis", detail: "", meta: "", configured: true }],
+    capabilities: [{ name: "k8s", tools: [{ name: "k8s_list_pods", write: false }, { name: "k8s_rollout_restart", write: true }] }],
+    backends: [{ name: "a", kind: "claude", model: "m", endpoint: "e", route: "heavy", viaWorker: false }],
+  } as never, NONCE, ASSETS, 1);
+  assert.match(html, /<div class="stat" data-tone="warning">[\s\S]*?Not configured[\s\S]*?<dd>1<span>Slack/);
+  assert.match(html, /<dd>2<span>1 families · 1 can write/);
+  assert.match(html, /<dd>1<span>routed light → heavy/);
+});
+
+test("the cluster shelf names what is short of desired and what was applied by hand", async () => {
+  const { clusterPage } = await import("./views.js");
+  const html = clusterPage({ scanned: { namespaces: 2, complete: true }, namespaces: [
+    { name: "shop", system: false, services: [], ingresses: [], workloads: [
+      { kind: "Deployment", name: "api", ready: 1, desired: 2, images: [], managedBy: { type: "helmrelease", name: "a", namespace: "f" } },
+      { kind: "Deployment", name: "web", ready: 1, desired: 1, images: [], managedBy: { type: "unmanaged" } }] },
+    { name: "kube-system", system: true, services: [], ingresses: [], workloads: [] },
+  ] }, null);
+  assert.match(html, /<dd>1<span>\+1 system, hidden/);
+  assert.match(html, /<div class="stat" data-tone="warning">[\s\S]*?Not ready[\s\S]*?<dd>1<span>api/);
+  assert.match(html, /Outside GitOps[\s\S]*?<dd>1<span>web/);
+  // the short workload's ready count is toned in its row too
+  assert.match(html, /<span class="badge" data-tone="warning">1\/2<\/span>/);
+});

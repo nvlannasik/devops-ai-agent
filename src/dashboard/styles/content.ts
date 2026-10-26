@@ -378,6 +378,10 @@ export const CONTENT_CSS = `
 .title-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-6); }
 /* The actions an incident offers sit to the right of its badges as buttons — outlined, so they
    rank below the page's one primary control (Apply filters) and above body links. */
+/* A shelf inside a .doc page is followed by whatever the page puts next — a map frame, a fold, a
+   table — and only a heading brought its own margin. The block gap is the shelf's, so every next
+   thing sits the same distance below it (adjacent margins collapse into a heading's larger one). */
+.doc > .stats { margin-bottom: var(--stack); }
 .page-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-left: auto; }
 .page-actions a.standalone {
   display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 var(--sp-3);

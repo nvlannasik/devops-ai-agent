@@ -1,7 +1,7 @@
 import type { ClusterInventory, DashboardClusterModel, ManagedBy } from "./cluster-types.js";
 import { cell, esc, fmtInt, headers, table } from "./html.js";
 import type { Assets } from "./assets.js";
-import { ICON, breakable, empty, jsonBlock, section } from "./parts.js";
+import { ICON, badge, breakable, empty, jsonBlock, section, statList } from "./parts.js";
 import { layout } from "./layout.js";
 
 // --- /cluster (spec 2026-10-07-cluster-tour §3.5) ---
@@ -68,7 +68,16 @@ export function clusterPage(
           `<tr role="row">` +
           cell("Workload", `<code translate="no">${breakable(w.name)}</code>`, "primary") +
           cell("Kind", esc(w.kind) + (w.schedule ? ` <code translate="no" style="white-space:nowrap">${esc(w.schedule)}</code>` : "")) +
-          cell("Ready", w.ready === null || w.desired === null ? "—" : `${fmtInt(w.ready)}/${fmtInt(w.desired)}`, "num") +
+          // Short of desired is the one state in this table someone acts on, so it is the one toned.
+          cell(
+            "Ready",
+            w.ready === null || w.desired === null
+              ? "—"
+              : w.ready < w.desired
+                ? badge(`${fmtInt(w.ready)}/${fmtInt(w.desired)}`, "warning")
+                : `${fmtInt(w.ready)}/${fmtInt(w.desired)}`,
+            "num"
+          ) +
           cell("Image", w.images.map((i) => `<code translate="no">${esc(i)}</code>`).join("<br>") || "—") +
           cell("Managed by", managed(w.managedBy)) +
           `</tr>`
@@ -90,7 +99,25 @@ export function clusterPage(
   } else {
     const user = inv.namespaces.filter((n) => !n.system);
     const system = inv.namespaces.filter((n) => n.system);
+    const workloads = user.flatMap((n) => n.workloads);
+    const short = workloads.filter((w) => w.ready !== null && w.desired !== null && w.ready < w.desired);
+    // The map's own predicate (cluster-graph.ts card()): applied by hand, not plain Helm.
+    const outside = workloads.filter((w) => w.managedBy.type === "unmanaged");
+    const names = (ws: typeof workloads) => ws.slice(0, 2).map((w) => w.name).join(", ") + (ws.length > 2 ? ` +${ws.length - 2}` : "");
+    const shelf = statList([
+      { icon: ICON.layers, label: "Namespaces", value: fmtInt(user.length), sub: system.length ? `+${fmtInt(system.length)} system, hidden` : "application namespaces" },
+      { icon: ICON.overview, label: "Workloads", value: fmtInt(workloads.length), sub: "in the application namespaces" },
+      {
+        icon: ICON.incidents,
+        label: "Not ready",
+        value: fmtInt(short.length),
+        sub: short.length ? names(short) : "every workload at its desired count",
+        tone: short.length ? "warning" : undefined,
+      },
+      { icon: ICON.changes, label: "Outside GitOps", value: fmtInt(outside.length), sub: outside.length ? names(outside) : "everything is declared in Git" },
+    ]);
     body =
+      shelf +
       (inv.scanned.complete
         ? ""
         : `<p class="meta"><strong>Partial inventory</strong> — the scan hit its ceiling after ${fmtInt(inv.scanned.namespaces)} namespace(s); what is missing is not shown as empty.</p>`) +
