@@ -5,10 +5,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { STYLES } from "./styles.js";
 
 // 2026-10-21 split: STYLES is seven ordered chunks. Order is the cascade, so the bytes are pinned —
-// a chunk moved or a line lost changes which rule wins with no error anywhere.
-test("STYLES is byte-identical to the pre-split stylesheet", () => {
-  assert.equal(STYLES.length, 146061);
-  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "30cfca021109126857608823b3d825909970803e1b265549eca4130529b39803");
+// a chunk moved or a line lost changes which rule wins with no error anywhere. A NEW rule re-pins
+// both numbers on purpose (2026-10-26: the /people block appended to the tables chunk).
+test("STYLES bytes are pinned", () => {
+  assert.equal(STYLES.length, 147616);
+  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "817cc28c94324dd3669ae6dab0bdb40b1558861ba93809e17d6f72ce55eb6374");
 });
 
 test("no stylesheet chunk interpolates", () => {

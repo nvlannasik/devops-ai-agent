@@ -5,7 +5,7 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { memoryKeyPage, memoryListPage, threadPage, threadsPage } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
@@ -167,8 +167,8 @@ export interface MemorySource {
   thread(threadId: string): Promise<ThreadMemory | null>;
 }
 
-/** Slack display names for /people — SlackApp.userNames, structural so neither side imports the other. */
-export type SlackNames = (ids: readonly string[]) => Promise<{ names: Map<string, string>; error: string | null }>;
+/** Slack profiles for /people — SlackApp.userProfiles, structural so neither side imports the other. */
+export type SlackNames = (ids: readonly string[]) => Promise<{ profiles: Map<string, SlackProfile>; error: string | null }>;
 
 export class DashboardServer {
   private server: http.Server | null = null;
@@ -568,8 +568,8 @@ export class DashboardServer {
         return [];
       });
       const ids = [...new Set([...oncall, ...approvers, ...allowed, ...activity.map((a) => a.user)])];
-      const { names, error } = this.slackNames ? await this.slackNames(ids) : { names: new Map<string, string>(), error: null };
-      const view = { oncall, approvers, allowed, activity, names, namesError: error };
+      const { profiles, error } = this.slackNames ? await this.slackNames(ids) : { profiles: new Map<string, SlackProfile>(), error: null };
+      const view = { oncall, approvers, allowed, activity, profiles, profilesError: error };
       return send(200, peoplePage(view, new Date(), await this.openCount()));
     }
 

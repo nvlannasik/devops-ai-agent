@@ -47,7 +47,7 @@ export class SlackApp {
    */
   private readonly unstored = new Map<string, UnstoredAlert>();
   private readonly inflight = new InFlightRegistry();
-  private readonly nameCache = new Map<string, { name: string; at: number }>();
+  private readonly profileCache = new Map<string, { at: number; profile: { name: string; handle?: string; title?: string; deleted?: boolean } }>();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -373,33 +373,42 @@ export class SlackApp {
   }
 
   /**
-   * Display names for the dashboard's /people page (`users.info`, needs `users:read`). A lookup
+   * Slack profiles for the dashboard's /people page (`users.info`, needs `users:read`). A lookup
    * that fails leaves that id out and reports the first Slack error (e.g. `missing_scope`), so the
    * page shows the bare id and says why instead of a blank.
    * ponytail: per-process cache for an hour — a renamed user shows the old name until then.
    */
-  async userNames(ids: readonly string[]): Promise<{ names: Map<string, string>; error: string | null }> {
+  async userProfiles(ids: readonly string[]): Promise<{
+    profiles: Map<string, { name: string; handle?: string; title?: string; deleted?: boolean }>;
+    error: string | null;
+  }> {
     const now = Date.now();
     let error: string | null = null;
     await Promise.all(
       ids
-        .filter((id) => (this.nameCache.get(id)?.at ?? 0) < now - NAME_TTL_MS)
+        .filter((id) => (this.profileCache.get(id)?.at ?? 0) < now - NAME_TTL_MS)
         .map(async (id) => {
           try {
             const { user } = await this.app.client.users.info({ user: id });
-            const name = user?.profile?.display_name || user?.real_name || user?.name;
-            if (name) this.nameCache.set(id, { name, at: now });
+            const p = user?.profile;
+            const name = p?.real_name || user?.real_name || p?.display_name || user?.name;
+            if (!name) return;
+            const handle = p?.display_name && p.display_name !== name ? p.display_name : undefined;
+            this.profileCache.set(id, {
+              at: now,
+              profile: { name, handle, title: p?.title || undefined, deleted: user?.deleted === true },
+            });
           } catch (err) {
             error ??= (err as { data?: { error?: string } }).data?.error ?? errDetail(err);
           }
         })
     );
-    const names = new Map<string, string>();
+    const profiles = new Map<string, { name: string; handle?: string; title?: string; deleted?: boolean }>();
     for (const id of ids) {
-      const hit = this.nameCache.get(id);
-      if (hit) names.set(id, hit.name);
+      const hit = this.profileCache.get(id);
+      if (hit) profiles.set(id, hit.profile);
     }
-    return { names, error };
+    return { profiles, error };
   }
 
   async stop(): Promise<void> {

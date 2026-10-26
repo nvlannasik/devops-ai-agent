@@ -389,4 +389,29 @@ form.signout button {
    whole 1.7 leading, which at a 68ch measure reads as a gap between sections rather than
    between paragraphs. */
 .prose > * + * { margin-top: var(--sp-4); }
+
+/* ---------- people (/people) ---------- */
+/* A member is a face and a name, the way every SaaS member list reads: an initials avatar in the
+   KPI chip's own brand tint (no image — the CSP has no img-src for Slack's CDN, and a second
+   origin per row is not worth a picture), the name at full weight, title/handle/id under it. */
+.person { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.avatar {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 2.25rem; height: 2.25rem; border-radius: 50%;
+  background: var(--brand-tint); color: var(--accent);
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: .04em;
+}
+.person-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.person-text strong { font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.person-text .meta { overflow-wrap: anywhere; }
+tr:has(.person) > td { vertical-align: middle; }
+.roles { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+/* Approve share of a member's decisions. The track is the rejections and stays neutral: a reject
+   is the gate working, not a failure, so it gets no tone. */
+.ratio {
+  display: block; width: 100%; max-width: 10rem; height: 6px; margin-bottom: var(--sp-1);
+  border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden;
+}
+.activity { display: block; font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap; }
+.ratio > span { display: block; height: 100%; width: calc(var(--a, 0) * 1%); background: var(--accent); border-radius: inherit; }
 `;
