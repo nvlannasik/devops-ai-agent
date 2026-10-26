@@ -159,7 +159,7 @@ export function harnessGatePage(name: string, d: GateDrill, now: Date, openIncid
       (e) =>
         `<tr role="row">` +
         cell("When", timeTag(e.createdAt, now), "when") +
-        cell("Outcome", `<code translate="no">${esc(e.outcome)}</code>`) +
+        cell("Outcome", badge(e.outcome, "")) +
         cell("Detail", e.detail ? esc(e.detail) : `<span class="meta">—</span>`) +
         cell(
           "Thread",
@@ -176,8 +176,8 @@ export function harnessGatePage(name: string, d: GateDrill, now: Date, openIncid
     `<div class="doc">
      <p class="eyebrow"><a href="/harness">Harness</a></p>
      <h1><code translate="no">${esc(name)}</code></h1>
-     <p class="meta">${fmtInt(total)} time(s) in the last 30 days, production only.</p>
-     ${total > 0 ? lineChart(d.daily.map((p) => ({ label: p.day.slice(5), value: p.n })), { label: "Fires per day, last 30 days" }) : ""}
+     <p class="meta">${fmtInt(total)} ${total === 1 ? "fire" : "fires"} in the last 30 days, production only.</p>
+     ${total > 0 ? `<div class="card">${lineChart(d.daily.map((p) => ({ label: p.day.slice(5), value: p.n })), { label: "Fires per day, last 30 days" })}</div>` : ""}
      ${section(ICON.incidents, "Latest", '<span class="meta">newest first · 100 at most</span>')}
      ${
        rows
