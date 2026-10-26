@@ -2,7 +2,7 @@ import { test } from "node:test";
 import type { BenchRun } from "./bench.js";
 import { readdir, readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, postmortemPage, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
+import { detailPage, listPage, loginPage, overviewPage, errorPage, layout, pageWindow, postmortemPage, postmortemsPage, promptPage, REFRESH_SECONDS, topologyPage, contextPage, skillPage, benchPage } from "./views.js";
 import { PAGE_SIZE, parseFilters } from "./filters.js";
 import { matchRoute } from "./server.js";
 import { STYLES } from "./styles.js";
@@ -1496,7 +1496,7 @@ test("postmortemPage renders the stored markdown through renderMarkdown, escaped
   });
   assert.doesNotMatch(html, /<script>alert/);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(html, /Generated.*by U1 · backend claude/s);
+  assert.match(html, /Generated.*by <code translate="no">U1<\/code> · backend claude/s);
   assert.match(html, /<div class="card md">/);
   // Both the download and the way back to the incident itself.
   assert.match(html, /href="\/incidents\/7\/postmortem\.md"/);
@@ -3178,4 +3178,16 @@ test("the state switch keeps the other filters and drops the page", () => {
   assert.match(html, /<a href="\/incidents\?namespace=prod&amp;resolved=false">Firing <span class="seg-count">2<\/span><\/a>/);
   assert.match(html, /<a href="\/incidents\?namespace=prod&amp;resolved=true" aria-current="true">Resolved<\/a>/);
   assert.match(html, /<a href="\/incidents\?namespace=prod">All<\/a>/);
+});
+
+test("postmortems name the requester, and the draft page's actions are buttons", () => {
+  const names = new Map([["U1", "Dina"]]);
+  const list = postmortemsPage(
+    [{ incidentId: 7, alertname: "A", namespace: null, severity: null, createdAt: new Date(), requestedBy: "U1", backend: null, revisions: 1 }],
+    new Date(), undefined, names
+  );
+  assert.match(list, /Dina <span class="meta" translate="no">U1<\/span>/);
+  const pm = postmortemPage(7, { id: 1, createdAt: new Date(), requestedBy: "U9", backend: "b", markdown: "# x" }, undefined, names);
+  assert.match(pm, /by <code translate="no">U9<\/code>/, "no name: the id");
+  assert.match(pm, /<span class="page-actions">[\s\S]*class="standalone primary" href="\/incidents\/7\/postmortem\.md"/);
 });

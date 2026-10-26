@@ -621,7 +621,7 @@ test("/incidents/:id/postmortem renders the stored draft", async () => {
     const res = await raw(port, "GET /incidents/7/postmortem HTTP/1.1", authed);
     assert.match(status(res), /^HTTP\/1\.1 200\b/);
     assert.match(res, /Postmortem draft/);
-    assert.match(res, /by U1/);
+    assert.match(res, /by <code translate="no">U1<\/code>/);
     // behind the password like every other page
     assert.match(status(await raw(port, "GET /incidents/7/postmortem HTTP/1.1")), /^HTTP\/1\.1 303\b/);
   }, { queries });

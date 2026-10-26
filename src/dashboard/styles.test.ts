@@ -8,8 +8,8 @@ import { STYLES } from "./styles.js";
 // a chunk moved or a line lost changes which rule wins with no error anywhere. A NEW rule re-pins
 // both numbers on purpose (2026-10-26: /people, the harness bars and bench folds, then the incident header and params).
 test("STYLES bytes are pinned", () => {
-  assert.equal(STYLES.length, 153571);
-  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "fdb48965c8a1672adc5328f8615c22337cf8f5bbb34c2a836af0116b4406744c");
+  assert.equal(STYLES.length, 153787);
+  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "6306d00fdfb0b6ef44a447e4d79f52e9cb487fea4295092270cc0a2ba55bbf3b");
 });
 
 test("no stylesheet chunk interpolates", () => {

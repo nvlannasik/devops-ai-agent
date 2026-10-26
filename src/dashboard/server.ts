@@ -213,6 +213,19 @@ export class DashboardServer {
     this.slackNames = slackNames;
   }
 
+  /**
+   * Slack ids in rows → display names, for pages that show who did something. Same lookup and
+   * cache as /people; no lookup or a failed one is an empty map, and the page prints the id.
+   */
+  private async nameMap(ids: readonly (string | null)[]): Promise<Map<string, string>> {
+    const wanted = [...new Set(ids.filter((x): x is string => !!x))];
+    const names = new Map<string, string>();
+    if (wanted.length === 0 || !this.slackNames) return names;
+    const { profiles } = await this.slackNames(wanted).catch(() => ({ profiles: new Map<string, SlackProfile>() }));
+    for (const [id, p] of profiles) names.set(id, p.name);
+    return names;
+  }
+
   async start(): Promise<void> {
     if (!config.dashboard.enabled) return;
 
@@ -642,14 +655,7 @@ export class DashboardServer {
           const now = new Date();
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
-          // The people on this page are Slack ids in the rows; a reader wants names. Same lookup
-          // and cache as /people, and a failure just leaves the ids.
-          const ids = [...new Set([...d.remediations.map((r) => r.approved_by), ...d.feedback.map((f) => f.slack_user)].filter((x): x is string => !!x))];
-          const names = new Map<string, string>();
-          if (ids.length > 0 && this.slackNames) {
-            const { profiles } = await this.slackNames(ids).catch(() => ({ profiles: new Map<string, SlackProfile>() }));
-            for (const [id, p] of profiles) names.set(id, p.name);
-          }
+          const names = await this.nameMap([...d.remediations.map((r) => r.approved_by), ...d.feedback.map((f) => f.slack_user)]);
           return send(200, detailPage({ ...d, names }, now, open, this.prices));
         }
         // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). Both
@@ -664,11 +670,11 @@ export class DashboardServer {
               errorPage("No postmortem draft", "No postmortem draft yet — ask `@agent postmortem` in the incident thread.")
             );
           }
-          return send(200, postmortemPage(route.id, pm, open));
+          return send(200, postmortemPage(route.id, pm, open, await this.nameMap([pm.requestedBy])));
         }
         case "postmortems": {
           const [rows, open] = await Promise.all([this.queries.postmortems(), this.openCount()]);
-          return send(200, postmortemsPage(rows, new Date(), open));
+          return send(200, postmortemsPage(rows, new Date(), open, await this.nameMap(rows.map((r) => r.requestedBy))));
         }
         case "postmortemMd": {
           const pm = await this.queries.postmortem(route.id);

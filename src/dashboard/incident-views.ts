@@ -437,7 +437,7 @@ export function detailPage(
  * `.doc` is the same wrapper `detailPage`/`skillPage` use: a long document laid straight into
  * `<main>` would be a run of full-width bands with nothing declaring it one page.
  */
-export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncidents?: number): string {
+export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncidents?: number, names?: ReadonlyMap<string, string>): string {
   return layout(
     "Postmortem draft",
     // Prose runs the card's full width; a 68ch measure was tried here and taken back out.
@@ -445,10 +445,12 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
      <p class="eyebrow">Incident #${esc(incidentId)}</p>
      <h1>Postmortem draft</h1>
      <div class="title-meta">
-       <span class="meta">Generated ${timeTag(pm.createdAt)} by ${esc(pm.requestedBy ?? "unknown")} · backend ${esc(pm.backend ?? "unknown")}</span>
-       <a class="standalone" href="/postmortems">← All postmortems</a>
-       <a class="standalone" href="/incidents/${esc(incidentId)}">← Incident #${esc(incidentId)}</a>
-       <a class="standalone" href="/incidents/${esc(incidentId)}/postmortem.md">Download Markdown →</a>
+       <span class="meta">Generated ${timeTag(pm.createdAt)} by ${pm.requestedBy ? person(pm.requestedBy, names) : "unknown"} · backend ${esc(pm.backend ?? "unknown")}</span>
+       <span class="page-actions">
+         <a class="standalone" href="/postmortems">← All postmortems</a>
+         <a class="standalone" href="/incidents/${esc(incidentId)}">← Incident #${esc(incidentId)}</a>
+         <a class="standalone primary" href="/incidents/${esc(incidentId)}/postmortem.md">Download Markdown</a>
+       </span>
      </div>
      <p class="meta">A draft: facts (timeline, durations) are rendered from data and the model never
        writes them; the narrative sections are drafted by the model and marked as a draft for
@@ -471,7 +473,7 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
  * how many times `@agent postmortem` was run on it. Like the draft page, it only reads: a draft is
  * made in the incident's Slack thread, so the empty state says that rather than offering a button.
  */
-export function postmortemsPage(rows: PostmortemListRow[], now: Date = new Date(), openIncidents?: number): string {
+export function postmortemsPage(rows: PostmortemListRow[], now: Date = new Date(), openIncidents?: number, names?: ReadonlyMap<string, string>): string {
   const body = rows
     .map(
       (r) => `<tr role="row"${toneAttr(r.severity)}>
@@ -480,7 +482,7 @@ export function postmortemsPage(rows: PostmortemListRow[], now: Date = new Date(
         `<div class="sub"><a href="/incidents/${esc(r.incidentId)}">Incident #${esc(r.incidentId)}</a></div>`, "primary")}
       ${cell("Namespace", esc(r.namespace ?? "—"), "ns mono")}
       ${cell("Severity", severityBadge(r.severity), "sev")}
-      ${cell("Requested by", esc(r.requestedBy ?? "unknown"))}
+      ${cell("Requested by", r.requestedBy ? person(r.requestedBy, names) : `<span class="meta">unknown</span>`)}
       ${cell("Backend", esc(r.backend ?? "unknown"), "mono")}
       ${cell("Revisions", esc(r.revisions), "num")}
     </tr>`
@@ -495,9 +497,12 @@ export function postmortemsPage(rows: PostmortemListRow[], now: Date = new Date(
       );
   return layout(
     "Postmortems",
-    `<h1>Postmortems</h1>
-     <p class="meta">The newest draft for each incident. Facts (timeline, durations) come from recorded data; the
-       narrative is drafted by the model. Review before sharing.</p>
+    `<div class="doc">
+       <p class="eyebrow">Monitor</p>
+       <h1>Postmortems</h1>
+       <p class="meta">${rows.length ? `${esc(fmtInt(rows.length))} incident${rows.length === 1 ? "" : "s"} with a draft · ` : ""}the newest draft
+         for each. Facts (timeline, durations) come from recorded data; the narrative is drafted by the model. Review before sharing.</p>
+     </div>
      ${list}`,
     { current: "/postmortems", openIncidents }
   );

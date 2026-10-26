@@ -370,6 +370,8 @@ export const CONTENT_CSS = `
   color: var(--text); font-size: var(--fs-sm); box-shadow: var(--shadow-sm);
 }
 .page-actions a.standalone:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.page-actions a.standalone.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.page-actions a.standalone.primary:hover { color: var(--on-accent); filter: brightness(1.08); }
 /* A list page's title row: the heading and its count on the left, the view switch on the right. */
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--sp-3) var(--sp-6); margin-bottom: var(--sp-5); }
 .page-head h1 { margin-bottom: var(--sp-1); }
