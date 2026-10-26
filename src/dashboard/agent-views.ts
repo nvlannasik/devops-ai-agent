@@ -4,7 +4,7 @@ import type { Assets } from "./assets.js";
 import { renderMarkdown } from "./markdown.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
-import { ICON, badge, empty, jsonBlock, section } from "./parts.js";
+import { ICON, badge, empty, jsonBlock, section, statList } from "./parts.js";
 import { layout } from "./layout.js";
 
 // `group` is only ever the anchor prefix: each box in the diagram links to its own row here,
@@ -275,7 +275,7 @@ export function promptPage(v: ContextView, openIncidents?: number): string {
      <div class="title-meta">
        <span class="badge">EVERY ITERATION</span>
        <span class="meta">${fmtInt(v.core.lines)} lines · ${fmtInt(v.core.chars)} chars · about ${fmtInt(v.core.tokens)} tokens</span>
-       <a class="standalone" href="/context">← Context and skills</a>
+       <span class="page-actions"><a class="standalone" href="/context">← Context and skills</a></span>
      </div>
      <p class="meta">Sent whole at the head of every request, on every iteration of every
        investigation — the largest and the only unconditional part of what this agent is told.</p>
@@ -310,7 +310,7 @@ export function skillPage(s: ContextView["skills"][number], openIncidents?: numb
      <div class="title-meta">
        ${always ? `<span class="badge">ALWAYS</span>` : `<span class="badge" data-tone="info">MATCHED</span>`}
        <span class="meta">${fmtInt(s.chars)} chars</span>
-       <a class="standalone" href="/context">← All skills</a>
+       <span class="page-actions"><a class="standalone" href="/context">← All skills</a></span>
      </div>
      <p class="meta">${esc(s.description)}</p>
 
@@ -339,7 +339,16 @@ function budgetRows(backends: ContextView["backends"]): string {
     backends
       .map((b) =>
         `<tr role="row">` +
-        cell("Backend", `<code translate="no">${esc(b.name)}</code>`) +
+        // The window as one bar, split the way the numbers beside it split it — the share left for
+        // skills and conversation is what this table is read for. aria-hidden: the four numbers
+        // in this row are the accessible statement of the same split.
+        cell(
+          "Backend",
+          `<code translate="no">${esc(b.name)}</code>` +
+            `<span class="stack-bar budget" aria-hidden="true">${(["reserve", "core", "tools", "available"] as const)
+              .map((k) => `<span data-k="${k}" style="--w:${b.window > 0 ? Math.max(0, Math.round((b[k] / b.window) * 100)) : 0}"></span>`)
+              .join("")}</span>`
+        ) +
         cell("Model", `<code translate="no">${esc(b.model)}</code>`) +
         // "num" is the class every other numeric cell in this file carries (see the Token usage
         // table, views.ts:273-276) — also a `pairs` table, so the combination is already proven.
@@ -358,9 +367,30 @@ function budgetRows(backends: ContextView["backends"]): string {
 export function contextPage(v: ContextView, openIncidents?: number): string {
   return layout(
     "Context",
-    `<h1>Context and skills</h1>
-     <p class="meta">What this agent knows before it reads a single metric, and how much room it
-       has to say it. Read from the running process — no database, no call leaves it.</p>
+    `<div class="doc">
+       <p class="eyebrow">Agent</p>
+       <h1>Context and skills</h1>
+       <p class="meta">What this agent knows before it reads a single metric, and how much room it
+         has to say it. Read from the running process — no database, no call leaves it.</p>
+     </div>
+     ${statList([
+       { icon: ICON.layers, label: "Core prompt", value: `~${fmtInt(v.core.tokens)}`, sub: `tokens on every call · ${fmtInt(v.core.lines)} lines` },
+       {
+         icon: ICON.context,
+         label: "Skills",
+         value: fmtInt(v.skills.length),
+         sub: `${fmtInt(v.skills.filter((k) => k.when === "always").length)} always · ${fmtInt(v.skills.filter((k) => k.when !== "always").length)} matched on the alert`,
+       },
+       { icon: ICON.plug, label: "Tool definitions", value: `~${fmtInt(v.backends[0]?.tools ?? 0)}`, sub: "tokens, sent with every call" },
+       {
+         icon: ICON.chip,
+         label: "Room left",
+         value: `~${fmtInt(v.effective.available)}`,
+         sub: `tokens on ${v.effective.backend}, the smallest window`,
+         // The one figure here that can be bad news: a window this full truncates conversation.
+         tone: v.effective.available < 8000 ? "warning" : undefined,
+       },
+     ])}
 
      ${section(ICON.layers, "Core prompt", `<a class="standalone" href="/prompt">Read the prompt →</a>`)}
      <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
@@ -378,6 +408,7 @@ export function contextPage(v: ContextView, openIncidents?: number): string {
        the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
        The router picks a backend after the request is assembled, so the request has to fit the
        smallest one it might land in.</p>
+     <p class="stack-legend"><span><i data-k="reserve"></i>reserve</span><span><i data-k="core"></i>core prompt</span><span><i data-k="tools"></i>tools</span><span><i data-k="available"></i>available</span></p>
      ${budgetRows(v.backends)}`,
     { current: "/context", openIncidents }
   );

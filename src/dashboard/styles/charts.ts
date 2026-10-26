@@ -401,6 +401,13 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 [data-k="accepted"] { background: var(--mark-ok); }
 [data-k="restored"] { background: var(--mark-info); }
 [data-k="kept-earlier"] { background: var(--mark-warning); }
+/* The context budget split: what is spent before the conversation starts, then what is left. */
+[data-k="reserve"] { background: var(--mark-line); }
+[data-k="core"] { background: var(--accent); }
+[data-k="tools"] { background: var(--mark-info); }
+[data-k="available"] { background: var(--mark-ok); }
+.stack-bar.budget { margin: var(--sp-2) 0 0; max-width: 14rem; }
+p.stack-legend { margin-bottom: var(--sp-3); }
 /* Latency as a range: the pale run is p95, the solid head is p50, both against the slowest p95
    on the page. The two spans overlap from the left edge, so the head is drawn second. */
 .lat-bar {

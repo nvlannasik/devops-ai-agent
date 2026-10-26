@@ -3191,3 +3191,13 @@ test("postmortems name the requester, and the draft page's actions are buttons",
   assert.match(pm, /by <code translate="no">U9<\/code>/, "no name: the id");
   assert.match(pm, /<span class="page-actions">[\s\S]*class="standalone primary" href="\/incidents\/7\/postmortem\.md"/);
 });
+
+test("the context shelf warns only when the smallest window is nearly full, and the budget bar splits the window", () => {
+  const roomy = contextPage(CTX);
+  assert.match(roomy, /<dd>~10,746<span>tokens on light, the smallest window/);
+  assert.doesNotMatch(roomy, /<div class="stat" data-tone="warning">/);
+  const tight = contextPage({ ...CTX, effective: { backend: "light", available: 3_000 } });
+  assert.match(tight, /<div class="stat" data-tone="warning">/);
+  // reserve + core + tools + available over the 32k window: 9120 → 29%
+  assert.match(roomy, /<span data-k="reserve" style="--w:29"><\/span>/);
+});
