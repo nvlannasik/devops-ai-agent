@@ -14,7 +14,7 @@ import type { Message } from "../agent/llm/types.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
 import type { MemoryKeyDetail, MemoryKeyPage, MemoryKeyRow } from "./queries.js";
-import { ICON, empty, pager, section } from "./parts.js";
+import { ICON, badge, dash, empty, pager, section, severityBadge, statList } from "./parts.js";
 import { layout } from "./layout.js";
 
 export interface MemoryFilters { page: number; alertname: string | null; namespace: string | null }
@@ -51,10 +51,16 @@ export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = n
     `<tr role="row">` +
     cell("Alert", `<a href="${esc(keyHref(r.alertname, r.namespace))}" translate="no">${esc(r.alertname)}</a>`, "primary") +
     cell("Namespace", nsLabel(r.namespace)) +
-    cell("Learned", esc(fmtInt(r.learned))) +
-    cell("Agent RCAs", esc(fmtInt(r.rcas))) +
-    cell("Remediations", `${esc(fmtInt(r.remediations))}` +
-      (r.recovered || r.worse ? ` <span class="when">${esc(r.recovered)} recovered · ${esc(r.worse)} worse</span>` : "")) +
+    // A confirmed cause is the strongest tier recall has, so a key that has one says so in words.
+    cell("Learned", r.learned > 0 ? badge(`${fmtInt(r.learned)} confirmed`, "ok") : dash) +
+    cell("Agent RCAs", esc(fmtInt(r.rcas)), "num") +
+    cell(
+      "Remediations",
+      `${esc(fmtInt(r.remediations))}` +
+        (r.recovered || r.worse
+          ? ` <span class="roles">${r.recovered ? badge(`${fmtInt(r.recovered)} recovered`, "ok") : ""}${r.worse ? badge(`${fmtInt(r.worse)} worse`, "critical") : ""}</span>`
+          : "")
+    ) +
     cell("Last seen", timeTag(r.lastSeen, now), "when") +
     `</tr>`;
   const body =
@@ -64,11 +70,15 @@ export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = n
           filtered ? "Clear a filter to see more." : "An alert's investigation is stored once its RCA is posted; @agent learn adds a confirmed cause.",
           ICON.memory
         )
-      : table(headers("Alert", "Namespace", "Learned", "Agent RCAs", "Remediations", "Last seen"), p.rows.map(row).join(""), "stack");
+      : table(headers("Alert", "Namespace", "Learned", ["Agent RCAs", "num"], "Remediations", "Last seen"), p.rows.map(row).join(""), "stack");
   return layout(
     "Alert memory",
-    `<h1>Alert memory</h1>
-     <p class="meta">What the agent recalls when an alert fires again, keyed the way it recalls it — by alert name and namespace. Read-only.</p>
+    `<div class="doc">
+       <p class="eyebrow">Agent</p>
+       <h1>Alert memory</h1>
+       <p class="meta">${p.total ? `${esc(fmtInt(p.total))} alert key${p.total === 1 ? "" : "s"}${filtered ? " match" : " remembered"} · ` : ""}what the agent
+         recalls when an alert fires again, keyed the way it recalls it — by alert name and namespace.</p>
+     </div>
      <form class="filters" method="get" action="/memory">
        <label>Alert<input type="text" name="alertname" value="${esc(f.alertname)}" placeholder="KubePodCrashLooping"
          autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -87,7 +97,8 @@ export function memoryKeyPage(
   recall: { incidents: string; remediations: string } | null,
   d: MemoryKeyDetail,
   now: Date = new Date(),
-  openIncidents?: number
+  openIncidents?: number,
+  names?: ReadonlyMap<string, string>
 ): string {
   const pre = (text: string, none: string): string =>
     text.trim() ? `<pre class="mem-pre" translate="no">${esc(text)}</pre>` : `<p class="meta">${esc(none)}</p>`;
@@ -103,9 +114,9 @@ export function memoryKeyPage(
         d.learned
           .map(
             (l) =>
-              `<tr role="row">${cell("Confirmed", `${timeTag(l.createdAt, now)}${l.slackUser ? ` <span class="when">by ${esc(l.slackUser)}</span>` : ""}`, "when")}` +
+              `<tr role="row">${cell("Confirmed", `${timeTag(l.createdAt, now)}${l.slackUser ? ` <span class="when">by ${esc(names?.get(l.slackUser) ?? l.slackUser)}</span>` : ""}`, "when")}` +
               cell("Root cause", esc(l.confirmedRootCause ?? "—")) + cell("Action", esc(l.actionTaken ?? "—")) +
-              cell("Outcome", esc(l.outcome ?? "unknown")) + cell("Incident", incidentLink(l.incidentId)) + `</tr>`
+              cell("Outcome", l.outcome ? badge(l.outcome) : `<span class="meta">unknown</span>`) + cell("Incident", incidentLink(l.incidentId)) + `</tr>`
           )
           .join(""),
         "stack"
@@ -118,7 +129,7 @@ export function memoryKeyPage(
           .map(
             (r) =>
               `<tr role="row">${cell("When", timeTag(r.createdAt, now), "when")}${cell("Root cause", esc((r.rootCause ?? "—").split("\n")[0]))}` +
-              cell("Severity", esc(r.severity ?? "—")) + cell("Confidence", esc(r.confidence ?? "—")) + cell("Incident", incidentLink(r.incidentId)) + `</tr>`
+              cell("Severity", severityBadge(r.severity)) + cell("Confidence", esc(r.confidence ?? "—")) + cell("Incident", incidentLink(r.incidentId)) + `</tr>`
           )
           .join(""),
         "stack"
@@ -131,7 +142,7 @@ export function memoryKeyPage(
           .map(
             (r) =>
               `<tr role="row">${cell("When", timeTag(r.createdAt, now), "when")}${cell("Remediation", esc(r.summary))}` +
-              cell("Status", esc(r.status)) + cell("Verdict", esc(r.verdict ?? "not verified")) + cell("Incident", incidentLink(r.incidentId)) + `</tr>`
+              cell("Status", badge(r.status)) + cell("Verdict", r.verdict ? badge(r.verdict) : `<span class="meta">not verified</span>`) + cell("Incident", incidentLink(r.incidentId)) + `</tr>`
           )
           .join(""),
         "stack"
@@ -144,6 +155,23 @@ export function memoryKeyPage(
      <p class="eyebrow"><a href="/memory">Alert memory</a></p>
      <h1 translate="no">${esc(key.alertname)}</h1>
      <p class="meta">Namespace ${nsLabel(key.namespace)}</p>
+     ${statList([
+       { icon: ICON.speech, label: "Confirmed causes", value: fmtInt(d.learned.length), sub: d.learned.length ? "recalled first, as fact" : "none yet — @agent learn adds one" },
+       { icon: ICON.memory, label: "Agent RCAs", value: fmtInt(d.rcas.length), sub: "recalled as a hypothesis" },
+       { icon: ICON.wrench, label: "Remediations", value: fmtInt(d.remediations.length), sub: "that ran on this key" },
+       // No tone: the figure is the recoveries. A "worse" verdict is named in the sub-line,
+       // where colouring the tile would have painted the good number red.
+       {
+         icon: ICON.check,
+         label: "Recovered",
+         value: fmtInt(d.remediations.filter((r) => r.verdict === "recovered").length),
+         sub:
+           `of ${fmtInt(d.remediations.filter((r) => r.verdict).length)} verified` +
+           (d.remediations.some((r) => r.verdict === "worse")
+             ? ` · ${fmtInt(d.remediations.filter((r) => r.verdict === "worse").length)} made it worse`
+             : ""),
+       },
+     ])}
      ${section(ICON.memory, "What the agent will read")}
      <p class="meta">The text recall puts in front of the model when this alert fires again, produced by the agent's own recall. The weakest tier — <em>possibly related</em> incidents, matched on the words of the alert's own text — is computed from that text when an alert arrives, so it cannot be shown here.</p>
      ${recallBlock}
@@ -162,17 +190,17 @@ export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<str
   const started = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
   const body = threads.length
     ? table(
-        headers("Thread", "Messages", "Expires in", "RCA sent", "Skills carried", "Incident"),
+        headers("Thread", ["Messages", "num"], "Expires in", "RCA sent", "Skills carried", "Incident"),
         threads
           .map((t) => {
             const inc = incidents.get(t.threadId);
             return (
               `<tr role="row">` +
               cell("Thread", `<a href="/memory/threads/${esc(t.threadId)}" translate="no">${esc(t.threadId)}</a> <span class="when">${timeTag(started(t.threadId), now)}</span>`, "primary") +
-              cell("Messages", esc(fmtInt(t.messages))) +
+              cell("Messages", esc(fmtInt(t.messages)), "num") +
               cell("Expires in", esc(fmtTtl(t.ttlSeconds))) +
-              cell("RCA sent", t.rcaSent ? "yes" : "no") +
-              cell("Skills carried", t.skills.length ? t.skills.map((s) => `<code>${esc(s)}</code>`).join(" ") : "—") +
+              cell("RCA sent", t.rcaSent ? badge("rca sent", "ok") : `<span class="meta">no</span>`) +
+              cell("Skills carried", t.skills.length ? `<span class="roles">${t.skills.map((s) => badge(s, "")).join("")}</span>` : dash) +
               cell("Incident", inc === undefined ? "—" : `<a href="/incidents/${esc(inc)}">#${esc(inc)}</a>`) +
               `</tr>`
             );
@@ -183,8 +211,12 @@ export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<str
     : empty("No conversation is held right now.", "A thread's conversation stays for 24 hours after its last message.", ICON.chats);
   return layout(
     "Conversation memory",
-    `<h1>Conversation memory</h1>
-     <p class="meta">The conversation each Slack thread still holds — what the model reads on that thread's next turn. Kept 24 hours after the last message.</p>
+    `<div class="doc">
+       <p class="eyebrow">Agent</p>
+       <h1>Conversation memory</h1>
+       <p class="meta">${threads.length ? `${esc(fmtInt(threads.length))} thread${threads.length === 1 ? "" : "s"} held · ` : ""}the conversation each Slack thread
+         still holds — what the model reads on that thread's next turn. Kept 24 hours after the last message.</p>
+     </div>
      ${body}`,
     { current: "/memory/threads", openIncidents }
   );
@@ -220,14 +252,24 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
       { current: "/memory/threads", openIncidents }
     );
   }
-  const rows = t.messages
+  // A transcript, not a table: a conversation is read top to bottom by who said it, and a
+  // three-column grid made every turn the same grey row. The agent's turns are tinted; the
+  // order and the pinned first message are stated in words, not by position alone.
+  // A user-role message that only carries tool results is the tool talking, not the person.
+  const who = (m: Message): string =>
+    m.role === "assistant"
+      ? "agent"
+      : Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => b.type === "tool_result")
+        ? "tool"
+        : m.role;
+  const turns = t.messages
     .map(
       (m, i) =>
-        `<tr role="row">` +
-        cell("#", `${esc(i + 1)}${i === 0 ? ` <strong>pinned</strong>` : ""}`, "when") +
-        cell("From", esc(m.role === "assistant" ? "agent" : m.role)) +
-        cell("Holds", messageContent(m)) +
-        `</tr>`
+        `<li class="turn" data-role="${who(m)}">` +
+        `<div class="turn-head"><span class="turn-who">${esc(who(m))}</span>` +
+        `<span class="meta">#${esc(i + 1)}</span>${i === 0 ? badge("pinned", "info") : ""}</div>` +
+        `<div class="turn-body">${messageContent(m)}</div>` +
+        `</li>`
     )
     .join("");
   return layout(
@@ -240,7 +282,7 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
       `${incidentId !== null ? ` · <a href="/incidents/${esc(incidentId)}">incident #${esc(incidentId)}</a>` : ""}</p>
      <p class="meta">The window the model reads on this thread's next turn, in order. The first message is pinned — trimming never drops it. Tool results show their size and first line only; the full run is in <a href="/api/trace/${esc(t.threadId)}">the trace</a>.</p>
      ${section(ICON.chats, "Conversation window")}
-     ${table(headers("#", "From", "Holds"), rows, "stack")}
+     <ol class="transcript">${turns}</ol>
      </div>`,
     { current: "/memory/threads", openIncidents }
   );

@@ -251,6 +251,21 @@ export const CONTENT_CSS = `
 .mem-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .mem-dim { color: var(--text-dim); overflow-wrap: anywhere; }
 .mem-text + p, .mem-text + .mem-text { margin-top: var(--sp-2); }
+/* A conversation window as a transcript. Each turn is a card; the agent's carry the brand tint and
+   sit inset from the left so the two voices read apart at a glance — the role is still a word in
+   the head, never the tint alone. */
+.transcript { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-3); }
+.turn {
+  background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--r);
+  padding: var(--sp-3) var(--sp-4); box-shadow: var(--shadow-sm); min-width: 0;
+}
+.turn[data-role="agent"] { margin-left: clamp(0rem, 6%, 3rem); background: color-mix(in srgb, var(--brand-tint) 55%, var(--surface-raised)); }
+.turn-head { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.turn-who { font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); }
+.turn[data-role="agent"] .turn-who { color: var(--accent); }
+.turn[data-role="tool"] { margin-left: clamp(0rem, 6%, 3rem); background: var(--surface-2); box-shadow: none; }
+.turn-body { font-size: var(--fs-sm); min-width: 0; }
+.turn-body p { margin: 0; }
 
 /* ---------- filter chips ---------- */
 /* For a filter with no field in the form. The form's six controls show their own state; this

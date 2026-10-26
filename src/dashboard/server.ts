@@ -649,7 +649,7 @@ export class DashboardServer {
             this.queries.memoryKey(name, ns),
             this.openCount(),
           ]);
-          return send(200, memoryKeyPage({ alertname: name, namespace: ns }, recall, d, new Date(), open));
+          return send(200, memoryKeyPage({ alertname: name, namespace: ns }, recall, d, new Date(), open, await this.nameMap(d.learned.map((l) => l.slackUser))));
         }
         case "detail": {
           const now = new Date();

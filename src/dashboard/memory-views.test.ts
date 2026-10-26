@@ -105,3 +105,32 @@ test("alert memory and conversation memory are two rail destinations, not tabs o
   assert.match(list, /<span class="lbl">Alert memory<\/span>/);
   assert.match(list, /<span class="lbl">Conversation memory<\/span>/);
 });
+
+test("a thread reads as a transcript: agent, user and tool turns named in words, the first pinned", () => {
+  const html = threadPage(
+    {
+      threadId: "1790000000.000100", ttlSeconds: 60, rcaSent: false, skills: [],
+      messages: [
+        { role: "user", content: "why is it down" },
+        { role: "assistant", content: [{ type: "tool_use", id: "1", name: "k8s_list_pods", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "line one\nline two" }] },
+      ],
+    } as never,
+    null
+  );
+  assert.match(html, /<li class="turn" data-role="user"><div class="turn-head"><span class="turn-who">user<\/span><span class="meta">#1<\/span><span class="badge"[^>]*>pinned/);
+  assert.match(html, /data-role="agent"/);
+  assert.match(html, /<span class="turn-who">tool<\/span>/);
+  assert.doesNotMatch(html, /line two/);
+});
+
+test("the key shelf counts recoveries and names a worse verdict without painting the tile", () => {
+  const html = memoryKeyPage({ alertname: "A", namespace: null }, null, {
+    learned: [], rcas: [],
+    remediations: [
+      { incidentId: 1, summary: "s", status: "succeeded", verdict: "recovered", createdAt: new Date().toISOString() },
+      { incidentId: 2, summary: "s", status: "succeeded", verdict: "worse", createdAt: new Date().toISOString() },
+    ],
+  });
+  assert.match(html, /<div class="stat"><dt>[\s\S]*?Recovered[\s\S]*?<dd>1<span>of 2 verified · 1 made it worse/);
+});
