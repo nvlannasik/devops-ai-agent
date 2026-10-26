@@ -3142,3 +3142,40 @@ test("clusterPage embeds the cluster model and its unknowns, or says the flow is
   assert.match(without, /Request flow is being computed — reload in a few seconds/);
   assert.doesNotMatch(without, /id="cluster-model"/);
 });
+
+// ---------- incidents: names, readable params, links, the state switch ----------
+test("a result's http(s) URL becomes a link and nothing else does", async () => {
+  const { linkify } = await import("./incident-views.js");
+  assert.equal(
+    linkify("GitOps PR opened: https://github.com/x/y/pull/42"),
+    'GitOps PR opened: <a href="https://github.com/x/y/pull/42" rel="noreferrer noopener" target="_blank">https://github.com/x/y/pull/42</a>'
+  );
+  assert.doesNotMatch(linkify("javascript:alert(1) <b>x</b>"), /<a |<b>/);
+  assert.doesNotMatch(linkify('https://x.io/"onmouseover="a'), /href="[^"]*"onmouseover/);
+});
+
+test("the incident page names people and lists params as key = value", () => {
+  const html = detailPage(
+    {
+      incident: { ...row, rca: "x", channel: null, thread_ts: null },
+      remediations: [{
+        action: "k8s_scale", params: { namespace: "prod", replicas: 3 }, status: "succeeded", approved_by: "U1", result: null,
+        created_at: new Date(), executed_at: null, verdict: null, verdict_detail: null, check_status: null, checked_at: null, due_at: null,
+      }],
+      feedback: [{ slack_user: "U2", confirmed_root_cause: "c", action_taken: "a", outcome: null, created_at: new Date() }],
+      names: new Map([["U1", "Dina <x>"]]),
+    },
+    new Date()
+  );
+  assert.match(html, /Dina &lt;x&gt; <span class="meta" translate="no">U1<\/span>/);
+  assert.match(html, /<code translate="no">U2<\/code>/, "no name: the id itself");
+  assert.match(html, /<dt>replicas<\/dt><dd>3<\/dd>/);
+  assert.doesNotMatch(html, /\{"namespace"/);
+});
+
+test("the state switch keeps the other filters and drops the page", () => {
+  const html = listPage(page([row]), parseFilters(new URLSearchParams("namespace=prod&page=3&resolved=true")), new Date(), 2);
+  assert.match(html, /<a href="\/incidents\?namespace=prod&amp;resolved=false">Firing <span class="seg-count">2<\/span><\/a>/);
+  assert.match(html, /<a href="\/incidents\?namespace=prod&amp;resolved=true" aria-current="true">Resolved<\/a>/);
+  assert.match(html, /<a href="\/incidents\?namespace=prod">All<\/a>/);
+});

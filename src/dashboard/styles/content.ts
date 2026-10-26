@@ -361,4 +361,27 @@ export const CONTENT_CSS = `
 .pages .step.off { opacity: .38; }
 .pages .gap { min-width: 1.5rem; padding: 0; }
 .title-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-6); }
+/* The actions an incident offers sit to the right of its badges as buttons — outlined, so they
+   rank below the page's one primary control (Apply filters) and above body links. */
+.page-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-left: auto; }
+.page-actions a.standalone {
+  display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 var(--sp-3);
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--surface-raised);
+  color: var(--text); font-size: var(--fs-sm); box-shadow: var(--shadow-sm);
+}
+.page-actions a.standalone:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+/* A list page's title row: the heading and its count on the left, the view switch on the right. */
+.page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--sp-3) var(--sp-6); margin-bottom: var(--sp-5); }
+.page-head h1 { margin-bottom: var(--sp-1); }
+.page-head strong { color: var(--text); font-weight: 600; }
+.seg-count {
+  display: inline-block; min-width: 1.4em; margin-left: .35em; padding: 0 .4em; border-radius: var(--r-pill);
+  background: var(--tint-critical); color: var(--critical); font-size: var(--fs-2xs); font-weight: 700; text-align: center;
+}
+/* A remediation's params: key and value on one line each, the key dimmed. */
+dl.kv { margin: var(--sp-1) 0 0; display: grid; gap: 2px; font-size: var(--fs-sm); }
+dl.kv > div { display: flex; flex-wrap: wrap; gap: 0 .5em; }
+dl.kv dt { color: var(--text-dim); }
+dl.kv dt::after { content: " ="; }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 `;

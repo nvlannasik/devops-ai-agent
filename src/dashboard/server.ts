@@ -642,7 +642,15 @@ export class DashboardServer {
           const now = new Date();
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
-          return send(200, detailPage(d, now, open, this.prices));
+          // The people on this page are Slack ids in the rows; a reader wants names. Same lookup
+          // and cache as /people, and a failure just leaves the ids.
+          const ids = [...new Set([...d.remediations.map((r) => r.approved_by), ...d.feedback.map((f) => f.slack_user)].filter((x): x is string => !!x))];
+          const names = new Map<string, string>();
+          if (ids.length > 0 && this.slackNames) {
+            const { profiles } = await this.slackNames(ids).catch(() => ({ profiles: new Map<string, SlackProfile>() }));
+            for (const [id, p] of profiles) names.set(id, p.name);
+          }
+          return send(200, detailPage({ ...d, names }, now, open, this.prices));
         }
         // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). Both
         // routes read the SAME latest-draft row; the page renders it and the .md route hands it

@@ -54,6 +54,23 @@ export function listPage(
       `</li></ul>`
     : "";
 
+  // The three views on-call actually switches between, one click each. The form's State select
+  // stays (it combines with the other fields); this is the same parameter, as links.
+  const stateHref = (v: boolean | null): string => {
+    const q = new URLSearchParams(qsWithout("resolved").split("?")[1] ?? "");
+    if (v !== null) q.set("resolved", String(v));
+    const out = q.toString();
+    return out ? `/incidents?${out}` : "/incidents";
+  };
+  const stateLink = (v: boolean | null, label: string): string =>
+    `<a href="${esc(stateHref(v))}"${f.resolved === v ? ` aria-current="true"` : ""}>${label}</a>`;
+  const stateSwitch =
+    `<nav class="seg" aria-label="Incident state">` +
+    stateLink(null, "All") +
+    stateLink(false, `Firing${openIncidents ? ` <span class="seg-count">${esc(fmtInt(openIncidents))}</span>` : ""}`) +
+    stateLink(true, "Resolved") +
+    `</nav>`;
+
   // Two different absences. No rows on page 1 means the filters matched nothing; no rows on
   // page 7 means the range ended earlier than the URL claims — usually a bookmark outliving
   // the rows it pointed at — and the way out of that is a link, not a suggestion to filter.
@@ -69,7 +86,15 @@ export function listPage(
   // `Prod`, which matches nothing), spellcheck off (every alert name is a red squiggle).
   return layout(
     "Incidents",
-    `<h1>Incidents</h1>
+    `<div class="page-head">
+       <div>
+         <h1>Incidents</h1>
+         <p class="meta">${esc(fmtInt(p.total))}${p.capped ? "+" : ""} incident${p.total === 1 ? "" : "s"}${filtered ? " match these filters" : ""}${
+           openIncidents ? ` · <strong>${esc(fmtInt(openIncidents))} firing now</strong>` : ""
+         }</p>
+       </div>
+       ${stateSwitch}
+     </div>
      <form class="filters" method="get" action="/incidents">
        <label>From<input type="date" name="from" value="${esc(f.from ? f.from.toISOString().slice(0, 10) : "")}"></label>
        <label>To<input type="date" name="to" value="${esc(f.to ? f.to.toISOString().slice(0, 10) : "")}"></label>
@@ -104,6 +129,33 @@ export function listPage(
     }
   );
 }
+
+/** A Slack id as its name when the lookup had one, the id kept beside it for matching the config. */
+const person = (id: string, names?: ReadonlyMap<string, string>): string => {
+  const name = names?.get(id);
+  return name ? `${esc(name)} <span class="meta" translate="no">${esc(id)}</span>` : `<code translate="no">${esc(id)}</code>`;
+};
+
+/** A remediation's params as key = value lines — the JSON was one unbroken token per row. */
+const paramList = (params: Record<string, unknown>): string => {
+  const entries = Object.entries(params ?? {});
+  if (entries.length === 0) return "";
+  return (
+    `<dl class="kv" translate="no">` +
+    entries
+      .map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(typeof v === "string" ? v : JSON.stringify(v))}</dd></div>`)
+      .join("") +
+    `</dl>`
+  );
+};
+
+/**
+ * http(s) URLs in a result line become links (a GitOps PR is the result someone wants to open).
+ * esc() first, then markup on the escaped text: the pattern stops at whitespace, `<` and quotes, so
+ * nothing esc() emitted can be pulled into an attribute, and a non-http scheme never matches.
+ */
+export const linkify = (text: string): string =>
+  esc(text).replace(/https?:\/\/[^\s<"']+/g, (u) => `<a href="${u}" rel="noreferrer noopener" target="_blank">${u}</a>`);
 
 /**
  * What the cluster did about a remediation, or why that is not known yet.
@@ -163,12 +215,15 @@ export function detailPage(
     /** Whether a postmortem draft exists for this incident (migrations/015) — never the draft
      *  itself, which the dashboard reads directly on its own route rather than here. */
     hasPostmortem?: boolean;
+    /** Slack display names for the ids in the rows (SlackApp.userProfiles); an id without one shows as itself. */
+    names?: ReadonlyMap<string, string>;
   },
   now: Date = new Date(),
   openIncidents?: number,
   prices: ReadonlyMap<string, Price> = new Map()
 ): string {
   const i = d.incident;
+  const who = (id: string | null): string => (id ? person(id, d.names) : dash);
   // app_redirect needs no workspace domain, so the deep link costs no configuration.
   // encodeURIComponent() first (safe *inside* the URL — a stray & or # in a component
   // can't inject a second query param or a fragment), then esc() on the whole string
@@ -213,16 +268,16 @@ export function detailPage(
               // The status is only the whole story where no check will ever run — an unapproved
               // proposal, or an action that errored before one was scheduled.
               (r) => `<tr role="row"${toneAttr(r.verdict ?? (r.check_status ? "" : r.status))}>` +
-                cell("Action", `<span translate="no">${esc(r.action)}</span><div class="sub" translate="no">${esc(JSON.stringify(r.params))}</div>`, "mono") +
+                cell("Action", `<span translate="no">${esc(r.action)}</span>${paramList(r.params)}`, "mono") +
                 // `result` is what the call said, so it belongs under the call's own badge
                 // rather than in a column of its own — which is also what makes room for the
                 // verdict without taking this table to six columns.
                 cell(
                   "Status",
-                  badge(r.status) + (r.result ? `<div class="sub">${esc(r.result)}</div>` : "")
+                  badge(r.status) + (r.result ? `<div class="sub">${linkify(r.result)}</div>` : "")
                 ) +
                 cell("Verdict", verdictCell(r, now)) +
-                cell("Approved by", esc(r.approved_by ?? "—")) +
+                cell("Approved by", who(r.approved_by)) +
                 cell("Executed", timeTag(r.executed_at, now), "when") +
                 `</tr>`
             )
@@ -302,7 +357,7 @@ export function detailPage(
           d.feedback
             .map(
               (r) => `<tr role="row"${toneAttr(r.outcome)}>` +
-                cell("From", esc(r.slack_user ?? "—")) +
+                cell("From", who(r.slack_user)) +
                 cell("Confirmed root cause", esc(r.confirmed_root_cause ?? "—")) +
                 cell("Action taken", esc(r.action_taken ?? "—")) +
                 cell("Outcome", r.outcome ? badge(r.outcome) : dash) +
@@ -330,9 +385,7 @@ export function detailPage(
      <div class="title-meta">
        ${severityBadge(i.severity)}
        ${stateBadge(i.resolved_at)}
-       ${mergedInto}
-       ${slack}
-       ${postmortemLink}
+       ${mergedInto || slack || postmortemLink ? `<span class="page-actions">${mergedInto}${slack}${postmortemLink}</span>` : ""}
      </div>
      ${statList(
        [
