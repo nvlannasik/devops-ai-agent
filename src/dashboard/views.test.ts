@@ -3198,6 +3198,6 @@ test("the context shelf warns only when the smallest window is nearly full, and 
   assert.doesNotMatch(roomy, /<div class="stat" data-tone="warning">/);
   const tight = contextPage({ ...CTX, effective: { backend: "light", available: 3_000 } });
   assert.match(tight, /<div class="stat" data-tone="warning">/);
-  // reserve + core + tools + available over the 32k window: 9120 → 29%
-  assert.match(roomy, /<span data-k="reserve" style="--w:29"><\/span>/);
+  // the light backend's 32k window, split: 9,120 reserve → 28 (9120/32000*100 is 28.4999… in floats)
+  assert.match(roomy, /<span data-k="reserve" style="--w:28"><\/span><span data-k="core" style="--w:25"><\/span>/);
 });
