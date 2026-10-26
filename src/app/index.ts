@@ -28,6 +28,7 @@ export { buildProposalContext } from "./mention.js";
 // How many ungrounded names the thread warning lists before it summarises the rest. A wall of
 // them says the same thing as five of them — the answer is not standing on its evidence.
 const UNGROUNDED_SHOWN = 5;
+const NAME_TTL_MS = 60 * 60 * 1000;
 
 export class SlackApp {
   private app: App;
@@ -46,6 +47,7 @@ export class SlackApp {
    */
   private readonly unstored = new Map<string, UnstoredAlert>();
   private readonly inflight = new InFlightRegistry();
+  private readonly nameCache = new Map<string, { name: string; at: number }>();
   private httpServer: Server | null = null;
   private verifyTimer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -368,6 +370,36 @@ export class SlackApp {
           .catch((err) => logger.error(`[slack] restart notice not posted to ${w.threadTs}: ${errDetail(err)}`))
       )
     );
+  }
+
+  /**
+   * Display names for the dashboard's /people page (`users.info`, needs `users:read`). A lookup
+   * that fails leaves that id out and reports the first Slack error (e.g. `missing_scope`), so the
+   * page shows the bare id and says why instead of a blank.
+   * ponytail: per-process cache for an hour — a renamed user shows the old name until then.
+   */
+  async userNames(ids: readonly string[]): Promise<{ names: Map<string, string>; error: string | null }> {
+    const now = Date.now();
+    let error: string | null = null;
+    await Promise.all(
+      ids
+        .filter((id) => (this.nameCache.get(id)?.at ?? 0) < now - NAME_TTL_MS)
+        .map(async (id) => {
+          try {
+            const { user } = await this.app.client.users.info({ user: id });
+            const name = user?.profile?.display_name || user?.real_name || user?.name;
+            if (name) this.nameCache.set(id, { name, at: now });
+          } catch (err) {
+            error ??= (err as { data?: { error?: string } }).data?.error ?? errDetail(err);
+          }
+        })
+    );
+    const names = new Map<string, string>();
+    for (const id of ids) {
+      const hit = this.nameCache.get(id);
+      if (hit) names.set(id, hit.name);
+    }
+    return { names, error };
   }
 
   async stop(): Promise<void> {

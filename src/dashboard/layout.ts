@@ -30,6 +30,7 @@ const NAV_GROUPS = [
       { href: "/context", label: "Context", icon: ICON.context },
       { href: "/bench", label: "Benchmark", icon: ICON.bench },
       { href: "/harness", label: "Harness", icon: ICON.harness },
+      { href: "/people", label: "People", icon: ICON.people },
     ],
   },
 ];

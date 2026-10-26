@@ -5,7 +5,7 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { memoryKeyPage, memoryListPage, threadPage, threadsPage } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
@@ -28,7 +28,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" | "people" }
   | { kind: "memoryThread"; threadTs: string }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
@@ -49,6 +49,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/topology") return { kind: "topology" };
   if (p === "/bench") return { kind: "bench" };
   if (p === "/harness") return { kind: "harness" };
+  if (p === "/people") return { kind: "people" };
   if (p === "/cluster") return { kind: "cluster" };
   // /memory (2026-10-20). A key is two query parameters, not a path: a namespace may be absent,
   // and "absent" must stay distinguishable from any spelling of a name. A thread is a Slack ts
@@ -166,6 +167,9 @@ export interface MemorySource {
   thread(threadId: string): Promise<ThreadMemory | null>;
 }
 
+/** Slack display names for /people — SlackApp.userNames, structural so neither side imports the other. */
+export type SlackNames = (ids: readonly string[]) => Promise<{ names: Map<string, string>; error: string | null }>;
+
 export class DashboardServer {
   private server: http.Server | null = null;
   private readonly queries: DashboardQueries;
@@ -176,6 +180,7 @@ export class DashboardServer {
   // The onboarding cluster model (agent/onboarding), PEEKED: never waits, null until the first build lands.
   private readonly clusterModel: (() => unknown) | undefined;
   private readonly memory?: MemorySource;
+  private readonly slackNames?: SlackNames;
   private inventoryCache: { at: number; inv: ClusterInventory | null; error: string | null } | null = null;
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
@@ -196,7 +201,8 @@ export class DashboardServer {
     skills?: () => readonly SkillView[],
     inventory?: () => Promise<string>,
     clusterModel?: () => unknown,
-    memory?: MemorySource
+    memory?: MemorySource,
+    slackNames?: SlackNames
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
@@ -204,6 +210,7 @@ export class DashboardServer {
     this.inventory = inventory;
     this.clusterModel = clusterModel;
     this.memory = memory;
+    this.slackNames = slackNames;
   }
 
   async start(): Promise<void> {
@@ -551,6 +558,19 @@ export class DashboardServer {
 
     if (route.kind === "bench") {
       return send(200, benchPage(loadBenchHistory(), await this.openCount()), "text/html; charset=utf-8");
+    }
+
+    // Before the database gate: the lists are this process's config. Activity degrades to none.
+    if (route.kind === "people") {
+      const { oncallUsers: oncall, approverUsers: approvers, allowedUsers: allowed } = config.slack;
+      const activity = await this.queries.people().catch((err) => {
+        logger.error(`[dashboard] people activity read failed: ${errDetail(err)}`);
+        return [];
+      });
+      const ids = [...new Set([...oncall, ...approvers, ...allowed, ...activity.map((a) => a.user)])];
+      const { names, error } = this.slackNames ? await this.slackNames(ids) : { names: new Map<string, string>(), error: null };
+      const view = { oncall, approvers, allowed, activity, names, namesError: error };
+      return send(200, peoplePage(view, new Date(), await this.openCount()));
     }
 
     // Before the database gate: a conversation lives in Redis (or in this process), so these

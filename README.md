@@ -58,7 +58,7 @@ The full pipeline, step by step: [docs/INVESTIGATION.md](docs/INVESTIGATION.md).
 
 - Node.js >= 24
 - A running [devops-mcp-server](../devops-mcp-server)
-- Slack app with scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`
+- Slack app with scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`, `users:read` (names on the dashboard's /people page)
 - Optional: Postgres (incident memory, dashboard) and Redis (multi-pod conversation memory + dedup)
 
 **Run**
@@ -74,7 +74,7 @@ npm test                       # unit tests
 **Slack app setup**
 
 1. [api.slack.com/apps](https://api.slack.com/apps) → Create App
-2. **OAuth & Permissions** → scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`
+2. **OAuth & Permissions** → scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`, `users:read` (names on the dashboard's /people page)
 3. **Event Subscriptions** → subscribe to `app_mention`, `reaction_added`
 4. Copy Bot Token + Signing Secret to `.env`
 5. Socket Mode: enable + generate App Token with `connections:write`

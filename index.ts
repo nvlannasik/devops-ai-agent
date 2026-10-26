@@ -18,7 +18,7 @@ async function main() {
       recall: (labels) => agent.memoryRecall(labels),
       threads: () => agent.conversationThreads(),
       thread: (id) => agent.conversationThread(id),
-    });
+    }, (ids) => slack.userNames(ids));
 
     // graceful shutdown
     const shutdown = async (signal: string) => {

@@ -15,6 +15,7 @@ export interface IncidentRow {
 export interface GateStat { name: string; outcome: string; d7: number; d30: number }
 /** One backend's chat() wall time over 7 days, router failover included. Milliseconds. */
 export interface LlmLatency { backend: string; calls: number; p50: number; p95: number }
+export interface PersonActivity { user: string; approved: number; rejected: number; lastApproval: Date | null }
 export interface HarnessView { runs7: number; runs30: number; stats: GateStat[]; llm?: LlmLatency[] }
 export interface GateEvent { threadTs: string; outcome: string; detail: string; createdAt: Date; incidentId: number | null }
 export interface GateDrill { daily: { day: string; n: number }[]; events: GateEvent[] }
@@ -707,6 +708,30 @@ export class DashboardQueries {
       subjects: r.subjects ?? [],
       created_at: r.created_at,
       resolved_at: r.resolved_at ?? null,
+    }));
+  }
+
+  /**
+   * Approve/reject clicks per Slack user, last 30 days. `approved_by` holds the decider for BOTH
+   * (reject() writes it too); an expired card has none and is not counted. Only an approval has a
+   * decision time (`executed_at`) — a rejection keeps only the card's own `created_at`.
+   */
+  async people(): Promise<PersonActivity[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT approved_by AS user,
+              count(*) FILTER (WHERE status <> 'rejected') AS approved,
+              count(*) FILTER (WHERE status = 'rejected') AS rejected,
+              max(executed_at) AS last_approval
+         FROM remediations
+        WHERE approved_by IS NOT NULL AND created_at > now() - interval '30 days'
+        GROUP BY approved_by`
+    );
+    return rows.map((r) => ({
+      user: String(r.user),
+      approved: num(r.approved),
+      rejected: num(r.rejected),
+      lastApproval: r.last_approval ?? null,
     }));
   }
 
