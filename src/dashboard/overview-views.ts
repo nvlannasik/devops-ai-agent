@@ -113,6 +113,7 @@ export function overviewPage(
   // not a success; counting it as either moves the percentage for a reason nobody did.
   const verdicts = recovered + unchanged + worse + inconclusive;
 
+  const topRecurring = Math.max(1, ...o.recurring.map((r) => r.n));
   const recurring =
     o.recurring.length === 0
       ? empty("Nothing has recurred.", `Every alert in the last ${WINDOW_LABEL[o.range]} fired exactly once.`, ICON.repeat)
@@ -133,7 +134,13 @@ export function overviewPage(
                   "primary"
                 ) +
                 cell("Namespace", `<span translate="no">${esc(r.namespace ?? "—")}</span>`, "mono") +
-                cell("Times", fmtInt(r.n), "num") +
+                // A ranking bar against the most frequent alert — it says "twice as often", which
+                // the bare count makes the reader work out.
+                cell(
+                  "Times",
+                  `${fmtInt(r.n)}<span class="ratio under" style="--a:${Math.round((r.n / topRecurring) * 100)}" aria-hidden="true"><span></span></span>`,
+                  "num"
+                ) +
                 cell("Last seen", timeTag(r.last_seen, now), "when") +
                 `</tr>`
             )
@@ -176,7 +183,13 @@ export function overviewPage(
     : null;
   return layout(
     "Overview",
-    `<h1 class="eyebrow">${ICON.overview}Incidents · last ${esc(WINDOW_LABEL[o.range])}</h1>
+    // One block: laid into <main> as three children, main > * + * spaced the title from its own
+    // caption like two unrelated sections.
+    `<div class="doc">
+       <p class="eyebrow">Monitor</p>
+       <h1>Overview</h1>
+       <p class="meta">What the agent investigated in the last ${esc(WINDOW_LABEL[o.range])}, and how it went.</p>
+     </div>
      ${statList(
        [
          {
