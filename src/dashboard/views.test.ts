@@ -2919,6 +2919,28 @@ test("the harness page lists gates with outcomes and the nudge resolution split"
   assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
 });
 
+test("the harness shelf: fires per run, nudges accepted, and the nudge split as a bar with its words", async () => {
+  const { harnessPage } = await import("./views.js");
+  const html = harnessPage({
+    runs7: 4,
+    runs30: 10,
+    stats: [
+      { name: "log-gap", outcome: "nudge", d7: 2, d30: 4 },
+      { name: "log-gap", outcome: "accepted", d7: 1, d30: 3 },
+      { name: "log-gap", outcome: "kept-earlier", d7: 1, d30: 1 },
+      { name: "repeat-call", outcome: "dropped", d7: 3, d30: 8 },
+    ],
+    llm: [{ backend: "slow-one", calls: 2, p50: 1000, p95: 4000 }],
+  });
+  // fires exclude the fates: nudge 4 + dropped 8 = 12 over 10 runs
+  assert.match(html, /<dd>12<span>1\.2× per investigation/);
+  assert.match(html, /<dd>75%<span>3 of 4 nudges/);
+  assert.match(html, /<dd>4\.0s<span>slow-one/);
+  // the split is never colour alone: every segment has a legend entry naming it and its count
+  assert.match(html, /data-k="accepted" style="--w:75"/);
+  assert.match(html, /<i data-k="kept-earlier"><\/i>kept-earlier <span class="num">1<\/span> · 25%/);
+});
+
 test("the harness page shows LLM latency per backend, slowest first, sub-second calls in ms", async () => {
   const { harnessPage } = await import("./views.js");
   const html = harnessPage({

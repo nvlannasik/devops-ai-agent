@@ -133,4 +133,43 @@ export const BENCH_CSS = `
      characters against about 20 of room. */
   .bench-table code { white-space: normal; overflow-wrap: anywhere; }
 }
+
+/* A run is a <details> now, newest open. A <details> is not a reliable grid container across
+   engines, so the card is a block and the grid moves onto its two halves: the summary (header,
+   configuration, axes) and the body (the per-case list). */
+details.bench-run { display: block; }
+.bench-run > summary { display: grid; gap: var(--sp-3); list-style: none; cursor: pointer; font-weight: inherit; }
+.bench-run > summary::-webkit-details-marker { display: none; }
+.bench-run > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--r-sm); }
+.bench-body { display: grid; gap: var(--sp-3); margin-top: var(--sp-3); }
+.bench-toggle { margin-left: auto; white-space: nowrap; }
+.bench-toggle::after { content: "Show cases ▸"; }
+.bench-run[open] .bench-toggle::after { content: "Hide cases ▾"; }
+.bench-run:not([open]):hover { border-color: var(--border-strong); }
+/* A folded section: the summary is a quiet row inside a card, the content opens beneath it. */
+details.fold {
+  background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--r);
+  box-shadow: var(--shadow-sm); padding: var(--sp-3) var(--sp-4);
+}
+details.fold > summary { font-size: var(--fs-sm); }
+details.fold[open] > summary { margin-bottom: var(--sp-3); }
+details.fold > .table-wrap { box-shadow: none; }
+details.fold.about { margin-top: var(--sp-4); }
+details.fold.about > p + p { margin-top: var(--sp-2); }
+
+/* A ranked list on a phone is a list, not a stack of forms. Under the paired layout each case
+   took five captioned lines and the 24-case table ran to ~7,900px. A row with a rate bar lays
+   out as two lines instead: the name across the top, then bar · attempts · runs, the two counts
+   keeping a short inline caption because "2/6" alone does not say what it counts. */
+@container page (max-width: 46rem) {
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+    gap: var(--sp-1) var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  }
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) > td { padding-left: 0; text-indent: 0; margin-top: 0; width: auto; }
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) > td:first-child { grid-column: 1 / -1; }
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) > td:not(.num)::before { display: none; }
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) > td.num::before { display: inline; width: auto; margin-right: .35em; }
+  table.bench-table[data-pairs] tbody tr:has(> td.rate) .rate-bar { width: calc(100% - 3.6rem); }
+}
 `;

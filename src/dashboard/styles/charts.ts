@@ -386,4 +386,29 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   .chart-col[data-current]:hover .chart-dot { transform: scale(1.35); }
   .chart-col:hover .chart-value { color: var(--text); }
 }
+
+/* ---------- inline bars in table cells (harness) ---------- */
+/* A share split into its parts: one track, one segment per part. Each segment carries its key's
+   mark colour AND the legend beside it names the part and its count — never colour alone. */
+.stack-bar {
+  display: flex; width: 100%; max-width: 18rem; height: 8px; margin-bottom: var(--sp-2);
+  border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden;
+}
+.stack-bar > span { width: calc(var(--w, 0) * 1%); }
+.stack-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); font-size: var(--fs-sm); color: var(--text-dim); }
+.stack-legend > span { display: inline-flex; align-items: center; gap: var(--sp-1); white-space: nowrap; }
+.stack-legend i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+[data-k="accepted"] { background: var(--mark-ok); }
+[data-k="restored"] { background: var(--mark-info); }
+[data-k="kept-earlier"] { background: var(--mark-warning); }
+/* Latency as a range: the pale run is p95, the solid head is p50, both against the slowest p95
+   on the page. The two spans overlap from the left edge, so the head is drawn second. */
+.lat-bar {
+  position: relative; display: block; width: 100%; min-width: 6rem; max-width: 14rem; height: 8px;
+  border-radius: var(--r-pill); background: var(--surface-2); overflow: hidden;
+}
+.lat-bar > span { position: absolute; inset: 0 auto 0 0; width: calc(var(--w, 0) * 1%); border-radius: inherit; }
+.lat-bar > span:first-child { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.lat-bar > span:last-child { background: var(--accent); }
+.ratio.under { margin: var(--sp-1) 0 0; max-width: 7rem; }
 `;

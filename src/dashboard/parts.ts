@@ -1,5 +1,5 @@
 import { costUsd, type Price } from "../agent/llm/pricing.js";
-import { esc, fmtInt } from "./html.js";
+import { esc, fmtDuration, fmtInt } from "./html.js";
 import { PAGE_SIZE } from "./filters.js";
 
 /** `$1.21`; under a cent is "<$0.01", never a rounded "$0.00" that reads as free. */
@@ -357,3 +357,39 @@ export const jsonBlock = (id: string, nonce: string, value: unknown): string =>
   `<script type="application/json" id="${esc(id)}" nonce="${esc(nonce)}">` +
   JSON.stringify(value).replace(/[<>&]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`) +
   `</script>`;
+
+/**
+ * The same figure, one window ago.
+ *
+ * Direction and judgement are two separate inputs and neither is derived from the other,
+ * because on this page they disagree: more incidents is bad, a shorter time to resolve is
+ * good. `better` says which direction counts as good news — it is what decides the colour;
+ * the arrow only ever reports the direction the number moved.
+ *
+ * Returns "" when there is nothing to compare against. A previous window of zero is not a
+ * baseline — every figure is then up by infinity, which is a rendering artefact rather than a
+ * finding — and neither is a null (see Previous in queries.ts).
+ */
+export function delta(
+  current: number | null,
+  previous: number | null,
+  opts: { better: "lower" | "higher"; unit?: "pp" | "count" | "duration" }
+): string {
+  if (current === null || previous === null || previous === 0) return "";
+  const diff = current - previous;
+  const dir = diff > 0 ? "up" : diff < 0 ? "down" : "flat";
+  // A tone only when the movement has a direction. An unchanged figure is neither good news
+  // nor bad, and colouring it either way is a claim the number does not make.
+  const tone =
+    dir === "flat" ? "" : (dir === "up") === (opts.better === "higher") ? "ok" : "critical";
+  const size = Math.abs(diff);
+  const text =
+    opts.unit === "duration"
+      ? fmtDuration(size)
+      : opts.unit === "pp"
+        // Percentage POINTS, not percent: the figure above is already a percentage, and "12%
+        // more" of a percentage is a different quantity from "12 points more".
+        ? `${fmtInt(Math.round(size))}pp`
+        : fmtInt(size);
+  return `<span class="delta" data-dir="${dir}"${toneAttr(tone)}>${esc(text)}</span>`;
+}

@@ -1,7 +1,7 @@
-import { cell, esc, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
+import { cell, esc, fmtAgo, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
-import { ICON, badge, section } from "./parts.js";
+import { ICON, badge, delta, section, statList } from "./parts.js";
 import { layout } from "./layout.js";
 
 // ---- Benchmark ------------------------------------------------------------------------------
@@ -52,7 +52,7 @@ function whyByCase(run: BenchRun): Map<string, { attempts: number[]; reasons: st
   return out;
 }
 
-function benchRunCard(run: BenchRun): string {
+function benchRunCard(run: BenchRun, open: boolean): string {
   const why = whyByCase(run);
   // Attempts that died before the model answered. They are scored as failures, which is right —
   // the run still did not work — but they measure the backend, not the agent, and the rate at the
@@ -64,7 +64,11 @@ function benchRunCard(run: BenchRun): string {
   const cases = [...new Set([...Object.keys(run.marks), ...why.keys()])].sort();
   const axes = Object.entries(run.axes ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
 
-  return `<article class="card bench-run">
+  // A <details>, newest open: twenty fully expanded runs made this page 5,000px of case lists
+  // nobody reads past the first. The summary is the whole header, so a closed run still says
+  // its score, its configuration and its axes — only the per-case detail folds away.
+  return `<details class="card bench-run"${open ? " open" : ""}>
+    <summary>
     <header class="bench-head">
       <div>
         <span class="bench-rate" title="every attempt passed">${fmtPct(run.passHatK, 1)}</span>
@@ -81,6 +85,7 @@ function benchRunCard(run: BenchRun): string {
         ${fmtInt(run.cases)} case${run.cases === 1 ? "" : "s"} × ${fmtInt(run.attempts)}
       </div>
       <div class="meta">${timeTag(run.at)}</div>
+      <span class="bench-toggle meta" aria-hidden="true"></span>
     </header>
 
     <div class="bench-meta meta">
@@ -97,7 +102,9 @@ function benchRunCard(run: BenchRun): string {
             .join("")}</div>`
         : ""
     }
+    </summary>
 
+    <div class="bench-body">
     ${
       // Text, not a tone alone: the caveat has to survive a reader who cannot see the colour,
       // and "don't convey information by colour alone" is the rule it would break. The badge
@@ -141,8 +148,8 @@ function benchRunCard(run: BenchRun): string {
         })
         .join("")}
     </ul>
-
-  </article>`;
+    </div>
+  </details>`;
 }
 
 // A rate as a bar. The number is already in the row; the bar is what makes twelve rows
@@ -233,8 +240,12 @@ function spotCheckTable(history: BenchRun[]): string {
       );
     })
     .join("");
+  // Folded: a spot check is looked up, not scanned — eighteen rows of them pushed the run list a
+  // screen further down for a table whose own caption says not to compare it.
   return `${section(ICON.bench, "Spot checks", '<span class="meta">subset runs — counted by case above, never compared as scores</span>')}
-    ${table(headers("When", "Scope", ["Cases", "num"], ["Attempts", "num"]), body, "pairs", "bench-table")}`;
+    <details class="fold"><summary>${fmtInt(rows.length)} spot check${rows.length === 1 ? "" : "s"} <span class="meta">· latest ${timeTag(rows[0]!.at)}</span></summary>
+    ${table(headers("When", "Scope", ["Cases", "num"], ["Attempts", "num"]), body, "pairs", "bench-table")}
+    </details>`;
 }
 
 function byConfigTable(history: BenchRun[]): string {
@@ -260,6 +271,44 @@ function byConfigTable(history: BenchRun[]): string {
     ${table(headers("Backends", "Pass rate", ["Attempts", "num"], ["Clean runs", "num"]), body, "pairs", "bench-table")}`;
 }
 
+/** The four figures a reader opens this page for, from the newest whole-suite run. */
+function benchShelf(runs: BenchRun[]): string {
+  const suite = suiteRuns(runs);
+  const [last, prev] = suite;
+  if (!last) return "";
+  const cases = byCase(runs);
+  const clean = cases.filter((c) => c.attempts > 0 && c.passed === c.attempts).length;
+  const pct = (n: number) => n * 100;
+  return statList([
+    {
+      icon: ICON.check,
+      label: `pass^${last.attempts}`,
+      value: fmtPct(last.passHatK, 1),
+      sub: `latest run · ${fmtInt(last.cases)} cases × ${fmtInt(last.attempts)}, every attempt passing`,
+      delta: prev ? delta(pct(last.passHatK), pct(prev.passHatK), { better: "higher", unit: "pp" }) : "",
+    },
+    {
+      icon: ICON.bench,
+      label: "pass@1",
+      value: fmtPct(last.pass1, 1),
+      sub: "latest run · first attempt passing",
+      delta: prev ? delta(pct(last.pass1), pct(prev.pass1), { better: "higher", unit: "pp" }) : "",
+    },
+    {
+      icon: ICON.incidents,
+      label: "Cases always passing",
+      value: `${fmtInt(clean)}/${fmtInt(cases.length)}`,
+      sub: "every attempt across every run",
+    },
+    {
+      icon: ICON.overview,
+      label: "Suite runs",
+      value: fmtInt(suite.length),
+      sub: `last ${fmtAgo(last.at)} · ${fmtInt(spotChecks(runs).length)} spot checks besides`,
+    },
+  ]);
+}
+
 export function benchPage(input: BenchRun[], openIncidents?: number): string {
   // Sorted HERE, not trusted from the caller. The heading says "newest first", and a heading
   // that depends on someone else having sorted is a heading that will one day be wrong — the
@@ -278,15 +327,18 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
              that file out of the image, so a score recorded after this pod was built appears on the next
              build. See <code translate="no">bench/README.md</code>.</p>
          </div>`
-      : cards.map(benchRunCard).join("");
+      : cards.map((r, i) => benchRunCard(r, i === 0)).join("");
 
   return layout(
     "Benchmark",
     `<div class="doc">
      <p class="eyebrow">Agent</p>
      <h1>Benchmark</h1>
-     <p class="meta">Synthetic incidents replayed through the real investigation path, scored on
-       what the agent produced. Newest first. ${esc(RATE_NOTE)}</p>
+     <p class="meta">Synthetic incidents replayed through the real investigation path, scored on what the agent
+       produced. pass^k first: it is the only rate that counts an answer you would not have to check.</p>
+     ${benchShelf(runs)}
+     <details class="fold about"><summary>How this is scored</summary>
+     <p class="meta">${esc(RATE_NOTE)}</p>
      <p class="meta">Case ids and tiers are this repo's own
        (<code translate="no">docs/BENCHMARK_agent_stack.md</code>); the scenario shape and two of the
        three views below &mdash; overall pass rate by case, and the configuration leaderboard &mdash;
@@ -296,10 +348,11 @@ export function benchPage(input: BenchRun[], openIncidents?: number): string {
      <p class="meta">Three of the design doc's six axes are implemented — the remediation proposal,
        evidence grounding, and the facts the RCA text has to state. A run showing 100% is silent
        about the other three.</p>
+     </details>
      ${byCaseTable(runs)}
-     ${spotCheckTable(runs)}
      ${byConfigTable(runs)}
-     ${section(ICON.overview, "Runs", '<span class="meta">newest first</span>')}
+     ${spotCheckTable(runs)}
+     ${section(ICON.overview, "Runs", '<span class="meta">newest first · older runs fold to their score</span>')}
      ${body}
      </div>`,
     { current: "/bench", openIncidents }

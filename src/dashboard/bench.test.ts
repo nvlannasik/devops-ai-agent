@@ -171,3 +171,24 @@ test("a run with no failures at all is unaffected", () => {
   assert.equal(a02!.attempts, 2);
   assert.equal(a02!.excluded, 0);
 });
+
+// ---------- the page: a shelf on top, the newest run open, the rest folded ----------
+
+test("the page leads with the latest suite run and folds everything a reader looks up", async () => {
+  const { benchPage } = await import("./views.js");
+  const p = write(
+    run({ at: "2026-09-01T00:00:00.000Z", passHatK: 0.5, pass1: 0.6 }),
+    run({ at: "2026-09-08T00:00:00.000Z", passHatK: 0.65, pass1: 0.6 }),
+    run({ at: "2026-09-09T00:00:00.000Z", filter: "^A02", passHatK: 1 })
+  );
+  const html = benchPage(loadBenchHistory(20, p));
+  // pass^k of the newest SUITE run — the newer spot check is not a score and must not lead
+  assert.match(html, /<span class="lbl">pass\^5<\/span><\/a>?|<span class="lbl">pass\^5<\/span>/);
+  assert.match(html, /<dd>65%/);
+  assert.match(html, /data-dir="up"[^>]*>15pp</, "the delta is against the previous suite run, in points");
+  // two suite runs: the newest open, the older folded to its header
+  assert.equal([...html.matchAll(/<details class="card bench-run" open>/g)].length, 1);
+  assert.equal([...html.matchAll(/<details class="card bench-run">/g)].length, 1);
+  assert.match(html, /<details class="fold"><summary>1 spot check /);
+  assert.match(html, /<details class="fold about"><summary>How this is scored/);
+});
