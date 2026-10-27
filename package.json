@@ -40,10 +40,10 @@
     "dotenv": "16.5.0",
     "import-in-the-middle": "3.5.3",
     "ioredis": "^5.6.1",
-    "openai": "4.103.0",
+    "openai": "7.45.0",
     "pg": "^8.22.0",
     "winston": "3.17.0",
-    "zod": "3.25.28"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@dagrejs/dagre": "^3.1.1",
