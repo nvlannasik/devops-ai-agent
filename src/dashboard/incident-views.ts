@@ -217,10 +217,14 @@ export function detailPage(
     hasPostmortem?: boolean;
     /** Slack display names for the ids in the rows (SlackApp.userProfiles); an id without one shows as itself. */
     names?: ReadonlyMap<string, string>;
+    /** The investigation's OpenTelemetry trace id (agent_events start payload), when tracing was on. */
+    otelTraceId?: string | null;
   },
   now: Date = new Date(),
   openIncidents?: number,
-  prices: ReadonlyMap<string, Price> = new Map()
+  prices: ReadonlyMap<string, Price> = new Map(),
+  /** TRACING_UI_URL — the Jaeger UI the trace links into; no link without it. */
+  tracingUiUrl: string | null = null
 ): string {
   const i = d.incident;
   const who = (id: string | null): string => (id ? person(id, d.names) : dash);
@@ -236,6 +240,12 @@ export function detailPage(
   // Read-only on this page too: the draft itself (and its request) only ever happens in Slack
   // (`@agent postmortem`) — this is a link to the already-stored draft, shown only when one
   // exists so a page with nothing to show does not advertise a dead end.
+  // Only a real 32-hex trace id reaches an href; the UI URL is operator config, esc()'d all the same.
+  const jaegerLink =
+    tracingUiUrl && d.otelTraceId && /^[0-9a-f]{32}$/.test(d.otelTraceId)
+      ? `<a class="standalone" href="${esc(`${tracingUiUrl.replace(/\/+$/, "")}/trace/${d.otelTraceId}`)}" rel="noreferrer noopener" target="_blank">Open in Jaeger</a>`
+      : "";
+
   const postmortemLink = d.hasPostmortem
     ? `<a class="standalone" href="/incidents/${esc(i.id)}/postmortem">Postmortem draft →</a>`
     : "";
@@ -385,7 +395,7 @@ export function detailPage(
      <div class="title-meta">
        ${severityBadge(i.severity)}
        ${stateBadge(i.resolved_at)}
-       ${mergedInto || slack || postmortemLink ? `<span class="page-actions">${mergedInto}${slack}${postmortemLink}</span>` : ""}
+       ${mergedInto || slack || postmortemLink || jaegerLink ? `<span class="page-actions">${mergedInto}${slack}${jaegerLink}${postmortemLink}</span>` : ""}
      </div>
      ${statList(
        [

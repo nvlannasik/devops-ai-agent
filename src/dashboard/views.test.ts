@@ -3229,3 +3229,14 @@ test("the cluster shelf names what is short of desired and what was applied by h
   // the short workload's ready count is toned in its row too
   assert.match(html, /<span class="badge" data-tone="warning">1\/2<\/span>/);
 });
+
+test("the incident page links its trace to Jaeger only when both the id and the UI URL exist", () => {
+  const base = { incident: { ...row, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] };
+  const id = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const html = detailPage({ ...base, otelTraceId: id }, new Date(), undefined, new Map(), "https://jaeger.annasik.cloud");
+  assert.match(html, new RegExp(`<span class="page-actions">[\\s\\S]*<a class="standalone" href="https://jaeger.annasik.cloud/trace/${id}"[^>]*>Open in Jaeger</a>`));
+  assert.doesNotMatch(detailPage({ ...base, otelTraceId: id }, new Date(), undefined, new Map(), null), /Open in Jaeger/);
+  assert.doesNotMatch(detailPage({ ...base, otelTraceId: null }, new Date(), undefined, new Map(), "https://j"), /Open in Jaeger/);
+  // An id that is not a trace id never reaches an href.
+  assert.doesNotMatch(detailPage({ ...base, otelTraceId: '"><b>x' }, new Date(), undefined, new Map(), "https://j"), /Open in Jaeger|<b>x/);
+});

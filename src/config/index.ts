@@ -224,6 +224,8 @@ export const config = {
     // `/incidents/:id/postmortem` path instead. Trailing slashes stripped so the path never
     // doubles one.
     publicUrl: process.env.DASHBOARD_PUBLIC_URL?.replace(/\/+$/, "") || undefined,
+    // The Jaeger UI an incident's "Open in Jaeger" links into (TRACING_UI_URL); unset → no link.
+    tracingUiUrl: process.env.TRACING_UI_URL?.replace(/\/+$/, "") || null,
   },
 
   maxConcurrentInvestigations: parseInt(process.env.MAX_CONCURRENT_INVESTIGATIONS ?? "5"),

@@ -656,7 +656,7 @@ export class DashboardServer {
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
           const names = await this.nameMap([...d.remediations.map((r) => r.approved_by), ...d.feedback.map((f) => f.slack_user)]);
-          return send(200, detailPage({ ...d, names }, now, open, this.prices));
+          return send(200, detailPage({ ...d, names }, now, open, this.prices, config.dashboard.tracingUiUrl));
         }
         // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). Both
         // routes read the SAME latest-draft row; the page renders it and the .md route hands it

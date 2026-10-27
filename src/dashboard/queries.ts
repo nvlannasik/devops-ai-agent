@@ -591,7 +591,7 @@ export class DashboardQueries {
       [id]
     );
     if (rows.length === 0) return null;
-    const [remediations, feedback, timeline, usage, children, postmortemExists] = await Promise.all([
+    const [remediations, feedback, timeline, usage, children, postmortemExists, otel] = await Promise.all([
       this.pool.query(
         // LEFT JOIN, not an inner one: a remediation that was proposed and never approved has
         // no check, and a remediation approved seconds ago has one that has not run. Both must
@@ -633,6 +633,17 @@ export class DashboardQueries {
       // Existence only — detailPage's "Postmortem draft →" link needs a boolean, never the
       // markdown body, so this is a plain existence probe rather than postmortem()'s SELECT.
       this.pool.query(`SELECT 1 FROM postmortems WHERE incident_id = $1 LIMIT 1`, [id]),
+      // The investigation's OpenTelemetry trace, for the "Open in Jaeger" action: the newest
+      // top-level run on this thread that carried one (a delegate's run shares its parent's trace).
+      rows[0].thread_ts
+        ? this.pool.query(
+            `SELECT payload->>'otelTraceId' AS otel_trace_id FROM agent_events
+              WHERE thread_ts = $1 AND kind = 'start' AND thread_ts NOT LIKE '%/sub-%'
+                AND payload->>'otelTraceId' IS NOT NULL
+              ORDER BY created_at DESC LIMIT 1`,
+            [String(rows[0].thread_ts)]
+          )
+        : Promise.resolve({ rows: [] as Array<{ otel_trace_id: string }> }),
     ]);
     return {
       incident: rows[0] as IncidentDetail,
@@ -645,6 +656,7 @@ export class DashboardQueries {
       })),
       children,
       hasPostmortem: postmortemExists.rows.length > 0,
+      otelTraceId: (otel.rows[0]?.otel_trace_id as string | undefined) ?? null,
     };
   }
 

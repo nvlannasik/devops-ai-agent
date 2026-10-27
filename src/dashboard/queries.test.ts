@@ -560,3 +560,21 @@ test("threadIncidents maps thread ts to its incident, and asks nothing for an em
   assert.deepEqual([...(await q.threadIncidents(["1.1", "2.2"]))], [["1.1", 7]]);
   assert.deepEqual(calls[0].params, [["1.1", "2.2"]]);
 });
+
+// The investigation's OpenTelemetry trace (agent/trace start payload, 2026-10-27): the newest
+// top-level run on the incident's thread that carried one. The dashboard links it to Jaeger.
+test("an incident's otelTraceId comes from its thread's newest top-level run start", async () => {
+  const calls: Call[] = [];
+  const q = new DashboardQueries(stub(calls, (sql) =>
+    /FROM incidents WHERE id/.test(sql) ? [{ id: 7, thread_ts: "1.1" }]
+      : /otelTraceId/.test(sql) ? [{ otel_trace_id: "4bf92f3577b34da6a3ce929d0e0e4736" }]
+      : []));
+  const d = await q.detail(7);
+  assert.equal(d!.otelTraceId, "4bf92f3577b34da6a3ce929d0e0e4736");
+  const sql = calls.find((c) => /otelTraceId/.test(c.sql))!;
+  assert.match(sql.sql, /kind = 'start'/);
+  assert.match(sql.sql, /NOT LIKE '%\/sub-%'/);
+  assert.deepEqual(sql.params, ["1.1"]);
+  const none = new DashboardQueries(stub([], (s) => (/FROM incidents WHERE id/.test(s) ? [{ id: 7, thread_ts: null }] : [])));
+  assert.equal((await none.detail(7))!.otelTraceId, null);
+});
