@@ -7,6 +7,12 @@
 // THEN load the SDK and the instrumentations — dynamically, because a static import here would be
 // evaluated before register() runs.
 //
+// The hook is registered through IITM's message channel, so it wraps ONLY the modules an
+// instrumentation asks for. Registered bare it wraps every ESM module, and the openai SDK's shims do
+// not survive that: the first traced rollout crashlooped on "you must import 'openai/shims/node'
+// before importing anything else from openai" (2026-10-27). waitForAllMessagesAcknowledged() holds
+// the app until the loader knows every module to wrap.
+//
 // With no OTEL_EXPORTER_OTLP_ENDPOINT nothing is registered or loaded: the service runs exactly as
 // it did before tracing existed. Nothing here may throw into the service.
 import { register } from "node:module";
@@ -16,7 +22,9 @@ const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || null;
 
 if (endpoint) {
   try {
-    register("@opentelemetry/instrumentation/hook.mjs", import.meta.url);
+    const { createAddHookMessageChannel } = await import("import-in-the-middle");
+    const { registerOptions, waitForAllMessagesAcknowledged } = createAddHookMessageChannel();
+    register("import-in-the-middle/hook.mjs", import.meta.url, registerOptions);
     const [{ startTracing }, { HttpInstrumentation }, { UndiciInstrumentation }, { PgInstrumentation }, { IORedisInstrumentation }, { WinstonInstrumentation }] =
       await Promise.all([
         import("./index.js"),
@@ -42,6 +50,7 @@ if (endpoint) {
         new WinstonInstrumentation(),
       ],
     });
+    await waitForAllMessagesAcknowledged();
   } catch (err) {
     console.warn(`[tracing] disabled — the preload failed: ${err instanceof Error ? err.message : String(err)}`);
   }

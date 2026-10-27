@@ -14,7 +14,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const PRELOAD = fileURLToPath(new URL("../../dist/src/tracing/preload.js", import.meta.url));
 const INDEX = pathToFileURL(fileURLToPath(new URL("../../dist/src/tracing/index.js", import.meta.url))).href;
 
+// The agent imports the openai SDK, whose shims break when the ESM loader hook wraps every module
+// (2026-10-27: the first traced rollout crashlooped on "you must import 'openai/shims/node'"). The
+// hook must touch only the modules an instrumentation asks for, so the app loads openai too.
 const APP = `import * as http from "node:http";
+  import OpenAI from ${JSON.stringify(import.meta.resolve("openai"))};
+  new OpenAI({ apiKey: "test" });
   import { activeTracing } from ${JSON.stringify(INDEX)};
   const srv = http.createServer((req, res) => res.end("ok"));
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
@@ -72,4 +77,29 @@ test("an unreachable endpoint costs nothing: the app runs and exits cleanly", as
   const { code, out } = await runChild("http://127.0.0.1:9");
   assert.equal(code, 0);
   assert.match(out, /APP:ok/);
+});
+
+// The bug class behind the 2026-10-27 crashloop is "some dependency breaks when the loader hook
+// wraps it". One SDK in a test app is one sample; the agent's real module graph is the population.
+test("the agent's own module graph loads under the preload", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "otel-agent-graph-"));
+  const app = join(dir, "graph.mjs");
+  const dist = new URL("../../dist/", import.meta.url);
+  writeFileSync(
+    app,
+    ["src/agent/index.js", "src/app/index.js", "src/dashboard/server.js"]
+      .map((m) => `await import(${JSON.stringify(new URL(m, dist).href)});`)
+      .join("\n") + `\nconsole.log("GRAPH:ok");`
+  );
+  const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
+    let text = "";
+    const child = spawn(process.execPath, ["--import", PRELOAD, app], {
+      env: { ...process.env, OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:9", SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "x" },
+    });
+    child.stdout.on("data", (c) => (text += c));
+    child.stderr.on("data", (c) => (text += c));
+    child.on("exit", (code) => resolve({ code, text }));
+  });
+  assert.equal(out.code, 0, out.text.slice(-800));
+  assert.match(out.text, /GRAPH:ok/);
 });
