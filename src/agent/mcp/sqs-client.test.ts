@@ -133,3 +133,36 @@ test("parseSqsClusters: name=queue pairs; unset is none; malformed fails boot", 
   assert.throws(() => parseSqsClusters("Lab_2=q.fifo"), /name/);
   assert.throws(() => parseSqsClusters("a=q1.fifo,a=q2.fifo"), /duplicate/);
 });
+
+test("tracing: the request carries the caller's traceparent, the dispatcher's polls belong to no trace", async () => {
+  const { context, propagation, trace } = await import("@opentelemetry/api");
+  const { W3CTraceContextPropagator } = await import("@opentelemetry/core");
+  const { AsyncLocalStorageContextManager } = await import("@opentelemetry/context-async-hooks");
+  const { TracerProvider } = await import("@opentelemetry/sdk-trace");
+  trace.setGlobalTracerProvider(new TracerProvider());
+  propagation.setGlobalPropagator(new W3CTraceContextPropagator());
+  context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+
+  const f = fakeSqs((req) => ({ requestId: req.requestId, response: { content: "ok", isError: false } }));
+  const pollParents: Array<string | undefined> = [];
+  const send = f.sqs.send;
+  f.sqs.send = async (cmd: any) => {
+    if (cmd.constructor.name === "ReceiveMessageCommand") pollParents.push(trace.getActiveSpan()?.spanContext().traceId);
+    return send(cmd);
+  };
+  const d = new SqsMcpDispatcher("devops-mcp-response.fifo", f.sqs, 1);
+  const c = new SqsMCPClient("lab2", "devops-mcp-lab2-request.fifo", d, { callTimeoutMs: 2000 });
+  let traceId = "";
+  try {
+    await trace.getTracer("t").startActiveSpan("execute_tool", async (span) => {
+      traceId = span.spanContext().traceId;
+      await c.callTool("k8s_list_pods", {});
+      span.end();
+    });
+    assert.match(f.sent[0].input.MessageAttributes?.traceparent?.StringValue ?? "", new RegExp(`^00-${traceId}-`));
+    assert.ok(pollParents.length > 0);
+    assert.deepEqual([...new Set(pollParents)], [undefined], "no poll ran inside the caller's trace");
+  } finally {
+    await d.shutdown();
+  }
+});

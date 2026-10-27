@@ -15,6 +15,7 @@ import { truncate } from "../../utils/truncate/index.js";
 import { releaseVisibilitySeconds, parseResponseBody } from "../llm/sqs.js";
 import type { GitOpsRequestBody, GitOpsPayload } from "./types.js";
 import { sqsTraceAttributes } from "../../tracing/sqs.js";
+import { untraced } from "../../tracing/untraced.js";
 
 // SQS RPC client for the GitOps PR flow. Deliberately mirrors SQSLLMClient's dispatcher
 // pattern rather than sharing a base with it: that client is the battle-tested critical
@@ -117,7 +118,8 @@ export class SqsGitOpsClient {
     this.responseQueueUrl = responseUrl;
     logger.info(`[sqs-gitops] request queue:  ${this.requestQueueUrl}`);
     logger.info(`[sqs-gitops] response queue: ${this.responseQueueUrl} (shared)`);
-    void this.dispatchLoop();
+    // No parent: this loop outlives the request that happened to start it (tracing/untraced.ts).
+    void untraced(() => this.dispatchLoop());
   }
 
   private async dispatchLoop(): Promise<void> {

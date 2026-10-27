@@ -13,6 +13,7 @@ import {
   QueueDoesNotExist,
 } from "@aws-sdk/client-sqs";
 import { sqsTraceAttributes } from "../../tracing/sqs.js";
+import { untraced } from "../../tracing/untraced.js";
 import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
@@ -130,7 +131,8 @@ export class SqsMcpDispatcher {
   private async doStart(): Promise<void> {
     this.responseQueueUrl = await this.resolveQueueUrl(this.responseQueueName);
     logger.info(`[mcp-sqs] response queue: ${this.responseQueueUrl}`);
-    void this.dispatchLoop();
+    // No parent: this loop outlives the request that happened to start it (tracing/untraced.ts).
+    void untraced(() => this.dispatchLoop());
   }
 
   private async dispatchLoop(): Promise<void> {
@@ -231,7 +233,7 @@ export class SqsMCPClient {
   /** Never throws: one unreachable cluster must not stop the agent booting for the others. */
   async connect(): Promise<void> {
     await this.refresh();
-    this.refreshTimer = setInterval(() => void this.refresh(), this.refreshMs);
+    this.refreshTimer = setInterval(() => void untraced(() => this.refresh()), this.refreshMs);
     this.refreshTimer.unref();
   }
 

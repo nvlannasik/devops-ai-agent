@@ -16,6 +16,7 @@ import { truncate } from "../../utils/truncate/index.js";
 import { currentTrace } from "../../utils/trace/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
 import { sqsTraceAttributes } from "../../tracing/sqs.js";
+import { untraced } from "../../tracing/untraced.js";
 
 const FIFO_ATTRS = { FifoQueue: "true", ContentBasedDeduplication: "false" };
 
@@ -177,7 +178,8 @@ export class SQSLLMClient implements LLMClient {
     this.responseQueueUrl = responseUrl;
     logger.info(`[sqs-llm] request queue:  ${this.requestQueueUrl}`);
     logger.info(`[sqs-llm] response queue: ${this.responseQueueUrl} (shared)`);
-    void this.dispatchLoop();
+    // No parent: this loop outlives the request that happened to start it (tracing/untraced.ts).
+    void untraced(() => this.dispatchLoop());
   }
 
   /**
