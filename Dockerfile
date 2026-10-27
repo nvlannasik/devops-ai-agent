@@ -90,4 +90,7 @@ EXPOSE 3001
 # entrypoint.sh generate AWS config (AWS_CONFIG_FILE, default /tmp/aws/config —
 # not ~/.aws: uid 1001 + read-only rootfs) dari env vars, lalu exec CMD
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "dist/index.js"]
+# The preload starts OpenTelemetry before the agent's ESM graph loads (src/tracing/preload.ts); with
+# no OTEL_EXPORTER_OTLP_ENDPOINT it does nothing at all.
+ENV OTEL_SERVICE_NAME=devops-ai-agent
+CMD ["node", "--import", "./dist/src/tracing/preload.js", "dist/index.js"]

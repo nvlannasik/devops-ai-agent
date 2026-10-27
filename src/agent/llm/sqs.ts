@@ -15,6 +15,7 @@ import logger, { errDetail } from "../../utils/logger/index.js";
 import { truncate } from "../../utils/truncate/index.js";
 import { currentTrace } from "../../utils/trace/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
+import { sqsTraceAttributes } from "../../tracing/sqs.js";
 
 const FIFO_ATTRS = { FifoQueue: "true", ContentBasedDeduplication: "false" };
 
@@ -140,6 +141,8 @@ export class SQSLLMClient implements LLMClient {
         QueueUrl: this.requestQueueUrl,
         MessageBody: JSON.stringify({ requestId, messages, tools, systemPrompt, traceId }),
         MessageGroupId: requestId,
+        // The active span's W3C context, as attributes — the body stays the contract it was (tracing/sqs.ts).
+        MessageAttributes: sqsTraceAttributes(),
         MessageDeduplicationId: requestId,
       }));
     } catch (err) {

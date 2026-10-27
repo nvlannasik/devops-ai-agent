@@ -14,6 +14,7 @@ import logger, { errDetail } from "../../utils/logger/index.js";
 import { truncate } from "../../utils/truncate/index.js";
 import { releaseVisibilitySeconds, parseResponseBody } from "../llm/sqs.js";
 import type { GitOpsRequestBody, GitOpsPayload } from "./types.js";
+import { sqsTraceAttributes } from "../../tracing/sqs.js";
 
 // SQS RPC client for the GitOps PR flow. Deliberately mirrors SQSLLMClient's dispatcher
 // pattern rather than sharing a base with it: that client is the battle-tested critical
@@ -88,6 +89,8 @@ export class SqsGitOpsClient {
         QueueUrl: this.requestQueueUrl,
         MessageBody: JSON.stringify({ requestId, ...body }),
         MessageGroupId: requestId,
+        // The active span's W3C context, as attributes — the body stays the contract it was (tracing/sqs.ts).
+        MessageAttributes: sqsTraceAttributes(),
         MessageDeduplicationId: requestId,
       }));
     } catch (err) {

@@ -1916,6 +1916,9 @@ Required only for `iam-anywhere`: `AWS_TRUST_ANCHOR_ARN`, `AWS_ROLESANYWHERE_PRO
 - Label templating in `labels:` block NOT resolved by Prometheus — use `annotations:` only
 - `startsAt` included in issueText as unix timestamp for query anchoring
 
+## OpenTelemetry tracing (2026-10-27)
+One trace per investigation across the agent, the MCP server and llm-worker, exported over OTLP to Jaeger. Design: `docs/superpowers/specs/2026-10-27-otel-tracing-design.md`; plan: `docs/superpowers/plans/2026-10-27-otel-tracing.md`. The decisions worth keeping: the SDK starts in a `node --import` preload that registers OTel's ESM loader hook first (both orderings were measured in devops-sample-apps the same day — from `index.ts` nothing is patched; without the hook an ESM `node:http` import stays unpatched); context crosses SQS as message attributes through two explicit helpers (no aws-sdk instrumentation: a detached receive span, and possible double injection); URL query strings are cut before export (PromQL/LogQL); the agent's spans carry metadata only, enforced by an allowlist test; Jaeger's UI went behind oauth2-proxy first. The harness trace (`agent_events`) stays the source for the dashboard and replay — OTel adds the cross-service view, joined by `otelTraceId`.
+
 ## Roadmap / Backlog
 
 ### Done (recent)

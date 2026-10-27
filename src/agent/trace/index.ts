@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LLMClient, LLMResponse } from "../llm/types.js";
 import { stripLoneSurrogates } from "../llm/sanitize.js";
 import { currentTrace } from "../../utils/trace/index.js";
+import { gateEvent, withChatSpan, withToolSpan } from "../../tracing/spans.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
 import type { EventRow } from "./store.js";
 
@@ -72,6 +73,11 @@ export class TraceRecorder {
     return this.sink !== null;
   }
 
+  /** prod | bench | replay — carried on the investigation's OpenTelemetry span too. */
+  get source(): "prod" | "bench" | "replay" {
+    return this.opts.source;
+  }
+
   begin(threadTs: string, start: Record<string, unknown>): void {
     if (!this.sink) return;
     // A previous run on this thread that never finished is flushed rather than merged: two runs
@@ -125,6 +131,8 @@ export class TraceRecorder {
   }
 
   gate(threadTs: string, name: GateName, outcome: string, detail = "", extra: Record<string, unknown> = {}): void {
+    // Before the sink check: the OpenTelemetry event does not depend on the harness being wired.
+    gateEvent(name, outcome);
     if (!this.sink) return;
     const payload = { ...extra, detail: detail.slice(0, 500), source: this.opts.source };
     const run = this.runs.get(threadTs);
@@ -188,7 +196,7 @@ export function instrumentLLM(llm: LLMClient, rec: () => TraceRecorder): LLMClie
   return {
     chat: async (messages, tools, systemPrompt) => {
       const start = Date.now();
-      const response = await llm.chat(messages, tools, systemPrompt);
+      const response = await withChatSpan(() => llm.chat(messages, tools, systemPrompt));
       const t = currentTrace();
       if (t) rec().llm(t, response, Date.now() - start);
       return response;
@@ -207,7 +215,7 @@ export function instrumentMCP<T extends { callTool(name: string, input: Record<s
     const t = currentTrace();
     const start = Date.now();
     try {
-      const result = await call(name, input);
+      const result = await withToolSpan(name, () => call(name, input));
       if (t) rec().tool(t, name, input, { result }, Date.now() - start);
       return result;
     } catch (err) {

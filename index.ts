@@ -1,6 +1,7 @@
 import { DevOpsAgent } from "./src/agent/index.js";
 import { SlackApp } from "./src/app/index.js";
 import { DashboardServer } from "./src/dashboard/server.js";
+import { activeTracing } from "./src/tracing/handle.js";
 import logger, { errDetail } from "./src/utils/logger/index.js";
 
 const SHUTDOWN_DRAIN_MS = 40_000;
@@ -34,6 +35,8 @@ async function main() {
       await slack.drain(SHUTDOWN_DRAIN_MS);
       await agent.shutdown();
       await dashboard.stop();
+      // Flush the spans the preload's SDK still holds; a no-op when tracing is off.
+      await activeTracing()?.shutdown();
       process.exit(0);
     };
 

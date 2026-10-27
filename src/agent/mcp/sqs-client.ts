@@ -12,6 +12,7 @@ import {
   CreateQueueCommand,
   QueueDoesNotExist,
 } from "@aws-sdk/client-sqs";
+import { sqsTraceAttributes } from "../../tracing/sqs.js";
 import { randomUUID } from "crypto";
 import { config } from "../../config/index.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
@@ -86,6 +87,8 @@ export class SqsMcpDispatcher {
           QueueUrl: requestUrl,
           MessageBody: JSON.stringify({ requestId, ...msg, deadline, traceId: currentTrace() }),
           MessageGroupId: requestId,
+          // The active span's W3C context, as attributes — the body stays the contract it was (tracing/sqs.ts).
+          MessageAttributes: sqsTraceAttributes(),
           MessageDeduplicationId: requestId,
         })
       );

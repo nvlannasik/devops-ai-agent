@@ -21,6 +21,7 @@ import { extractText } from "./control.js";
 import { newRunState, addUsage, type InvestigateOptions, type RunCtx, type RunState } from "./run-state.js";
 import { finalizeAnswer } from "./finalize.js";
 import { settleAnswer } from "./answer-gates.js";
+import { currentOtelTraceId, withInvestigateSpan } from "../../tracing/spans.js";
 
 /**
  * What the loop needs from the agent. Every member is read LIVE: initialize() swaps the memory
@@ -50,10 +51,21 @@ export class InvestigationRunner {
 
   constructor(private readonly host: RunnerHost) {}
 
-  async run(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
+  /** One investigation run, inside its OpenTelemetry `investigate` span (tracing/spans.ts). */
+  run(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
+    return withInvestigateSpan(
+      threadId,
+      { mode: opts.mode ?? "alert", depth: opts.depth ?? 0, namespace: opts.namespace ?? null, source: this.host.trace().source },
+      () => this.runInSpan(threadId, userMessage, opts)
+    );
+  }
+
+  private async runInSpan(threadId: string, userMessage: string, opts: InvestigateOptions): Promise<string> {
     logger.info(`[${threadId}] Investigation started`);
     this.host.trace().begin(threadId, {
       phase: "investigate",
+      // The run's OpenTelemetry trace — what the dashboard's "Open in Jaeger" links to. Null with tracing off.
+      otelTraceId: currentOtelTraceId(),
       issue: userMessage,
       opts: {
         mode: opts.mode ?? "alert",
