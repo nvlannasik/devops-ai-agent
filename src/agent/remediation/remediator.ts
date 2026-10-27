@@ -25,6 +25,7 @@ import { TraceRecorder, refusalGate } from "../trace/index.js";
 import { TraceStore } from "../trace/store.js";
 import { quarantineRefusal, orphanDeleteRefusal, ungroundedTargetRefusal, resourceFaultRefusal, offerMismatchRefusal, targetKey, scaleOutRefusal, unseenImageRefusal, backupFrom } from "./evidence-refusals.js";
 import { extractText } from "../loop/control.js";
+import { withProposalSpan } from "../../tracing/spans.js";
 
 /**
  * What the remediator reads off the agent. Getters, not values: `initialize()` swaps the stores
@@ -60,6 +61,15 @@ export class Remediator {
     labels: Record<string, string>,
     rca: string,
     opts: { userRequested?: boolean; threadId?: string; offer?: string | null } = {}
+  ): ReturnType<Remediator["proposeRemediationRun"]> {
+    return withProposalSpan(opts.threadId ?? currentTrace() ?? null, () => this.proposeRemediationTraced(incidentId, labels, rca, opts));
+  }
+
+  private async proposeRemediationTraced(
+    incidentId: number | null,
+    labels: Record<string, string>,
+    rca: string,
+    opts: { userRequested?: boolean; threadId?: string; offer?: string | null }
   ): ReturnType<Remediator["proposeRemediationRun"]> {
     // A run of its own under the thread, phase "proposal": the proposal's LLM call, its guard
     // reads, the dry-run and every refusal land in one trace beside the RCA's.

@@ -61,6 +61,25 @@ export function withInvestigateSpan<T>(
   );
 }
 
+/**
+ * One remediation proposal (the harness's "proposal" phase): its chat calls, guard reads and
+ * dry-run under one span. A new trace, like a top-level investigation — the RCA's span has
+ * already ended — found beside it in Jaeger by the same slack.thread_ts.
+ */
+export function withProposalSpan<T>(threadTs: string | null, fn: () => Promise<T>): Promise<T> {
+  const active = trace.getActiveSpan();
+  return tracer().startActiveSpan(
+    "propose_remediation",
+    {
+      kind: SpanKind.INTERNAL,
+      root: true,
+      links: active ? [{ context: active.spanContext() }] : [],
+      attributes: threadTs ? { "slack.thread_ts": threadTs } : {},
+    },
+    (span) => run(span, fn)
+  );
+}
+
 /** One chat() call (OTel GenAI conventions). The model is only known from the response, so the span is renamed then. */
 export function withChatSpan(fn: () => Promise<LLMResponse>): Promise<LLMResponse> {
   return tracer().startActiveSpan("chat", { kind: SpanKind.CLIENT, attributes: { "gen_ai.operation.name": "chat" } }, (span) =>

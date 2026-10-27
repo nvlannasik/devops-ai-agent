@@ -30,12 +30,13 @@ const scripted = (responses: Array<LLMResponse | Error>): LLMClient => {
     },
   };
 };
-const agentWith = (llm: LLMClient) => {
+const agentWith = (llm: LLMClient, extraTools: Array<{ name: string; description: string }> = []) => {
   const rows: EventRow[] = [];
   const recorder = new TraceRecorder({ insert: async (r) => void rows.push(...r) }, { source: "bench", sha: "test" });
   const mcp = {
     connect: async () => {},
-    getTools: () => [{ name: "k8s_list_pods", description: "list pods", input_schema: { type: "object", properties: {} } }],
+    getTools: () =>
+      [{ name: "k8s_list_pods", description: "list pods" }, ...extraTools].map((t) => ({ ...t, input_schema: { type: "object", properties: {} } })),
     callTool: async () => TOOL_RESULT,
     disconnect: async () => {},
   } as any;
@@ -99,4 +100,22 @@ test("an LLM call that throws: the chat span is ERROR and the same error reaches
   const chat = exporter.getFinishedSpans().find((s) => s.name.startsWith("chat"))!;
   assert.equal(chat.status.code, SpanStatusCode.ERROR);
   assert.equal(exporter.getFinishedSpans().find((s) => s.name === "investigate")!.status.code, SpanStatusCode.ERROR);
+});
+
+test("a remediation proposal: its chat calls are children of one propose_remediation span, not traces of their own", async () => {
+  exporter.reset();
+  const nothing = { content: [{ type: "text", text: "null" }], stopReason: "end_turn", usage, model: "gpt-5-mini" } as LLMResponse;
+  const { agent } = agentWith(scripted([nothing, nothing, nothing]), [{ name: "k8s_restart_deployment", description: "[WRITE] restart" }]);
+  assert.equal(await agent.proposeRemediation(7, { namespace: "sample-apps" }, "SECRET-RCA web is down", { threadId: "100.3" }), null);
+  const spans = exporter.getFinishedSpans();
+  const prop = spans.find((s) => s.name === "propose_remediation")!;
+  assert.ok(prop, "a propose_remediation span");
+  assert.equal(prop.attributes["slack.thread_ts"], "100.3");
+  const chats = spans.filter((s) => s.name.startsWith("chat"));
+  assert.ok(chats.length > 0, "the proposal asked the model at least once, or this check proves nothing");
+  for (const c of chats) assert.equal(c.parentSpanContext?.spanId, prop.spanContext().spanId);
+  for (const s of spans) for (const [k, v] of Object.entries(s.attributes)) {
+    assert.ok(ALLOWED_ATTRIBUTES.has(k), `attribute ${k} on ${s.name} is not on the allowlist`);
+    assert.ok(!/SECRET-/.test(String(v)), `content leaked into ${k} on ${s.name}`);
+  }
 });
