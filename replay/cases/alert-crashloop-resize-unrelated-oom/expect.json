@@ -1,0 +1,18 @@
+{
+  "answer": {
+    "must": [],
+    "mustNot": []
+  },
+  "gates": {
+    "must": [
+      "iteration-ceiling:forced",
+      "remediation-replacement:refused",
+      "remediation-resource-fault:refused"
+    ],
+    "mustNot": []
+  },
+  "proposal": {
+    "action": null
+  },
+  "allowDiverge": false
+}

@@ -36,8 +36,8 @@ test("a resize with no resource fault anywhere in the evidence is refused", () =
 test("the cases that MUST keep proposing are untouched", () => {
   assert.equal(resourceFaultRefusal(resize("bench-a02", "backend-api"), oomkilled), null, "A02: OOMKilled in lastState");
   assert.equal(resourceFaultRefusal(resize("bench-a05", "orders-api"), unschedulable), null, "A05: Insufficient cpu");
-  assert.equal(resourceFaultRefusal(resize("bench-c02", "orders-api"), "container exceeded its memory limit and was restarted"), null);
-  assert.equal(resourceFaultRefusal(resize("ns", "w"), '"flags":["cpu_throttled","oom_risk"]'), null, "k8s_recommend_resources flags count");
+  assert.equal(resourceFaultRefusal(resize("bench-c02", "orders-api"), '{"pod":"orders-api-7c9d8e6f5-k2j4l","message":"container exceeded its memory limit and was restarted"}'), null);
+  assert.equal(resourceFaultRefusal(resize("ns", "w"), '{"workload":"w","flags":["cpu_throttled","oom_risk"]}'), null, "k8s_recommend_resources flags count");
 });
 
 test("it fails open, and only judges resize proposals", () => {
@@ -88,8 +88,19 @@ test("a pod that cannot schedule for a reason that is not size is not a resource
   assert.match(resourceFaultRefusal(resize("bench-a07", "ledger"), unboundPvc) ?? "", /no scheduling pressure/, "A07: unbound PVC");
   assert.match(resourceFaultRefusal(resize("bench-a06", "api"), selector) ?? "", /no scheduling pressure/, "A06: node selector");
   assert.equal(
-    resourceFaultRefusal(resize("bench-a05", "orders-api"), "warning failedscheduling 0/3 nodes are available: 3 insufficient cpu."),
+    resourceFaultRefusal(resize("bench-a05", "orders-api"), '{"involvedobject":"orders-api-5b4c3d2e1-zz111","message":"warning failedscheduling 0/3 nodes are available: 3 insufficient cpu."}'),
     null,
     "A05: insufficient cpu IS the resource fault"
   );
+});
+
+// Remediation 112, 2026-10-23: cloudflared restart-looped on QUIC tunnel timeouts and a 1s liveness
+// probe; the card resized it. The gate's only "fault" was another pod's OOMKill in a cluster-wide
+// `sum by (reason)` query — a line that names no workload at all. The fault has to be the target's.
+test("a resource fault that belongs to some other workload does not unlock a resize", () => {
+  const evidence = [
+    '{"resulttype":"vector","result":[{"metric":{"reason":"starterror"},"value":[1792720774.543,"1"]},{"metric":{"reason":"oomkilled"},"value":[1792720774.543,"1"]}]}',
+    '[{"name":"cloudflared-deployment-5c6f46fd4f-ms62z","namespace":"default","status":"running","ready":true,"restarts":38}]',
+  ].join("\n");
+  assert.match(resourceFaultRefusal(resize("default", "cloudflared-deployment"), evidence) ?? "", /no OOMKill, no throttling/);
 });

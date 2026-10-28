@@ -179,7 +179,12 @@ const RESOURCE_FAULT =
 
 export function resourceFaultRefusal(proposal: Proposal, observed: string | null): string | null {
   if (proposal.action !== "k8s_set_resources") return null;
-  if (observed === null || RESOURCE_FAULT.test(observed)) return null;
+  if (observed === null) return null;
+  // Line-scoped to the target, like scaleOutRefusal: remediation 112 resized cloudflared on another
+  // pod's OOMKill from a cluster-wide `sum by (reason)` line that named no workload. Measured on the
+  // recorded A02/A05/C02 threads first: every one that passed before still passes.
+  const name = proposal.name.toLowerCase();
+  if (observed.split("\n").some((line) => line.toLowerCase().includes(name) && RESOURCE_FAULT.test(line))) return null;
   return (
     `resizing \`${proposal.namespace}/${proposal.name}\` is refused: nothing this investigation read ` +
     `shows a fault that a different request or limit would address — no OOMKill, no throttling, no ` +
