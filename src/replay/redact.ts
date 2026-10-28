@@ -11,6 +11,14 @@ const MASK = "[REDACTED]";
 
 const PATTERNS: Array<{ name: string; re: RegExp; replace: (m: string, ...g: string[]) => string | null }> = [
   { name: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, replace: () => MASK },
+  // Base64 of a JSON object, dotless — a cloudflared tunnel token is one (after the jwt pattern).
+  { name: "base64-json", re: /\beyJ[A-Za-z0-9+/_-]{30,}={0,2}/g, replace: () => MASK },
+  {
+    // A secret passed as a CLI flag: `--token v`, `--token=v`, or a JSON args array `"--token","v"`.
+    name: "cli-flag",
+    re: /(--(?:password|passwd|secret|client-secret|token|access-token|api-key|access-key)\b)(["']?\s*(?:=|\s|",\s*"|',\s*')\s*["']?)([^\s"'&,;}\]]+)/gi,
+    replace: (_m, flag, sep, value) => (value.length < 6 || value.startsWith("-") || value.startsWith("[") ? null : `${flag}${sep}${MASK}`),
+  },
   { name: "bearer", re: /\b(Bearer)\s+[A-Za-z0-9\-._~+/]{12,}=*/gi, replace: (_m, kw) => `${kw} ${MASK}` },
   { name: "aws-key-id", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replace: () => MASK },
   {

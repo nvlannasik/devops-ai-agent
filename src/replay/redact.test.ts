@@ -35,3 +35,14 @@ test("every string in a nested trace is walked, and each hit is reported", () =>
   assert.equal(hits.length, 2);
   assert.ok(hits.every((h) => !h.includes("hunter22") && !h.includes("abcDEF")), "the report must not repeat the secret");
 });
+
+// Replay export, 2026-10-28: a cloudflared Deployment's `args` carried its tunnel token, and the
+// trace of an alert on it held `"--token","eyJhIjoi…"` — no dots for the jwt pattern, no `:`/`=`
+// for key-value. Both shapes, with a made-up value.
+test("a base64 JSON blob and a secret passed as a CLI flag are redacted", () => {
+  const blob = "eyJhIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJ0IjoiZmFrZSJ9";
+  assert.equal(one(`["tunnel","run","--token","${blob}"]`), `["tunnel","run","--token","[REDACTED]"]`);
+  assert.equal(one("cloudflared tunnel run --token s3cr3tvalue123"), "cloudflared tunnel run --token [REDACTED]");
+  assert.equal(one("--password=hunter2hunter2"), "--password=[REDACTED]");
+  assert.equal(one("tokens used: 1200, see --help for flags"), "tokens used: 1200, see --help for flags");
+});
