@@ -5,7 +5,8 @@
  *
  * ponytail: pattern matching, so it is evadable and incomplete by construction. It is why export
  * prints every hit and a human reviews the file before it is committed — the review is the
- * control, this is the first pass.
+ * control, this is the first pass. The text patterns are mirrored in devops-mcp-server's
+ * src/utils/redact (which masks tool results at the source); change both.
  */
 const MASK = "[REDACTED]";
 
