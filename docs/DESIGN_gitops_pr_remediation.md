@@ -259,7 +259,7 @@ App auth flow (hand-rolled with `node:crypto` — no new dependency; ~30 lines):
 1. Build a JWT signed **RS256** with the app private key (`iss = appId`, `exp` ≤ 10 min).
    `crypto.createSign("RSA-SHA256")` over `base64url(header).base64url(payload)`.
 2. Exchange it for an installation token: `POST {apiBase}/app/installations/{id}/access_tokens`.
-3. Use that token (≤1h) as the bearer for contents/PR calls, via global `fetch` (Node 24).
+3. Use that token (≤1h) as the bearer for contents/PR calls, via global `fetch` (Node 26).
 
 Config (env) — on the **llm-worker**:
 - `GITHUB_API_URL` — default `https://api.github.com`; GHE = `https://<host>/api/v3`.

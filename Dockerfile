@@ -1,7 +1,7 @@
 # =============================================================================
 # Build stage: compile TypeScript
 # =============================================================================
-FROM node:24-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -49,7 +49,7 @@ RUN apk add --no-cache curl && \
 # =============================================================================
 # Runtime stage
 # =============================================================================
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 
 # The commit this image was built from — stamped on every investigation trace (agent/trace).
 ARG GIT_SHA=unknown
