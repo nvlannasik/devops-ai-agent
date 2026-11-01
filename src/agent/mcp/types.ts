@@ -12,3 +12,6 @@ export interface McpTools {
   ping(): Promise<boolean>;
   callTool(name: string, input: Record<string, unknown>): Promise<string>;
 }
+
+/** An SQS bridge client (SqsMCPClient): everything but ping — the agent's readiness never waits on a remote cluster. */
+export type BridgeTools = Omit<McpTools, "ping">;

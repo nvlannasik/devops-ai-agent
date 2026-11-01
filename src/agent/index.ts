@@ -2,6 +2,9 @@ import { createLLMClient } from "./llm/index.js";
 import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
+import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
+import { clusterRegistry, type ClusterRegistry } from "./cluster/index.js";
+import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
 import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
@@ -69,6 +72,7 @@ export interface AgentDeps {
 export class DevOpsAgent {
   private llm: LLMClient;
   private mcp: McpTools;
+  readonly clusters: ClusterRegistry;
   // Investigation traces (agent/trace, migrations/011). A recorder with no sink is a no-op, which
   // is what this is until initialize() has a pool.
   private trace: TraceRecorder;
@@ -99,7 +103,18 @@ export class DevOpsAgent {
     // Wrapped once, here, so every chat()/callTool() call site is recorded without touching it.
     // The getter matters: initialize() replaces this.trace after the wrappers exist.
     this.llm = instrumentLLM(deps.llm ?? createLLMClient(), () => this.trace);
-    this.mcp = instrumentMCP(deps.mcp ?? new MCPClient(), () => this.trace);
+    // With a cluster registry (MCP_LOCAL_CLUSTER / MCP_SQS_CLUSTERS) this is a ClusterRouter; without
+    // one, the plain MCPClient as before (agent/cluster). One response-queue dispatcher serves every bridge.
+    this.clusters = clusterRegistry();
+    let dispatcher: SqsMcpDispatcher | undefined;
+    this.mcp = instrumentMCP(
+      deps.mcp ??
+        createMcp(this.clusters, new MCPClient(), (b) => {
+          dispatcher ??= new SqsMcpDispatcher(config.mcp.sqs.responseQueueName);
+          return new SqsMCPClient(b.name, b.requestQueueName, dispatcher);
+        }),
+      () => this.trace
+    );
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
     this.incidents = new IncidentMemory(null); // no-op until initialize() wires Postgres
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
