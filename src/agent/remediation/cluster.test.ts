@@ -89,3 +89,27 @@ test("a proposal runs on its thread's cluster", async () => {
   assert.ok(calls.every((c) => !c.startsWith("dev:k8s_")), `no Kubernetes call reached dev: ${calls.join(", ")}`);
   assert.deepEqual(stored, [{ action: "k8s_rollout_restart", cluster: "stg" }]);
 });
+
+test("a Flux-managed target off the local cluster gets no PR", async () => {
+  const sent: string[] = [];
+  const tool = (name: string, description = name): ToolDefinition => ({ name, description, input_schema: { type: "object", properties: {} } });
+  const stgTools = [tool("k8s_scale", "[WRITE] scale"), tool("k8s_list_deployments"), tool("k8s_list_pods")];
+  const preview = JSON.stringify({ gitOpsPrEligible: true, helmRelease: { name: "web", namespace: "flux-app" }, action: "scale", changes: [{ field: "replicas", from: 1, to: 3 }] });
+  const fake = (tools: ToolDefinition[]) => ({
+    connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => tools,
+    callTool: async (name: string, input: Record<string, unknown>) => {
+      if (name === "k8s_list_deployments") return JSON.stringify([{ name: "web", namespace: "default", replicas: 1, readyReplicas: 1, containers: [{ name: "web", image: "nginx:1" }] }]);
+      if (input.dry_run) return preview;
+      return "[]";
+    },
+  });
+  const mcp = new ClusterRouter(fake([tool("prometheus_query"), ...stgTools]) as McpTools, new Map([["stg", fake(stgTools) as BridgeTools]]), registry);
+  const proposal = `{"action":"k8s_scale","namespace":"default","workload":"web","kind":"deployment","replicas":3,"reason":"the user asked for it"}`;
+  const llm: LLMClient = { chat: async () => ({ content: [{ type: "text", text: proposal }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } }) };
+  const agent = new DevOpsAgent({ llm, mcp, recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }), remediations: { pendingFor: async () => null, propose: async () => 7 } as never, clusters: registry });
+  (agent as unknown as { gitops: unknown }).gitops = { request: async (m: { op: string }) => { sent.push(m.op); return { ok: true, op: m.op }; } };
+  await agent.bindThreadCluster("T", "stg");
+  const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { threadId: "T", userRequested: true });
+  assert.deepEqual(out, { refused: "GitOps changes for stg arrive with per-cluster repository mapping (multi-cluster part 3); a restart or a pod delete is still possible." });
+  assert.deepEqual(sent, [], "the worker was never asked for a PR");
+});

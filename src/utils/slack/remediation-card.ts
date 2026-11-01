@@ -16,7 +16,9 @@ export function buildRemediationCard(
   p: Proposal,
   dryRunSummary: string,
   approvers: string[] = [],
-  gitOps?: GitOpsCardContext
+  gitOps?: GitOpsCardContext,
+  /** Multi-cluster only: the cluster this change acts on, stated directly above the buttons. */
+  cluster?: string
 ): KnownBlock[] {
   // <@Uxx> in a section block triggers a real Slack notification for each approver
   const mentions = approvers.length > 0 ? `\n*Approval needed from:* ${approvers.map((u) => `<@${u}>`).join(" ")}` : "";
@@ -38,10 +40,11 @@ export function buildRemediationCard(
         ? `*Dry-run:* ✅\n\`\`\`\n${dryRunSummary.slice(0, 1500)}\n\`\`\``
         : `*Dry-run:* ✅ \`${dryRunSummary.slice(0, 400)}\``) +
       mentions;
+  const text = cluster ? `${detail}\n*Cluster: ${cluster}*` : detail;
   return [
     {
       type: "section",
-      text: { type: "mrkdwn", text: detail },
+      text: { type: "mrkdwn", text },
     },
     {
       type: "actions",

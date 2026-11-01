@@ -394,3 +394,20 @@ test("a section over Slack's 3000-char limit is split, not dropped", () => {
   // nothing silently lost: the last fact still ships
   assert.ok(blocks.some((b) => JSON.stringify(b).includes("[Fact 89]")), "the tail of the evidence was dropped");
 });
+
+// Multi-cluster 2a: the cluster on the card, and nothing changes without one.
+test("the RCA header carries the cluster, and only when given", () => {
+  const rca = "*🔴 Severity:* `Critical`\n\n*📍 Root Cause*\nX\n\n*📊 Evidence*\nY";
+  const withCluster = buildRcaBlocks(rca, "footer", "stg");
+  assert.match(JSON.stringify(withCluster[0]), /☸ stg/);
+  assert.deepEqual(buildRcaBlocks(rca, "footer", undefined), buildRcaBlocks(rca, "footer"));
+});
+
+test("the footer names the cluster and the bridge", () => {
+  const base = { durationMs: 2000, rounds: 3, toolCalls: 4 };
+  assert.match(formatRunFooter({ ...base, cluster: "stg", viaBridge: true }), /cluster stg \(bridge\)/);
+  const local = formatRunFooter({ ...base, cluster: "dev", viaBridge: false });
+  assert.match(local, /cluster dev/);
+  assert.doesNotMatch(local, /bridge/);
+  assert.doesNotMatch(formatRunFooter(base), /cluster/);
+});

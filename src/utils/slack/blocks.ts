@@ -190,6 +190,9 @@ export function formatRunFooter(meta: {
   model?: string;
   backend?: string;
   route?: "light" | "heavy";
+  /** Multi-cluster (agent/cluster): which cluster the run read, and whether through an SQS bridge. */
+  cluster?: string;
+  viaBridge?: boolean;
 }): string {
   const parts = [`⏱ ${formatDuration(meta.durationMs)}`];
   // backend is the name YOU gave it in the routes; model is what actually ran. Both, when they
@@ -201,10 +204,12 @@ export function formatRunFooter(meta: {
   if (engine) parts.push(`🧠 ${engine}${meta.route ? ` · ${meta.route}` : ""}`);
   parts.push(`${meta.rounds} round${meta.rounds === 1 ? "" : "s"}`);
   if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool call${meta.toolCalls === 1 ? "" : "s"}`);
+  if (meta.cluster) parts.push(`cluster ${meta.cluster}${meta.viaBridge ? " (bridge)" : ""}`);
   return parts.join(" · ");
 }
 
-export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
+/** `cluster`: multi-cluster only — a badge beside the severity; absent, the card is unchanged. */
+export function buildRcaBlocks(rcaText: string, footer?: string, cluster?: string): Block[] {
   const blocks: Block[] = [];
 
   // ── Severity ─────────────────────────────────────────────────────────────
@@ -213,7 +218,7 @@ export function buildRcaBlocks(rcaText: string, footer?: string): Block[] {
   const severityEmoji = SEVERITY_COLOR[severity] ?? "⚪";
   const severityLabel = severity ? severity.charAt(0).toUpperCase() + severity.slice(1) : "Unknown";
 
-  blocks.push(header(`${severityEmoji} ${severityLabel} Severity Incident`));
+  blocks.push(header(`${severityEmoji} ${severityLabel} Severity Incident${cluster ? ` · ☸ ${cluster}` : ""}`));
   blocks.push(divider());
 
   // ── Section order ────────────────────────────────────────────────────────

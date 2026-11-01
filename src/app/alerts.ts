@@ -422,7 +422,9 @@ export class AlertFlow {
       const structured = isRcaResponse(rca) && !!extractSection(rca, "Root Cause");
       this.host.agent.recordGate(threadId, "rca-structure", structured ? "card" : "conversation");
       if (structured) {
-        const rcaBlocks = buildRcaBlocks(rca, alertMeta ? formatRunFooter(alertMeta) : undefined);
+        // Multi-cluster: the cluster on the card and in the footer (agent/cluster); undefined, unchanged.
+        const where = cluster ? { cluster, viaBridge: cluster !== this.host.agent.clusters.local } : {};
+        const rcaBlocks = buildRcaBlocks(rca, alertMeta ? formatRunFooter({ ...alertMeta, ...where }) : undefined, cluster ?? undefined);
         const changesBlock = changes ? renderForSlack(changes) : null;
         if (changesBlock) rcaBlocks.push(changesBlock);
         // What we actually handed Slack. Added because "the dividers are gone" could not be

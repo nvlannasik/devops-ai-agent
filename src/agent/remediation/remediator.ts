@@ -208,6 +208,12 @@ export class Remediator {
     // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
     // validation) — route to the GitOps PR flow instead of storing a direct-patch card.
     const preview = parseGitOpsPreview(dryRun);
+    // A PR edits the repo overlay of the LOCAL cluster; per-cluster repository mapping is part 3.
+    // Until then a Flux-managed target on another cluster gets a reason, never a PR at the wrong path.
+    const cluster = currentCluster();
+    if (preview && this.host.clusters?.strict && cluster && cluster !== this.host.clusters.local) {
+      return { refused: `GitOps changes for ${cluster} arrive with per-cluster repository mapping (multi-cluster part 3); a restart or a pod delete is still possible.` };
+    }
     if (preview) return preview.action === "rollback" ? this.proposeRevertPr(incidentId, proposal, preview, opts.threadId) : this.proposeGitOpsPr(incidentId, proposal, preview);
 
     // A rollback replays the live revision the dry-run saw as `from_revision`: the MCP patch

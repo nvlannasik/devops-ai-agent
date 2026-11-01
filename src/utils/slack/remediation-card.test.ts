@@ -50,3 +50,12 @@ test("a rollback card renders its dry-run summary as a fenced block, not a 400-c
   const set = (buildRemediationCard(3, proposal, "validated") as Array<{ text?: { text: string } }>)[0].text!.text;
   assert.match(set, /\*Dry-run:\* ✅ `validated`/, "other actions keep the inline span");
 });
+
+test("the approval card states the cluster above the buttons, and only when given", async () => {
+  const { parseProposal } = await import("../../agent/remediation/proposal.js");
+  const p = parseProposal('{"action":"k8s_rollout_restart","namespace":"default","workload":"web","kind":"deployment","reason":"r"}')!;
+  const blocks = buildRemediationCard(7, p, "ok", [], undefined, "stg");
+  const actionsAt = blocks.findIndex((b) => b.type === "actions");
+  assert.match(JSON.stringify(blocks[actionsAt - 1]), /\*Cluster: stg\*/);
+  assert.deepEqual(buildRemediationCard(7, p, "ok", [], undefined, undefined), buildRemediationCard(7, p, "ok", []));
+});
