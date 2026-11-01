@@ -62,7 +62,7 @@ export class RemediationFlow {
         text: `🔧 Remediation needed${gitOps ? " (GitOps PR)" : ""}: ${proposed.proposal.summary} — approve or reject`,
         // Multi-cluster: the approver sees which cluster the change acts on — the proposal ran on the
         // thread's (agent/cluster); null in single-cluster mode, and the card is unchanged.
-        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps, (await this.host.agent.threadCluster(threadId)) ?? undefined),
+        blocks: buildRemediationCard(proposed.id, proposed.proposal, proposed.dryRunSummary, approvers, gitOps, this.host.agent.clusters?.strict ? ((await this.host.agent.threadCluster(threadId)) ?? undefined) : undefined),
       });
       // The message id is known here and nowhere else until somebody clicks. Without it the
       // expiry sweep can close the row but not the card, which is the half a human sees.
