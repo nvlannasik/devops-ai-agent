@@ -213,7 +213,7 @@ test("propose maps 23505 to 'duplicate' and null pool to null", async () => {
 test("claimForExecution wins the flip and returns the action", async () => {
   const pool = { query: async () => ({ rows: [{ action: "k8s_rollout_restart", params: { namespace: "payment", name: "api" } }] }) } as any;
   const claim = await new RemediationStore(pool).claimForExecution(5, "U1");
-  assert.deepEqual(claim, { action: "k8s_rollout_restart", params: { namespace: "payment", name: "api" } });
+  assert.deepEqual(claim, { action: "k8s_rollout_restart", params: { namespace: "payment", name: "api" }, cluster: null });
 });
 
 test("losing the flip distinguishes 'taken' from 'expired'", async () => {

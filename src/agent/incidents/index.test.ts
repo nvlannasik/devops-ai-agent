@@ -71,7 +71,7 @@ test("store returns the inserted id and persists the Slack thread link", async (
   // one nothing outside the resolved webhook can release the claim), the change timeline
   // (null here — no changes argument was passed), subjects (null — no opts passed), and
   // alert_started_at (null — no opts.alertStartedAt passed; migration 013)
-  assert.deepEqual(insert.params.slice(-6), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null, null, null]);
+  assert.deepEqual(insert.params.slice(-7), ["C123", "1720.99", '{"alertname":"X","namespace":"ns"}', null, null, null, null]); // the last null: cluster (migrations/017)
   // a non-child store with a Slack thread links that thread's unlinked children — best-effort,
   // and here a no-op since the fake pool has no real rows to match.
   const update = calls.find((c) => c !== insert)!;
