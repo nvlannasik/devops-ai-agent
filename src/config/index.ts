@@ -147,6 +147,9 @@ export const config = {
     // per-tool-call timeout (seconds) so a hung MCP server / upstream can't stall an investigation
     toolTimeoutMs: parseInt(process.env.MCP_TOOL_TIMEOUT_SECONDS ?? "45") * 1000,
     // SQS bridges to clusters that accept no inbound traffic (spec 2026-10-15-multi-cluster-sqs-bridge-design).
+    // The cluster this agent's own HTTP MCP server reads (multi-cluster 2a). Unset with no bridges =
+    // single-cluster mode, exactly as before. Validated in agent/cluster's clusterRegistry().
+    localCluster: process.env.MCP_LOCAL_CLUSTER || null,
     sqs: {
       clusters: parseSqsClusters(process.env.MCP_SQS_CLUSTERS),
       // dedicated to MCP — never the LLM response queue (tens of tool calls per investigation
