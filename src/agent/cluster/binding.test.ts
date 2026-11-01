@@ -43,3 +43,12 @@ test("the note", () => {
   assert.match(unlabelled, /no `cluster` label/);
   assert.match(unlabelled, /no Kubernetes tools/);
 });
+
+test("an alert binds by its cluster label, and only to a registry cluster", async () => {
+  const { alertCluster } = await import("./binding.js");
+  assert.equal(alertCluster({ alertname: "X", cluster: "stg" }, registry), "stg");
+  assert.equal(alertCluster({ alertname: "X" }, registry), null, "no label");
+  assert.equal(alertCluster({ alertname: "X", cluster: "prd" }, registry), null, "a cluster the registry does not know");
+  const single = clusterRegistry({ localCluster: null, sqs: { clusters: [] } });
+  assert.equal(alertCluster({ alertname: "X", cluster: "stg" }, single), undefined, "single-cluster mode: nothing to bind");
+});

@@ -75,3 +75,13 @@ test("an unbound thread offers no Kubernetes tool and is told to ask", async () 
   assert.match(JSON.stringify(seen[0]!.messages), /\[Cluster: none\]/);
   assert.deepEqual(calls, []);
 });
+
+test("an alert with no usable cluster label runs without Kubernetes and is capped to Low", async () => {
+  const high: LLMResponse = { content: [{ type: "text", text: "*📍 Root Cause*\nA.\n\n*📊 Evidence*\nB.\n\n*📈 Confidence:* `High` — sure." }], stopReason: "end_turn", usage };
+  const { agent, calls, seen } = setup([high, high, high]);
+  const out = await agent.investigate("C", "KubePodCrashLooping in kube-system", { mode: "alert", cluster: null });
+  assert.ok(!seen[0]!.tools.some((t) => t.name.startsWith("k8s_")));
+  assert.match(JSON.stringify(seen[0]!.messages), /\[Cluster: unknown\]/);
+  assert.match(out, /Confidence:\* `Low` — no cluster label/);
+  assert.deepEqual(calls, []);
+});

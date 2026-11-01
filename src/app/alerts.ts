@@ -4,6 +4,7 @@ import { answerAsksForInput, buildAlertProposalContext } from "../agent/remediat
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
 import { serviceGraph, relatedIncident, describeVia, type OpenIncident } from "../agent/correlation/topology.js";
 import { delegationHint } from "../agent/subagent/index.js";
+import { alertCluster } from "../agent/cluster/binding.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, formatRunFooter } from "../utils/slack/blocks.js";
 import { splitForSlack, toMrkdwn } from "../utils/slack/split.js";
 import logger, { errDetail } from "../utils/logger/index.js";
@@ -393,11 +394,16 @@ export class AlertFlow {
         : undefined;
 
       let alertMeta: RunMeta | undefined;
+      // Multi-cluster: the alert's own `cluster` label binds the thread (agent/cluster); none, or one the
+      // registry does not know, investigates with no Kubernetes at all. Single-cluster: undefined, a no-op.
+      const cluster = alertCluster(labels, this.host.agent.clusters);
+      if (cluster) await this.host.agent.bindThreadCluster(threadId, cluster).catch(() => {});
       const rca = toMrkdwn(
         await this.host.agent.investigate(threadId, fullIssue, {
           mode: "alert",
           trigger: issueText,
           namespace: labels.namespace,
+          cluster,
           onProgress,
           onComplete: (m) => { alertMeta = m; },
         })

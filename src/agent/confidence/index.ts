@@ -67,3 +67,17 @@ export function capConfidence(answer: string, sawLogLines: boolean): { text: str
   if (!admitsLogGap(answer)) return { text: answer, capped: false };
   return { text: answer.replace(HIGH_LINE, `$1Medium$2 — ${CAPPED_REASON}`), capped: true };
 }
+
+const RATED_LINE = /^(.*?confidence(?:\s+level)?[^a-z\n]{0,10}[:`]\s*(?:[`*]\s*){0,2}\[?)(?:high|medium)(\]?[`*]?)[^\n]*$/im;
+const UNBOUND_REASON = "no cluster label — Kubernetes was not read";
+
+/**
+ * Multi-cluster 2a: an alert with no usable `cluster` label ran with no Kubernetes tools at all, so
+ * its answer cannot be more than Low — and Low pages on-call, which is the right outcome for an
+ * alert rule that does not say where it fired.
+ */
+export function capForUnboundCluster(answer: string): { text: string; capped: boolean } {
+  const level = parseConfidence(answer);
+  if (level !== "high" && level !== "medium") return { text: answer, capped: false };
+  return { text: answer.replace(RATED_LINE, `$1Low$2 — ${UNBOUND_REASON}`), capped: true };
+}

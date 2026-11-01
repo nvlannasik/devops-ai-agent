@@ -42,3 +42,14 @@ export function clusterNote(state: { cluster: string | null; reason: "bound" | "
     `can show, then ask which cluster this is about: ${list}.`
   );
 }
+
+/**
+ * The cluster an alert is about: its `cluster` label when the registry knows it, null when it has
+ * none or names a cluster the registry does not know (an unlabelled alert — no Kubernetes, capped to
+ * Low), undefined in single-cluster mode where there is nothing to bind.
+ */
+export function alertCluster(labels: Record<string, string>, registry: ClusterRegistry): string | null | undefined {
+  if (!registry.strict) return undefined;
+  const label = labels.cluster;
+  return label && registry.names.includes(label) ? label : null;
+}

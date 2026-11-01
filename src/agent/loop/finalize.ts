@@ -1,6 +1,7 @@
 import logger from "../../utils/logger/index.js";
 import { truncate } from "../../utils/truncate/index.js";
-import { capConfidence, admitsLogGap, parseConfidence } from "../confidence/index.js";
+import { capConfidence, capForUnboundCluster, admitsLogGap, parseConfidence } from "../confidence/index.js";
+import { currentCluster } from "../cluster/index.js";
 import { stripTemplateEcho } from "../template-echo/index.js";
 import { stripFabricatedNote } from "../fabricated-note/index.js";
 import { stripMutatingCommands } from "../runbook/index.js";
@@ -37,7 +38,14 @@ export function finalizeAnswer(ctx: RunCtx, s: RunState, trace: TraceRecorder, t
   );
   // An answer that says it could not read the logs cannot also be highly confident — see
   // capConfidence. Here, so the alert path and a mention both pass through it.
-  const { text: rated, capped } = capConfidence(text, s.sawLogLines);
+  const { text: logRated, capped } = capConfidence(text, s.sawLogLines);
+  // Multi-cluster: an alert that ran with no cluster read no Kubernetes at all (agent/cluster).
+  const unbound = ctx.mode === "alert" && ctx.depth === 0 && currentCluster() === null;
+  const { text: rated, capped: clusterCapped } = unbound ? capForUnboundCluster(logRated) : { text: logRated, capped: false };
+  if (clusterCapped) {
+    logger.info(`[${ctx.threadId}] capped Confidence → Low — the alert names no known cluster`);
+    trace.gate(ctx.threadId, "cluster-cap", "capped");
+  }
   if (capped) {
     logger.info(`[${ctx.threadId}] capped Confidence: High → Medium — the answer reports no logs`);
     trace.gate(ctx.threadId, "confidence-cap", "capped");

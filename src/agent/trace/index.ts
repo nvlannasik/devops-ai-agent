@@ -14,7 +14,7 @@ export const GATE_NAMES = [
   "no-evidence", "log-gap", "image-gap", "rca-completeness", "nudge-lost-rca",
   "tool-budget", "iteration-ceiling", "deadline", "delegate",
   "placeholder", "injection", "repeat-call", "log-fanout", "scope-lock", "write-blocked",
-  "confidence-cap", "template-echo", "fabricated-note", "runbook", "offer",
+  "confidence-cap", "cluster-cap", "template-echo", "fabricated-note", "runbook", "offer",
   "grounding", "rca-structure",
   "remediation-replacement", "remediation-quarantine", "remediation-orphan", "remediation-offer",
   "remediation-target", "remediation-resource-fault", "remediation-scale", "remediation-image",
