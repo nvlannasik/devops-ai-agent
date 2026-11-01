@@ -8,7 +8,7 @@ import logger from "../../utils/logger/index.js";
 const EXPIRY_MINUTES = 15; // approval window — checked at click time, and by pendingFor
 
 export type ClaimResult =
-  | { action: string; params: Record<string, unknown> }
+  | { action: string; params: Record<string, unknown>; cluster?: string | null }
   | "expired"
   | "taken"
   | null;
@@ -53,14 +53,15 @@ export class RemediationStore {
     return rows.length > 0 ? Number(rows[0].id) : null;
   }
 
-  async propose(incidentId: number | null, action: string, params: Record<string, unknown>): Promise<number | "duplicate" | null> {
+  /** `cluster`: the cluster the card acts on (multi-cluster 2a, migrations/017); null = the local one. */
+  async propose(incidentId: number | null, action: string, params: Record<string, unknown>, cluster: string | null = null): Promise<number | "duplicate" | null> {
     if (!this.pool) return null;
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO remediations (incident_id, action, params, status, proposed_by)
-         VALUES ($1, $2, $3, 'proposed', 'agent')
+        `INSERT INTO remediations (incident_id, action, params, status, proposed_by, cluster)
+         VALUES ($1, $2, $3, 'proposed', 'agent', $4)
          RETURNING id`,
-        [incidentId, action, params]
+        [incidentId, action, params, cluster]
       );
       return Number(rows[0].id);
     } catch (err) {
@@ -118,10 +119,10 @@ export class RemediationStore {
     const { rows } = await this.pool.query(
       `UPDATE remediations SET status = 'executing', approved_by = $2, executed_at = now()
         WHERE id = $1 AND status = 'proposed' AND created_at > now() - interval '${EXPIRY_MINUTES} minutes'
-        RETURNING action, params`,
+        RETURNING action, params, cluster`,
       [id, approvedBy]
     );
-    if (rows.length > 0) return { action: rows[0].action, params: rows[0].params };
+    if (rows.length > 0) return { action: rows[0].action, params: rows[0].params, cluster: rows[0].cluster ?? null };
 
     const { rows: cur } = await this.pool.query(`SELECT status FROM remediations WHERE id = $1`, [id]);
     if (cur.length === 0) return null;

@@ -94,33 +94,46 @@ export class IncidentMemory {
   // alert text (weakest; a lead, not an answer). See migrations/005.
   async recall(
     labels: Record<string, string>,
-    opts: { queryText?: string; limit?: number } = {}
+    /** `cluster`/`local`: multi-cluster recall (agent/cluster). The same cluster's rows keep their tiers;
+     *  another cluster's drop to "possibly related", labelled. Unset = single-cluster recall, unchanged. */
+    opts: { queryText?: string; limit?: number; cluster?: string | null; local?: string | null } = {}
   ): Promise<string> {
     if (!this.pool) return "";
     const alertname = labels.alertname;
     if (!alertname) return ""; // nothing to key on (e.g. ad-hoc mention)
     const namespace = labels.namespace ?? null;
     const limit = opts.limit ?? 3;
+    const keyed = typeof opts.cluster === "string";
+    const fetch = keyed ? limit * 2 : limit;
 
-    const [hypo, confirmed] = await Promise.all([
+    const [hypoAll, confirmedAll] = await Promise.all([
       this.pool.query(
-        `SELECT created_at, severity, assessed_severity, confidence, root_cause
+        `SELECT created_at, severity, assessed_severity, confidence, root_cause, COALESCE(cluster, $4::text) AS cluster
            FROM incidents
           WHERE alertname = $1 AND ($2::text IS NULL OR namespace = $2) AND ${TOP_LEVEL}
           ORDER BY created_at DESC
           LIMIT $3`,
-        [alertname, namespace, limit]
+        [alertname, namespace, fetch, opts.local ?? null]
       ),
       this.pool.query(
-        `SELECT f.created_at, f.confirmed_root_cause, f.action_taken, f.outcome
+        `SELECT f.created_at, f.confirmed_root_cause, f.action_taken, f.outcome, COALESCE(i.cluster, $4::text) AS cluster
            FROM incident_feedback f
            JOIN incidents i ON i.id = f.incident_id
           WHERE i.alertname = $1 AND ($2::text IS NULL OR i.namespace = $2)
           ORDER BY f.created_at DESC
           LIMIT $3`,
-        [alertname, namespace, limit]
+        [alertname, namespace, fetch, opts.local ?? null]
       ),
     ]);
+    const here = (r: any) => !keyed || r.cluster === opts.cluster;
+    const hypo = { rows: hypoAll.rows.filter(here).slice(0, limit) };
+    const confirmed = { rows: confirmedAll.rows.filter(here).slice(0, limit) };
+    const elsewhere = keyed
+      ? [
+          ...confirmedAll.rows.filter((r: any) => !here(r)).map((r: any) => ({ at: r.created_at, line: `confirmed on ${r.cluster}: ${String(r.confirmed_root_cause ?? r.action_taken ?? "").slice(0, 300)} (outcome: ${r.outcome || "unknown"})` })),
+          ...hypoAll.rows.filter((r: any) => !here(r)).map((r: any) => ({ at: r.created_at, line: `seen on ${r.cluster} (the agent's own RCA, confidence ${r.confidence || "?"}): ${String(r.root_cause ?? "").slice(0, 300)}` })),
+        ].slice(0, limit)
+      : [];
 
     const sections: string[] = [];
 
@@ -160,6 +173,16 @@ export class IncidentMemory {
           `## Prior similar incidents — same alert${namespace ? ` in namespace ${namespace}` : ""}`,
           ...lines,
           `These are hypotheses from earlier investigations, NOT ground truth. Confirm with fresh evidence before reusing a root cause.`,
+        ].join("\n")
+      );
+    }
+
+    if (elsewhere.length > 0) {
+      sections.push(
+        [
+          `## Possibly related — same alert on another cluster`,
+          ...elsewhere.map((e) => `- ${new Date(e.at).toISOString().slice(0, 10)} — ${e.line}`),
+          `Same alert name, different cluster: a lead worth checking, not a prior. A cause confirmed there was confirmed for THAT cluster's workloads, which may differ from this one's.`,
         ].join("\n")
       );
     }
@@ -253,6 +276,22 @@ export class IncidentMemory {
   // Map a Slack thread back to its incident (threads are linked since migration 002). The
   // TOP_LEVEL filter is what makes this the PARENT'S id when the thread also holds children —
   // feedback and remediation link to the investigation, not to a merged-in child row.
+  /** The cluster of a thread's top-level incident (multi-cluster): `{ cluster: null }` is a row from
+   *  before multi-cluster (the local one), `null` is no incident on that thread at all. */
+  async clusterForThread(threadTs: string): Promise<{ cluster: string | null } | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT cluster FROM incidents WHERE thread_ts = $1 AND ${TOP_LEVEL} ORDER BY id DESC LIMIT 1`,
+        [threadTs]
+      );
+      return rows.length > 0 ? { cluster: rows[0].cluster ?? null } : null;
+    } catch (err) {
+      logger.error(`[incidents] clusterForThread failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   async findIncidentByThread(channel: string, threadTs: string): Promise<number | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(
@@ -334,7 +373,7 @@ export class IncidentMemory {
      *  the caller knows the thread, not the id. `alertStartedAt`: the alert's own start
      *  (Alertmanager's `startsAt`, not when this row happened to be inserted) — the relatability
      *  window in topology.ts's `relatedIncident` is measured against it. */
-    opts?: { subjects?: string[]; child?: boolean; alertStartedAt?: Date }
+    opts?: { subjects?: string[]; child?: boolean; alertStartedAt?: Date; cluster?: string | null }
   ): Promise<number | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
@@ -347,8 +386,8 @@ export class IncidentMemory {
         ? `(SELECT id FROM incidents WHERE channel = $8 AND thread_ts = $9 AND ${TOP_LEVEL} ORDER BY id LIMIT 1)`
         : "NULL";
       const { rows } = await this.pool.query(
-        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes, subjects, parent_id, alert_started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, ${parentIdExpr}, $13)
+        `INSERT INTO incidents (alertname, namespace, severity, assessed_severity, confidence, root_cause, rca, channel, thread_ts, group_labels, changes, subjects, parent_id, alert_started_at, cluster)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, ${parentIdExpr}, $13, $14)
          RETURNING id`,
         [
           alertname,
@@ -375,6 +414,7 @@ export class IncidentMemory {
           changes ? JSON.stringify(cleanDeep(changes)) : null,
           opts?.subjects ? JSON.stringify(opts.subjects) : null,
           opts?.alertStartedAt ?? null,
+          opts?.cluster ?? null,
         ]
       );
       const id = Number(rows[0].id);
@@ -411,16 +451,19 @@ export class IncidentMemory {
   // edge away). TOP_LEVEL excludes children: a child IS the match already made, not a fresh
   // candidate to match again. Fails open to [] — no candidates reads as "no correlation found",
   // which is today's (pre-correlation) behaviour.
-  async openRelatable(namespace: string, sinceMinutes: number): Promise<OpenIncident[]> {
+  /** `scope`: multi-cluster only (agent/cluster) — dev and stg share namespace names, so a neighbour
+   *  must also share the cluster (NULL rows are the local one). Unset = no cluster predicate. */
+  async openRelatable(namespace: string, sinceMinutes: number, scope?: { cluster: string | null; local: string | null }): Promise<OpenIncident[]> {
     if (!this.pool) return [];
     try {
       const { rows } = await this.pool.query(
         `SELECT id, channel, thread_ts, alertname, namespace, subjects, created_at, alert_started_at
            FROM incidents
           WHERE namespace = $1 AND resolved_at IS NULL AND ${TOP_LEVEL}
-            AND created_at > now() - ($2::int * interval '1 minute')
+            AND created_at > now() - ($2::int * interval '1 minute')${scope ? `
+            AND COALESCE(cluster, $3::text) IS NOT DISTINCT FROM $4::text` : ""}
           ORDER BY created_at DESC LIMIT 20`,
-        [namespace, sinceMinutes]
+        scope ? [namespace, sinceMinutes, scope.local, scope.cluster] : [namespace, sinceMinutes]
       );
       return rows.map((r: Record<string, any>) => {
         // alert_started_at is the alert's own start (Alertmanager's startsAt); created_at is

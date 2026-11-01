@@ -121,7 +121,7 @@ export class RemediationFlow {
       const progress = `⏳ Executing remediation ${remediationId} — approved by <@${userId}>...`;
       await client.chat.update({ channel, ts: messageTs, text: progress, blocks: remediationStatusBlocks(progress) });
 
-      const { text, target, backup, awaitApply } = await this.host.agent.executeRemediation(remediationId, userId);
+      const { text, target, backup, awaitApply, cluster } = await this.host.agent.executeRemediation(remediationId, userId);
       await client.chat.update({ channel, ts: messageTs, text, blocks: remediationStatusBlocks(text) });
       const noteThread: string | undefined = body.message?.thread_ts;
       if (noteThread) await this.host.agent.noteInThread(noteThread, text);
@@ -151,7 +151,7 @@ export class RemediationFlow {
       if (target) {
         const threadTs: string = body.message?.thread_ts ?? messageTs;
         await this.host.agent
-          .scheduleRemediationCheck(remediationId, channel, threadTs, target)
+          .scheduleRemediationCheck(remediationId, channel, threadTs, target, cluster)
           .catch((e) => logger.error(`[remediation] could not schedule verification for ${remediationId}: ${errDetail(e)}`));
       } else if (awaitApply) {
         // A GitOps PR: nothing is live until it merges and Flux syncs, so the check waits for the

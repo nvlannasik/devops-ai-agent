@@ -38,6 +38,8 @@ export type RemediationCheck = {
   status?: string;
   expect?: ApplyExpectation | null;
   applyBy?: string | null;
+  /** The card's cluster (migrations/017); NULL = the local cluster. */
+  cluster?: string | null;
 };
 
 /**
@@ -355,9 +357,9 @@ export class RemediationCheckStore {
     try {
       const { rows } = await this.pool.query(
         `INSERT INTO remediation_checks
-           (remediation_id, incident_id, channel, thread_ts, alertname, namespace, target, before_state, due_at)
+           (remediation_id, incident_id, channel, thread_ts, alertname, namespace, target, before_state, due_at, cluster)
          SELECT r.id, r.incident_id, $2, $3, i.alertname, i.namespace, $4::jsonb, $5::jsonb,
-                now() + ($6::int * interval '1 second')
+                now() + ($6::int * interval '1 second'), r.cluster
            FROM remediations r LEFT JOIN incidents i ON i.id = r.incident_id
           WHERE r.id = $1
          ON CONFLICT (remediation_id) DO NOTHING
@@ -388,9 +390,9 @@ export class RemediationCheckStore {
     try {
       const { rows } = await this.pool.query(
         `INSERT INTO remediation_checks
-           (remediation_id, incident_id, channel, thread_ts, alertname, namespace, target, status, expect, due_at, apply_by)
+           (remediation_id, incident_id, channel, thread_ts, alertname, namespace, target, status, expect, due_at, apply_by, cluster)
          SELECT r.id, r.incident_id, $2, $3, i.alertname, i.namespace, $4::jsonb, 'awaiting', $5::jsonb,
-                now() + ($6::int * interval '1 second'), now() + ($7::int * interval '1 second')
+                now() + ($6::int * interval '1 second'), now() + ($7::int * interval '1 second'), r.cluster
            FROM remediations r LEFT JOIN incidents i ON i.id = r.incident_id
           WHERE r.id = $1
          ON CONFLICT (remediation_id) DO NOTHING
@@ -450,7 +452,7 @@ export class RemediationCheckStore {
              LIMIT $1
              FOR UPDATE SKIP LOCKED)
         RETURNING c.id, c.remediation_id, c.channel, c.thread_ts, c.alertname, c.namespace,
-                  c.target, c.before_state, c.attempts, c.created_at, c.status, c.expect, c.apply_by`,
+                  c.target, c.before_state, c.attempts, c.created_at, c.status, c.expect, c.apply_by, c.cluster`,
         [limit, LEASE_SECONDS]
       );
       return rows.map((r: Record<string, any>) => ({
@@ -467,6 +469,7 @@ export class RemediationCheckStore {
         status: r.status,
         expect: r.expect ?? null,
         applyBy: r.apply_by ? new Date(r.apply_by).toISOString() : null,
+        cluster: r.cluster ?? null,
       }));
     } catch (err) {
       logger.error(`[remediation] claiming due verifications failed: ${errText(err)}`);

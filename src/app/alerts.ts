@@ -78,7 +78,7 @@ export class AlertFlow {
         startedAt: u.startedAt!,
         resolved: !!u.resolved,
       }));
-    const stored = await this.host.agent.openRelatable(namespace, 30).catch(() => [] as OpenIncident[]);
+    const stored = await this.host.agent.openRelatable(namespace, 30, groupLabels).catch(() => [] as OpenIncident[]);
     const seen = new Set(inFlight.map((c) => c.threadTs));
     const startsAt = Math.min(...firing.map((a) => Date.parse(a.startsAt ?? "")).filter(Number.isFinite), Date.now());
     const rel = relatedIncident({ namespace, subjects, startsAt }, [...inFlight, ...stored.filter((s) => !seen.has(s.threadTs))], graph);

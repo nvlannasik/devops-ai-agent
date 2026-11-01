@@ -22,6 +22,7 @@ import { newRunState, addUsage, type InvestigateOptions, type RunCtx, type RunSt
 import { finalizeAnswer } from "./finalize.js";
 import { settleAnswer } from "./answer-gates.js";
 import { currentOtelTraceId, withInvestigateSpan } from "../../tracing/spans.js";
+import { currentCluster } from "../cluster/index.js";
 
 /**
  * What the loop needs from the agent. Every member is read LIVE: initialize() swaps the memory
@@ -66,6 +67,8 @@ export class InvestigationRunner {
       phase: "investigate",
       // The run's OpenTelemetry trace — what the dashboard's "Open in Jaeger" links to. Null with tracing off.
       otelTraceId: currentOtelTraceId(),
+      // Multi-cluster only (agent/cluster); absent in single-cluster mode so recorded runs are unchanged.
+      ...(currentCluster() !== undefined ? { cluster: currentCluster() } : {}),
       issue: userMessage,
       opts: {
         mode: opts.mode ?? "alert",

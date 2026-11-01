@@ -22,6 +22,7 @@ import logger from "../../utils/logger/index.js";
 import { errDetail } from "../../utils/logger/index.js";
 import { currentTrace, withRoute, withTrace } from "../../utils/trace/index.js";
 import { TraceRecorder, refusalGate } from "../trace/index.js";
+import { currentCluster, storedCluster, withCluster, type ClusterRegistry } from "../cluster/index.js";
 import { TraceStore } from "../trace/store.js";
 import { quarantineRefusal, orphanDeleteRefusal, ungroundedTargetRefusal, resourceFaultRefusal, offerMismatchRefusal, targetKey, scaleOutRefusal, unseenImageRefusal, backupFrom } from "./evidence-refusals.js";
 import { extractText } from "../loop/control.js";
@@ -43,11 +44,20 @@ export interface RemediatorHost {
   traceStore(): TraceStore;
   timelineFor(threadId?: string): Promise<ChangeTimeline | null>;
   recordUsage(threadTs: string | null, response: LLMResponse): void;
+  /** Multi-cluster (agent/cluster). Optional so a host built for one cluster needs neither. */
+  readonly clusters?: ClusterRegistry;
+  threadCluster?(threadId: string): Promise<string | null>;
 }
 
 /** The guarded-remediation half of the agent (housekeeping 2026-10-20: out of agent/index.ts). */
 export class Remediator {
   constructor(private readonly host: RemediatorHost) {}
+
+  /** Runs `fn` on a stored cluster (NULL = the local one) in multi-cluster mode; as-is otherwise. */
+  private onCluster<T>(stored: string | null | undefined, fn: () => Promise<T>): Promise<T> {
+    const registry = this.host.clusters;
+    return registry?.strict ? withCluster(storedCluster(stored ?? null, registry), fn) : fn();
+  }
 
   // ---- Guarded Remediation (docs/DESIGN_guarded_remediation.md) ----
 
@@ -62,7 +72,12 @@ export class Remediator {
     rca: string,
     opts: { userRequested?: boolean; threadId?: string; offer?: string | null } = {}
   ): ReturnType<Remediator["proposeRemediationRun"]> {
-    return withProposalSpan(opts.threadId ?? currentTrace() ?? null, () => this.proposeRemediationTraced(incidentId, labels, rca, opts));
+    // Called from the Slack layer after the investigation returned, so outside its cluster: the
+    // proposal re-enters the thread's (agent/cluster) — its guard reads, dry-run and card all act there.
+    const thread = opts.threadId ?? currentTrace() ?? null;
+    const run = () => withProposalSpan(thread, () => this.proposeRemediationTraced(incidentId, labels, rca, opts));
+    if (!this.host.clusters?.strict || currentCluster() !== undefined || !thread || !this.host.threadCluster) return run();
+    return this.host.threadCluster(thread).then((cluster) => withCluster(cluster, run));
   }
 
   private async proposeRemediationTraced(
@@ -210,7 +225,7 @@ export class Remediator {
       target: targetKey(proposal.action, proposal.namespace, proposal.name),
       reason: proposal.reason,
       summary: proposal.summary,
-    });
+    }, currentCluster() ?? null);
     if (typeof id !== "number") {
       logger.info(`[remediation] not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
       return null;
@@ -551,7 +566,7 @@ export class Remediator {
       workload: preview.workload, // kind/namespace/name: what the apply-watch reads once the PR is open
       reason: proposal.reason,
       summary,
-    });
+    }, currentCluster() ?? null);
     if (typeof id !== "number") {
       logger.info(`[remediation] gitops not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
       return null;
@@ -610,7 +625,7 @@ export class Remediator {
       ...(expectFromRevert(broke?.diff) ? { applyExpect: expectFromRevert(broke?.diff) } : {}),
       reason: proposal.reason,
       summary,
-    });
+    }, currentCluster() ?? null);
     if (typeof id !== "number") {
       logger.info(`[remediation] revert not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
       return null;
@@ -664,7 +679,7 @@ export class Remediator {
       target: targetKey("flux_reconcile", target.namespace, target.name),
       reason: `cluster drifted from the GitOps repo: ${drift.valuesKey} is ${drift.gitValue} in ${drift.path}, cluster is running ${drift.clusterValue}`,
       summary,
-    });
+    }, currentCluster() ?? null);
     if (typeof id !== "number") {
       logger.info(`[remediation] flux_reconcile not stored: ${id === "duplicate" ? "an active card already exists for this incident" : "store failure"}`);
       return null;
@@ -689,11 +704,23 @@ export class Remediator {
   async executeRemediation(
     id: number,
     approvedBy: string
-  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown; awaitApply?: AwaitApply }> {
+  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown; awaitApply?: AwaitApply; cluster?: string | null }> {
     const claim = await this.host.remediations.claimForExecution(id, approvedBy);
     if (claim === null) return { text: "⚠️ Remediation not found (or the store is unavailable)." };
     if (claim === "expired") return { text: "⌛ This approval window (15 min) has passed — re-run the investigation for a fresh proposal." };
     if (claim === "taken") return { text: "⚠️ This remediation was already handled by another approver or process." };
+    // The click arrives with no thread context — possibly on another replica, after a restart — so the
+    // card acts on the cluster stored on its row (agent/cluster). Handed back so the caller schedules
+    // the verification on the same one.
+    const out = await this.onCluster(claim.cluster, () => this.executeClaim(id, approvedBy, claim));
+    return this.host.clusters?.strict ? { ...out, cluster: storedCluster(claim.cluster ?? null, this.host.clusters) } : out;
+  }
+
+  private async executeClaim(
+    id: number,
+    approvedBy: string,
+    claim: { action: string; params: Record<string, unknown> }
+  ): Promise<{ text: string; target?: { namespace: string; name: string }; backup?: unknown; awaitApply?: AwaitApply }> {
 
     // GitOps PR remediations open a PR via the worker instead of patching the cluster
     if ((claim.params as { gitops?: boolean }).gitops) return this.executeGitOpsPr(id, approvedBy, claim.params);
@@ -808,10 +835,12 @@ export class Remediator {
     remediationId: number,
     channel: string,
     threadTs: string,
-    target: { namespace: string; name: string }
+    target: { namespace: string; name: string },
+    /** The card's cluster, from executeRemediation (agent/cluster); the baseline is read there. */
+    cluster?: string | null
   ): Promise<void> {
     if (!this.host.checks.enabled) return; // no Postgres → no durable schedule to keep
-    const before = await this.podHealth(target).catch((err) => {
+    const before = await this.onCluster(cluster, () => this.podHealth(target)).catch((err) => {
       logger.warn(`[remediation] baseline snapshot for ${target.namespace}/${target.name} failed: ${errDetail(err)}`);
       return null;
     });
@@ -875,30 +904,33 @@ export class Remediator {
     const out: Array<{ channel: string; threadTs: string; text: string }> = [];
 
     for (const check of due) {
-      if (check.status === "awaiting") {
-        const msg = await this.pollAwaitingApply(check).catch((err) => {
-          logger.warn(`[remediation] apply-watch ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
-          return null;
-        });
-        if (msg) out.push(msg);
-        continue;
-      }
-      if (maxAttemptsReached(check)) {
-        const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Alertmanager could not be read`;
-        await this.host.checks.abandon(check.id, detail);
-        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, "inconclusive", detail) });
-        continue;
-      }
-      try {
-        const { verdict, detail } = await this.verifyRemediation(check);
-        await this.host.checks.complete(check.id, verdict, detail);
-        logger.info(`[remediation] check ${check.id} (remediation ${check.remediationId}): ${verdict} — ${detail}`);
-        out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, verdict, detail) });
-      } catch (err) {
-        // Left claimed on purpose: the lease expires and the next pass retries it, which is
-        // what makes a transient MCP outage a delay rather than a lost verdict.
-        logger.warn(`[remediation] check ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
-      }
+      // Each check acts on its card's cluster (agent/cluster), whatever replica claimed it.
+      await this.onCluster(check.cluster, async () => {
+        if (check.status === "awaiting") {
+          const msg = await this.pollAwaitingApply(check).catch((err) => {
+            logger.warn(`[remediation] apply-watch ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
+            return null;
+          });
+          if (msg) out.push(msg);
+          return;
+        }
+        if (maxAttemptsReached(check)) {
+          const detail = `verification kept failing (${check.attempts} attempts) — the cluster or Alertmanager could not be read`;
+          await this.host.checks.abandon(check.id, detail);
+          out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, "inconclusive", detail) });
+          return;
+        }
+        try {
+          const { verdict, detail } = await this.verifyRemediation(check);
+          await this.host.checks.complete(check.id, verdict, detail);
+          logger.info(`[remediation] check ${check.id} (remediation ${check.remediationId}): ${verdict} — ${detail}`);
+          out.push({ channel: check.channel, threadTs: check.threadTs, text: verdictMessage(check, verdict, detail) });
+        } catch (err) {
+          // Left claimed on purpose: the lease expires and the next pass retries it, which is
+          // what makes a transient MCP outage a delay rather than a lost verdict.
+          logger.warn(`[remediation] check ${check.id} failed, will retry after the lease: ${errDetail(err)}`);
+        }
+      });
     }
     return out;
   }

@@ -3,8 +3,8 @@ import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
-import { clusterRegistry, withCluster, type ClusterRegistry } from "./cluster/index.js";
-import { clusterNote, parseClusterMention } from "./cluster/binding.js";
+import { clusterRegistry, storedCluster, withCluster, type ClusterRegistry } from "./cluster/index.js";
+import { alertCluster, clusterNote, parseClusterMention } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -171,6 +171,8 @@ export class DevOpsAgent {
       traceStore: () => self.traceStore,
       timelineFor: (threadId) => self.timelineFor(threadId),
       recordUsage: (threadTs, response) => self.recordUsage(threadTs, response),
+      get clusters() { return self.clusters; },
+      threadCluster: (threadId) => self.threadCluster(threadId),
     });
     this.lifecycle = new IncidentLifecycle({
       get incidents() { return self.incidents; },
@@ -321,7 +323,9 @@ export class DevOpsAgent {
   }
 
   recallIncidents(labels: Record<string, string>, queryText?: string): Promise<string> {
-    return this.incidents.recall(labels, { queryText });
+    // Multi-cluster: keyed by the alert's cluster as well (agent/cluster); undefined = unchanged.
+    const cluster = alertCluster(labels, this.clusters);
+    return this.incidents.recall(labels, cluster === undefined ? { queryText } : { queryText, cluster, local: this.clusters.local });
   }
 
   // Recall what was actually DONE about this alert before (past remediations + their PRs/
@@ -402,13 +406,17 @@ export class DevOpsAgent {
      *  straight through. */
     opts?: { subjects?: string[]; child?: boolean; alertStartedAt?: Date }
   ): Promise<number | null> {
-    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes, opts);
+    // The incident's cluster is its alert's — store() runs after investigate() returned, outside it.
+    const cluster = alertCluster(labels, this.clusters);
+    return this.incidents.store(labels, rca, channel && threadTs ? { channel, threadTs } : undefined, alertSeverity, changes, cluster ? { ...opts, cluster } : opts);
   }
 
   // Open top-level incidents in `namespace` from the last `sinceMinutes` — the candidate set a
   // new alert group is checked against for cross-alert correlation (agent/correlation).
-  openRelatable(namespace: string, sinceMinutes: number): Promise<OpenIncident[]> {
-    return this.incidents.openRelatable(namespace, sinceMinutes);
+  /** `labels`: the new group's — in multi-cluster mode a neighbour must share its cluster. */
+  openRelatable(namespace: string, sinceMinutes: number, labels?: Record<string, string>): Promise<OpenIncident[]> {
+    const cluster = labels ? alertCluster(labels, this.clusters) : undefined;
+    return this.incidents.openRelatable(namespace, sinceMinutes, cluster === undefined ? undefined : { cluster, local: this.clusters.local });
   }
 
   // Everything below runs inside the trace context so outbound SQS requests carry the
@@ -432,7 +440,11 @@ export class DevOpsAgent {
   /** The cluster a thread is bound to, or null. Single-cluster mode: always null. */
   async threadCluster(threadId: string): Promise<string | null> {
     if (!this.clusters.strict) return null;
-    return this.memory.getCluster(threadId).catch(() => null);
+    const bound = await this.memory.getCluster(threadId).catch(() => null);
+    if (bound) return bound;
+    // Past the conversation's 24h TTL an alert thread still has its incident row (NULL = local).
+    const row = await this.incidents.clusterForThread(threadId).catch(() => null);
+    return row ? storedCluster(row.cluster, this.clusters) : null;
   }
 
   /** Binds a thread from an alert's label (validated against the registry by the caller). */
