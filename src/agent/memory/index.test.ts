@@ -143,7 +143,7 @@ test("clear() drops the playbooks with the conversation on both backends", async
   const redisMemory = new ConversationMemory(stubRedis(store, calls));
   await redisMemory.setSkills("t1", ["rca-format"]);
   await redisMemory.clear("t1");
-  assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1"]);
+  assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1", "cluster:t1"]);
   assert.deepEqual(await redisMemory.getSkills("t1"), []);
 });
 
@@ -218,4 +218,21 @@ test("list() and inspect() read Redis through REDIS_KEYS, with each key's TTL", 
   const list = await m.list();
   assert.deepEqual(list, [{ threadId: "1700000000.000100", messages: 1, ttlSeconds: 4000, rcaSent: true, skills: ["oomkilled"] }]);
   assert.equal((await m.inspect("1700000000.000100"))?.ttlSeconds, 4000);
+});
+
+test("a thread's cluster binding lives under its own key, with the conversation's TTL", async () => {
+  const store = new Map<string, string>();
+  const calls: RedisCall[] = [];
+  await new ConversationMemory(stubRedis(store, calls)).setCluster("t1", "stg");
+  const write = calls.find((c) => c.cmd === "set")!;
+  assert.equal(write.args[0], "cluster:t1");
+  assert.equal(write.args[2], "EX");
+  assert.equal(write.args[3], 86400);
+  assert.equal(await new ConversationMemory(stubRedis(store)).getCluster("t1"), "stg", "a restarted pod reads the binding back");
+  assert.equal(await new ConversationMemory(stubRedis(store)).getCluster("t2"), null);
+  const mem = new ConversationMemory();
+  await mem.setCluster("t3", "dev");
+  assert.equal(await mem.getCluster("t3"), "dev");
+  await mem.clear("t3");
+  assert.equal(await mem.getCluster("t3"), null, "clearing a thread clears its binding");
 });

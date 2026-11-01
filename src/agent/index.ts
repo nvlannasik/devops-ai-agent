@@ -3,7 +3,8 @@ import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
-import { clusterRegistry, type ClusterRegistry } from "./cluster/index.js";
+import { clusterRegistry, withCluster, type ClusterRegistry } from "./cluster/index.js";
+import { clusterNote, parseClusterMention } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -67,6 +68,8 @@ export interface AgentDeps {
    * and a proposal that passed every gate would replay as "no proposal".
    */
   remediations?: RemediationStore;
+  /** Tests inject a strict registry; production reads MCP_LOCAL_CLUSTER / MCP_SQS_CLUSTERS. */
+  clusters?: ClusterRegistry;
 }
 
 export class DevOpsAgent {
@@ -105,7 +108,7 @@ export class DevOpsAgent {
     this.llm = instrumentLLM(deps.llm ?? createLLMClient(), () => this.trace);
     // With a cluster registry (MCP_LOCAL_CLUSTER / MCP_SQS_CLUSTERS) this is a ClusterRouter; without
     // one, the plain MCPClient as before (agent/cluster). One response-queue dispatcher serves every bridge.
-    this.clusters = clusterRegistry();
+    this.clusters = deps.clusters ?? clusterRegistry();
     let dispatcher: SqsMcpDispatcher | undefined;
     this.mcp = instrumentMCP(
       deps.mcp ??
@@ -414,9 +417,42 @@ export class DevOpsAgent {
   investigate(threadId: string, userMessage: string, opts: InvestigateOptions = {}): Promise<string> {
     // finish() in a finally: a run that throws (backend down mid-loop) is still written — it is
     // exactly the run someone will want to look at.
-    return withTrace(threadId, () =>
-      this.runner.run(threadId, userMessage, opts).finally(() => this.trace.finish(threadId))
-    );
+    const run = (message: string) =>
+      withTrace(threadId, () => this.runner.run(threadId, message, opts).finally(() => this.trace.finish(threadId)));
+    if (!this.clusters.strict) return run(userMessage);
+    // Multi-cluster (agent/cluster): the run is about exactly one cluster or none — never a guess.
+    return (async () => {
+      const cluster = opts.cluster !== undefined ? opts.cluster : await this.threadCluster(threadId);
+      const reason = cluster ? "bound" : opts.mode === "alert" || opts.mode === undefined ? "unlabelled" : "unbound";
+      const note = clusterNote({ cluster, reason }, this.clusters);
+      return withCluster(cluster, () => run(`${note}\n\n${userMessage}`));
+    })();
+  }
+
+  /** The cluster a thread is bound to, or null. Single-cluster mode: always null. */
+  async threadCluster(threadId: string): Promise<string | null> {
+    if (!this.clusters.strict) return null;
+    return this.memory.getCluster(threadId).catch(() => null);
+  }
+
+  /** Binds a thread from an alert's label (validated against the registry by the caller). */
+  async bindThreadCluster(threadId: string, cluster: string): Promise<void> {
+    await this.memory.setCluster(threadId, cluster);
+  }
+
+  /**
+   * A mention's word on the cluster (spec 2026-11-02 §2): an unbound thread binds to the cluster the
+   * message names; a bound one keeps its cluster unless the message explicitly switches. Returns the
+   * cluster it switched away from, for the Slack line, or null.
+   */
+  async applyMentionCluster(threadId: string, text: string): Promise<{ switchedFrom: string | null; cluster: string | null }> {
+    if (!this.clusters.strict) return { switchedFrom: null, cluster: null };
+    const bound = await this.threadCluster(threadId);
+    const named = parseClusterMention(text, this.clusters.names);
+    if (!named || named.cluster === bound) return { switchedFrom: null, cluster: bound };
+    if (bound && !named.switch) return { switchedFrom: null, cluster: bound };
+    await this.memory.setCluster(threadId, named.cluster);
+    return { switchedFrom: bound, cluster: named.cluster };
   }
 
   // One row per chat() call (per the llm_usage migration's own header comment) — every

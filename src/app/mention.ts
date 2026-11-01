@@ -194,6 +194,11 @@ export class MentionFlow {
       // Captured before the investigation appends this turn's own messages: a bare "ya" is an
       // approval only if the agent put a change on the table in the turn before it.
       const previousReply = await this.host.agent.lastAssistantText(threadId).catch(() => "");
+      // Multi-cluster: this message may bind the thread to a cluster, or switch it (agent/cluster).
+      const { switchedFrom, cluster } = await this.host.agent.applyMentionCluster(threadId, text);
+      if (switchedFrom && cluster) {
+        await say({ text: `🔀 This thread now uses cluster ${cluster}. Earlier answers were about ${switchedFrom}.`, thread_ts: threadId });
+      }
       // A namespace tour gets the cluster model PREFETCHED, outside the investigation like the change
       // timeline (so replay never re-runs it) — see tourContext.
       const tour = await this.tourContext(text, undefined, threadId);

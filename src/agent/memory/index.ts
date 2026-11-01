@@ -19,6 +19,7 @@ export const REDIS_KEYS = {
   conv: { prefix: "conv", holds: "conversation history, per Slack thread" },
   rca: { prefix: "rca", holds: "whether an RCA has been sent, per thread" },
   skills: { prefix: "skills", holds: "playbook names selected for a thread" },
+  cluster: { prefix: "cluster", holds: "the cluster a thread is bound to (multi-cluster)" },
 } as const;
 
 /** What one thread still holds — the dashboard's /memory/threads row. */
@@ -44,6 +45,7 @@ export class ConversationMemory {
   private store = new Map<string, Message[]>();
   private rcaThreads = new Set<string>(); // in-memory; Redis uses a separate key
   private skillThreads = new Map<string, string[]>(); // ditto — playbook names per thread
+  private clusterThreads = new Map<string, string>(); // ditto — the cluster a thread is bound to
   private redis: Redis | null;
 
   constructor(redis?: Redis) {
@@ -94,6 +96,20 @@ export class ConversationMemory {
       return (await this.redis.exists(`${REDIS_KEYS.rca.prefix}:${threadId}`)) === 1;
     }
     return this.rcaThreads.has(threadId);
+  }
+
+  /** The cluster this thread is bound to (agent/cluster), or null. Same lifetime as the conversation. */
+  async getCluster(threadId: string): Promise<string | null> {
+    if (!this.redis) return this.clusterThreads.get(threadId) ?? null;
+    return (await this.redis.get(`${REDIS_KEYS.cluster.prefix}:${threadId}`)) ?? null;
+  }
+
+  async setCluster(threadId: string, cluster: string): Promise<void> {
+    if (!this.redis) {
+      this.clusterThreads.set(threadId, cluster);
+      return;
+    }
+    await this.redis.set(`${REDIS_KEYS.cluster.prefix}:${threadId}`, cluster, "EX", REDIS_TTL_SEC);
   }
 
   /**
@@ -174,11 +190,12 @@ export class ConversationMemory {
 
   async clear(threadId: string): Promise<void> {
     if (this.redis) {
-      await this.redis.del(`${REDIS_KEYS.conv.prefix}:${threadId}`, `${REDIS_KEYS.rca.prefix}:${threadId}`, `${REDIS_KEYS.skills.prefix}:${threadId}`);
+      await this.redis.del(`${REDIS_KEYS.conv.prefix}:${threadId}`, `${REDIS_KEYS.rca.prefix}:${threadId}`, `${REDIS_KEYS.skills.prefix}:${threadId}`, `${REDIS_KEYS.cluster.prefix}:${threadId}`);
     } else {
       this.store.delete(threadId);
       this.rcaThreads.delete(threadId);
       this.skillThreads.delete(threadId);
+      this.clusterThreads.delete(threadId);
     }
   }
 }

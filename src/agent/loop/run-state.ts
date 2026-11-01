@@ -25,6 +25,11 @@ export interface InvestigateOptions {
    */
   namespace?: string;
   /**
+   * Multi-cluster only (agent/cluster): the cluster this run is about. `undefined` = resolve it from
+   * the thread's binding; `null` = no cluster (an unlabelled alert) — no Kubernetes tools at all.
+   */
+  cluster?: string | null;
+  /**
    * Called once per tool round, before the tools run, with the round number and the tool
    * names that round will actually execute. Optional and fire-and-forget: the loop ignores
    * whatever it returns and never awaits it, because a progress update is not worth failing
