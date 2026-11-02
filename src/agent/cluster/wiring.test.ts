@@ -96,3 +96,15 @@ test("an alert's change timeline reads its own cluster, and none when it is unla
   assert.deepEqual(calls, ["stg:k8s_change_timeline"]);
   assert.ok(u!.unread.some((x) => /no cluster is bound/.test(x)));
 });
+
+test("a mention in an unbound thread is asked for its cluster, and naming one resumes the question", async () => {
+  const { agent, calls, seen } = setup([callPods("t1"), answer]);
+  const ask = await agent.askForCluster("Q", "pod mana yang restart?");
+  assert.match(ask ?? "", /`dev`, `stg`/);
+  assert.equal(seen.length, 0, "no LLM call");
+  assert.deepEqual(await agent.applyMentionCluster("Q", "stg"), { switchedFrom: null, cluster: "stg" });
+  assert.equal(await agent.askForCluster("Q", "stg"), null);
+  await agent.investigate("Q", "stg", { mode: "conversation", maxToolRounds: 2 });
+  assert.deepEqual(calls, ["stg:k8s_list_pods"]);
+  assert.match(JSON.stringify(seen[0]!.messages), /pod mana yang restart/);
+});

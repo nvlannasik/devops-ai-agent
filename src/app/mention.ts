@@ -199,6 +199,13 @@ export class MentionFlow {
       if (switchedFrom && cluster) {
         await say({ text: `🔀 This thread now uses cluster ${cluster}. Earlier answers were about ${switchedFrom}.`, thread_ts: threadId });
       }
+      // No cluster yet: ask, before the tour prefetch and the LLM (agent askForCluster).
+      const ask = cluster === null ? await this.host.agent.askForCluster(threadId, message).catch(() => null) : null;
+      if (ask) {
+        this.host.semaphore.release();
+        await say({ text: ask, thread_ts: threadId });
+        return;
+      }
       // A namespace tour gets the cluster model PREFETCHED, outside the investigation like the change
       // timeline (so replay never re-runs it) — see tourContext.
       const tour = await this.tourContext(text, undefined, threadId);
