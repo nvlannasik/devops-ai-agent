@@ -4,7 +4,7 @@ import { DevOpsAgent } from "../index.js";
 import { TraceRecorder } from "../trace/index.js";
 import type { LLMClient, LLMResponse, Message, ToolDefinition } from "../llm/types.js";
 import type { BridgeTools, McpTools } from "../mcp/types.js";
-import { clusterRegistry } from "./index.js";
+import { clusterRegistry, withCluster } from "./index.js";
 import { ClusterRouter } from "./router.js";
 
 // A real DevOpsAgent and a real ClusterRouter over recording fakes: what multi-cluster 2a promises
@@ -122,4 +122,12 @@ test("a bound thread asked about another cluster is told how to switch, never an
   await agent.investigate("S", "pindah ke dev", { mode: "conversation", maxToolRounds: 2 });
   assert.deepEqual(calls, ["dev:k8s_list_pods"]);
   assert.match(JSON.stringify(seen[0]!.messages), /unused resources on dev cluster/);
+});
+
+test("the dashboard's /cluster reads the local cluster; another cluster's thread gets no local model", async () => {
+  const { agent, calls } = setup([]);
+  await agent.clusterInventory();
+  assert.deepEqual(calls, ["dev:k8s_cluster_inventory"]);
+  assert.equal(await withCluster("stg", () => agent.clusterModel("default")), null);
+  assert.deepEqual(calls, ["dev:k8s_cluster_inventory"], "no model built for stg from the local cache");
 });

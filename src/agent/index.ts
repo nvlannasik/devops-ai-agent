@@ -3,7 +3,7 @@ import { routerRegistry } from "./llm/registry.js";
 import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
-import { clusterRegistry, storedCluster, withCluster, type ClusterRegistry } from "./cluster/index.js";
+import { clusterRegistry, currentCluster, storedCluster, withCluster, type ClusterRegistry } from "./cluster/index.js";
 import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksIndonesian } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
@@ -126,7 +126,9 @@ export class DevOpsAgent {
     this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
     this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
     const gitops = this.gitops;
-    this.clusterModels = new ClusterModelCache((ns) =>
+    // The cache is the local cluster's only (onLocal): the dashboard reads it, and a tour on another
+    // cluster's thread gets no model from it (clusterModel) rather than the local one's.
+    this.clusterModels = new ClusterModelCache((ns) => this.onLocal(() =>
       buildClusterModel(
         {
           inventory: (n) => this.mcp.callTool("k8s_cluster_inventory", n ? { namespace: n } : { detail: true }),
@@ -137,7 +139,7 @@ export class DevOpsAgent {
         },
         ns
       )
-    );
+    ));
 
     // Throws here rather than at first request: a malformed skill file must be a pod that
     // refuses to start. src/agent/skills/real.test.ts loads this same directory, so a bad file
@@ -243,6 +245,7 @@ export class DevOpsAgent {
   /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
   /** The onboarding cluster model (agent/onboarding) — called outside any investigation, like collectChanges. */
   async clusterModel(namespace?: string): Promise<ClusterModel | null> {
+    if (this.clusters.strict && currentCluster() !== this.clusters.local) return null;
     return this.clusterModels.get(namespace);
   }
 
@@ -263,7 +266,12 @@ export class DevOpsAgent {
   }
 
   async clusterInventory(): Promise<string> {
-    return this.mcp.callTool("k8s_cluster_inventory", { detail: true });
+    return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }));
+  }
+
+  /** Work with no thread (the dashboard's /cluster) reads the local cluster, as before multi-cluster. */
+  private onLocal<T>(fn: () => Promise<T>): Promise<T> {
+    return this.clusters.strict ? withCluster(this.clusters.local, fn) : fn();
   }
 
   /** Direct MCP access for callers outside the agentic loop — e.g. cross-alert correlation's

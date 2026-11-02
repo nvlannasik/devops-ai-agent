@@ -15,6 +15,7 @@ import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { clusterReply, speaksIndonesian } from "../agent/cluster/binding.js";
+import { withCluster } from "../agent/cluster/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 import type { SlackHost } from "./host.js";
 
@@ -209,7 +210,8 @@ export class MentionFlow {
       }
       // A namespace tour gets the cluster model PREFETCHED, outside the investigation like the change
       // timeline (so replay never re-runs it) — see tourContext.
-      const tour = await this.tourContext(text, undefined, threadId);
+      // Under the thread's cluster: the prefetch reads Kubernetes outside investigate()'s withCluster.
+      const tour = await (cluster ? withCluster(cluster, () => this.tourContext(text, undefined, threadId)) : this.tourContext(text, undefined, threadId));
       // A follow-up tour gets the tour budget too; mentionBudget sees only this message's words.
       const turnBudget = tour.isTour && !investigation ? { maxToolRounds: config.tourToolRounds } : budget;
       const tourMessage = tour.text ? `${tour.text}\n\n---\n\n${message}` : message;
