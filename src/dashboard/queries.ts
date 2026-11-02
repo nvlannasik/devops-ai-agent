@@ -10,6 +10,8 @@ export interface IncidentRow {
   id: number; created_at: Date; resolved_at: Date | null;
   alertname: string; namespace: string | null;
   severity: string | null; confidence: string | null; root_cause: string | null;
+  /** Multi-cluster: the incident's cluster, NULL rows read as the local one. Absent single-cluster. */
+  cluster?: string | null;
 }
 // --- harness trace (agent_events, migrations/011) ---
 export interface GateStat { name: string; outcome: string; d7: number; d30: number }
@@ -225,6 +227,10 @@ const INCIDENT_WHERE = `WHERE ($1::timestamptz IS NULL OR created_at >= $1)
                     FROM remediations r
                     JOIN remediation_checks rc ON rc.remediation_id = r.id
                    WHERE r.incident_id = incidents.id AND rc.verdict = $7))`;
+
+/** `$n` = the cluster filter (NULL = any), `$n+1` = the local cluster a NULL row reads as. */
+const clusterAnd = (n: number): string => `
+            AND ($${n}::text IS NULL OR COALESCE(cluster, $${n + 1}::text) = $${n}::text)`;
 
 // The window is now chosen per request (see parseRange in filters.ts), which is exactly the
 // day the comment that used to stand here was written for: every one of these values is
@@ -547,7 +553,8 @@ export class DashboardQueries {
     return value;
   }
 
-  async list(f: Filters): Promise<IncidentPage> {
+  /** `local`: MCP_LOCAL_CLUSTER, what a NULL cluster reads as (agent/cluster). */
+  async list(f: Filters, local: string | null = null): Promise<IncidentPage> {
     if (!this.pool) return { rows: [], hasMore: false, total: 0, capped: false };
     // over-fetch by one: tells us whether a next page exists without trusting the count below
     const limit = PAGE_SIZE + 1;
@@ -557,16 +564,19 @@ export class DashboardQueries {
     // parameters, the LIMIT and the OFFSET.
     const [page, count] = await Promise.all([
       this.pool.query(
-        `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence, root_cause
+        // The cluster predicate's parameters come LAST ($10/$11 here, $9/$10 below), so the filter,
+        // LIMIT and OFFSET positions other code and tests read are where they always were.
+        `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence, root_cause,
+                COALESCE(cluster, $11::text) AS cluster
            FROM incidents
-          ${INCIDENT_WHERE}
+          ${INCIDENT_WHERE}${clusterAnd(10)}
           ORDER BY created_at DESC
           LIMIT $8 OFFSET $9`,
-        [...args, limit, offset]
+        [...args, limit, offset, f.cluster, local]
       ),
       this.pool.query(
-        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE} LIMIT $8) c`,
-        [...args, COUNT_CAP]
+        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE}${clusterAnd(9)} LIMIT $8) c`,
+        [...args, COUNT_CAP, f.cluster, local]
       ),
     ]);
     const hasMore = page.rows.length > PAGE_SIZE;
@@ -585,7 +595,7 @@ export class DashboardQueries {
       // filtered on the primary key, so this is already at most one row — the LIMIT
       // is redundant but present for the same reason as the totals query above.
       `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence,
-              root_cause, rca, channel, thread_ts, changes, parent_id
+              root_cause, rca, channel, thread_ts, changes, parent_id, cluster
          FROM incidents WHERE id = $1
         LIMIT 1`,
       [id]

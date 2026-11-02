@@ -12,7 +12,9 @@ export function listPage(
   p: IncidentPage,
   f: Filters,
   now: Date = new Date(),
-  openIncidents?: number
+  openIncidents?: number,
+  /** Multi-cluster only: the registry's clusters. Empty = single-cluster, and the page is unchanged. */
+  clusters: string[] = []
 ): string {
   const qs = (page: number): string => {
     const q = new URLSearchParams();
@@ -23,6 +25,7 @@ export function listPage(
     if (f.severity) q.set("severity", f.severity);
     if (f.resolved !== null) q.set("resolved", String(f.resolved));
     if (f.verdict) q.set("verdict", f.verdict);
+    if (f.cluster) q.set("cluster", f.cluster);
     // page=1 is omitted: a link that restates the default is a query string the reader has to
     // read past to see which filters are actually on.
     if (page > 1) q.set("page", String(page));
@@ -42,7 +45,7 @@ export function listPage(
   const sel = (v: string, cur: string | null, label: string): string =>
     `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(label)}</option>`;
 
-  const filtered = !!(f.from || f.to || f.alertname || f.namespace || f.severity || f.resolved !== null || f.verdict);
+  const filtered = !!(f.from || f.to || f.alertname || f.namespace || f.severity || f.resolved !== null || f.verdict || f.cluster);
 
   // The one filter with no field in the form, so the one that would otherwise be invisible:
   // a reader who followed "Made it worse" would land on a shortened list with nothing saying
@@ -71,6 +74,19 @@ export function listPage(
     stateLink(true, "Resolved") +
     `</nav>`;
 
+  // Multi-cluster: one cluster's incidents, as links like the state switch (the form's six controls
+  // are a fixed ladder; a seventh would re-cut every row of it).
+  const clusterHref = (c: string | null): string => {
+    const q = new URLSearchParams(qsWithout("cluster").split("?")[1] ?? "");
+    if (c) q.set("cluster", c);
+    const out = q.toString();
+    return out ? `/incidents?${out}` : "/incidents";
+  };
+  const clusterSwitch = clusters.length === 0 ? "" :
+    `<nav class="seg" aria-label="Cluster">` +
+    [null, ...clusters].map((c) => `<a href="${esc(clusterHref(c))}"${f.cluster === c ? ` aria-current="true"` : ""}>${esc(c ?? "All")}</a>`).join("") +
+    `</nav>`;
+
   // Two different absences. No rows on page 1 means the filters matched nothing; no rows on
   // page 7 means the range ended earlier than the URL claims — usually a bookmark outliving
   // the rows it pointed at — and the way out of that is a link, not a suggestion to filter.
@@ -93,7 +109,7 @@ export function listPage(
            openIncidents ? ` · <strong>${esc(fmtInt(openIncidents))} firing now</strong>` : ""
          }</p>
        </div>
-       ${stateSwitch}
+       ${clusterSwitch ? `<div class="page-actions">${stateSwitch}${clusterSwitch}</div>` : stateSwitch}
      </div>
      <form class="filters" method="get" action="/incidents">
        <label>From<input type="date" name="from" value="${esc(f.from ? f.from.toISOString().slice(0, 10) : "")}"></label>
@@ -116,7 +132,7 @@ export function listPage(
        </div>
      </form>
      ${chips}
-     ${incidentTable(p.rows, nothing, now)}
+     ${incidentTable(p.rows, nothing, now, clusters.length > 0)}
      ${pager(p, f, qs)}`,
     {
       current: "/incidents",
@@ -212,6 +228,8 @@ export function detailPage(
     usage?: TokenLine[];
     /** Related alerts correlate() merged into this incident's thread (agent/correlation). */
     children?: ChildIncident[];
+    /** Multi-cluster only: the incident's cluster, shown beside its severity. */
+    cluster?: string;
     /** Whether a postmortem draft exists for this incident (migrations/015) — never the draft
      *  itself, which the dashboard reads directly on its own route rather than here. */
     hasPostmortem?: boolean;
@@ -394,7 +412,8 @@ export function detailPage(
      <h1>${breakable(i.alertname)}</h1>
      <div class="title-meta">
        ${severityBadge(i.severity)}
-       ${stateBadge(i.resolved_at)}
+       ${stateBadge(i.resolved_at)}${d.cluster ? `
+       <span class="badge" translate="no">☸ ${esc(d.cluster)}</span>` : ""}
        ${mergedInto || slack || postmortemLink || jaegerLink ? `<span class="page-actions">${mergedInto}${slack}${jaegerLink}${postmortemLink}</span>` : ""}
      </div>
      ${statList(

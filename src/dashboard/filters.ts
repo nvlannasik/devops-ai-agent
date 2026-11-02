@@ -21,6 +21,8 @@ export interface Filters {
    * is what keeps a filter nobody can see from being a filter nobody can clear.
    */
   verdict: string | null;
+  /** Multi-cluster only (agent/cluster): one cluster's incidents. NULL rows read as the local one. */
+  cluster: string | null;
   page: number;
 }
 
@@ -68,6 +70,8 @@ export function parseFilters(params: URLSearchParams): Filters {
     // way, but a value outside the four a checker can write matches nothing, and silently
     // returning an empty page is a worse answer than ignoring a filter that cannot be true.
     verdict: VERDICTS.includes(str(params, "verdict") ?? "") ? str(params, "verdict") : null,
+    // A cluster name's own shape (MCP_SQS_CLUSTERS' rule); a value outside it cannot name one.
+    cluster: /^[a-z0-9][a-z0-9-]*$/.test(str(params, "cluster") ?? "") ? str(params, "cluster") : null,
     // absent means "either" — distinct from an explicit false. unrecognised values also
     // collapse to null (no filter), never to a boolean that contradicts the intent.
     resolved: resolveBool(params, "resolved"),

@@ -149,6 +149,12 @@ td.primary a {
     font-size: var(--fs-sm); color: var(--text-dim);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* Multi-cluster only: the cluster opens the closing row on the left, and the namespace keeps the
+     right edge it already had — the sibling selector moves it only when a cluster cell is there. */
+  table[data-cards] td.cluster {
+    grid-column: 1; grid-row: 3; font-size: var(--fs-sm); color: var(--text-dim); white-space: nowrap;
+  }
+  table[data-cards] td.cluster + td.ns { grid-column: 2 / -1; }
 }
 
 /* ---------- every other table, below 46rem ---------- */

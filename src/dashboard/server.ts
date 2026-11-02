@@ -1,6 +1,7 @@
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { config } from "../config/index.js";
+import { clusterRegistry, storedCluster } from "../agent/cluster/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
@@ -629,8 +630,10 @@ export class DashboardServer {
         case "list": {
           const now = new Date();
           const f = parseFilters(url.searchParams);
-          const [p, open] = await Promise.all([this.queries.list(f), this.openCount()]);
-          return send(200, listPage(p, f, now, open));
+          // Multi-cluster (agent/cluster): the column and the filter appear only with a registry.
+          const clusters = clusterRegistry();
+          const [p, open] = await Promise.all([this.queries.list(f, clusters.local), this.openCount()]);
+          return send(200, listPage(p, f, now, open, clusters.strict ? clusters.names : []));
         }
         case "memory": {
           const f = parseFilters(url.searchParams);
@@ -656,7 +659,9 @@ export class DashboardServer {
           const [d, open] = await Promise.all([this.queries.detail(route.id), this.openCount()]);
           if (!d) return send(404, errorPage("Not found", `No incident with id ${route.id}.`));
           const names = await this.nameMap([...d.remediations.map((r) => r.approved_by), ...d.feedback.map((f) => f.slack_user)]);
-          return send(200, detailPage({ ...d, names }, now, open, this.prices, config.dashboard.tracingUiUrl));
+          const registry = clusterRegistry();
+          const cluster = registry.strict ? storedCluster(d.incident.cluster ?? null, registry) ?? undefined : undefined;
+          return send(200, detailPage({ ...d, names, cluster }, now, open, this.prices, config.dashboard.tracingUiUrl));
         }
         // Postmortem draft (migrations/015, spec 2026-10-14-postmortem-draft-design §5). Both
         // routes read the SAME latest-draft row; the page renders it and the .md route hands it

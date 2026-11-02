@@ -12,7 +12,8 @@ import { WINDOW_LABEL, layout, rangeControl } from "./layout.js";
 // addresses the cells by name to do it — a positional selector would silently re-target the day
 // someone inserts a column, which is the kind of break no test written against the columns as a
 // SET would catch.
-export function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date = new Date()): string {
+/** `showCluster`: multi-cluster only — a Cluster column after the alert (agent/cluster). */
+export function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date = new Date(), showCluster = false): string {
   if (rows.length === 0) return whenEmpty;
   const body = rows
     .map(
@@ -20,14 +21,16 @@ export function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date 
       <td role="cell" class="when">${timeTag(r.created_at, now)}</td>
       <td role="cell" class="primary"><a href="/incidents/${esc(r.id)}">${breakable(r.alertname)}</a>${
         r.root_cause ? `<div class="sub summary">${incidentSummary(r.root_cause)}</div>` : ""
-      }</td>
+      }</td>${showCluster ? `
+      <td role="cell" class="cluster mono" data-label="Cluster" translate="no">${esc(r.cluster ?? "—")}</td>` : ""}
       <td role="cell" class="ns mono" translate="no">${esc(r.namespace ?? "—")}</td>
       <td role="cell" class="sev">${severityBadge(r.severity)}</td>
       <td role="cell" class="state">${stateBadge(r.resolved_at)}</td>
     </tr>`
     )
     .join("");
-  return table(headers("When", "Alert", "Namespace", "Severity", "State"), body, "cards");
+  const head = showCluster ? headers("When", "Alert", "Cluster", "Namespace", "Severity", "State") : headers("When", "Alert", "Namespace", "Severity", "State");
+  return table(head, body, "cards");
 }
 
 // What the investigations cost. The stats are totals over the window; the table is per
