@@ -277,6 +277,27 @@ test("recallForAlert carries the verification verdict — 'succeeded' alone does
   assert.match(rows[0].detail!, /still firing/);
 });
 
+// Multi-cluster (agent/cluster): dev and stg share alertnames, so recall must only surface the
+// SAME cluster's past remediations — same COALESCE(i.cluster, $local) pattern as openRelatable.
+test("recallForAlert scopes by the incident's cluster", async () => {
+  let captured: { sql: string; params: unknown[] } | null = null;
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      captured = { sql, params };
+      return { rows: [] };
+    },
+  } as any;
+  const store = new RemediationStore(pool);
+  await store.recallForAlert("KubePodCrashLooping", "payments", 3, { cluster: "stg", local: "dev" });
+  assert.match(captured!.sql, /COALESCE\(i\.cluster/);
+  assert.deepEqual(captured!.params, ["KubePodCrashLooping", "payments", 3, "dev", "stg"]);
+
+  // unset scope: unchanged from today, no cluster predicate and no extra params
+  await store.recallForAlert("KubePodCrashLooping", "payments");
+  assert.doesNotMatch(captured!.sql, /COALESCE\(i\.cluster/);
+  assert.deepEqual(captured!.params, ["KubePodCrashLooping", "payments", 3]);
+});
+
 // ---- worthProposing: approval carried across two turns ----
 //
 // The production thread this comes from: the agent proposed an image change in prose, the

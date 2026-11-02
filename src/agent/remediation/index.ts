@@ -185,10 +185,14 @@ export class RemediationStore {
   // Whether the alert actually went away is `verdict`, and a `succeeded` + `unchanged` pair
   // is the negative prior — proof the agent already tried this and it didn't work. The join
   // is 1:1 (one_check_per_remediation), so it can't fan the row set out.
+  /** `scope`: multi-cluster only (agent/cluster) — dev and stg share alertnames, so recall must
+   *  only surface the SAME cluster's past remediations (NULL rows are the local one). Unset = no
+   *  cluster predicate, today's behaviour. Same COALESCE pattern as IncidentMemory.openRelatable. */
   async recallForAlert(
     alertname: string,
     namespace: string | undefined,
-    limit = 3
+    limit = 3,
+    scope?: { cluster: string | null; local: string | null }
   ): Promise<Array<{ summary: string; status: string; result: string; createdAt: string; verdict: string | null; detail: string | null }>> {
     if (!this.pool) return [];
     try {
@@ -199,9 +203,10 @@ export class RemediationStore {
            JOIN incidents i ON r.incident_id = i.id
            LEFT JOIN remediation_checks c ON c.remediation_id = r.id AND c.verdict IS NOT NULL
           WHERE i.alertname = $1 AND i.namespace IS NOT DISTINCT FROM $2
-            AND r.status IN ('succeeded', 'failed')
+            AND r.status IN ('succeeded', 'failed')${scope ? `
+            AND COALESCE(i.cluster, $4::text) IS NOT DISTINCT FROM $5::text` : ""}
           ORDER BY r.created_at DESC LIMIT $3`,
-        [alertname, namespace ?? null, limit]
+        scope ? [alertname, namespace ?? null, limit, scope.local, scope.cluster] : [alertname, namespace ?? null, limit]
       );
       return rows.map((r: { summary: string | null; status: string; result: string | null; created_at: string; verdict: string | null; detail: string | null }) => ({
         summary: r.summary ?? "(remediation)",

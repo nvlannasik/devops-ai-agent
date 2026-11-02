@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Remediator } from "./remediator.js";
-import { clusterRegistry, currentCluster } from "../cluster/index.js";
+import { clusterRegistry, currentCluster, withCluster } from "../cluster/index.js";
 import { ClusterRouter } from "../cluster/router.js";
 import { DevOpsAgent } from "../index.js";
 import { TraceRecorder } from "../trace/index.js";
@@ -112,4 +112,34 @@ test("a Flux-managed target off the local cluster gets no PR", async () => {
   const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { threadId: "T", userRequested: true });
   assert.deepEqual(out, { refused: "GitOps changes for stg arrive with per-cluster repository mapping (multi-cluster part 3); a restart or a pod delete is still possible." });
   assert.deepEqual(sent, [], "the worker was never asked for a PR");
+});
+
+// A pending card is a lock on a target (RemediationStore.pendingFor, matched on params.target).
+// Without a cluster in the key, a card proposed on dev would block the identical restart on stg.
+test("a dev pending card does not block the same target on stg", async () => {
+  const pendingKeys: string[] = [];
+  const storedTargets: string[] = [];
+  const proposal = `{"action":"k8s_rollout_restart","namespace":"default","workload":"web","kind":"deployment","reason":"the user asked for it"}`;
+  const llm: LLMClient = { chat: async () => ({ content: [{ type: "text", text: proposal }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } }) };
+  const mcp = {
+    getTools: () => [
+      { name: "k8s_rollout_restart", description: "[WRITE] restart", input_schema: { type: "object", properties: {} } },
+      { name: "k8s_list_deployments", description: "list", input_schema: { type: "object", properties: {} } },
+    ],
+    callTool: async (name: string, input: Record<string, unknown>) => {
+      if (name === "k8s_list_deployments") return JSON.stringify([{ name: "web", namespace: "default", replicas: 1, readyReplicas: 1, containers: [{ name: "web", image: "nginx:1" }] }]);
+      if (input.dry_run) return JSON.stringify({ action: "rollout_restart", dryRun: true, result: "would restart deployment/default/web" });
+      return "[]";
+    },
+  };
+  const remediations = {
+    pendingFor: async (key: string) => { pendingKeys.push(key); return null; },
+    propose: async (_incidentId: number | null, _action: string, params: Record<string, unknown>) => { storedTargets.push(params.target as string); return 1; },
+  };
+  const r = remediatorWith({ llm, mcp, remediations, recordUsage: () => {} });
+  await withCluster("dev", () => r.proposeRemediation(null, { namespace: "default" }, "User request: restart web", { userRequested: true }));
+  await withCluster("stg", () => r.proposeRemediation(null, { namespace: "default" }, "User request: restart web", { userRequested: true }));
+  assert.deepEqual(pendingKeys, ["dev:k8s_rollout_restart:default/web", "stg:k8s_rollout_restart:default/web"]);
+  assert.notEqual(pendingKeys[0], pendingKeys[1]);
+  assert.deepEqual(storedTargets, pendingKeys, "the card's params.target is the same key pendingFor just checked");
 });

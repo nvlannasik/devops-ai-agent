@@ -138,3 +138,39 @@ test("a delegate runs on its lead's cluster, not its own unbound sub-thread", as
   assert.deepEqual(calls, ["stg:k8s_list_pods"]);
   assert.match(JSON.stringify(seen[0]!.messages), /\[Cluster: stg\]/);
 });
+
+// Identity keyed by cluster (part 3 task 1): the resolved-alert loop and remediation recall must
+// scope to the alert's cluster — dev and stg share alertnames, so an unscoped query would close or
+// recall the wrong cluster's row. NULL reads as the local cluster (migrations/017).
+test("an unlabelled resolve closes the NULL-cluster incident (reads as local)", async () => {
+  const { agent } = setup([]);
+  const seen: unknown[] = [];
+  (agent as any).incidents = { markResolved: async (labels: unknown, by: unknown, scope: unknown) => { seen.push([labels, by, scope]); return null; } };
+  await agent.resolveIncident({ alertname: "KubePodCrashLooping", namespace: "kube-system" });
+  assert.deepEqual(seen, [[{ alertname: "KubePodCrashLooping", namespace: "kube-system" }, "alertmanager", { cluster: "dev", local: "dev" }]]);
+});
+
+test("resolveIncident with cluster=stg scopes to stg", async () => {
+  const { agent } = setup([]);
+  const seen: unknown[] = [];
+  (agent as any).incidents = { markResolved: async (labels: unknown, by: unknown, scope: unknown) => { seen.push([labels, by, scope]); return null; } };
+  await agent.resolveIncident({ alertname: "KubePodCrashLooping", namespace: "kube-system", cluster: "stg" });
+  assert.deepEqual(seen, [[{ alertname: "KubePodCrashLooping", namespace: "kube-system", cluster: "stg" }, "alertmanager", { cluster: "stg", local: "dev" }]]);
+});
+
+test("recallRemediations passes the alert's cluster in strict mode", async () => {
+  const { agent } = setup([]);
+  const seen: unknown[] = [];
+  (agent as any).remediations = { recallForAlert: async (...a: unknown[]) => { seen.push(a); return []; } };
+  await agent.recallRemediations({ alertname: "KubePodCrashLooping", namespace: "kube-system", cluster: "stg" });
+  assert.deepEqual(seen, [["KubePodCrashLooping", "kube-system", 3, { cluster: "stg", local: "dev" }]]);
+});
+
+test("recallRemediations passes no scope in single-cluster mode", async () => {
+  const registry = clusterRegistry({ localCluster: null, sqs: { clusters: [] } });
+  const agent = new DevOpsAgent({ mcp: { connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => [], callTool: async () => "" }, clusters: registry });
+  const seen: unknown[] = [];
+  (agent as any).remediations = { recallForAlert: async (...a: unknown[]) => { seen.push(a); return []; } };
+  await agent.recallRemediations({ alertname: "KubePodCrashLooping", namespace: "kube-system" });
+  assert.deepEqual(seen, [["KubePodCrashLooping", "kube-system", 3]]);
+});

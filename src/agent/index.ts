@@ -341,7 +341,15 @@ export class DevOpsAgent {
   async recallRemediations(labels: Record<string, string>): Promise<string> {
     const alertname = labels.alertname;
     if (!alertname) return ""; // keyed by alert; mention-driven flows have no labels
-    const rows = await this.remediations.recallForAlert(alertname, labels.namespace, 3).catch(() => []);
+    // Multi-cluster: keyed by the alert's cluster as well (agent/cluster) — dev and stg share
+    // alertnames, so an unscoped recall would surface the wrong cluster's past remediations.
+    const scope = this.clusters.strict
+      ? { cluster: alertCluster(labels, this.clusters) ?? this.clusters.local, local: this.clusters.local }
+      : undefined;
+    const rows = await (scope
+      ? this.remediations.recallForAlert(alertname, labels.namespace, 3, scope)
+      : this.remediations.recallForAlert(alertname, labels.namespace, 3)
+    ).catch(() => []);
     if (rows.length === 0) return "";
     const lines = rows.map((r) => {
       const date = new Date(r.createdAt).toISOString().slice(0, 10);
@@ -652,7 +660,13 @@ export class DevOpsAgent {
   }
 
   async resolveIncident(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
-    return this.incidents.markResolved(labels);
+    // Multi-cluster: dev and stg share alertnames, so an unscoped resolve could close the wrong
+    // cluster's incident. An unlabelled alert still resolves — against the local cluster's row,
+    // since NULL reads as local (migrations/017) and that is what an unlabelled store() wrote.
+    const scope = this.clusters.strict
+      ? { cluster: alertCluster(labels, this.clusters) ?? this.clusters.local, local: this.clusters.local }
+      : undefined;
+    return this.incidents.markResolved(labels, "alertmanager", scope);
   }
 
   // ---- Incident lifecycle — the bodies live in incidents/lifecycle.ts; these delegate. ----

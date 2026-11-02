@@ -59,6 +59,12 @@ export class Remediator {
     return registry?.strict ? withCluster(storedCluster(stored ?? null, registry), fn) : fn();
   }
 
+  /** The cluster `targetKey` locks on: the thread's bound cluster in multi-cluster mode (proposals
+   *  run inside the thread's `withCluster`), undefined otherwise — single-cluster keys unchanged. */
+  private keyCluster(): string | null | undefined {
+    return this.host.clusters?.strict ? currentCluster() : undefined;
+  }
+
   // ---- Guarded Remediation (docs/DESIGN_guarded_remediation.md) ----
 
   // Propose at most one whitelisted action after an RCA. Returns null when: write tools
@@ -176,7 +182,7 @@ export class Remediator {
 
     // One pending card per action+target, across incidents — see RemediationStore.pendingFor.
     // Not in refusalFor: it is a fact about the store, and no re-ask can change it.
-    const pending = await this.host.remediations.pendingFor(targetKey(proposal.action, proposal.namespace, proposal.name)).catch(() => null);
+    const pending = await this.host.remediations.pendingFor(targetKey(proposal.action, proposal.namespace, proposal.name, this.keyCluster())).catch(() => null);
     if (pending !== null) {
       logger.info(`[remediation] duplicate of pending card ${pending}: ${proposal.summary}`);
       return { refused: `An approval card for this exact action on \`${proposal.namespace}/${proposal.name}\` is already waiting (remediation ${pending}). Approve or reject that one — a second card is the same decision twice.` };
@@ -228,7 +234,7 @@ export class Remediator {
     const id = await this.host.remediations.propose(incidentId, proposal.action, {
       ...proposal.toolParams,
       ...(rollbackFrom !== undefined ? { from_revision: rollbackFrom } : {}),
-      target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      target: targetKey(proposal.action, proposal.namespace, proposal.name, this.keyCluster()),
       reason: proposal.reason,
       summary: proposal.summary,
     }, currentCluster() ?? null);
@@ -568,7 +574,7 @@ export class Remediator {
       pathPrefix, // replay the same overlay scope on open_pr
       path: payload.path,
       valuesKey: payload.valuesKey,
-      target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      target: targetKey(proposal.action, proposal.namespace, proposal.name, this.keyCluster()),
       workload: preview.workload, // kind/namespace/name: what the apply-watch reads once the PR is open
       reason: proposal.reason,
       summary,
@@ -625,7 +631,7 @@ export class Remediator {
       helmRelease: preview.helmRelease,
       sha: commit.sha,
       pathPrefix,
-      target: targetKey(proposal.action, proposal.namespace, proposal.name),
+      target: targetKey(proposal.action, proposal.namespace, proposal.name, this.keyCluster()),
       // What the workload runs again once the revert is applied: the broken rollout's diff, at
       // its `from` side — known only now, from the timeline, so stored with the card.
       ...(expectFromRevert(broke?.diff) ? { applyExpect: expectFromRevert(broke?.diff) } : {}),
@@ -682,7 +688,7 @@ export class Remediator {
     );
     const id = await this.host.remediations.propose(incidentId, "flux_reconcile", {
       ...toolParams,
-      target: targetKey("flux_reconcile", target.namespace, target.name),
+      target: targetKey("flux_reconcile", target.namespace, target.name, this.keyCluster()),
       reason: `cluster drifted from the GitOps repo: ${drift.valuesKey} is ${drift.gitValue} in ${drift.path}, cluster is running ${drift.clusterValue}`,
       summary,
     }, currentCluster() ?? null);

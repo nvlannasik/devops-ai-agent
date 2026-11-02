@@ -220,9 +220,12 @@ export function offerMismatchRefusal(proposal: Proposal, offer: string | null): 
   );
 }
 
-/** What "the same card" means: the action and the object it acts on, never the parameters. */
-export const targetKey = (action: string, namespace: string, name: string): string =>
-  `${action}:${namespace}/${name}`.toLowerCase();
+/** What "the same card" means: the action and the object it acts on, never the parameters.
+ *  `cluster`: multi-cluster only (agent/cluster) — dev and stg can both have a `default/web`
+ *  Deployment, so a cluster prefix is what keeps a dev card from locking out the identical
+ *  action on stg. Falsy (unset, null, "") keeps today's shape — single-cluster keys unchanged. */
+export const targetKey = (action: string, namespace: string, name: string, cluster?: string | null): string =>
+  (cluster ? `${cluster}:${action}:${namespace}/${name}` : `${action}:${namespace}/${name}`).toLowerCase();
 
 /**
  * Scaling OUT needs something in this thread to have measured the workload as saturated.

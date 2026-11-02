@@ -248,9 +248,13 @@ export class IncidentMemory {
 
   // D. resolved-alert loop: mark the newest unresolved incident for this alert as
   // resolved and return its Slack thread so the app can post the ✅ update there.
+  /** `scope`: multi-cluster only (agent/cluster) — dev and stg share alertnames, so a resolve must
+   *  only close the SAME cluster's incident (NULL rows are the local one). Unset = no cluster
+   *  predicate, today's behaviour. Same COALESCE pattern as openRelatable. */
   async markResolved(
     labels: Record<string, string>,
-    by = "alertmanager"
+    by = "alertmanager",
+    scope?: { cluster: string | null; local: string | null }
   ): Promise<{ channel: string; threadTs: string } | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
@@ -260,10 +264,11 @@ export class IncidentMemory {
         `UPDATE incidents SET resolved_at = now(), resolved_by = $3, cleared_seen_at = NULL
           WHERE id = (
             SELECT id FROM incidents
-             WHERE alertname = $1 AND namespace IS NOT DISTINCT FROM $2 AND resolved_at IS NULL
+             WHERE alertname = $1 AND namespace IS NOT DISTINCT FROM $2 AND resolved_at IS NULL${scope ? `
+               AND COALESCE(cluster, $4::text) IS NOT DISTINCT FROM $5::text` : ""}
              ORDER BY created_at DESC LIMIT 1)
           RETURNING channel, thread_ts`,
-        [alertname, labels.namespace ?? null, by]
+        scope ? [alertname, labels.namespace ?? null, by, scope.local, scope.cluster] : [alertname, labels.namespace ?? null, by]
       );
       if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
       return { channel: rows[0].channel, threadTs: rows[0].thread_ts };

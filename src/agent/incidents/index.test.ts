@@ -532,6 +532,27 @@ test("markResolved flips the newest unresolved incident and returns its thread",
   assert.equal(await empty.markResolved({ alertname: "X" }), null);
 });
 
+// Multi-cluster (agent/cluster): dev and stg share alertnames, so a resolve must only close the
+// SAME cluster's incident — same COALESCE(cluster, $local) pattern as openRelatable.
+test("markResolved scopes to the alert's cluster", async () => {
+  let captured: { sql: string; params: unknown[] } | null = null;
+  const fakePool = {
+    query: async (sql: string, params: unknown[]) => {
+      captured = { sql, params };
+      return { rows: [{ channel: "C123", thread_ts: "1720.99" }] };
+    },
+  } as any;
+  const mem = new IncidentMemory(fakePool);
+  await mem.markResolved({ alertname: "X", namespace: "ns" }, "alertmanager", { cluster: "stg", local: "dev" });
+  assert.match(captured!.sql, /COALESCE\(cluster/);
+  assert.deepEqual(captured!.params, ["X", "ns", "alertmanager", "dev", "stg"]);
+
+  // unset scope: unchanged from today, no cluster predicate and no extra params
+  await mem.markResolved({ alertname: "X", namespace: "ns" });
+  assert.doesNotMatch(captured!.sql, /COALESCE\(cluster/);
+  assert.deepEqual(captured!.params, ["X", "ns", "alertmanager"]);
+});
+
 // --- severity vs assessed_severity (migration 008) --------------------------------------
 //
 // The bug this pins: rca-format.md used to print `*🔴 Severity:* \`Critical\`` as a literal
