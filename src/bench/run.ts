@@ -157,7 +157,7 @@ async function attempt(
   // The same timeline app/index.ts prepends for an alert — measured, not skipped. Bench
   // namespaces are not Flux-managed, so only the cluster half runs here.
   const changes = task.mode === "alert"
-    ? await agent.collectChanges(task.groupLabels!.namespace, new Date(), (task.alerts ?? []).flatMap((a) => Object.values(a.labels)), threadId).catch(() => null)
+    ? await agent.collectChanges(task.groupLabels!, new Date(), (task.alerts ?? []).flatMap((a) => Object.values(a.labels)), threadId).catch(() => null)
     : null;
   const issue = task.mode === "alert"
     ? (changes ? `${renderForModel(changes)}\n\n---\n\n${alertText}` : alertText)

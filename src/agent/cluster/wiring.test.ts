@@ -37,8 +37,8 @@ function setup(script: LLMResponse[]) {
     },
   };
   const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
-  const central = fakeMcp("dev", ["k8s_list_pods", "prometheus_query"], calls) as McpTools;
-  const stg = fakeMcp("stg", ["k8s_list_pods"], calls) as BridgeTools;
+  const central = fakeMcp("dev", ["k8s_list_pods", "k8s_change_timeline", "prometheus_query"], calls) as McpTools;
+  const stg = fakeMcp("stg", ["k8s_list_pods", "k8s_change_timeline"], calls) as BridgeTools;
   const mcp = new ClusterRouter(central, new Map([["stg", stg]]), registry);
   const recorder = new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "test" });
   return { agent: new DevOpsAgent({ llm, mcp, recorder, clusters: registry }), calls, seen };
@@ -84,4 +84,15 @@ test("an alert with no usable cluster label runs without Kubernetes and is cappe
   assert.match(JSON.stringify(seen[0]!.messages), /\[Cluster: unknown\]/);
   assert.match(out, /Confidence:\* `Low` — no cluster label/);
   assert.deepEqual(calls, []);
+});
+
+test("an alert's change timeline reads its own cluster, and none when it is unlabelled", async () => {
+  const { agent, calls } = setup([]);
+  const at = new Date();
+  const t = await agent.collectChanges({ namespace: "default", cluster: "stg" }, at, []);
+  assert.deepEqual(calls, ["stg:k8s_change_timeline"]);
+  assert.ok(!t!.unread.some((u) => /no cluster is bound/.test(u)), t!.unread.join("; "));
+  const u = await agent.collectChanges({ namespace: "default" }, at, []);
+  assert.deepEqual(calls, ["stg:k8s_change_timeline"]);
+  assert.ok(u!.unread.some((x) => /no cluster is bound/.test(x)));
 });

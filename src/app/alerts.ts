@@ -361,7 +361,7 @@ export class AlertFlow {
         this.host.agent.recallIncidents(labels, issueText).catch(() => ""),
         this.host.agent.recallRemediations(labels).catch(() => ""),
         // Best-effort like recall, with its own timeouts inside: never blocks the investigation.
-        this.host.agent.collectChanges(labels.namespace, changeScope.alertAt, changeScope.subjects, threadId).catch((e) => {
+        this.host.agent.collectChanges(labels, changeScope.alertAt, changeScope.subjects, threadId).catch((e) => {
           logger.warn(`[changes] timeline failed for thread ${threadId}: ${errDetail(e)}`);
           return null;
         }),

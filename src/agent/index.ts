@@ -358,12 +358,18 @@ export class DevOpsAgent {
 
   // The change timeline for an alert (agent/changes). Called by app/index.ts BEFORE investigate()
   // and outside any trace run, so replay never executes it. null = no namespace to scope it to.
-  async collectChanges(namespace: string | undefined, alertAt: Date, subjects: string[], threadId?: string): Promise<ChangeTimeline | null> {
+  // `labels`: the alert group's — in multi-cluster mode they name the cluster the timeline reads,
+  // since this runs before investigate() and so outside its withCluster.
+  async collectChanges(labels: Record<string, string>, alertAt: Date, subjects: string[], threadId?: string): Promise<ChangeTimeline | null> {
+    const namespace = labels.namespace;
     if (!namespace) return null;
-    const gitops = this.gitops;
+    const cluster = alertCluster(labels, this.clusters);
+    const read = <T>(fn: () => Promise<T>) => (cluster === undefined ? fn() : withCluster(cluster, fn));
+    // Git history is the local cluster's overlay; per-cluster repository mapping is part 3.
+    const gitops = cluster === undefined || cluster === this.clusters.local ? this.gitops : null;
     const t = await collectChanges(
       {
-        callTool: (name, input) => this.mcp.callTool(name, input),
+        callTool: (name, input) => read(() => this.mcp.callTool(name, input)),
         history: gitops
           ? async (hr, since) => (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix: await this.resolveOverlayPath(hr) })) as HistoryPayload
           : undefined,
