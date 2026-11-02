@@ -99,12 +99,27 @@ test("an alert's change timeline reads its own cluster, and none when it is unla
 
 test("a mention in an unbound thread is asked for its cluster, and naming one resumes the question", async () => {
   const { agent, calls, seen } = setup([callPods("t1"), answer]);
-  const ask = await agent.askForCluster("Q", "pod mana yang restart?");
+  const ask = await agent.askForCluster("Q", "pod mana yang restart?", "pod mana yang restart?");
   assert.match(ask ?? "", /`dev`, `stg`/);
   assert.equal(seen.length, 0, "no LLM call");
   assert.deepEqual(await agent.applyMentionCluster("Q", "stg"), { switchedFrom: null, cluster: "stg" });
-  assert.equal(await agent.askForCluster("Q", "stg"), null);
+  assert.equal(await agent.askForCluster("Q", "stg", "stg"), null);
   await agent.investigate("Q", "stg", { mode: "conversation", maxToolRounds: 2 });
   assert.deepEqual(calls, ["stg:k8s_list_pods"]);
   assert.match(JSON.stringify(seen[0]!.messages), /pod mana yang restart/);
+});
+
+test("a bound thread asked about another cluster is told how to switch, never answered about its own", async () => {
+  const { agent, calls, seen } = setup([callPods("t1"), answer]);
+  await agent.applyMentionCluster("S", "cek di stg");
+  const text = "unused resources on dev cluster";
+  assert.deepEqual(await agent.applyMentionCluster("S", text), { switchedFrom: null, cluster: "stg" });
+  assert.match((await agent.askForCluster("S", text, text)) ?? "", /`stg`[\s\S]*pindah ke dev/);
+  assert.equal(seen.length, 0, "no LLM call");
+  assert.equal(await agent.askForCluster("S", "pod yang lain?", "pod yang lain?"), null, "no other cluster named: no guard");
+  assert.deepEqual(await agent.applyMentionCluster("S", "pindah ke dev"), { switchedFrom: "stg", cluster: "dev" });
+  assert.equal(await agent.askForCluster("S", "pindah ke dev", "pindah ke dev"), null);
+  await agent.investigate("S", "pindah ke dev", { mode: "conversation", maxToolRounds: 2 });
+  assert.deepEqual(calls, ["dev:k8s_list_pods"]);
+  assert.match(JSON.stringify(seen[0]!.messages), /unused resources on dev cluster/);
 });

@@ -474,18 +474,27 @@ export class DevOpsAgent {
   }
 
   /**
-   * Multi-cluster: a mention in a thread bound to no cluster gets a question, not an LLM call. The
-   * prompt note alone lost to Scope of Work's decline line — live 2026-11-02, "what cluster you
-   * monitor?" was declined as out of scope. Both turns go to memory, so the reply that names a
-   * cluster picks up the original question. null = the thread has a cluster, or single-cluster mode.
+   * Multi-cluster: a mention whose cluster is not settled gets a question, not an LLM call — the
+   * thread is bound to none, or to one while `text` names another without switching. The prompt
+   * note alone lost to Scope of Work's decline line (live 2026-11-02, "what cluster you monitor?" was
+   * declined), and a bound thread asked "how about dev cluster?" was answered about stg. Both turns
+   * go to memory, so the reply that names or switches the cluster picks up the original question.
+   * Called after applyMentionCluster. null = proceed: the cluster is settled, or single-cluster mode.
    */
-  async askForCluster(threadId: string, message: string): Promise<string | null> {
-    if (!this.clusters.strict || (await this.threadCluster(threadId))) return null;
-    const list = this.clusters.names.map((n) => `\`${n}\``).join(", ");
-    const ask = `☸ I watch more than one cluster: ${list}. Which one is this about? Reply naming it (e.g. "di ${this.clusters.names[0]}") and I'll answer your question there.`;
+  async askForCluster(threadId: string, text: string, message: string): Promise<string | null> {
+    if (!this.clusters.strict) return null;
+    const bound = await this.threadCluster(threadId);
+    const named = parseClusterMention(text, this.clusters.names);
+    let ask: string;
+    if (!bound) {
+      const list = this.clusters.names.map((n) => `\`${n}\``).join(", ");
+      ask = `☸ I watch more than one cluster: ${list}. Which one is this about? Reply naming it (e.g. "di ${this.clusters.names[0]}") and I'll answer your question there.`;
+    } else if (named && named.cluster !== bound) {
+      ask = `☸ This thread is about \`${bound}\`. To look at \`${named.cluster}\`, say "pindah ke ${named.cluster}" here (earlier answers stay about ${bound}), or ask in a new thread.`;
+    } else return null;
     await this.memory.append(threadId, { role: "user", content: message });
     await this.memory.append(threadId, { role: "assistant", content: ask });
-    logger.info(`[cluster] ${threadId}: no cluster bound — asked which`);
+    logger.info(`[cluster] ${threadId}: ${bound ? `bound to ${bound}, asked about ${named!.cluster} — told how to switch` : "no cluster bound — asked which"}`);
     return ask;
   }
 
