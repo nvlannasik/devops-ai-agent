@@ -21,7 +21,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
     "@aws-sdk/client-sqs": "3.1058.0",
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@opentelemetry/api": "1.10.0",
     "@opentelemetry/context-async-hooks": "3.0.0",
     "@opentelemetry/core": "3.0.0",
@@ -43,7 +43,7 @@
     "openai": "4.103.0",
     "pg": "^8.22.0",
     "winston": "3.17.0",
-    "zod": "3.25.28"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@dagrejs/dagre": "^3.1.1",
@@ -64,5 +64,10 @@
     "tailwindcss": "^4.3.3",
     "tsx": "4.22.3",
     "typescript": "6.0.3"
+  },
+  "overrides": {
+    "openai": {
+      "zod": "$zod"
+    }
   }
 }
