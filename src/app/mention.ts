@@ -14,6 +14,7 @@ import type { ClusterModel } from "../agent/onboarding/types.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
+import { clusterReply, speaksIndonesian } from "../agent/cluster/binding.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 import type { SlackHost } from "./host.js";
 
@@ -197,7 +198,7 @@ export class MentionFlow {
       // Multi-cluster: this message may bind the thread to a cluster, or switch it (agent/cluster).
       const { switchedFrom, cluster } = await this.host.agent.applyMentionCluster(threadId, text);
       if (switchedFrom && cluster) {
-        await say({ text: `🔀 This thread now uses cluster ${cluster}. Earlier answers were about ${switchedFrom}.`, thread_ts: threadId });
+        await say({ text: clusterReply.switched(switchedFrom, cluster, speaksIndonesian(text)), thread_ts: threadId });
       }
       // Cluster not settled (none yet, or another one named): ask, before the tour prefetch and the LLM.
       const ask = await this.host.agent.askForCluster(threadId, text, message).catch(() => null);

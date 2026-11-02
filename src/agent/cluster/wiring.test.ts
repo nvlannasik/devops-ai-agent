@@ -114,7 +114,7 @@ test("a bound thread asked about another cluster is told how to switch, never an
   await agent.applyMentionCluster("S", "cek di stg");
   const text = "unused resources on dev cluster";
   assert.deepEqual(await agent.applyMentionCluster("S", text), { switchedFrom: null, cluster: "stg" });
-  assert.match((await agent.askForCluster("S", text, text)) ?? "", /`stg`[\s\S]*pindah ke dev/);
+  assert.match((await agent.askForCluster("S", text, text)) ?? "", /`stg`[\s\S]*"switch to dev"/);
   assert.equal(seen.length, 0, "no LLM call");
   assert.equal(await agent.askForCluster("S", "pod yang lain?", "pod yang lain?"), null, "no other cluster named: no guard");
   assert.deepEqual(await agent.applyMentionCluster("S", "pindah ke dev"), { switchedFrom: "stg", cluster: "dev" });

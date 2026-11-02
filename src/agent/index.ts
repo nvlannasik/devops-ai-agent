@@ -4,7 +4,7 @@ import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
 import { clusterRegistry, storedCluster, withCluster, type ClusterRegistry } from "./cluster/index.js";
-import { alertCluster, clusterNote, parseClusterMention } from "./cluster/binding.js";
+import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksIndonesian } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -485,13 +485,11 @@ export class DevOpsAgent {
     if (!this.clusters.strict) return null;
     const bound = await this.threadCluster(threadId);
     const named = parseClusterMention(text, this.clusters.names);
+    const id = speaksIndonesian(text);
     let ask: string;
-    if (!bound) {
-      const list = this.clusters.names.map((n) => `\`${n}\``).join(", ");
-      ask = `☸ I watch more than one cluster: ${list}. Which one is this about? Reply naming it (e.g. "di ${this.clusters.names[0]}") and I'll answer your question there.`;
-    } else if (named && named.cluster !== bound) {
-      ask = `☸ This thread is about \`${bound}\`. To look at \`${named.cluster}\`, say "pindah ke ${named.cluster}" here (earlier answers stay about ${bound}), or ask in a new thread.`;
-    } else return null;
+    if (!bound) ask = clusterReply.which(this.clusters.names, id);
+    else if (named && named.cluster !== bound) ask = clusterReply.other(bound, named.cluster, id);
+    else return null;
     await this.memory.append(threadId, { role: "user", content: message });
     await this.memory.append(threadId, { role: "assistant", content: ask });
     logger.info(`[cluster] ${threadId}: ${bound ? `bound to ${bound}, asked about ${named!.cluster} — told how to switch` : "no cluster bound — asked which"}`);
