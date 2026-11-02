@@ -103,3 +103,19 @@ test("ping is central's; connect survives a dead bridge", async () => {
   await router.connect();
   assert.equal(central.connected, true);
 });
+
+test("central queries are held to the current cluster; none bound, as written", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const central = { ...fake("central", centralTools), callTool: async (_n: string, input: Record<string, unknown>) => { sent.push(input); return "ok"; } };
+  const router = new ClusterRouter(central as McpTools, new Map(), registry);
+  await withCluster("stg", () => router.callTool("prometheus_query", { query: "up", time: "1" }));
+  await withCluster("stg", () => router.callTool("loki_query_range", { query: '{app="x"} |= "e"' }));
+  await withCluster("stg", () => router.callTool("prometheus_get_rules", { query: "up" }));
+  await withCluster(null, () => router.callTool("prometheus_query", { query: "up" }));
+  assert.deepEqual(sent, [
+    { query: 'up{cluster="stg"}', time: "1" },
+    { query: '{cluster="stg", app="x"} |= "e"' },
+    { query: "up" },
+    { query: "up" },
+  ]);
+});

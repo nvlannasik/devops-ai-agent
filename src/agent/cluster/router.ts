@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../llm/types.js";
 import type { BridgeTools, McpTools } from "../mcp/types.js";
 import { currentCluster, type ClusterRegistry } from "./index.js";
+import { queryLanguage, scopeQuery } from "./scope.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
 
 // Kubernetes and Flux act on a cluster; Prometheus, Loki, Alertmanager and tracing are central.
@@ -47,7 +48,7 @@ export class ClusterRouter implements McpTools {
   }
 
   async callTool(name: string, input: Record<string, unknown>): Promise<string> {
-    if (!isClusterTool(name)) return this.central.callTool(name, input);
+    if (!isClusterTool(name)) return this.central.callTool(name, scoped(name, input));
     const cluster = currentCluster();
     if (!cluster) {
       throw new Error(`no cluster is bound to this thread, so ${name} cannot run — ask which cluster (${this.registry.names.join(", ")})`);
@@ -61,6 +62,17 @@ export class ClusterRouter implements McpTools {
       throw new Error(`Kubernetes for ${cluster} was unreachable through its bridge: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/** A central PromQL/LogQL query, held to the current cluster (agent/cluster/scope). No cluster: as written. */
+function scoped(name: string, input: Record<string, unknown>): Record<string, unknown> {
+  const cluster = currentCluster();
+  const lang = queryLanguage(name);
+  if (!cluster || !lang || typeof input.query !== "string") return input;
+  const query = scopeQuery(input.query, cluster, lang);
+  if (query === input.query) return input;
+  logger.debug(`[cluster] ${name} held to ${cluster}: ${query}`);
+  return { ...input, query };
 }
 
 /** The router in strict mode; the central client itself otherwise, so single-cluster mode is untouched. */

@@ -131,3 +131,10 @@ test("the dashboard's /cluster reads the local cluster; another cluster's thread
   assert.equal(await withCluster("stg", () => agent.clusterModel("default")), null);
   assert.deepEqual(calls, ["dev:k8s_cluster_inventory"], "no model built for stg from the local cache");
 });
+
+test("a delegate runs on its lead's cluster, not its own unbound sub-thread", async () => {
+  const { agent, calls, seen } = setup([callPods("d1"), answer, answer, answer]);
+  await withCluster("stg", () => agent.investigate("L/sub-1", "[DELEGATE] pods restarting?", { maxToolRounds: 2, depth: 1 }));
+  assert.deepEqual(calls, ["stg:k8s_list_pods"]);
+  assert.match(JSON.stringify(seen[0]!.messages), /\[Cluster: stg\]/);
+});

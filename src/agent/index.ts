@@ -444,7 +444,9 @@ export class DevOpsAgent {
     if (!this.clusters.strict) return run(userMessage);
     // Multi-cluster (agent/cluster): the run is about exactly one cluster or none — never a guess.
     return (async () => {
-      const cluster = opts.cluster !== undefined ? opts.cluster : await this.threadCluster(threadId);
+      // A delegate (<thread>/sub-N) has no binding of its own: it runs inside its lead's withCluster.
+      const inherited = currentCluster();
+      const cluster = opts.cluster !== undefined ? opts.cluster : inherited !== undefined ? inherited : await this.threadCluster(threadId);
       const reason = cluster ? "bound" : opts.mode === "alert" || opts.mode === undefined ? "unlabelled" : "unbound";
       const note = clusterNote({ cluster, reason }, this.clusters);
       return withCluster(cluster, () => run(`${note}\n\n${userMessage}`));
