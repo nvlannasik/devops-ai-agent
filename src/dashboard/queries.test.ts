@@ -397,7 +397,8 @@ test("adding the verdict did not disturb the limit and offset binds", async () =
   await new DashboardQueries(stub(calls)).list(parseFilters(new URLSearchParams("page=2")));
   assert.equal(calls[0].params.at(-2), PAGE_SIZE + 1);
   assert.equal(calls[0].params.at(-1), PAGE_SIZE);
-  assert.match(calls[0].sql, /LIMIT \$8 OFFSET \$9/);
+  // $8/$9 are the cluster filter (migrations/017), so the page binds moved to the end, still last.
+  assert.match(calls[0].sql, /LIMIT \$10 OFFSET \$11/);
 });
 
 // --- harness trace (agent_events, migrations/011) ---

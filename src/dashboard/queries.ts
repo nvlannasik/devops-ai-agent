@@ -226,11 +226,8 @@ const INCIDENT_WHERE = `WHERE ($1::timestamptz IS NULL OR created_at >= $1)
                   SELECT 1
                     FROM remediations r
                     JOIN remediation_checks rc ON rc.remediation_id = r.id
-                   WHERE r.incident_id = incidents.id AND rc.verdict = $7))`;
-
-/** `$n` = the cluster filter (NULL = any), `$n+1` = the local cluster a NULL row reads as. */
-const clusterAnd = (n: number): string => `
-            AND ($${n}::text IS NULL OR COALESCE(cluster, $${n + 1}::text) = $${n}::text)`;
+                   WHERE r.incident_id = incidents.id AND rc.verdict = $7))
+            AND ($8::text IS NULL OR COALESCE(cluster, $9::text) = $8::text)`;
 
 // The window is now chosen per request (see parseRange in filters.ts), which is exactly the
 // day the comment that used to stand here was written for: every one of these values is
@@ -559,24 +556,24 @@ export class DashboardQueries {
     // over-fetch by one: tells us whether a next page exists without trusting the count below
     const limit = PAGE_SIZE + 1;
     const offset = (f.page - 1) * PAGE_SIZE;
-    const args = [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved, f.verdict];
+    // $8/$9 = the cluster filter and the local cluster a NULL row reads as (multi-cluster, agent/cluster):
+    // inside the shared predicate, so the page and its count still filter on the same text.
+    const args = [f.from, f.to, f.alertname, f.namespace, f.severity, f.resolved, f.verdict, f.cluster, local];
     // The rows query goes first and stays first: three tests read calls[0] for the filter
     // parameters, the LIMIT and the OFFSET.
     const [page, count] = await Promise.all([
       this.pool.query(
-        // The cluster predicate's parameters come LAST ($10/$11 here, $9/$10 below), so the filter,
-        // LIMIT and OFFSET positions other code and tests read are where they always were.
         `SELECT id, created_at, resolved_at, alertname, namespace, severity, confidence, root_cause,
-                COALESCE(cluster, $11::text) AS cluster
+                COALESCE(cluster, $9::text) AS cluster
            FROM incidents
-          ${INCIDENT_WHERE}${clusterAnd(10)}
+          ${INCIDENT_WHERE}
           ORDER BY created_at DESC
-          LIMIT $8 OFFSET $9`,
-        [...args, limit, offset, f.cluster, local]
+          LIMIT $10 OFFSET $11`,
+        [...args, limit, offset]
       ),
       this.pool.query(
-        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE}${clusterAnd(9)} LIMIT $8) c`,
-        [...args, COUNT_CAP, f.cluster, local]
+        `SELECT count(*)::int AS n FROM (SELECT 1 FROM incidents ${INCIDENT_WHERE} LIMIT $10) c`,
+        [...args, COUNT_CAP]
       ),
     ]);
     const hasMore = page.rows.length > PAGE_SIZE;
