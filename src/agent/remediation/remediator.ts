@@ -23,7 +23,7 @@ import { currentTrace, withRoute, withTrace } from "../../utils/trace/index.js";
 import { TraceRecorder, refusalGate } from "../trace/index.js";
 import { currentCluster, storedCluster, withCluster, type ClusterRegistry } from "../cluster/index.js";
 import { TraceStore } from "../trace/store.js";
-import { quarantineRefusal, orphanDeleteRefusal, ungroundedTargetRefusal, resourceFaultRefusal, offerMismatchRefusal, targetKey, scaleOutRefusal, unseenImageRefusal, backupFrom } from "./evidence-refusals.js";
+import { quarantineRefusal, orphanDeleteRefusal, ungroundedTargetRefusal, resourceFaultRefusal, offerMismatchRefusal, targetKey, scaleOutRefusal, unseenImageRefusal, mentionedText, backupFrom } from "./evidence-refusals.js";
 import { extractText } from "../loop/control.js";
 import { withProposalSpan } from "../../tracing/spans.js";
 
@@ -374,8 +374,11 @@ export class Remediator {
    */
   async imageRefusalFor(proposal: Proposal, threadId: string | undefined, rca: string): Promise<string | null> {
     if (proposal.action !== "k8s_set_image") return null;
-    const userText = rca.match(/^User request: ([\s\S]*?)\n\nAgent reply:/)?.[1] ?? "";
-    return unseenImageRefusal(proposal, await this.threadEvidence(threadId), userText);
+    const request = rca.match(/^User request: ([\s\S]*?)\n\nAgent reply:/)?.[1] ?? "";
+    // The earlier mentions count too: a request held by the cluster question resumes on a reply
+    // that no longer names the image (mentionedText).
+    const history = threadId ? await this.host.memory.get(threadId).catch(() => [] as Message[]) : [];
+    return unseenImageRefusal(proposal, await this.threadEvidence(threadId), `${request}\n${mentionedText(history)}`);
   }
 
   /** The thread's tool output for the grounding gates, or null when there is no thread at all. */

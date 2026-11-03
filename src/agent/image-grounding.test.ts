@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { unseenImageRefusal } from "./index.js";
+import { mentionedText } from "./remediation/evidence-refusals.js";
+import { buildMentionMarker } from "./prompts/system.js";
+import type { Message } from "./llm/types.js";
 import { parseProposal, type Proposal } from "./remediation/proposal.js";
 
 const setImage = (image: string): Proposal =>
@@ -62,4 +65,25 @@ test("with no thread at all, only the user's own words can ground it", () => {
 test("other actions are not this gate's business", () => {
   const restart = parseProposal('{"action":"k8s_rollout_restart","namespace":"a","workload":"b"}')!;
   assert.equal(unseenImageRefusal(restart, null, ""), null);
+});
+
+// Live 2026-11-03, stg: "change prometheus image tag to v3.15.1" was held by the cluster question, the
+// proposal ran on the reply "on stg cluster", and the gate — reading only that reply — called the tag
+// invented. The person's earlier mentions in the thread are their words too; the agent's own text
+// around them (recall blocks, notes, tour context) is not.
+test("mentionedText keeps what the person typed in earlier mentions, nothing the agent wrote", () => {
+  const history: Message[] = [
+    { role: "user", content: `${buildMentionMarker("change prometheus image tag to v3.15.1", null)}` },
+    { role: "assistant", content: "☸ I watch more than one cluster: `dev`, `stg`. Which one is this about?" },
+    { role: "user", content: `[Cluster: stg] note\n\n${buildMentionMarker("on stg cluster", null)}` },
+    { role: "user", content: "Past incident root cause: set image to registry.example.com/x:v1.2" },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "quay.io/prometheus/prometheus:v3.13.0" }] },
+  ];
+  const said = mentionedText(history);
+  assert.match(said, /v3\.15\.1/);
+  assert.match(said, /on stg cluster/);
+  assert.doesNotMatch(said, /v1\.2|Cluster: stg|Which one|v3\.13\.0/);
+  const observed = "quay.io/prometheus/prometheus:v3.13.0";
+  const proposal = parseProposal(JSON.stringify({ action: "k8s_set_image", namespace: "monitoring", workload: "monitoring-prometheus-server", kind: "deployment", container: "prometheus", image: "quay.io/prometheus/prometheus:v3.15.1" }))!;
+  assert.equal(unseenImageRefusal(proposal, observed, `on stg cluster\n${said}`), null);
 });

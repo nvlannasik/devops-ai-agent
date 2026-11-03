@@ -268,6 +268,24 @@ export function scaleOutRefusal(proposal: Proposal, observed: string | null): st
 }
 
 /**
+ * What the person typed in this thread's mentions: the text after `buildMentionMarker`'s line, in
+ * every user turn that carries one. Never the agent's own words around it — the cluster note, the
+ * tour context, an alert's recall block (a past incident's root cause is how an invented image
+ * propagates). Live 2026-11-03: "change prometheus image tag to v3.15.1" was held by the cluster
+ * question, the proposal ran on the reply "on stg cluster", and the image gate — reading only that
+ * reply — called the tag invented.
+ */
+export function mentionedText(history: Message[]): string {
+  const said: string[] = [];
+  for (const m of history) {
+    if (m.role !== "user" || typeof m.content !== "string") continue;
+    const typed = /\[USER MESSAGE — [^\n]*\]\n([\s\S]*)$/.exec(m.content)?.[1];
+    if (typed) said.push(typed);
+  }
+  return said.join("\n");
+}
+
+/**
  * An image change must name an image something in this thread actually showed — a tool result,
  * or the person asking.
  *
