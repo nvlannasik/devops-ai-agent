@@ -188,6 +188,9 @@ export class DashboardServer {
   // failure cannot evict dev's cached inventory — each cluster's 60s TTL and "failures are never
   // cached" rule apply independently.
   private readonly inventoryCache = new Map<string, { at: number; inv: ClusterInventory | null; error: string | null }>();
+  // Bounds the `inventory` call itself, independently of the cache above — overridable so a
+  // test can see the timeout fire without waiting for it. Default set in the constructor.
+  private readonly inventoryTimeoutMs: number;
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
   // never built, which the topology page renders as a note rather than an empty frame.
@@ -208,7 +211,8 @@ export class DashboardServer {
     inventory?: (cluster?: string) => Promise<string>,
     clusterModel?: (cluster?: string) => unknown,
     memory?: MemorySource,
-    slackNames?: SlackNames
+    slackNames?: SlackNames,
+    inventoryTimeoutMs?: number
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
@@ -217,6 +221,7 @@ export class DashboardServer {
     this.clusterModel = clusterModel;
     this.memory = memory;
     this.slackNames = slackNames;
+    this.inventoryTimeoutMs = inventoryTimeoutMs ?? 10_000;
   }
 
   /**
@@ -376,6 +381,9 @@ export class DashboardServer {
    *  cache's only key. */
   private async clusterInventory(cluster?: string): Promise<{ inv: ClusterInventory | null; error: string | null }> {
     const TTL_MS = 60_000;
+    // The MCP tool timeout is 45s, and failures are never cached (see below) — without this,
+    // an unreachable cluster makes every uncached /cluster reload wait the full 45s.
+    const INVENTORY_TIMEOUT_MS = this.inventoryTimeoutMs;
     const key = cluster ?? "";
     const cached = this.inventoryCache.get(key);
     if (cached && Date.now() - cached.at < TTL_MS) return cached;
@@ -383,8 +391,19 @@ export class DashboardServer {
     if (!this.inventory) {
       entry = { at: Date.now(), inv: null, error: "MCP server not connected" };
     } else {
+      const inventoryFn = this.inventory; // captured so the closure below needs no `!`
       try {
-        const raw = await this.inventory(cluster);
+        const raw = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error(`${cluster ?? "the cluster"} did not answer within ${INVENTORY_TIMEOUT_MS / 1000}s`)),
+            INVENTORY_TIMEOUT_MS
+          );
+          timer.unref();
+          inventoryFn(cluster).then(
+            (v) => { clearTimeout(timer); resolve(v); },
+            (err) => { clearTimeout(timer); reject(err); }
+          );
+        });
         const parsed = (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })();
         // The MCP client returns a tool failure as text ("Error: …"), not a throw — show that text.
         entry =

@@ -127,13 +127,14 @@ async function withServer<T>(
     clusterModel?: (cluster?: string) => unknown;
     queries?: DashboardQueries;
     memory?: MemorySource;
+    inventoryTimeoutMs?: number;
   } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory, opts.clusterModel, opts.memory);
+  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory, opts.clusterModel, opts.memory, undefined, opts.inventoryTimeoutMs);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -696,6 +697,20 @@ test("a stg failure does not touch dev's cached inventory, and failures are neve
     mcpConfig.localCluster = saved.local;
     mcpConfig.sqs.clusters = saved.clusters;
   }
+});
+
+// Measured live 2026-11-03: with the stg bridge down, /cluster?cluster=stg waited the full 45s
+// tool timeout because clusterInventory awaited `inventory` with no bound of its own. An
+// inventory that never resolves must not hold the page past the short inventory timeout — hence
+// the injectable `inventoryTimeoutMs` (short here, instead of the real 10s) so this proves it in
+// well under 45s without a real 10-second sleep.
+test("/cluster gives up on an unreachable cluster after the inventory timeout, not the 45s tool timeout", async () => {
+  const inventory = () => new Promise<string>(() => {}); // never resolves, like a dead SQS bridge
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /cluster HTTP/1.1", authed);
+    assert.match(status(res), /^HTTP\/1\.1 200\b/);
+    assert.match(res, /Inventory failed:.*did not answer within 0\.05s/);
+  }, { inventory, inventoryTimeoutMs: 50 });
 });
 
 // ---------- Postmortem draft routes (migrations/015, spec 2026-10-14-postmortem-draft-design §5) ----------
