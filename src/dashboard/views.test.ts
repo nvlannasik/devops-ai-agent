@@ -3143,6 +3143,27 @@ test("clusterPage embeds the cluster model and its unknowns, or says the flow is
   assert.doesNotMatch(without, /id="cluster-model"/);
 });
 
+// Multi-cluster part 3 (spec 2026-11-03-multi-cluster-part3-and-2c §5): a cluster switch and the
+// cluster in the title, copied from the incident list's <nav class="seg"> — and only with a view.
+test("clusterPage names the cluster and links the others", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [] };
+  const html = clusterPage(inv as any, null, undefined, "n", null, null, { current: "stg", names: ["dev", "stg"] });
+  assert.match(html, /<title>Cluster · stg — DevOps AI Agent<\/title>/);
+  assert.match(html, /<nav class="seg" aria-label="Cluster">/);
+  assert.match(html, /<a href="\/cluster\?cluster=dev">dev<\/a>/);
+  assert.match(html, /<a href="\/cluster\?cluster=stg" aria-current="true">stg<\/a>/);
+});
+
+test("clusterPage without a view is unchanged", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [] };
+  const before = clusterPage(inv as any, null, undefined, "n", null, null);
+  const after = clusterPage(inv as any, null, undefined, "n", null, null, undefined);
+  assert.equal(before, after);
+  assert.doesNotMatch(before.slice(before.indexOf("<body")), /aria-label="Cluster"|<div class="page-actions">/);
+});
+
 // ---------- incidents: names, readable params, links, the state switch ----------
 test("a result's http(s) URL becomes a link and nothing else does", async () => {
   const { linkify } = await import("./incident-views.js");

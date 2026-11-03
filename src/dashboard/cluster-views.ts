@@ -49,8 +49,17 @@ export function clusterPage(
   openIncidents?: number,
   nonce = "",
   assets: Assets | null = null,
-  model: DashboardClusterModel | null = null
+  model: DashboardClusterModel | null = null,
+  /** Multi-cluster only: the registry, and which cluster this render is for. Absent = single-cluster,
+   *  and the page is unchanged (no switch, no cluster in the title). */
+  view?: { current: string; names: string[] }
 ): string {
+  // The incident list's switch, copied: a <nav class="seg"> of links, aria-current on today's.
+  const clusterSwitch = view
+    ? `<div class="page-actions"><nav class="seg" aria-label="Cluster">` +
+      view.names.map((c) => `<a href="/cluster?cluster=${esc(c)}"${c === view.current ? ` aria-current="true"` : ""}>${esc(c)}</a>`).join("") +
+      `</nav></div>`
+    : "";
   // The cluster model's flow (agent/onboarding) rides beside the inventory. The page never waits for
   // it — a cold cache says so and the next load has it; what could not be read is listed, not hidden.
   const flowNote = !model
@@ -130,10 +139,11 @@ export function clusterPage(
         : "");
   }
   return layout(
-    "Cluster",
+    view ? `Cluster · ${view.current}` : "Cluster",
     `<div class="doc">
      <p class="eyebrow">Agent</p>
      <h1>Cluster</h1>
+     ${clusterSwitch}
      <p class="meta">What runs here and who manages it, read live from <code translate="no">k8s_cluster_inventory</code> —
        the same inventory the agent's cluster tour answers from. No model is involved in this page.</p>
      ${body}

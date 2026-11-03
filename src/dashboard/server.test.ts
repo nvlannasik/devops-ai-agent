@@ -14,6 +14,13 @@ import type { SkillView } from "./context.js";
 type DashboardConfig = { enabled: boolean; port: number; password?: string; cookieSecure: boolean };
 const dashboardConfig = config.dashboard as unknown as DashboardConfig;
 
+// Same cast, for the same reason: config.mcp is `as const` for the TYPE system only, and
+// clusterRegistry() (called with no args by server.ts) reads the live config.mcp — so a
+// strict-mode test here has to mutate it directly, like dashboardConfig above, and restore it
+// so later tests in this file see the single-cluster default again.
+type McpConfig = { localCluster: string | null; sqs: { clusters: Array<{ name: string; requestQueueName: string }> } };
+const mcpConfig = config.mcp as unknown as McpConfig;
+
 const PASSWORD = "test-dashboard-password";
 // Minting directly rather than posting the form: these tests are about what a valid session
 // unlocks, and the login round-trip has its own tests below. Sessions are signed, not stored,
@@ -113,13 +120,20 @@ test("a malformed request-target gets a clean 400, not a dead process", async ()
 // resolves without ever calling res.end(), and the socket hangs until Node's 300s requestTimeout.
 async function withServer<T>(
   fn: (port: number) => Promise<T>,
-  opts: { unconfigured?: boolean; skills?: SkillView[]; inventory?: () => Promise<string>; queries?: DashboardQueries; memory?: MemorySource } = {}
+  opts: {
+    unconfigured?: boolean;
+    skills?: SkillView[];
+    inventory?: (cluster?: string) => Promise<string>;
+    clusterModel?: (cluster?: string) => unknown;
+    queries?: DashboardQueries;
+    memory?: MemorySource;
+  } = {}
 ): Promise<T> {
   dashboardConfig.enabled = true;
   dashboardConfig.port = 0;
   dashboardConfig.password = opts.unconfigured ? undefined : PASSWORD;
   dashboardConfig.cookieSecure = true;
-  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory, undefined, opts.memory);
+  const dashboard = new DashboardServer(opts.queries ?? new DashboardQueries(null), undefined, () => opts.skills ?? [], opts.inventory, opts.clusterModel, opts.memory);
   await dashboard.start();
   const address = (dashboard as unknown as { server: { address(): net.AddressInfo } }).server.address();
   try {
@@ -581,6 +595,101 @@ test("/cluster turns a failing or non-JSON inventory into a note, never a 500", 
   await withServer(async (port) => {
     assert.match(await raw(port, "GET /cluster HTTP/1.1", authed), /MCP server not connected/);
   });
+});
+
+// Multi-cluster part 3 (spec 2026-11-03-multi-cluster-part3-and-2c §5). Strict mode only — these
+// mutate config.mcp directly (clusterRegistry() reads it with no args, like server.ts does) and
+// restore it in a finally so later tests in this file see the single-cluster default again.
+test("/cluster?cluster= calls inventory/clusterModel for the named cluster; absent means the local one", async () => {
+  const saved = { local: mcpConfig.localCluster, clusters: mcpConfig.sqs.clusters };
+  mcpConfig.localCluster = "dev";
+  mcpConfig.sqs.clusters = [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }];
+  try {
+    const invCalls: (string | undefined)[] = [];
+    const modelCalls: (string | undefined)[] = [];
+    const inventory = async (cluster?: string) => {
+      invCalls.push(cluster);
+      return JSON.stringify({ scanned: { namespaces: 0, complete: true }, namespaces: [] });
+    };
+    const clusterModel = (cluster?: string) => {
+      modelCalls.push(cluster);
+      return null;
+    };
+    await withServer(async (port) => {
+      assert.match(status(await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
+      assert.match(status(await raw(port, "GET /cluster HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
+    }, { inventory, clusterModel });
+    assert.deepEqual(invCalls, ["stg", "dev"]);
+    assert.deepEqual(modelCalls, ["stg", "dev"]);
+  } finally {
+    mcpConfig.localCluster = saved.local;
+    mcpConfig.sqs.clusters = saved.clusters;
+  }
+});
+
+test("/cluster?cluster= 404s on a name outside the registry, malformed or not", async () => {
+  const saved = { local: mcpConfig.localCluster, clusters: mcpConfig.sqs.clusters };
+  mcpConfig.localCluster = "dev";
+  mcpConfig.sqs.clusters = [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }];
+  try {
+    await withServer(async (port) => {
+      assert.match(status(await raw(port, "GET /cluster?cluster=prd HTTP/1.1", authed)), /^HTTP\/1\.1 404\b/);
+      assert.match(status(await raw(port, "GET /cluster?cluster=Bad! HTTP/1.1", authed)), /^HTTP\/1\.1 404\b/);
+      // a registered name still renders, proving the 404s above are about the name and not the route
+      assert.match(status(await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
+    }, { inventory: async () => "{}" });
+  } finally {
+    mcpConfig.localCluster = saved.local;
+    mcpConfig.sqs.clusters = saved.clusters;
+  }
+});
+
+test("single-cluster mode: ?cluster= is ignored, the page renders as it always has", async () => {
+  // No mutation here — this file's config.mcp default (localCluster: null, no bridges) is
+  // single-cluster, exactly the mode this test is about.
+  await withServer(async (port) => {
+    const withParam = await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed);
+    assert.match(status(withParam), /^HTTP\/1\.1 200\b/, "an unregistered name must not 404 — the param is ignored, not validated");
+    assert.doesNotMatch(withParam, /aria-label="Cluster"/);
+    const without = await raw(port, "GET /cluster HTTP/1.1", authed);
+    assert.doesNotMatch(without, /aria-label="Cluster"/);
+  }, { inventory: async () => "{}" });
+});
+
+test("a stg failure does not touch dev's cached inventory, and failures are never cached", async () => {
+  const saved = { local: mcpConfig.localCluster, clusters: mcpConfig.sqs.clusters };
+  mcpConfig.localCluster = "dev";
+  mcpConfig.sqs.clusters = [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }];
+  try {
+    let stgCalls = 0;
+    const inventory = async (cluster?: string) => {
+      if (cluster === "stg") {
+        stgCalls++;
+        throw new Error("stg unreachable");
+      }
+      return JSON.stringify({
+        scanned: { namespaces: 1, complete: true },
+        namespaces: [{ name: "dev-ns", system: false, services: [], ingresses: [], workloads: [] }],
+      });
+    };
+    await withServer(async (port) => {
+      const devFirst = await raw(port, "GET /cluster HTTP/1.1", authed);
+      assert.match(devFirst, /dev-ns/);
+
+      const stgFail = await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed);
+      assert.match(stgFail, /Inventory failed:/);
+      assert.equal(stgCalls, 1);
+
+      const devAgain = await raw(port, "GET /cluster HTTP/1.1", authed);
+      assert.match(devAgain, /dev-ns/, "dev's cache must survive stg's failure");
+
+      await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed);
+      assert.equal(stgCalls, 2, "a failure is never cached, so stg is retried every time");
+    }, { inventory });
+  } finally {
+    mcpConfig.localCluster = saved.local;
+    mcpConfig.sqs.clusters = saved.clusters;
+  }
 });
 
 // ---------- Postmortem draft routes (migrations/015, spec 2026-10-14-postmortem-draft-design §5) ----------

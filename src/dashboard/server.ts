@@ -176,13 +176,18 @@ export class DashboardServer {
   private readonly queries: DashboardQueries;
   private readonly mcpTools: () => readonly McpTool[];
   private readonly skills: () => readonly SkillView[];
-  // k8s_cluster_inventory's raw result. A whole-cluster scan, so it is cached: a reload must not rescan.
-  private readonly inventory: (() => Promise<string>) | undefined;
+  // k8s_cluster_inventory's raw result. A whole-cluster scan, so it is cached: a reload must not
+  // rescan. `cluster` is multi-cluster only — single-cluster callers (e.g. index.ts's bare arrow)
+  // ignore the argument, same as before.
+  private readonly inventory: ((cluster?: string) => Promise<string>) | undefined;
   // The onboarding cluster model (agent/onboarding), PEEKED: never waits, null until the first build lands.
-  private readonly clusterModel: (() => unknown) | undefined;
+  private readonly clusterModel: ((cluster?: string) => unknown) | undefined;
   private readonly memory?: MemorySource;
   private readonly slackNames?: SlackNames;
-  private inventoryCache: { at: number; inv: ClusterInventory | null; error: string | null } | null = null;
+  // Keyed by cluster ("" in single-cluster mode, where there is only ever one key) so a stg
+  // failure cannot evict dev's cached inventory — each cluster's 60s TTL and "failures are never
+  // cached" rule apply independently.
+  private readonly inventoryCache = new Map<string, { at: number; inv: ClusterInventory | null; error: string | null }>();
   private readonly throttle = new LoginThrottle();
   // Read once at construction and held in memory — see assets.ts. `null` means the bundle was
   // never built, which the topology page renders as a note rather than an empty frame.
@@ -200,8 +205,8 @@ export class DashboardServer {
     queries?: DashboardQueries,
     mcpTools?: () => readonly McpTool[],
     skills?: () => readonly SkillView[],
-    inventory?: () => Promise<string>,
-    clusterModel?: () => unknown,
+    inventory?: (cluster?: string) => Promise<string>,
+    clusterModel?: (cluster?: string) => unknown,
     memory?: MemorySource,
     slackNames?: SlackNames
   ) {
@@ -366,16 +371,20 @@ export class DashboardServer {
    * assert that nothing is firing, which is exactly the wrong thing to say when the reason we
    * have no number is that the database did not answer. No badge says nothing.
    */
-  /** The inventory or the reason there is none — never a throw, so /cluster never 500s. */
-  private async clusterInventory(): Promise<{ inv: ClusterInventory | null; error: string | null }> {
+  /** The inventory or the reason there is none — never a throw, so /cluster never 500s.
+   *  `cluster` is multi-cluster only: undefined in single-cluster mode, where it is also the
+   *  cache's only key. */
+  private async clusterInventory(cluster?: string): Promise<{ inv: ClusterInventory | null; error: string | null }> {
     const TTL_MS = 60_000;
-    if (this.inventoryCache && Date.now() - this.inventoryCache.at < TTL_MS) return this.inventoryCache;
+    const key = cluster ?? "";
+    const cached = this.inventoryCache.get(key);
+    if (cached && Date.now() - cached.at < TTL_MS) return cached;
     let entry: { at: number; inv: ClusterInventory | null; error: string | null };
     if (!this.inventory) {
       entry = { at: Date.now(), inv: null, error: "MCP server not connected" };
     } else {
       try {
-        const raw = await this.inventory();
+        const raw = await this.inventory(cluster);
         const parsed = (() => { try { return JSON.parse(raw) as unknown; } catch { return null; } })();
         // The MCP client returns a tool failure as text ("Error: …"), not a throw — show that text.
         entry =
@@ -387,7 +396,7 @@ export class DashboardServer {
       }
     }
     // A failure is not cached: the next reload should try again rather than show a stale error.
-    if (entry.inv) this.inventoryCache = entry;
+    if (entry.inv) this.inventoryCache.set(key, entry);
     return entry;
   }
 
@@ -562,12 +571,33 @@ export class DashboardServer {
     // and it answers while Postgres is down.
     // Same side of the database gate: the inventory comes from the MCP server, not Postgres.
     if (route.kind === "cluster") {
-      const { inv, error } = await this.clusterInventory();
+      // Multi-cluster only. Strict mode resolves `?cluster=` against the registry — absent
+      // means the local cluster, a name outside `clusters.names` (malformed or not — a
+      // malformed value is never IN the registry, so membership alone covers both) is the
+      // existing 404. Single-cluster mode never reads the param at all: `cluster` stays
+      // undefined, exactly like every call site before this task, and the page is unchanged.
+      const registry = clusterRegistry();
+      let cluster: string | undefined;
+      let view: { current: string; names: string[] } | undefined;
+      if (registry.strict) {
+        const raw = url.searchParams.get("cluster");
+        if (raw !== null) {
+          if (!registry.names.includes(raw)) return send(404, errorPage("Not found", `No such cluster "${raw}".`));
+          cluster = raw;
+        } else {
+          cluster = registry.local ?? undefined;
+        }
+        if (cluster !== undefined) view = { current: cluster, names: registry.names };
+      }
+      const { inv, error } = await this.clusterInventory(cluster);
       // The map's bundle runs under this response's nonce, exactly as /topology's does.
       const nonce = newNonce();
-      return send(200, clusterPage(inv, error, await this.openCount(), nonce, this.assets, (this.clusterModel?.() ?? null) as DashboardClusterModel | null), "text/html; charset=utf-8", {
-        "content-security-policy": csp(nonce),
-      });
+      return send(
+        200,
+        clusterPage(inv, error, await this.openCount(), nonce, this.assets, (this.clusterModel?.(cluster) ?? null) as DashboardClusterModel | null, view),
+        "text/html; charset=utf-8",
+        { "content-security-policy": csp(nonce) }
+      );
     }
 
     if (route.kind === "bench") {
