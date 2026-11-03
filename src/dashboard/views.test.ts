@@ -3153,6 +3153,10 @@ test("clusterPage names the cluster and links the others", async () => {
   assert.match(html, /<nav class="seg" aria-label="Cluster">/);
   assert.match(html, /<a href="\/cluster\?cluster=dev">dev<\/a>/);
   assert.match(html, /<a href="\/cluster\?cluster=stg" aria-current="true">stg<\/a>/);
+  // .page-actions only right-aligns as a flex item — the switch has to share .page-head with
+  // the <h1>, the same wrapper the incident list uses for its title + state/cluster switch,
+  // or it renders full-width and left-aligned under the heading.
+  assert.match(html, /<div class="page-head"><h1>Cluster<\/h1><div class="page-actions"><nav class="seg"/);
 });
 
 test("clusterPage without a view is unchanged", async () => {

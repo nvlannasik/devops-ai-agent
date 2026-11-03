@@ -617,7 +617,13 @@ test("/cluster?cluster= calls inventory/clusterModel for the named cluster; abse
     };
     await withServer(async (port) => {
       assert.match(status(await raw(port, "GET /cluster?cluster=stg HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
-      assert.match(status(await raw(port, "GET /cluster HTTP/1.1", authed)), /^HTTP\/1\.1 200\b/);
+      const noParam = await raw(port, "GET /cluster HTTP/1.1", authed);
+      assert.match(status(noParam), /^HTTP\/1\.1 200\b/);
+      // absent means the local cluster, server-side AND on the page: the switch renders with
+      // dev (not stg) as aria-current, so a reader lands on a switch that already agrees with
+      // what was resolved.
+      assert.match(noParam, /aria-label="Cluster"/);
+      assert.match(noParam, /<a href="\/cluster\?cluster=dev" aria-current="true">dev<\/a>/);
     }, { inventory, clusterModel });
     assert.deepEqual(invCalls, ["stg", "dev"]);
     assert.deepEqual(modelCalls, ["stg", "dev"]);

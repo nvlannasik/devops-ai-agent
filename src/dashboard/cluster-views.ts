@@ -55,10 +55,15 @@ export function clusterPage(
   view?: { current: string; names: string[] }
 ): string {
   // The incident list's switch, copied: a <nav class="seg"> of links, aria-current on today's.
-  const clusterSwitch = view
-    ? `<div class="page-actions"><nav class="seg" aria-label="Cluster">` +
+  // `.page-actions` only right-aligns as a FLEX ITEM (it's `margin-left: auto`, nothing else) —
+  // every other use on this dashboard sits inside `.page-head` or `.title-meta`, both flex rows.
+  // A bare sibling of <h1> inside `.doc` (not a flex container) rendered full-width and
+  // left-aligned, so the title and the switch share `.page-head` here, exactly like the
+  // incident list's title + state/cluster switch (incident-views.ts).
+  const clusterNav = view
+    ? `<nav class="seg" aria-label="Cluster">` +
       view.names.map((c) => `<a href="/cluster?cluster=${esc(c)}"${c === view.current ? ` aria-current="true"` : ""}>${esc(c)}</a>`).join("") +
-      `</nav></div>`
+      `</nav>`
     : "";
   // The cluster model's flow (agent/onboarding) rides beside the inventory. The page never waits for
   // it — a cold cache says so and the next load has it; what could not be read is listed, not hidden.
@@ -142,8 +147,9 @@ export function clusterPage(
     view ? `Cluster · ${view.current}` : "Cluster",
     `<div class="doc">
      <p class="eyebrow">Agent</p>
-     <h1>Cluster</h1>
-     ${clusterSwitch}
+     ${view
+       ? `<div class="page-head"><h1>Cluster</h1><div class="page-actions">${clusterNav}</div></div>`
+       : `<h1>Cluster</h1>`}
      <p class="meta">What runs here and who manages it, read live from <code translate="no">k8s_cluster_inventory</code> —
        the same inventory the agent's cluster tour answers from. No model is involved in this page.</p>
      ${body}
