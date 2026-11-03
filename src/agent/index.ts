@@ -23,6 +23,7 @@ import { groundingGaps } from "./grounding/index.js";
 import { RemediationStore } from "./remediation/index.js";
 import { RemediationCheckStore } from "./remediation/verify.js";
 import { SqsGitOpsClient } from "./gitops/sqs.js";
+import { type GitOpsClient } from "./gitops/types.js";
 import { collectChanges, type ChangeTimeline, type HistoryPayload } from "./changes/index.js";
 import { PostmortemStore, type LatestDraft } from "./postmortem/store.js";
 import { type PostmortemFacts } from "./postmortem/facts.js";
@@ -70,6 +71,8 @@ export interface AgentDeps {
   remediations?: RemediationStore;
   /** Tests inject a strict registry; production reads MCP_LOCAL_CLUSTER / MCP_SQS_CLUSTERS. */
   clusters?: ClusterRegistry;
+  /** Tests inject a fake `{ request() }`; production gets an SqsGitOpsClient when enabled. */
+  gitops?: GitOpsClient;
 }
 
 export class DevOpsAgent {
@@ -87,7 +90,7 @@ export class DevOpsAgent {
   private remediations: RemediationStore;
   private checks: RemediationCheckStore;
   private postmortems: PostmortemStore;
-  private gitops: SqsGitOpsClient | null;
+  private gitops: GitOpsClient | null;
   private readonly remediator: Remediator;
   private readonly runner: InvestigationRunner;
   private readonly lifecycle: IncidentLifecycle;
@@ -124,7 +127,7 @@ export class DevOpsAgent {
     this.remediations = deps.remediations ?? new RemediationStore(null); // no-op until initialize() wires Postgres
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
-    this.gitops = config.gitops.enabled ? new SqsGitOpsClient() : null; // GitOps PR-flow bridge (opt-in)
+    this.gitops = deps.gitops ?? (config.gitops.enabled ? new SqsGitOpsClient() : null); // GitOps PR-flow bridge (opt-in)
     const gitops = this.gitops;
     // The cache is the local cluster's only (onLocal): the dashboard reads it, and a tour on another
     // cluster's thread gets no model from it (clusterModel) rather than the local one's.
@@ -392,13 +395,24 @@ export class DevOpsAgent {
     if (!namespace) return null;
     const cluster = alertCluster(labels, this.clusters);
     const read = <T>(fn: () => Promise<T>) => (cluster === undefined ? fn() : withCluster(cluster, fn));
-    // Git history is the local cluster's overlay; per-cluster repository mapping is part 3.
-    const gitops = cluster === undefined || cluster === this.clusters.local ? this.gitops : null;
+    const gitops = this.gitops; // per-cluster repository mapping (part 3) — resolved below, per HelmRelease
     const t = await collectChanges(
       {
         callTool: (name, input) => read(() => this.mcp.callTool(name, input)),
         history: gitops
-          ? async (hr, since) => (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix: await this.resolveOverlayPath(hr) })) as HistoryPayload
+          ? async (hr, since) => {
+              // Resolved under the SAME cluster as callTool above (read()) — resolveOverlayPath reads
+              // the HelmRelease CR off the cluster, and outside read() strict mode has no ambient
+              // cluster bound yet here (this runs before investigate()'s own withCluster) and throws
+              // "no cluster is bound" instead of resolving anything.
+              const pathPrefix = await read(() => this.resolveOverlayPath(hr));
+              // Never a request with no pathPrefix for a non-local cluster — HelmRelease names repeat
+              // across clusters' overlays, so an unresolved one there is UNKNOWN, not the local repo.
+              if (pathPrefix === undefined && this.clusters.strict && cluster !== undefined && cluster !== this.clusters.local) {
+                return { ok: false, reason: `cannot tell which overlay in the repository is ${cluster}'s for ${hr.name}` };
+              }
+              return (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix })) as HistoryPayload;
+            }
           : undefined,
       },
       namespace,
@@ -746,7 +760,7 @@ export class DevOpsAgent {
   async shutdown(): Promise<void> {
     await this.mcp.disconnect();
     await this.llm.shutdown?.();
-    await this.gitops?.shutdown();
+    await this.gitops?.shutdown?.();
     await this.incidents.close();
   }
 }

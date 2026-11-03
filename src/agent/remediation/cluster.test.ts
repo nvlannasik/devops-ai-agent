@@ -7,6 +7,7 @@ import { DevOpsAgent } from "../index.js";
 import { TraceRecorder } from "../trace/index.js";
 import type { LLMClient, ToolDefinition } from "../llm/types.js";
 import type { BridgeTools, McpTools } from "../mcp/types.js";
+import { type GitOpsClient } from "../gitops/types.js";
 
 // Multi-cluster 2a: work that runs without a thread — an approval click, a due verification —
 // acts on the cluster stored on its row, never on whatever the process defaults to.
@@ -119,28 +120,98 @@ test("a proposal runs on its thread's cluster", async () => {
   assert.deepEqual(stored, [{ action: "k8s_rollout_restart", cluster: "stg" }]);
 });
 
-test("a Flux-managed target off the local cluster gets no PR", async () => {
-  const sent: string[] = [];
-  const tool = (name: string, description = name): ToolDefinition => ({ name, description, input_schema: { type: "object", properties: {} } });
-  const stgTools = [tool("k8s_scale", "[WRITE] scale"), tool("k8s_list_deployments"), tool("k8s_list_pods")];
-  const preview = JSON.stringify({ gitOpsPrEligible: true, helmRelease: { name: "web", namespace: "flux-app" }, action: "scale", changes: [{ field: "replicas", from: 1, to: 3 }] });
-  const fake = (tools: ToolDefinition[]) => ({
+// Part 3 task 3: GitOps PRs per cluster. The overlay is auto-detected (gitops/overlay.ts) via
+// k8s_get_custom_resources on the SAME cluster as the proposal, never the local repo's prefix —
+// HelmRelease names repeat across clusters' overlays (base, dev, stg).
+const fluxTool = (name: string, description = name): ToolDefinition => ({ name, description, input_schema: { type: "object", properties: {} } });
+const fluxPreview = JSON.stringify({ gitOpsPrEligible: true, helmRelease: { name: "web", namespace: "flux-app" }, action: "scale", changes: [{ field: "replicas", from: 1, to: 3 }] });
+const fluxProposal = `{"action":"k8s_scale","namespace":"default","workload":"web","kind":"deployment","replicas":3,"reason":"the user asked for it"}`;
+const fluxLlm: LLMClient = { chat: async () => ({ content: [{ type: "text", text: fluxProposal }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } }) };
+// `resolved`: whether k8s_get_custom_resources answers with a Kustomization ref (overlay auto-detects)
+// or an empty listing (no kustomize.toolkit.fluxcd.io labels — resolveOverlayPath returns undefined).
+function fluxFake(tools: ToolDefinition[], resolved: boolean) {
+  return {
     connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => tools,
     callTool: async (name: string, input: Record<string, unknown>) => {
       if (name === "k8s_list_deployments") return JSON.stringify([{ name: "web", namespace: "default", replicas: 1, readyReplicas: 1, containers: [{ name: "web", image: "nginx:1" }] }]);
-      if (input.dry_run) return preview;
+      if (resolved && name === "k8s_get_custom_resources" && input.plural === "helmreleases") {
+        return JSON.stringify({ metadata: { labels: { "kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system" } } });
+      }
+      if (resolved && name === "k8s_get_custom_resources" && input.plural === "kustomizations") {
+        return JSON.stringify({ spec: { path: "./apps/stg/applications" } });
+      }
+      if (input.dry_run) return fluxPreview;
       return "[]";
     },
+  };
+}
+const fluxGitopsOk = (sent: Array<Record<string, unknown>>) => ({
+  request: async (m: Record<string, unknown>) => {
+    sent.push(m);
+    return { ok: true, op: "dry_run", path: "apps/stg/applications/values.yaml", valuesKey: "replicas", before: "1", after: "3", diff: "diff" };
+  },
+});
+
+test("off-local GitOps proposal is no longer refused", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const stgTools = [fluxTool("k8s_scale", "[WRITE] scale"), fluxTool("k8s_list_deployments"), fluxTool("k8s_list_pods")];
+  const mcp = new ClusterRouter(
+    fluxFake([fluxTool("prometheus_query"), ...stgTools], true) as McpTools,
+    new Map([["stg", fluxFake(stgTools, true) as BridgeTools]]),
+    registry
+  );
+  const agent = new DevOpsAgent({
+    llm: fluxLlm, mcp,
+    recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }),
+    remediations: { pendingFor: async () => null, propose: async () => 7 } as never,
+    clusters: registry,
+    gitops: fluxGitopsOk(sent) as unknown as GitOpsClient,
   });
-  const mcp = new ClusterRouter(fake([tool("prometheus_query"), ...stgTools]) as McpTools, new Map([["stg", fake(stgTools) as BridgeTools]]), registry);
-  const proposal = `{"action":"k8s_scale","namespace":"default","workload":"web","kind":"deployment","replicas":3,"reason":"the user asked for it"}`;
-  const llm: LLMClient = { chat: async () => ({ content: [{ type: "text", text: proposal }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } }) };
-  const agent = new DevOpsAgent({ llm, mcp, recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }), remediations: { pendingFor: async () => null, propose: async () => 7 } as never, clusters: registry });
-  (agent as unknown as { gitops: unknown }).gitops = { request: async (m: { op: string }) => { sent.push(m.op); return { ok: true, op: m.op }; } };
   await agent.bindThreadCluster("T", "stg");
   const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { threadId: "T", userRequested: true });
-  assert.deepEqual(out, { refused: "GitOps changes for stg arrive with per-cluster repository mapping (multi-cluster part 3); a restart or a pod delete is still possible." });
+  assert.ok(out && "id" in out, `a card was proposed: ${JSON.stringify(out)}`);
+  assert.equal(sent.length, 1, "the worker WAS asked for a PR");
+  assert.equal(sent[0]!.op, "dry_run");
+  assert.equal(sent[0]!.pathPrefix, "apps/stg/applications", "stg's own overlay, resolved via its own Flux Kustomization");
+});
+
+test("off-local unresolved prefix refuses", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const stgTools = [fluxTool("k8s_scale", "[WRITE] scale"), fluxTool("k8s_list_deployments"), fluxTool("k8s_list_pods")];
+  const mcp = new ClusterRouter(
+    fluxFake([fluxTool("prometheus_query"), ...stgTools], false) as McpTools,
+    new Map([["stg", fluxFake(stgTools, false) as BridgeTools]]),
+    registry
+  );
+  const agent = new DevOpsAgent({
+    llm: fluxLlm, mcp,
+    recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }),
+    remediations: { pendingFor: async () => null, propose: async () => 7 } as never,
+    clusters: registry,
+    gitops: fluxGitopsOk(sent) as unknown as GitOpsClient,
+  });
+  await agent.bindThreadCluster("T", "stg");
+  const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { threadId: "T", userRequested: true });
+  assert.deepEqual(out, { refused: "GitOps changes for stg need its overlay path, and flux-app/web's Flux Kustomization could not be read; a restart or a pod delete is still possible." });
   assert.deepEqual(sent, [], "the worker was never asked for a PR");
+});
+
+test("local unresolved prefix keeps the fallback", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const devTools = [fluxTool("prometheus_query"), fluxTool("k8s_scale", "[WRITE] scale"), fluxTool("k8s_list_deployments"), fluxTool("k8s_list_pods")];
+  const mcp = new ClusterRouter(fluxFake(devTools, false) as McpTools, new Map(), registry);
+  const agent = new DevOpsAgent({
+    llm: fluxLlm, mcp,
+    recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }),
+    remediations: { pendingFor: async () => null, propose: async () => 7 } as never,
+    clusters: registry,
+    gitops: fluxGitopsOk(sent) as unknown as GitOpsClient,
+  });
+  await agent.bindThreadCluster("T", "dev");
+  const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { threadId: "T", userRequested: true });
+  assert.ok(out && "id" in out, `a card was proposed: ${JSON.stringify(out)}`);
+  assert.equal(sent.length, 1, "the worker was still asked, with no pathPrefix");
+  assert.equal(sent[0]!.pathPrefix, undefined, "local fallback: the worker uses its own GITOPS_PATH_PREFIX default");
 });
 
 // A pending card is a lock on a target (RemediationStore.pendingFor, matched on params.target).

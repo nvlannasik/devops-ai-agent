@@ -9,10 +9,9 @@ import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSum
 import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./noop-guard.js";
 import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, expectFromRevert, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
-import { SqsGitOpsClient } from "../gitops/sqs.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "../gitops/preview.js";
 import { pickRevertCommit } from "../gitops/revert.js";
-import { type GitOpsDrift } from "../gitops/types.js";
+import { type GitOpsDrift, type GitOpsClient } from "../gitops/types.js";
 import { FLUX_HELMRELEASE, FLUX_KUSTOMIZATION, kustomizeRefOf, fluxPathToPrefix } from "../gitops/overlay.js";
 import { type ChangeTimeline } from "../changes/index.js";
 import { config } from "../../config/index.js";
@@ -37,7 +36,7 @@ export interface RemediatorHost {
   readonly llm: LLMClient;
   readonly remediations: RemediationStore;
   readonly checks: RemediationCheckStore;
-  readonly gitops: SqsGitOpsClient | null;
+  readonly gitops: GitOpsClient | null;
   readonly memory: ConversationMemory;
   readonly incidents: IncidentMemory;
   trace(): TraceRecorder;
@@ -212,14 +211,12 @@ export class Remediator {
     }
 
     // Flux HelmRelease-managed workloads return a structured PR preview (not a direct-patch
-    // validation) — route to the GitOps PR flow instead of storing a direct-patch card.
+    // validation) — route to the GitOps PR flow instead of storing a direct-patch card. The overlay
+    // is resolved per the AMBIENT cluster (proposeGitOpsPr/proposeRevertPr → resolveOverlayPath, via
+    // overlayRefusal below) — a Flux-managed target on another cluster whose overlay didn't resolve
+    // gets a reason there, never a PR at the wrong (local) path. The local cluster keeps today's
+    // worker fallback (no pathPrefix => the worker's own GITOPS_PATH_PREFIX default).
     const preview = parseGitOpsPreview(dryRun);
-    // A PR edits the repo overlay of the LOCAL cluster; per-cluster repository mapping is part 3.
-    // Until then a Flux-managed target on another cluster gets a reason, never a PR at the wrong path.
-    const cluster = currentCluster();
-    if (preview && this.host.clusters?.strict && cluster && cluster !== this.host.clusters.local) {
-      return { refused: `GitOps changes for ${cluster} arrive with per-cluster repository mapping (multi-cluster part 3); a restart or a pod delete is still possible.` };
-    }
     if (preview) return preview.action === "rollback" ? this.proposeRevertPr(incidentId, proposal, preview, opts.threadId) : this.proposeGitOpsPr(incidentId, proposal, preview);
 
     // A rollback replays the live revision the dry-run saw as `from_revision`: the MCP patch
@@ -534,6 +531,22 @@ export class Remediator {
     }
   }
 
+  /**
+   * On a non-local cluster, an unresolved overlay must refuse the GitOps path rather than send the
+   * worker a request with no `pathPrefix` — that falls back to the worker's whole-repo default,
+   * which is the LOCAL cluster's overlay, and HelmRelease names repeat across clusters' overlays
+   * (base, dev, stg). The local cluster keeps today's fallback: `pathPrefix` undefined is fine there
+   * because the worker's own default IS its overlay.
+   */
+  private overlayRefusal(hr: { name: string; namespace: string }, pathPrefix: string | undefined): string | null {
+    if (pathPrefix !== undefined) return null;
+    const registry = this.host.clusters;
+    if (!registry?.strict) return null;
+    const cluster = currentCluster();
+    if (!cluster || cluster === registry.local) return null;
+    return `GitOps changes for ${cluster} need its overlay path, and ${hr.namespace}/${hr.name}'s Flux Kustomization could not be read; a restart or a pod delete is still possible.`;
+  }
+
   // GitOps PR branch of proposeRemediation: ask the worker (over SQS) to prepare the PR
   // (dry_run → diff), then store a PR-flavored remediation so the approve path opens it.
   private async proposeGitOpsPr(
@@ -546,6 +559,8 @@ export class Remediator {
       return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
     }
     const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    const blocked = this.overlayRefusal(preview.helmRelease, pathPrefix);
+    if (blocked) return { refused: blocked };
     let payload;
     try {
       payload = await this.host.gitops.request({ op: "dry_run", helmRelease: preview.helmRelease, action: preview.action, container: preview.container, component: preview.component, changes: preview.changes, pathPrefix });
@@ -613,6 +628,8 @@ export class Remediator {
       };
     }
     const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    const blocked = this.overlayRefusal(preview.helmRelease, pathPrefix);
+    if (blocked) return { refused: blocked };
     let payload;
     try {
       payload = await this.host.gitops.request({ op: "revert_pr", helmRelease: preview.helmRelease, sha: commit.sha, pathPrefix, dryRun: true });

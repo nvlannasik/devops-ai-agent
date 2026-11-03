@@ -7,6 +7,7 @@ import type { BridgeTools, McpTools } from "../mcp/types.js";
 import { clusterRegistry, withCluster } from "./index.js";
 import { ClusterRouter } from "./router.js";
 import { resetServiceGraphCache } from "../correlation/topology.js";
+import { type GitOpsClient } from "../gitops/types.js";
 
 // A real DevOpsAgent and a real ClusterRouter over recording fakes: what multi-cluster 2a promises
 // end to end — a mention binds the thread, follow-ups keep it, an unbound thread gets no Kubernetes.
@@ -100,6 +101,59 @@ test("an alert's change timeline reads its own cluster, and none when it is unla
   const u = await agent.collectChanges({ namespace: "default" }, at, []);
   assert.deepEqual(calls, ["stg:k8s_change_timeline"]);
   assert.ok(u!.unread.some((x) => /no cluster is bound/.test(x)));
+});
+
+// Part 3 task 3: git history's overlay is resolved under the ALERT's cluster — resolveOverlayPath
+// reads the HelmRelease CR via k8s_get_custom_resources, a k8s_ tool the ClusterRouter must route
+// to stg, not dev; the bug fixed here ran that read outside collectChanges's read() wrapper, which
+// throws "no cluster is bound" in strict mode instead of resolving anything.
+function fluxFake(overlayPath: string | null) {
+  return {
+    connect: async () => {},
+    disconnect: async () => {},
+    ping: async () => true,
+    getTools: () => [tool("k8s_change_timeline"), tool("k8s_get_custom_resources")],
+    callTool: async (name: string, input: Record<string, unknown> = {}) => {
+      if (name === "k8s_change_timeline") return JSON.stringify({ changes: [], helmReleases: [{ name: "web", namespace: "default" }] });
+      if (name === "k8s_get_custom_resources" && overlayPath !== null) {
+        if (input.plural === "helmreleases") {
+          return JSON.stringify({ metadata: { labels: { "kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system" } } });
+        }
+        if (input.plural === "kustomizations") return JSON.stringify({ spec: { path: overlayPath } });
+      }
+      return "[]"; // overlayPath === null: no kustomize.toolkit.fluxcd.io labels on the HelmRelease
+    },
+  };
+}
+const noLocal = { connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => [], callTool: async () => "[]" };
+
+test("history resolves the overlay under the alert's cluster", async () => {
+  const calls: string[] = [];
+  const stg = fluxFake("./apps/stg/applications");
+  const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
+  const mcp = new ClusterRouter(noLocal as unknown as McpTools, new Map([["stg", { ...stg, callTool: async (name: string, input: Record<string, unknown> = {}) => { calls.push(`stg:${name}`); return stg.callTool(name, input); } } as unknown as BridgeTools]]), registry);
+  const sent: Array<Record<string, unknown>> = [];
+  const gitops = { request: async (body: Record<string, unknown>) => { sent.push(body); return { ok: true as const, op: "history" as const, commits: [] }; } };
+  const agent = new DevOpsAgent({ mcp, clusters: registry, gitops: gitops as unknown as GitOpsClient });
+  const t = await agent.collectChanges({ namespace: "default", cluster: "stg" }, new Date(), []);
+  assert.ok(calls.includes("stg:k8s_get_custom_resources"), `overlay lookup must reach stg: ${calls.join(", ")}`);
+  assert.ok(calls.every((c) => c.startsWith("stg:")), `the Kustomization read went to stg, never dev: ${calls.join(", ")}`);
+  assert.equal(sent.length, 1, "one history request");
+  assert.equal(sent[0]!.pathPrefix, "apps/stg/applications");
+  assert.ok(!t!.unread.some((u) => /no cluster is bound|cannot tell/.test(u)), t!.unread.join("; "));
+});
+
+test("off-local unresolved prefix gives no git source", async () => {
+  const calls: string[] = [];
+  const stg = fluxFake(null);
+  const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
+  const mcp = new ClusterRouter(noLocal as unknown as McpTools, new Map([["stg", { ...stg, callTool: async (name: string, input: Record<string, unknown> = {}) => { calls.push(`stg:${name}`); return stg.callTool(name, input); } } as unknown as BridgeTools]]), registry);
+  const sent: Array<Record<string, unknown>> = [];
+  const gitops = { request: async (body: Record<string, unknown>) => { sent.push(body); return { ok: true as const, op: "history" as const, commits: [] }; } };
+  const agent = new DevOpsAgent({ mcp, clusters: registry, gitops: gitops as unknown as GitOpsClient });
+  const t = await agent.collectChanges({ namespace: "default", cluster: "stg" }, new Date(), []);
+  assert.deepEqual(sent, [], "no history request without a resolved overlay");
+  assert.ok(t!.unread.some((u) => u.includes("stg") && u.includes("web")), t!.unread.join("; "));
 });
 
 test("a mention in an unbound thread is asked for its cluster, and naming one resumes the question", async () => {

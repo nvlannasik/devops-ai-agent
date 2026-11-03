@@ -70,3 +70,11 @@ export type GitOpsPayload =
   | { ok: true; op: "revert_pr"; dryRun: false; paths: string[]; prUrl: string }
   | { ok: true; op: "locate"; revision: string; releases: LocateResult[] }
   | { ok: false; reason: string; drift?: GitOpsDrift };
+
+// What the agent needs from the GitOps bridge — SqsGitOpsClient satisfies this structurally.
+// A minimal interface (rather than the concrete class) so tests can inject a fake `{ request() }`
+// with no SQS, no dispatcher, mirroring how AgentDeps.mcp takes McpTools rather than MCPClient.
+export interface GitOpsClient {
+  request(body: GitOpsRequestBody): Promise<GitOpsPayload>;
+  shutdown?(): Promise<void>;
+}
