@@ -113,3 +113,15 @@ test("a workload named after its own namespace is not grounded by the namespace"
   assert.equal(ungroundedTargetRefusal(p, `{"name":"bench-c01","namespace":"bench-c01","kind":"Deployment"}`), null);
   assert.equal(ungroundedTargetRefusal(p, "", { deployment: "bench-c01", namespace: "bench-c01" }), null);
 });
+
+// Live 2026-11-03, stg: the offer named the image before the workload, and the gate read the image
+// (`quay.io/prometheus/prometheus:v3.15.1` has slashes too) as the object — every card was refused.
+test("the offer's object is the workload, never an image reference in the same line", () => {
+  const offer = "change container `prometheus-server` image to `quay.io/prometheus/prometheus:v3.15.1` in `monitoring/Deployment/monitoring-prometheus-server`";
+  const card = parseProposal(JSON.stringify({ action: "k8s_set_image", namespace: "monitoring", workload: "monitoring-prometheus-server", kind: "deployment", container: "prometheus", image: "quay.io/prometheus/prometheus:v3.15.1" }))!;
+  assert.equal(offerMismatchRefusal(card, offer), null);
+  const other = parseProposal(JSON.stringify({ action: "k8s_set_image", namespace: "monitoring", workload: "loki", kind: "deployment", container: "loki", image: "quay.io/prometheus/prometheus:v3.15.1" }))!;
+  assert.match(offerMismatchRefusal(other, offer) ?? "", /monitoring\/Deployment\/monitoring-prometheus-server/);
+  // An offer whose only slashed token is an image names no object: nothing to compare.
+  assert.equal(offerMismatchRefusal(other, "set the image to `docker.io/library/nginx:1.27`"), null);
+});

@@ -208,7 +208,12 @@ export function resourceFaultRefusal(proposal: Proposal, observed: string | null
  */
 export function offerMismatchRefusal(proposal: Proposal, offer: string | null): string | null {
   if (!offer) return null;
-  const named = offer.match(/`([^`\n]*\/[^`\n]*)`/)?.[1];
+  // The object is `ns/Kind/name` or `ns/name`; an image reference in the same line has slashes too
+  // (live 2026-11-03: `quay.io/prometheus/prometheus:v3.15.1` read as the object refused every card).
+  // A namespace holds no `.`, and an image carries a tag, digest or registry host, so those are skipped.
+  const named = [...offer.matchAll(/`([^`\n]*\/[^`\n]*)`/g)]
+    .map((m) => m[1]!)
+    .find((t) => !/[:@]/.test(t) && !t.split("/")[0]!.includes("."));
   if (!named) return null;
   const parts = named.toLowerCase().split("/").filter(Boolean);
   const target = parts[parts.length - 1];
