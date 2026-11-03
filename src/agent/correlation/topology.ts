@@ -1,4 +1,5 @@
 import logger from "../../utils/logger/index.js";
+import { currentCluster } from "../cluster/index.js";
 
 // Cross-group correlation by the LIVE call graph (spec 2026-10-13-alert-correlation-design).
 // One fault fires several alert groups — orders-api slows, checkout-gateway (its caller) alerts
@@ -47,13 +48,18 @@ export function parseCallGraph(promResult: string): CallGraph | null {
   return g;
 }
 
-let cached: { at: number; graph: CallGraph } | null = null;
-export const resetServiceGraphCache = (): void => { cached = null; };
+// One cache entry per cluster (multi-cluster part 3 task 2): dev's and stg's call graphs are
+// different data, and `currentCluster() ?? ""` collapses single-cluster mode (always undefined)
+// to the one key it always used.
+const cache = new Map<string, { at: number; graph: CallGraph }>();
+export const resetServiceGraphCache = (): void => { cache.clear(); };
 
 export async function serviceGraph(
   callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
   now: () => number = Date.now
 ): Promise<CallGraph | null> {
+  const key = currentCluster() ?? "";
+  const cached = cache.get(key);
   if (cached && now() - cached.at < CACHE_MS) return cached.graph;
   try {
     const raw = await Promise.race([
@@ -62,7 +68,7 @@ export async function serviceGraph(
     ]);
     const graph = parseCallGraph(raw);
     if (!graph) { logger.info(`[correlation] graph unavailable: not a vector (${raw.slice(0, 120)})`); return null; }
-    cached = { at: now(), graph };
+    cache.set(key, { at: now(), graph });
     return graph;
   } catch (err) {
     logger.info(`[correlation] graph unavailable: ${err instanceof Error ? err.message : String(err)}`);

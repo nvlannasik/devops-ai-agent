@@ -8,7 +8,7 @@ import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksInd
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
-import { serviceGraph, type OpenIncident } from "./correlation/topology.js";
+import { serviceGraph, type CallGraph, type OpenIncident } from "./correlation/topology.js";
 import { buildClusterModel, ClusterModelCache } from "./onboarding/index.js";
 import { namespaceNamed } from "./onboarding/model.js";
 import { type ClusterModel } from "./onboarding/types.js";
@@ -181,6 +181,7 @@ export class DevOpsAgent {
       get mcp() { return self.mcp; },
       get llm() { return self.llm; },
       recordUsage: (threadTs, response) => self.recordUsage(threadTs, response),
+      get clusters() { return self.clusters; },
     });
     this.runner = new InvestigationRunner({
       get mcp() { return self.mcp; },
@@ -278,6 +279,16 @@ export class DevOpsAgent {
    * service-graph query (app/index.ts), which needs one tool call and no investigation. */
   callTool(name: string, input: Record<string, unknown>): Promise<string> {
     return this.mcp.callTool(name, input);
+  }
+
+  /** Cross-alert correlation's service-graph query (app/alerts.ts), run under the alert's OWN
+   *  cluster in multi-cluster mode — this runs before any investigation's withCluster exists,
+   *  so there is no ambient cluster to inherit; an unlabelled alert gets no graph, same as no
+   *  Kubernetes tools for it. Plain (no wrapping) in single-cluster mode, unchanged. */
+  async serviceGraphFor(labels: Record<string, string>): Promise<CallGraph | null> {
+    const cluster = alertCluster(labels, this.clusters);
+    const run = () => serviceGraph((n, i) => this.mcp.callTool(n, i));
+    return cluster === undefined ? run() : withCluster(cluster, run);
   }
 
   mcpTools(): ToolDefinition[] {

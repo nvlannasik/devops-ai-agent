@@ -68,6 +68,20 @@ test("correlation stays inside one cluster", async () => {
   assert.equal((await mem.openRelatable("kube-system", 30)).length, 2, "single-cluster: no filter");
 });
 
+test("listUnresolved selects cluster, for the sweeper's per-incident alertState check", async () => {
+  let sql = "";
+  const pool = {
+    query: async (q: string) => {
+      sql = q;
+      return { rows: [{ id: 1, alertname: "X", namespace: "ns", channel: "C", thread_ts: "1.1", group_labels: null, cleared_seen_at: null, cluster: "stg" }] };
+    },
+  };
+  const mem = new IncidentMemory(pool as never);
+  const rows = await mem.listUnresolved(600, 50);
+  assert.match(sql, /\bcluster\b/);
+  assert.equal(rows[0]?.cluster, "stg");
+});
+
 test("a thread's incident row says its cluster", async () => {
   const pool = { query: async (_sql: string, params: unknown[]) => ({ rows: params[0] === "9.9" ? [{ cluster: "stg" }] : params[0] === "8.8" ? [{ cluster: null }] : [] }) };
   const mem = new IncidentMemory(pool as never);

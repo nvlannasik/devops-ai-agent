@@ -4,7 +4,7 @@ import { SlackApp } from "./index.js";
 import { AlertFlow } from "./alerts.js";
 
 const viaAlerts = (fake: object) => Object.assign(Object.create(AlertFlow.prototype), fake, { host: fake });
-import { resetServiceGraphCache } from "../agent/correlation/topology.js";
+import { resetServiceGraphCache, serviceGraph } from "../agent/correlation/topology.js";
 import { config } from "../config/index.js";
 import { InFlightRegistry } from "../agent/inflight/index.js";
 import { fakeRedis } from "../agent/inflight/fake-redis.test.js";
@@ -48,11 +48,15 @@ function harness(opts: {
   const semaphoreCalls = { acquire: 0, release: 0 };
   const inFlightTracked: any[] = [];
   let pending: Promise<unknown> | null = null;
+  // serviceGraphFor replaces the direct callTool-based serviceGraph() call (DevOpsAgent now runs
+  // the query under the alert's own cluster) — this fake agent has no cluster registry, so it
+  // just wraps the same fake MCP read the `callTool` option configures.
+  const callToolFn = opts.callTool ?? (async () => VECTOR);
   const self: any = {
     unstored: new Map(),
     inflight: new InFlightRegistry(() => null),
     agent: {
-      callTool: opts.callTool ?? (async () => VECTOR),
+      serviceGraphFor: () => serviceGraph(callToolFn),
       openRelatable: opts.openRelatable ?? (async () => []),
       storeIncident: async (...a: any[]) => {
         stored.push(a);

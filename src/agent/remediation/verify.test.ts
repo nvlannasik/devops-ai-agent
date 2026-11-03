@@ -51,12 +51,18 @@ test("summarizePods distinguishes 'no pods matched' from 'could not read'", () =
 // ---- alertState ----
 
 // the alertmanager_get_alerts shape: groups of alerts, each labelled with its status
-const alerts = (...items: Array<{ name: string; status?: string; namespace?: string }>) =>
+const alerts = (...items: Array<{ name: string; status?: string; namespace?: string; cluster?: string }>) =>
   JSON.stringify({
     summary: { groups: items.length, alerts: items.length, byStatus: {}, bySeverity: {} },
     groups: items.map((a) => ({
       groupLabels: { alertname: a.name },
-      alerts: [{ name: a.name, status: a.status ?? "active", labels: a.namespace ? { namespace: a.namespace } : {} }],
+      alerts: [
+        {
+          name: a.name,
+          status: a.status ?? "active",
+          labels: { ...(a.namespace ? { namespace: a.namespace } : {}), ...(a.cluster ? { cluster: a.cluster } : {}) },
+        },
+      ],
     })),
   });
 const noAlerts = JSON.stringify({ summary: { groups: 0, alerts: 0, byStatus: {}, bySeverity: {} }, groups: [] });
@@ -98,6 +104,21 @@ test("alertState is 'cleared' when the alert is gone, 'none' without an alertnam
   assert.equal(alertState(alerts({ name: "SomethingElse" }), "KubePodCrashLooping", "payments"), "cleared");
   assert.equal(alertState(noAlerts, "KubePodCrashLooping", "payments"), "cleared");
   assert.equal(alertState(noAlerts, null, null), "none");
+});
+
+// Multi-cluster part 3 task 2: dev and stg can both page the same alertname+namespace, so the
+// re-check has to reject the OTHER cluster's record — same "reject only what we can compare"
+// rule the namespace check above uses.
+test("alertState ignores another cluster's alert", () => {
+  const raw = alerts({ name: "KubePodCrashLooping", namespace: "default", cluster: "dev" });
+  assert.equal(alertState(raw, "KubePodCrashLooping", "default", "stg"), "cleared");
+  assert.equal(alertState(raw, "KubePodCrashLooping", "default", "dev"), "firing");
+  assert.equal(alertState(raw, "KubePodCrashLooping", "default"), "firing");
+});
+
+test("alertState keeps a cluster-less alert (no cluster label) for whichever cluster asks", () => {
+  const raw = alerts({ name: "KubePodCrashLooping", namespace: "default" });
+  assert.equal(alertState(raw, "KubePodCrashLooping", "default", "stg"), "firing");
 });
 
 test("alertState is 'unknown' on unreadable output — not 'cleared'", () => {

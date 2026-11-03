@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import fs from "node:fs";
 import { CALL_GRAPH_QUERY, parseCallGraph, relatedIncident, describeVia, serviceGraph, resetServiceGraphCache, type OpenIncident } from "./topology.js";
+import { withCluster } from "../cluster/index.js";
 
 // The real shape returned by prometheus_query MCP tool: resultType and result at top level,
 // optional note fields from explainEmptyVector if the result is empty
@@ -97,6 +98,17 @@ test("serviceGraph caches a good graph for 5 minutes and never caches a failure"
   assert.equal(calls, 2, "cached inside 5 min");
   await serviceGraph(callTool, () => T0 + 6 * MIN);
   assert.equal(calls, 3, "expired after 5 min");
+});
+
+test("serviceGraph caches per cluster", async () => {
+  resetServiceGraphCache();
+  let calls = 0;
+  const callTool = async () => { calls++; return VECTOR; };
+  await withCluster("dev", () => serviceGraph(callTool, () => T0));
+  await withCluster("stg", () => serviceGraph(callTool, () => T0));
+  assert.equal(calls, 2, "two different clusters, two keys, two calls");
+  await withCluster("dev", () => serviceGraph(callTool, () => T0 + MIN));
+  assert.equal(calls, 2, "dev's own entry is still inside its TTL");
 });
 
 test("CALL_GRAPH_QUERY metric exists in the sample apps", async (t) => {

@@ -232,7 +232,7 @@ const alertsIn = (g: unknown): HeldAlert[] => {
  * here. That is deliberate — Alertmanager is the source of truth — and `decideVerdict` still
  * refuses to call it recovered while any pod is unready.
  */
-export function alertState(raw: string, alertname: string | null, namespace: string | null): AlertState {
+export function alertState(raw: string, alertname: string | null, namespace: string | null, cluster?: string | null): AlertState {
   if (!alertname) return "none";
   let parsed: unknown;
   try {
@@ -250,6 +250,10 @@ export function alertState(raw: string, alertname: string | null, namespace: str
       // (node-level rules) still counts for the namespace it was investigated under.
       const ns = rec.labels?.namespace;
       if (namespace && typeof ns === "string" && ns !== namespace) return false;
+      // Same rule for cluster (multi-cluster part 3 task 2): a record naming a DIFFERENT
+      // cluster is not evidence for this one, but a record with no cluster label still counts.
+      const rc = rec.labels?.cluster;
+      if (cluster && typeof rc === "string" && rc !== cluster) return false;
       return true;
     })
   );

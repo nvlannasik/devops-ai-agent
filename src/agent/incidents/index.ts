@@ -507,7 +507,7 @@ export class IncidentMemory {
     if (!this.pool) return [];
     try {
       const { rows } = await this.pool.query(
-        `SELECT id, alertname, namespace, channel, thread_ts, group_labels, cleared_seen_at
+        `SELECT id, alertname, namespace, channel, thread_ts, group_labels, cleared_seen_at, cluster
            FROM incidents
           WHERE resolved_at IS NULL
             AND alertname IS NOT NULL
@@ -524,6 +524,7 @@ export class IncidentMemory {
         threadTs: r.thread_ts ?? null,
         groupLabels: r.group_labels ?? null,
         clearedSeenAt: r.cleared_seen_at ? new Date(r.cleared_seen_at).toISOString() : null,
+        cluster: r.cluster ?? null,
       }));
     } catch (err) {
       logger.error(`[incidents] listUnresolved failed: ${err instanceof Error ? err.message : err}`);

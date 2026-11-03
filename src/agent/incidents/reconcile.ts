@@ -25,6 +25,9 @@ export type UnresolvedIncident = {
   // migration 007, where alertname+namespace is the best key available
   groupLabels: Record<string, string> | null;
   clearedSeenAt: string | null;
+  // The incident's own cluster (migrations/017); NULL = the local cluster. dev and stg can
+  // share an alertname+namespace, so the sweeper's alertState check must filter on this.
+  cluster: string | null;
 };
 
 /**

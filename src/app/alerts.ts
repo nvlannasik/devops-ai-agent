@@ -2,7 +2,7 @@ import { config } from "../config/index.js";
 import { type RunMeta } from "../agent/index.js";
 import { answerAsksForInput, buildAlertProposalContext } from "../agent/remediation/proposal.js";
 import { groupIdentity, buildGroupAlertText, distinctSubjects, type AlertItem } from "../agent/correlation/index.js";
-import { serviceGraph, relatedIncident, describeVia, type OpenIncident } from "../agent/correlation/topology.js";
+import { relatedIncident, describeVia, type OpenIncident } from "../agent/correlation/topology.js";
 import { delegationHint } from "../agent/subagent/index.js";
 import { alertCluster } from "../agent/cluster/binding.js";
 import { buildRcaBlocks, isRcaResponse, extractSection, formatRunFooter } from "../utils/slack/blocks.js";
@@ -63,7 +63,7 @@ export class AlertFlow {
     const namespace = groupLabels.namespace;
     const subjects = distinctSubjects(firing)?.values ?? [];
     if (!namespace || subjects.length === 0) return false;
-    const graph = await serviceGraph((n, i) => this.host.agent.callTool(n, i));
+    const graph = await this.host.agent.serviceGraphFor(groupLabels);
     if (!graph) return false;
     const remote = await this.host.inflight.remote();
     const running = new Map([...remote, ...this.host.unstored]);

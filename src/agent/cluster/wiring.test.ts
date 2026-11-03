@@ -6,17 +6,21 @@ import type { LLMClient, LLMResponse, Message, ToolDefinition } from "../llm/typ
 import type { BridgeTools, McpTools } from "../mcp/types.js";
 import { clusterRegistry, withCluster } from "./index.js";
 import { ClusterRouter } from "./router.js";
+import { resetServiceGraphCache } from "../correlation/topology.js";
 
 // A real DevOpsAgent and a real ClusterRouter over recording fakes: what multi-cluster 2a promises
 // end to end — a mention binds the thread, follow-ups keep it, an unbound thread gets no Kubernetes.
 const tool = (name: string): ToolDefinition => ({ name, description: name, input_schema: { type: "object", properties: {} } });
-const fakeMcp = (label: string, names: string[], calls: string[]) => ({
+// `queries` records the full call (label:name + input), beside `calls`'s plain `label:name` —
+// most tests only need the latter, task 2's serviceGraphFor test needs the query text too.
+const fakeMcp = (label: string, names: string[], calls: string[], queries: Array<{ label: string; name: string; input: Record<string, unknown> }> = []) => ({
   connect: async () => {},
   disconnect: async () => {},
   ping: async () => true,
   getTools: () => names.map(tool),
-  callTool: async (name: string) => {
+  callTool: async (name: string, input: Record<string, unknown> = {}) => {
     calls.push(`${label}:${name}`);
+    queries.push({ label, name, input });
     return `[{"name":"web-1","namespace":"default","ready":true}]`;
   },
 });
@@ -26,6 +30,7 @@ const answer: LLMResponse = { content: [{ type: "text", text: "All pods look fin
 
 function setup(script: LLMResponse[]) {
   const calls: string[] = [];
+  const queries: Array<{ label: string; name: string; input: Record<string, unknown> }> = [];
   const seen: Array<{ tools: ToolDefinition[]; messages: Message[] }> = [];
   let i = 0;
   const llm: LLMClient = {
@@ -37,11 +42,11 @@ function setup(script: LLMResponse[]) {
     },
   };
   const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
-  const central = fakeMcp("dev", ["k8s_list_pods", "k8s_change_timeline", "prometheus_query"], calls) as McpTools;
-  const stg = fakeMcp("stg", ["k8s_list_pods", "k8s_change_timeline"], calls) as BridgeTools;
+  const central = fakeMcp("dev", ["k8s_list_pods", "k8s_change_timeline", "prometheus_query"], calls, queries) as McpTools;
+  const stg = fakeMcp("stg", ["k8s_list_pods", "k8s_change_timeline"], calls, queries) as BridgeTools;
   const mcp = new ClusterRouter(central, new Map([["stg", stg]]), registry);
   const recorder = new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "test" });
-  return { agent: new DevOpsAgent({ llm, mcp, recorder, clusters: registry }), calls, seen };
+  return { agent: new DevOpsAgent({ llm, mcp, recorder, clusters: registry }), calls, seen, queries };
 }
 
 test("a mention binds the thread to its cluster, and a follow-up keeps it", async () => {
@@ -164,6 +169,20 @@ test("recallRemediations passes the alert's cluster in strict mode", async () =>
   (agent as any).remediations = { recallForAlert: async (...a: unknown[]) => { seen.push(a); return []; } };
   await agent.recallRemediations({ alertname: "KubePodCrashLooping", namespace: "kube-system", cluster: "stg" });
   assert.deepEqual(seen, [["KubePodCrashLooping", "kube-system", 3, { cluster: "stg", local: "dev" }]]);
+});
+
+// Multi-cluster part 3 task 2: the correlation service-graph query (app/alerts.ts) runs under
+// the ALERT's own cluster, never whatever is ambient — there is no investigation's withCluster
+// at that point for it to inherit. prometheus_query is central (ClusterRouter), so the proof is
+// the query text ClusterRouter.scoped() adds, reaching the central ("dev") fake.
+test("serviceGraphFor runs the service-graph query under the alert's own cluster", async () => {
+  resetServiceGraphCache();
+  const { agent, queries } = setup([]);
+  await agent.serviceGraphFor({ cluster: "stg" });
+  const graphQueries = queries.filter((q) => q.name === "prometheus_query");
+  assert.equal(graphQueries.length, 1);
+  assert.equal(graphQueries[0]!.label, "dev", "prometheus is central, reached through the local cluster's client");
+  assert.match(String(graphQueries[0]!.input.query), /cluster="stg"/);
 });
 
 test("recallRemediations passes no scope in single-cluster mode", async () => {

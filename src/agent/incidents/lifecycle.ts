@@ -3,6 +3,7 @@ import { IncidentMemory } from "./index.js";
 import { alertsReadable, decideReconcile, type StatusCommand, type UnresolvedIncident } from "./reconcile.js";
 import { parseFeedbackJson, buildExtractionPrompt, EXTRACTION_SYSTEM, tracesToHumans } from "../feedback/index.js";
 import { alertState } from "../remediation/verify.js";
+import { storedCluster, type ClusterRegistry } from "../cluster/index.js";
 import { config } from "../../config/index.js";
 import { truncate } from "../../utils/truncate/index.js";
 import { type LLMClient, type LLMResponse } from "../llm/types.js";
@@ -18,6 +19,8 @@ export interface LifecycleHost {
   readonly mcp: McpTools;
   readonly llm: LLMClient;
   recordUsage(threadTs: string | null, response: LLMResponse): void;
+  /** Multi-cluster (agent/cluster). Optional so a host built for one cluster needs neither. */
+  readonly clusters?: ClusterRegistry;
 }
 
 // One incident the sweeper closed: what to say, and the label set whose dedup claim has to be
@@ -79,8 +82,12 @@ export class IncidentLifecycle {
     const confirming: number[] = [];
     const reset: number[] = [];
     const closing: UnresolvedIncident[] = [];
+    const registry = this.host.clusters;
     for (const inc of candidates) {
-      const state = alertState(raw, inc.alertname, inc.namespace);
+      // dev and stg can share an alertname+namespace, so the combined (central, unfiltered)
+      // response has to be filtered per incident, by its own cluster — never the thread's.
+      const cluster = registry?.strict ? storedCluster(inc.cluster, registry) : undefined;
+      const state = alertState(raw, inc.alertname, inc.namespace, cluster);
       switch (decideReconcile(state, inc.clearedSeenAt, confirmMs)) {
         case "confirming":
           confirming.push(inc.id);

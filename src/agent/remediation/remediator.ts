@@ -950,11 +950,15 @@ export class Remediator {
   // Deterministic, no LLM call. Both signals are fetched together and each degrades on its
   // own — a Prometheus outage must not cost us the pod evidence, and vice versa.
   private async verifyRemediation(check: RemediationCheck): Promise<{ verdict: Verdict; detail: string }> {
+    // Alertmanager is central and unfiltered (MEMORY_BANK), so the re-check has to reject any
+    // OTHER cluster's record itself — dev and stg can share an alertname+namespace.
+    const registry = this.host.clusters;
+    const cluster = registry?.strict ? storedCluster(check.cluster ?? null, registry) : undefined;
     const [alert, after] = await Promise.all([
       check.alertname
         ? this.host.mcp
             .callTool("alertmanager_get_alerts", {})
-            .then((raw) => alertState(raw, check.alertname, check.namespace))
+            .then((raw) => alertState(raw, check.alertname, check.namespace, cluster))
             .catch((err) => {
               logger.warn(`[remediation] alert re-check for ${check.alertname} failed: ${errDetail(err)}`);
               return "unknown" as AlertState;

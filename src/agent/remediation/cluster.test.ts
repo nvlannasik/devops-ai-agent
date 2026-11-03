@@ -56,6 +56,35 @@ test("a due check runs against its row's cluster", async () => {
   assert.ok(k8s.every((s) => s.startsWith("stg:")), `every Kubernetes read on stg: ${seen.join(", ")}`);
 });
 
+// Alertmanager is central and unfiltered — dev and stg can page the same alertname+namespace —
+// so the re-check itself has to reject the other cluster's record (verify.ts's alertState).
+test("a due check's alert re-check rejects another cluster's alert of the same name", async () => {
+  const check = {
+    id: 1, remediationId: 2, channel: "C", threadTs: "T", alertname: "KubePodCrashLooping", namespace: "default",
+    target: { namespace: "default", name: "web" }, before: null, attempts: 1, createdAt: new Date().toISOString(),
+    status: "running", cluster: "stg",
+  };
+  const completed: Array<{ verdict: string; detail: string }> = [];
+  const r = remediatorWith({
+    mcp: {
+      connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => [],
+      callTool: async (name: string) =>
+        name === "alertmanager_get_alerts"
+          ? JSON.stringify({ groups: [{ groupLabels: {}, alerts: [{ name: "KubePodCrashLooping", status: "active", labels: { namespace: "default", cluster: "dev" } }] }] })
+          : `[{"name":"web-1","namespace":"default","status":"Running","ready":true}]`,
+    },
+    checks: {
+      claimDue: async () => [check],
+      complete: async (_id: number, verdict: string, detail: string) => { completed.push({ verdict, detail }); },
+      abandon: async () => {},
+      expireStale: async () => [],
+    },
+    remediations: { expireStale: async () => [] },
+  });
+  await r.runDueRemediationChecks();
+  assert.equal(completed[0]?.verdict, "recovered", `dev's alert must not count as stg's: ${JSON.stringify(completed)}`);
+});
+
 test("a proposal runs on its thread's cluster", async () => {
   const calls: string[] = [];
   const tool = (name: string, description = name): ToolDefinition => ({ name, description, input_schema: { type: "object", properties: {} } });
