@@ -155,8 +155,11 @@ const fluxGitopsOk = (sent: Array<Record<string, unknown>>) => ({
 test("off-local GitOps proposal is no longer refused", async () => {
   const sent: Array<Record<string, unknown>> = [];
   const stgTools = [fluxTool("k8s_scale", "[WRITE] scale"), fluxTool("k8s_list_deployments"), fluxTool("k8s_list_pods")];
+  // Final review finding 5: the local (dev) fake must resolve to NOTHING — only stg's resolves.
+  // Both resolving to the same overlay let a misrouted overlay read (dev's fake instead of stg's)
+  // pass this test as if routing were correct, when it was not being proven at all.
   const mcp = new ClusterRouter(
-    fluxFake([fluxTool("prometheus_query"), ...stgTools], true) as McpTools,
+    fluxFake([fluxTool("prometheus_query"), ...stgTools], false) as McpTools,
     new Map([["stg", fluxFake(stgTools, true) as BridgeTools]]),
     registry
   );

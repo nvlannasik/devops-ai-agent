@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AlertFlow } from "./alerts.js";
 import { InFlightRegistry } from "../agent/inflight/index.js";
 import { fakeRedis } from "../agent/inflight/fake-redis.test.js";
+import { config } from "../config/index.js";
 
 const viaAlerts = (fake: object) => Object.assign(Object.create(AlertFlow.prototype), fake, { host: fake });
 
@@ -93,4 +94,77 @@ test("if the row lands while the resolve is being handed over, the receiving rep
   await b.resolve();
   assert.equal(b.posted.length, 1);
   assert.equal(b.posted[0].thread_ts, "111.1");
+});
+
+// Final review finding 1: Alertmanager groups by [alertname, namespace, cluster] — a resolve for
+// one cluster's group must never match another cluster's in-flight entry of the same
+// alertname+namespace (incidentKey now carries the cluster label too, when present). This goes
+// through the real handleAlert()/handleResolvedAlert() pair rather than a hand-built unstored
+// entry, so the in-flight key is whatever incidentKey() actually produces for each group — the
+// exact value that collided before this fix (incidentKey ignored `cluster` entirely).
+function minimalAlertHost(tsPrefix: string) {
+  let ts = 0;
+  return {
+    unstored: new Map<string, { key: string; resolved?: unknown }>(),
+    inflight: new InFlightRegistry(() => null),
+    dedup: { shouldProcess: async () => true, clear: async () => {} },
+    agent: { resolveIncident: async () => null },
+    app: { client: { chat: { postMessage: async () => ({ ts: `${tsPrefix}${++ts}` }) } } },
+    inFlight: { track: (_meta: unknown, p: Promise<unknown>) => p },
+    threadQueue: { run: (_id: string, _fn: () => Promise<unknown>) => Promise.resolve() },
+  };
+}
+
+test("a stg resolve does not match a dev in-flight entry of the same alertname+namespace", async () => {
+  const previousChannel = config.slack.alertChannel;
+  config.slack.alertChannel = "C-TEST-FINDING1";
+  try {
+    const self: any = minimalAlertHost("T");
+    const devAlert = {
+      status: "firing" as const,
+      // No service-level subject label (just `pod`) — correlate() short-circuits on
+      // distinctSubjects() before touching the agent, keeping this host minimal.
+      labels: { alertname: "SampleAppHighErrorRate", namespace: "sample-apps", pod: "x-abc12", cluster: "dev" },
+      annotations: {},
+      startsAt: new Date().toISOString(),
+    };
+    await AlertFlow.prototype.handleAlert.call(viaAlerts(self), { alerts: [devAlert] });
+    assert.equal(self.unstored.size, 1, "the dev alert opened one in-flight entry");
+    const [threadId] = [...self.unstored.keys()];
+
+    await AlertFlow.prototype.handleResolvedAlert.call(
+      viaAlerts(self),
+      { alertname: "SampleAppHighErrorRate", namespace: "sample-apps", cluster: "stg" },
+      RESOLVED
+    );
+
+    assert.equal(self.unstored.get(threadId!)!.resolved, undefined, "a stg resolve must not mark a dev in-flight entry of the same alertname+namespace");
+  } finally {
+    config.slack.alertChannel = previousChannel;
+  }
+});
+
+// Regression: with no cluster label anywhere (single-cluster mode, or an unlabelled alert in
+// strict mode), the key must be exactly what it was before this fix — a same-cluster resolve
+// still matches its own in-flight entry.
+test("with no cluster label anywhere, a resolve still matches its own in-flight entry (key unchanged)", async () => {
+  const previousChannel = config.slack.alertChannel;
+  config.slack.alertChannel = "C-TEST-FINDING1B";
+  try {
+    const self: any = minimalAlertHost("U");
+    const alert = {
+      status: "firing" as const,
+      labels: { alertname: "SampleAppHighErrorRate", namespace: "sample-apps", pod: "x-abc12" },
+      annotations: {},
+      startsAt: new Date().toISOString(),
+    };
+    await AlertFlow.prototype.handleAlert.call(viaAlerts(self), { alerts: [alert] });
+    const [threadId] = [...self.unstored.keys()];
+
+    await AlertFlow.prototype.handleResolvedAlert.call(viaAlerts(self), { alertname: "SampleAppHighErrorRate", namespace: "sample-apps" }, RESOLVED);
+
+    assert.ok(self.unstored.get(threadId!)!.resolved, "no cluster anywhere: same alertname+namespace still matches, exactly as before this fix");
+  } finally {
+    config.slack.alertChannel = previousChannel;
+  }
 });

@@ -31,6 +31,9 @@ export interface InFlightEntry {
   startedAt?: number;
   alertname?: string;
   resolved?: unknown[];
+  /** Final review finding 1: the alert group's cluster label, so another replica's correlation
+   *  never treats a different cluster's in-flight investigation as a candidate. */
+  cluster?: string;
 }
 
 type RedisLike = Pick<Redis, "set" | "get" | "del" | "mget" | "scan">;

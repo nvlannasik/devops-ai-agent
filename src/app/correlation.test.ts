@@ -364,3 +364,33 @@ test("another replica's entry in another namespace is not a candidate", async ()
   assert.equal(await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate" }, firingAlert(), "t", "warning"), false);
 });
 
+// Final review finding 1: an in-flight entry from a DIFFERENT cluster must never be a correlation
+// candidate, even when its namespace/subjects would otherwise match via the call graph (same
+// same-service edge the first test in this file merges on). Without the cluster filter this used
+// to merge a stg alert into a dev thread.
+test("correlate does not merge an in-flight entry from a different cluster", async () => {
+  resetServiceGraphCache();
+  const h = harness();
+  h.self.unstored.set("100.1", { ...PARENT, cluster: "dev" });
+
+  const result = await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate", cluster: "stg" }, firingAlert(), "issue text body", "warning");
+
+  assert.equal(result, false, "a different cluster's in-flight entry must not be merged into");
+  assert.equal(h.posted.length, 0);
+  assert.equal(h.stored.length, 0);
+});
+
+// The same in-flight entry DOES still merge for the SAME cluster — the filter must not be a
+// blanket "never merge" once any cluster label is involved.
+test("correlate still merges an in-flight entry from the SAME cluster", async () => {
+  resetServiceGraphCache();
+  const h = harness();
+  h.self.unstored.set("100.1", { ...PARENT, cluster: "stg" });
+
+  const result = await h.correlate("C2", { namespace: "sample-apps", alertname: "SampleAppHighErrorRate", cluster: "stg" }, firingAlert(), "issue text body", "warning");
+  await h.waitFollowUp();
+
+  assert.equal(result, true, "the same cluster's in-flight entry is still a valid candidate");
+  assert.equal(h.posted[0].thread_ts, "100.1");
+});
+

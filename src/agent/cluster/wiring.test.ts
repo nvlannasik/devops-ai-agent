@@ -135,7 +135,11 @@ test("history resolves the overlay under the alert's cluster", async () => {
   const calls: string[] = [];
   const stg = fluxFake("./apps/stg/applications");
   const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
-  const mcp = new ClusterRouter(noLocal as unknown as McpTools, new Map([["stg", { ...stg, callTool: async (name: string, input: Record<string, unknown> = {}) => { calls.push(`stg:${name}`); return stg.callTool(name, input); } } as unknown as BridgeTools]]), registry);
+  // Final review finding 6: `noLocal` recorded nothing, so `calls` only ever held stg entries and
+  // `calls.every(c => c.startsWith("stg:"))` below passed vacuously — it couldn't have caught a
+  // misrouted read landing on dev. Record dev's calls too, so the assertion has something to fail on.
+  const local = { ...noLocal, callTool: async (name: string, input: Record<string, unknown> = {}) => { calls.push(`dev:${name}`); return noLocal.callTool(name, input); } };
+  const mcp = new ClusterRouter(local as unknown as McpTools, new Map([["stg", { ...stg, callTool: async (name: string, input: Record<string, unknown> = {}) => { calls.push(`stg:${name}`); return stg.callTool(name, input); } } as unknown as BridgeTools]]), registry);
   const sent: Array<Record<string, unknown>> = [];
   const gitops = { request: async (body: Record<string, unknown>) => { sent.push(body); return { ok: true as const, op: "history" as const, commits: [] }; } };
   const agent = new DevOpsAgent({ mcp, clusters: registry, gitops: gitops as unknown as GitOpsClient });
@@ -158,6 +162,38 @@ test("off-local unresolved prefix gives no git source", async () => {
   const t = await agent.collectChanges({ namespace: "default", cluster: "stg" }, new Date(), []);
   assert.deepEqual(sent, [], "no history request without a resolved overlay");
   assert.ok(t!.unread.some((u) => u.includes("stg") && u.includes("web")), t!.unread.join("; "));
+});
+
+// Final review finding 2: the cluster-model `locate` closure (modelCacheFor) had no such guard —
+// an unresolved overlay on a non-local cluster went out with NO pathPrefix, which the worker reads
+// as "use the local repo's default prefix": the whole-repo fallback this mode forbids. Mirrors the
+// history op's own guard (collectChanges), now applied to locate too.
+test("stg model build with an unresolved overlay sends no locate request without pathPrefix", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const inv = JSON.stringify({
+    scanned: { namespaces: 1, complete: true }, fluxRevisions: [],
+    namespaces: [{ name: "flux-app", system: false, services: [], ingresses: [], workloads: [
+      { kind: "Deployment", name: "web", ready: 1, desired: 1, images: ["nginx:1"], managedBy: { type: "helmrelease", name: "web", namespace: "flux-app" }, dependsOn: [], externalHosts: [], unresolved: [] },
+    ] }],
+  });
+  const stg = {
+    connect: async () => {}, disconnect: async () => {}, ping: async () => true,
+    getTools: () => [tool("k8s_cluster_inventory"), tool("k8s_get_custom_resources")],
+    callTool: async (name: string) => (name === "k8s_cluster_inventory" ? inv : "[]"), // "[]": no kustomize labels, overlay never resolves
+  };
+  const central = {
+    connect: async () => {}, disconnect: async () => {}, ping: async () => true,
+    getTools: () => [tool("prometheus_query")],
+    callTool: async () => "not json", // callGraph: fails open to null, doesn't block the model
+  };
+  const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
+  const mcp = new ClusterRouter(central as unknown as McpTools, new Map([["stg", stg as unknown as BridgeTools]]), registry);
+  const gitops = { request: async (m: Record<string, unknown>) => { sent.push(m); return { ok: true as const, op: "locate" as const, revision: "x", releases: [] }; } };
+  const agent = new DevOpsAgent({ mcp, clusters: registry, gitops: gitops as unknown as GitOpsClient });
+  const model = await withCluster("stg", () => agent.clusterModel());
+  assert.deepEqual(sent, [], "no locate request without a resolved overlay");
+  assert.ok(model, "the model still builds — the gap is unknowns, not a crash");
+  assert.ok(model!.unknowns.some((u) => u.includes("cannot tell") && u.includes("stg")), model!.unknowns.join("; "));
 });
 
 test("a mention in an unbound thread is asked for its cluster, and naming one resumes the question", async () => {
@@ -260,6 +296,18 @@ test("serviceGraphFor runs the service-graph query under the alert's own cluster
   assert.equal(graphQueries.length, 1);
   assert.equal(graphQueries[0]!.label, "dev", "prometheus is central, reached through the local cluster's client");
   assert.match(String(graphQueries[0]!.input.query), /cluster="stg"/);
+});
+
+// Final review finding 3: an unlabelled alert (alertCluster → null) must get NO graph at all.
+// withCluster(null, run) left the query unscoped (ClusterRouter.scoped treats a falsy current
+// cluster as "as written"), so this used to run the COMBINED cross-cluster query and cache it
+// under the same "" key single-cluster mode uses — the doc comment said "none", the code sent one.
+test("serviceGraphFor returns no graph for an unlabelled alert, and sends no query at all", async () => {
+  resetServiceGraphCache();
+  const { agent, queries } = setup([]);
+  const graph = await agent.serviceGraphFor({});
+  assert.equal(graph, null);
+  assert.equal(queries.filter((q) => q.name === "prometheus_query").length, 0, "no query at all — not the unscoped cross-cluster one");
 });
 
 test("recallRemediations passes no scope in single-cluster mode", async () => {

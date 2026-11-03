@@ -13,8 +13,20 @@ import { flagInjection } from "../agent/injection/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 import type { SlackHost } from "./host.js";
 
-/** What `markResolved` matches an incident on: alertname + namespace. */
-const incidentKey = (labels: Record<string, string>): string => `${labels.alertname ?? ""}\u0000${labels.namespace ?? ""}`;
+/**
+ * What `markResolved` matches an incident on: alertname + namespace, plus the cluster label when
+ * the group has one. Final review finding 1: Alertmanager groups by [alertname, namespace,
+ * cluster], so without the suffix a stg resolve matched a dev in-flight entry of the same
+ * alertname+namespace and closed the wrong incident. No cluster label (single-cluster mode, or an
+ * unlabelled alert) keeps today's key exactly — no suffix.
+ */
+export const incidentKey = (labels: Record<string, string>): string =>
+  `${labels.alertname ?? ""}\u0000${labels.namespace ?? ""}${labels.cluster ? `\u0000${labels.cluster}` : ""}`;
+
+/** Same cluster, for in-flight correlation matching: both absent (single-cluster, or neither
+ *  labelled) counts as a match; one set and the other not, or two different names, does not —
+ *  see correlate()'s inFlight filter below. */
+const sameCluster = (a: string | undefined, b: string | undefined): boolean => (a ?? "") === (b ?? "");
 
 /**
  * The change timeline (agent/changes) re-renders tool output verbatim — env values, commit
@@ -67,8 +79,11 @@ export class AlertFlow {
     if (!graph) return false;
     const remote = await this.host.inflight.remote();
     const running = new Map([...remote, ...this.host.unstored]);
+    // Final review finding 1: Alertmanager groups by [alertname, namespace, cluster], so an
+    // in-flight entry from a different cluster (or no cluster, against a labelled group) must
+    // never be a correlation candidate — same namespace+subject on another cluster is coincidence.
     const inFlight: OpenIncident[] = [...running.entries()]
-      .filter(([, u]) => u.namespace && u.startedAt !== undefined)
+      .filter(([, u]) => u.namespace && u.startedAt !== undefined && sameCluster(u.cluster, groupLabels.cluster))
       .map(([threadTs, u]) => ({
         threadTs,
         channel: u.channel ?? channel,
@@ -253,6 +268,7 @@ export class AlertFlow {
       subjects: changeScope.serviceSubjects,
       startedAt: changeScope.alertAt.getTime(),
       alertname: alertName,
+      cluster: groupLabels.cluster,
     };
     this.host.unstored.set(threadId, running);
     // Mirrored so another replica can correlate against it and hand it a resolve (agent/inflight).

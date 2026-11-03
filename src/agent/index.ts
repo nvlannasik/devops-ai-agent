@@ -249,7 +249,16 @@ export class DevOpsAgent {
           {
             inventory: (n) => this.mcp.callTool("k8s_cluster_inventory", n ? { namespace: n } : { detail: true }),
             callGraph: () => serviceGraph((name, input) => this.mcp.callTool(name, input)),
-            locate: gitops ? (pathPrefix, targets) => gitops.request({ op: "locate", targets, ...(pathPrefix ? { pathPrefix } : {}) }) : undefined,
+            // Final review finding 2: an unresolved overlay on a non-local cluster must never go
+            // out with no pathPrefix — the worker reads that as "use the local repo's default
+            // prefix", which is the whole-repo fallback this mode forbids. Local keeps today's
+            // fallback (collectChanges's gitops request has the same rule, see resolveOverlayPath).
+            locate: gitops
+              ? (pathPrefix, targets) =>
+                  strict && cluster !== this.clusters.local && pathPrefix === undefined
+                    ? Promise.resolve({ ok: false as const, reason: `cannot tell which overlay in the repository is ${cluster}'s` })
+                    : gitops.request({ op: "locate", targets, ...(pathPrefix ? { pathPrefix } : {}) })
+              : undefined,
             overlayPath: (hr) => this.resolveOverlayPath(hr),
             now: Date.now,
           },
@@ -261,7 +270,6 @@ export class DevOpsAgent {
     return cache;
   }
 
-  /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
   /** The onboarding cluster model (agent/onboarding) — called outside any investigation, like collectChanges.
    *  Strict mode: `currentCluster()`'s own model, null when nothing is bound. Single-cluster mode: the
    *  one cache ("" ), exactly as before multi-cluster. */
@@ -292,7 +300,8 @@ export class DevOpsAgent {
     }
   }
 
-  /** `cluster` defaults to the local cluster in strict mode — the dashboard's /cluster page asks
+  /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved.
+   *  `cluster` defaults to the local cluster in strict mode — the dashboard's /cluster page asks
    *  for a specific one; the plain mention/alert paths still call this with none. */
   async clusterInventory(cluster?: string): Promise<string> {
     return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
@@ -316,6 +325,12 @@ export class DevOpsAgent {
    *  Kubernetes tools for it. Plain (no wrapping) in single-cluster mode, unchanged. */
   async serviceGraphFor(labels: Record<string, string>): Promise<CallGraph | null> {
     const cluster = alertCluster(labels, this.clusters);
+    // Final review finding 3: null (strict mode, no usable cluster label) is NOT "no cluster
+    // bound" the way undefined (single-cluster mode) is — `withCluster(null, run)` leaves the
+    // query unscoped (ClusterRouter.scoped treats a falsy current cluster as "as written"), so
+    // this returned the COMBINED cross-cluster graph, cached under the same "" key single-cluster
+    // mode uses. An unlabelled alert gets no graph at all, same as no Kubernetes tools for it.
+    if (cluster === null) return null;
     const run = () => serviceGraph((n, i) => this.mcp.callTool(n, i));
     return cluster === undefined ? run() : withCluster(cluster, run);
   }
@@ -385,9 +400,7 @@ export class DevOpsAgent {
     if (!alertname) return ""; // keyed by alert; mention-driven flows have no labels
     // Multi-cluster: keyed by the alert's cluster as well (agent/cluster) — dev and stg share
     // alertnames, so an unscoped recall would surface the wrong cluster's past remediations.
-    const scope = this.clusters.strict
-      ? { cluster: alertCluster(labels, this.clusters) ?? this.clusters.local, local: this.clusters.local }
-      : undefined;
+    const scope = this.alertScope(labels);
     const rows = await (scope
       ? this.remediations.recallForAlert(alertname, labels.namespace, 3, scope)
       : this.remediations.recallForAlert(alertname, labels.namespace, 3)
@@ -716,10 +729,15 @@ export class DevOpsAgent {
     // Multi-cluster: dev and stg share alertnames, so an unscoped resolve could close the wrong
     // cluster's incident. An unlabelled alert still resolves — against the local cluster's row,
     // since NULL reads as local (migrations/017) and that is what an unlabelled store() wrote.
-    const scope = this.clusters.strict
+    return this.incidents.markResolved(labels, "alertmanager", this.alertScope(labels));
+  }
+
+  /** Final review finding 7: the scope ternary `recallRemediations` and `resolveIncident` both
+   *  had, byte for byte. Single-cluster mode: undefined, unchanged — no scope at all. */
+  private alertScope(labels: Record<string, string>): { cluster: string | null; local: string | null } | undefined {
+    return this.clusters.strict
       ? { cluster: alertCluster(labels, this.clusters) ?? this.clusters.local, local: this.clusters.local }
       : undefined;
-    return this.incidents.markResolved(labels, "alertmanager", scope);
   }
 
   // ---- Incident lifecycle — the bodies live in incidents/lifecycle.ts; these delegate. ----

@@ -1018,9 +1018,14 @@ export type AwaitApply = { target: { namespace: string; name: string; kind: stri
 /** `deployment` → `Deployment`, the spelling k8s_get_resource's `kind` takes. */
 const kindName = (kind: string): string => ({ deployment: "Deployment", statefulset: "StatefulSet", daemonset: "DaemonSet" })[kind.toLowerCase()] ?? "Deployment";
 
-/** `k8s_scale:ns/name` — the card's target key — for rows proposed before `workload` was stored. */
+/**
+ * `k8s_scale:ns/name`, or multi-cluster's `<cluster>:k8s_scale:ns/name` (targetKey) — for rows
+ * proposed before `workload` was stored. Final review finding 4: without the optional cluster
+ * prefix, `[a-z0-9_]+:` greedily ate `k8s_scale:default` as one segment, so `stg:k8s_scale:default/web`
+ * parsed as namespace `k8s_scale:default` instead of `default`.
+ */
 function targetOf(key: string): { kind: string; namespace: string; name: string } | null {
-  const m = /^[a-z0-9_]+:([^/\s]+)\/([^/\s]+)$/.exec(key);
+  const m = /^(?:[^:]+:)?[a-z0-9_]+:([^/:\s]+)\/([^/\s]+)$/.exec(key);
   return m ? { kind: "deployment", namespace: m[1]!, name: m[2]! } : null;
 }
 

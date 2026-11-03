@@ -189,6 +189,19 @@ test("a revert PR is watched for the broken rollout's old values", async () => {
   assert.deepEqual(res.awaitApply, { target: { namespace: "apps", name: "api", kind: "Deployment" }, expect: exp(["api.env.MODE", "a"]) });
 });
 
+// Final review finding 4: targetOf's regex greedily ate the `<cluster>:` prefix multi-cluster's
+// targetKey() adds into the namespace capture (`stg:k8s_rollout_undo:apps/api` parsed as namespace
+// `k8s_rollout_undo:apps`). The revert path reads `target` through targetOf directly (no workload
+// field on this params shape), so this is the one place that regex result is externally visible.
+test("a revert PR's target key tolerates a multi-cluster targetKey's cluster prefix", async () => {
+  const res = await approve(
+    { gitops: true, revert: true, helmRelease: { name: "api", namespace: "f" }, sha: "abc", target: "stg:k8s_rollout_undo:apps/api", summary: "s",
+      applyExpect: exp(["api.env.MODE", "a"]) },
+    { ok: true, op: "revert_pr", dryRun: false, prUrl: "u", paths: [] }
+  );
+  assert.deepEqual(res.awaitApply, { target: { namespace: "apps", name: "api", kind: "Deployment" }, expect: exp(["api.env.MODE", "a"]) });
+});
+
 test("a PR with nothing readable to wait for schedules nothing", async () => {
   const revert = await approve({ gitops: true, revert: true, helmRelease: { name: "a", namespace: "f" }, sha: "abc", target: "k8s_rollout_undo:apps/api", summary: "s" }, { ok: true, op: "revert_pr", dryRun: false, prUrl: "u", paths: [] });
   assert.equal(revert.awaitApply, undefined, "a revert proposed with no recorded diff");

@@ -9,7 +9,7 @@ import type { Accepted, InFlightWork, Semaphore, ThreadQueue } from "./queue.js"
 import type { InFlightRegistry } from "../agent/inflight/index.js";
 
 /** An alert thread whose incident is not stored yet, and a resolve that arrived for it meanwhile. */
-export type UnstoredAlert = { key: string; resolved?: AlertItem[]; channel?: string; namespace?: string; subjects?: string[]; startedAt?: number; alertname?: string };
+export type UnstoredAlert = { key: string; resolved?: AlertItem[]; channel?: string; namespace?: string; subjects?: string[]; startedAt?: number; alertname?: string; cluster?: string };
 
 /**
  * The one object SlackApp hands every flow (2026-10-21 split of app/index.ts). Every member is read
