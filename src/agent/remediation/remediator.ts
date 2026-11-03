@@ -537,14 +537,20 @@ export class Remediator {
    * which is the LOCAL cluster's overlay, and HelmRelease names repeat across clusters' overlays
    * (base, dev, stg). The local cluster keeps today's fallback: `pathPrefix` undefined is fine there
    * because the worker's own default IS its overlay.
+   *
+   * Fails CLOSED: only `cluster === registry.local` is treated as local. `currentCluster() === null`
+   * (strict mode with nothing bound) is NOT — collectChanges (agent/index.ts) treats an unbound/
+   * unlabelled cluster as non-local too (`cluster !== this.clusters.local`), and the two must agree
+   * on what counts as "the local cluster's overlay" or a prefix-less request reads differently
+   * depending on which code path built it.
    */
   private overlayRefusal(hr: { name: string; namespace: string }, pathPrefix: string | undefined): string | null {
     if (pathPrefix !== undefined) return null;
     const registry = this.host.clusters;
     if (!registry?.strict) return null;
     const cluster = currentCluster();
-    if (!cluster || cluster === registry.local) return null;
-    return `GitOps changes for ${cluster} need its overlay path, and ${hr.namespace}/${hr.name}'s Flux Kustomization could not be read; a restart or a pod delete is still possible.`;
+    if (cluster === registry.local) return null;
+    return `GitOps changes for ${cluster ?? "this cluster"} need its overlay path, and ${hr.namespace}/${hr.name}'s Flux Kustomization could not be read; a restart or a pod delete is still possible.`;
   }
 
   // GitOps PR branch of proposeRemediation: ask the worker (over SQS) to prepare the PR
@@ -611,6 +617,15 @@ export class Remediator {
     threadId?: string
   ): Promise<{ id: number; proposal: Proposal; dryRunSummary: string; gitOps?: { path: string; valuesKey: string; helmRelease: { name: string; namespace: string } } } | { refused: string } | null> {
     if (!this.host.gitops) return { refused: `${preview.message} (GitOps PR remediation is not enabled on the agent — set GITOPS_REMEDIATION_ENABLED=true)` };
+    // Checked BEFORE the timeline/commit read below: on a non-local cluster whose overlay never
+    // resolved, collectChanges (agent/index.ts) already refused that HelmRelease's git history —
+    // so `timeline.commits` is empty for it not because there is nothing to revert, but because
+    // the agent couldn't read the overlay to ask. Reading the timeline first would surface "there
+    // is nothing to revert" instead of the real reason, and that refusal is unreachable in the
+    // realistic case (an unresolved overlay IS the reason history came back empty).
+    const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
+    const blocked = this.overlayRefusal(preview.helmRelease, pathPrefix);
+    if (blocked) return { refused: blocked };
     // The commit behind the broken rollout landed BEFORE it. A newer commit to the same release
     // means the repo moved on since — reverting either one is a guess, so refuse.
     const timeline = await this.host.timelineFor(threadId);
@@ -627,9 +642,6 @@ export class Remediator {
         refused: `\`${proposal.namespace}/${proposal.name}\` is managed by Flux HelmRelease \`${preview.helmRelease.name}\`, and the change timeline holds no Git commit for it — there is nothing to revert. If its values changed with no commit, the cluster drifted from Git; reconcile instead.`,
       };
     }
-    const pathPrefix = await this.resolveOverlayPath(preview.helmRelease);
-    const blocked = this.overlayRefusal(preview.helmRelease, pathPrefix);
-    if (blocked) return { refused: blocked };
     let payload;
     try {
       payload = await this.host.gitops.request({ op: "revert_pr", helmRelease: preview.helmRelease, sha: commit.sha, pathPrefix, dryRun: true });

@@ -214,6 +214,73 @@ test("local unresolved prefix keeps the fallback", async () => {
   assert.equal(sent[0]!.pathPrefix, undefined, "local fallback: the worker uses its own GITOPS_PATH_PREFIX default");
 });
 
+// Fix round 1, finding 1: proposeRevertPr used to read the timeline/commit BEFORE the overlay
+// check — so on stg, whose git history collectChanges already refused (unresolved overlay means
+// no commits were ever read for this HelmRelease), the "nothing to revert" refusal fired first
+// and the overlay refusal was unreachable in the realistic case. The timeline below has a
+// spec-change (so the rollback gates upstream pass) but NO commits, which is exactly what
+// collectChanges leaves behind for an unresolved-overlay cluster.
+test("a rollback on stg with an unresolved overlay returns the overlay refusal, not 'nothing to revert'", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const rollbackPreview = JSON.stringify({ gitOpsPrEligible: true, helmRelease: { name: "web", namespace: "flux-app" }, workload: "deployment/default/web", action: "rollback", changes: [], message: "managed by Flux" });
+  const stgTools = [fluxTool("k8s_rollout_undo", "[WRITE] rollback"), fluxTool("k8s_list_deployments")];
+  const fake = (tools: ToolDefinition[]) => ({
+    connect: async () => {}, disconnect: async () => {}, ping: async () => true, getTools: () => tools,
+    callTool: async (name: string, input: Record<string, unknown>) => {
+      if (name === "k8s_list_deployments") return JSON.stringify([{ name: "web", namespace: "default", replicas: 1, readyReplicas: 1, containers: [{ name: "web", image: "nginx:1" }] }]);
+      if (name === "k8s_get_custom_resources") return "[]"; // overlay never resolves on stg
+      if (input.dry_run) return rollbackPreview;
+      return "[]";
+    },
+  });
+  const mcp = new ClusterRouter(fake([fluxTool("prometheus_query"), ...stgTools]) as McpTools, new Map([["stg", fake(stgTools) as BridgeTools]]), registry);
+  const proposal = `{"action":"k8s_rollout_undo","namespace":"default","workload":"web","kind":"deployment","to_revision":1,"reason":"the user asked for it"}`;
+  const llm: LLMClient = { chat: async () => ({ content: [{ type: "text", text: proposal }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 } }) };
+  const agent = new DevOpsAgent({
+    llm, mcp,
+    recorder: new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "t" }),
+    remediations: { pendingFor: async () => null, propose: async () => 7 } as never,
+    clusters: registry,
+    gitops: fluxGitopsOk(sent) as unknown as GitOpsClient,
+  });
+  // The thread's change timeline (agent/changes) is normally built by collectChanges() before
+  // investigate(); poked directly here since this test is only about proposeRemediation.
+  (agent as unknown as { timelines: Map<string, { t: unknown; at: number }> }).timelines.set("T", {
+    t: {
+      namespace: "default", window: { from: "", to: "" }, subjects: [], unread: [], commits: [],
+      changes: [{ at: "2026-11-02T00:00:00Z", source: "rollout", kind: "spec-change", workload: "Deployment/web", revision: "2", diff: [] }],
+    },
+    at: Date.now(),
+  });
+  await agent.bindThreadCluster("T", "stg");
+  const out = await agent.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: roll back web", { threadId: "T", userRequested: true });
+  assert.deepEqual(out, { refused: "GitOps changes for stg need its overlay path, and flux-app/web's Flux Kustomization could not be read; a restart or a pod delete is still possible." });
+  assert.deepEqual(sent, [], "the worker was never asked for anything");
+});
+
+// Fix round 1, finding 2: overlayRefusal must fail CLOSED — only the registry's local cluster
+// keeps the no-pathPrefix fallback. `currentCluster() === null` (strict mode, nothing bound) used
+// to be treated as local too, which disagreed with collectChanges's own non-local test
+// (`cluster !== this.clusters.local`, true for both a named bridge AND null).
+test("an unbound ambient cluster (null) refuses the overlay fallback too, not just a named bridge", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const mcp = {
+    getTools: () => [fluxTool("k8s_scale", "[WRITE] scale"), fluxTool("k8s_list_deployments")],
+    callTool: async (name: string, input: Record<string, unknown>) => {
+      if (name === "k8s_list_deployments") return JSON.stringify([{ name: "web", namespace: "default", replicas: 1, readyReplicas: 1, containers: [{ name: "web", image: "nginx:1" }] }]);
+      if (name === "k8s_get_custom_resources") return "[]"; // overlay never resolves
+      if (input.dry_run) return fluxPreview;
+      return "[]";
+    },
+  };
+  const remediations = { pendingFor: async () => null, propose: async () => 7 };
+  const r = remediatorWith({ llm: fluxLlm, mcp, remediations, recordUsage: () => {}, gitops: fluxGitopsOk(sent) });
+  const out = await withCluster(null, () => r.proposeRemediation(null, { namespace: "default", deployment: "web" }, "User request: scale web to 3", { userRequested: true }));
+  assert.ok(out && "refused" in out, `must refuse rather than fall back: ${JSON.stringify(out)}`);
+  assert.match((out as { refused: string }).refused, /GitOps changes for .* need its overlay path/);
+  assert.deepEqual(sent, [], "the worker was never asked for a PR");
+});
+
 // A pending card is a lock on a target (RemediationStore.pendingFor, matched on params.target).
 // Without a cluster in the key, a card proposed on dev would block the identical restart on stg.
 test("a dev pending card does not block the same target on stg", async () => {
