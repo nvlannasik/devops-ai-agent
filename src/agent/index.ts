@@ -94,8 +94,11 @@ export class DevOpsAgent {
   private readonly remediator: Remediator;
   private readonly runner: InvestigationRunner;
   private readonly lifecycle: IncidentLifecycle;
-  // The onboarding cluster model (agent/onboarding), 5 min per namespace scope — see clusterModel().
-  private readonly clusterModels: ClusterModelCache;
+  // The onboarding cluster model (agent/onboarding), 5 min per namespace scope — one cache per
+  // cluster (part 3 task 5): a single cache kept dev's and stg's models as the SAME entry, keyed
+  // only by namespace. "" is the key in single-cluster mode; in strict mode it's the cluster name.
+  // See clusterModel()/modelCacheFor().
+  private readonly clusterModels = new Map<string, ClusterModelCache>();
   private readonly skills: SkillRegistry;
   private readonly threadSkills: ThreadSkills = new Map();
   // threadId -> this process's own copy of the thread's change timeline (agent/changes), for the
@@ -128,21 +131,6 @@ export class DevOpsAgent {
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
     this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
     this.gitops = deps.gitops ?? (config.gitops.enabled ? new SqsGitOpsClient() : null); // GitOps PR-flow bridge (opt-in)
-    const gitops = this.gitops;
-    // The cache is the local cluster's only (onLocal): the dashboard reads it, and a tour on another
-    // cluster's thread gets no model from it (clusterModel) rather than the local one's.
-    this.clusterModels = new ClusterModelCache((ns) => this.onLocal(() =>
-      buildClusterModel(
-        {
-          inventory: (n) => this.mcp.callTool("k8s_cluster_inventory", n ? { namespace: n } : { detail: true }),
-          callGraph: () => serviceGraph((name, input) => this.mcp.callTool(name, input)),
-          locate: gitops ? (pathPrefix, targets) => gitops.request({ op: "locate", targets, ...(pathPrefix ? { pathPrefix } : {}) }) : undefined,
-          overlayPath: (hr) => this.resolveOverlayPath(hr),
-          now: Date.now,
-        },
-        ns
-      )
-    ));
 
     // Throws here rather than at first request: a malformed skill file must be a pod that
     // refuses to start. src/agent/skills/real.test.ts loads this same directory, so a bad file
@@ -246,16 +234,51 @@ export class DevOpsAgent {
     return lastToolResultIn(await this.memory.get(threadId).catch(() => [] as Message[]), tool);
   }
 
-  /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
-  /** The onboarding cluster model (agent/onboarding) — called outside any investigation, like collectChanges. */
-  async clusterModel(namespace?: string): Promise<ClusterModel | null> {
-    if (this.clusters.strict && currentCluster() !== this.clusters.local) return null;
-    return this.clusterModels.get(namespace);
+  /** This cluster's model cache, built lazily — one per cluster so dev's and stg's models never
+   *  collapse into the same entry. The builder re-enters `withCluster(cluster, …)` itself rather
+   *  than trusting the caller's ambient context, because a background rebuild (get()'s "stale but
+   *  return cached" path, or peek()'s kick) can run after the caller that triggered it moved on. */
+  private modelCacheFor(cluster: string): ClusterModelCache {
+    const existing = this.clusterModels.get(cluster);
+    if (existing) return existing;
+    const gitops = this.gitops;
+    const strict = this.clusters.strict;
+    const cache = new ClusterModelCache((ns) => {
+      const build = () =>
+        buildClusterModel(
+          {
+            inventory: (n) => this.mcp.callTool("k8s_cluster_inventory", n ? { namespace: n } : { detail: true }),
+            callGraph: () => serviceGraph((name, input) => this.mcp.callTool(name, input)),
+            locate: gitops ? (pathPrefix, targets) => gitops.request({ op: "locate", targets, ...(pathPrefix ? { pathPrefix } : {}) }) : undefined,
+            overlayPath: (hr) => this.resolveOverlayPath(hr),
+            now: Date.now,
+          },
+          ns
+        );
+      return strict ? withCluster(cluster, build) : build();
+    });
+    this.clusterModels.set(cluster, cache);
+    return cache;
   }
 
-  /** The whole-cluster model for /cluster: never waits; a cold or stale cache kicks a background build. */
-  peekClusterModel(): ClusterModel | null {
-    return this.clusterModels.peek();
+  /** k8s_cluster_inventory's raw result, for the dashboard's /cluster page — no LLM involved. */
+  /** The onboarding cluster model (agent/onboarding) — called outside any investigation, like collectChanges.
+   *  Strict mode: `currentCluster()`'s own model, null when nothing is bound. Single-cluster mode: the
+   *  one cache ("" ), exactly as before multi-cluster. */
+  async clusterModel(namespace?: string): Promise<ClusterModel | null> {
+    if (!this.clusters.strict) return this.modelCacheFor("").get(namespace);
+    const cluster = currentCluster();
+    if (!cluster) return null;
+    return this.modelCacheFor(cluster).get(namespace);
+  }
+
+  /** The whole-cluster model for /cluster: never waits; a cold or stale cache kicks a background
+   *  build. `cluster` defaults to the local cluster in strict mode (the dashboard has no thread to
+   *  bind it); omitted entirely in single-cluster mode, where there is only the one cache. */
+  peekClusterModel(cluster?: string): ClusterModel | null {
+    const key = this.clusters.strict ? cluster ?? this.clusters.local : "";
+    if (key === null) return null; // strict, no local cluster, and none named — nothing to peek
+    return this.modelCacheFor(key).peek();
   }
 
   /** The namespace a tour mention names, matched against the live namespace list; null when it names none. */
@@ -269,13 +292,16 @@ export class DevOpsAgent {
     }
   }
 
-  async clusterInventory(): Promise<string> {
-    return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }));
+  /** `cluster` defaults to the local cluster in strict mode — the dashboard's /cluster page asks
+   *  for a specific one; the plain mention/alert paths still call this with none. */
+  async clusterInventory(cluster?: string): Promise<string> {
+    return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
   }
 
-  /** Work with no thread (the dashboard's /cluster) reads the local cluster, as before multi-cluster. */
-  private onLocal<T>(fn: () => Promise<T>): Promise<T> {
-    return this.clusters.strict ? withCluster(this.clusters.local, fn) : fn();
+  /** Work with no thread (the dashboard's /cluster) reads the local cluster, as before multi-cluster —
+   *  unless `cluster` names a different one explicitly. */
+  private onLocal<T>(fn: () => Promise<T>, cluster?: string): Promise<T> {
+    return this.clusters.strict ? withCluster(cluster ?? this.clusters.local, fn) : fn();
   }
 
   /** Direct MCP access for callers outside the agentic loop — e.g. cross-alert correlation's
@@ -294,8 +320,10 @@ export class DevOpsAgent {
     return cluster === undefined ? run() : withCluster(cluster, run);
   }
 
+  /** The local cluster's tools in strict mode (dashboard's /topology has no thread to bind a
+   *  cluster, so getTools() under no ambient cluster would see none of the k8s_/flux_ ones). */
   mcpTools(): ToolDefinition[] {
-    return this.mcp.getTools();
+    return this.clusters.strict ? withCluster(this.clusters.local, () => this.mcp.getTools()) : this.mcp.getTools();
   }
 
   // The registered skills, for the dashboard's /context page. Read-only and already in memory —

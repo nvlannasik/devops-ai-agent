@@ -35,7 +35,10 @@ export function clusterRegistry(mcp: McpRegistryConfig = config.mcp): ClusterReg
 // null = "no cluster" on purpose (an unbound thread, an unlabelled alert); undefined = never set.
 const store = new AsyncLocalStorage<string | null>();
 
-export const withCluster = <T>(cluster: string | null, fn: () => Promise<T>): Promise<T> => store.run(cluster, fn);
+// Sync-capable (part 3 task 5): a per-cluster cache's builder re-enters this around a background
+// rebuild, and mcpTools() needs the local cluster's tools with no await at all. Existing async
+// callers are unchanged — T is just inferred as the Promise they already pass.
+export const withCluster = <T>(cluster: string | null, fn: () => T): T => store.run(cluster, fn);
 
 export const currentCluster = (): string | null | undefined => store.getStore();
 

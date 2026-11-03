@@ -22,6 +22,10 @@ const fakeMcp = (label: string, names: string[], calls: string[], queries: Array
   callTool: async (name: string, input: Record<string, unknown> = {}) => {
     calls.push(`${label}:${name}`);
     queries.push({ label, name, input });
+    // Task 5's cluster-model tests need a buildClusterModel() that actually succeeds (so caching
+    // kicks in) — an empty-but-well-shaped inventory, distinct from the pods fixture every other
+    // test relies on for k8s_list_pods etc.
+    if (name === "k8s_cluster_inventory") return JSON.stringify({ namespaces: [], scanned: { namespaces: 0, complete: true } });
     return `[{"name":"web-1","namespace":"default","ready":true}]`;
   },
 });
@@ -43,8 +47,8 @@ function setup(script: LLMResponse[]) {
     },
   };
   const registry = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "stg", requestQueueName: "devops-mcp-stg-request.fifo" }] } });
-  const central = fakeMcp("dev", ["k8s_list_pods", "k8s_change_timeline", "prometheus_query"], calls, queries) as McpTools;
-  const stg = fakeMcp("stg", ["k8s_list_pods", "k8s_change_timeline"], calls, queries) as BridgeTools;
+  const central = fakeMcp("dev", ["k8s_list_pods", "k8s_change_timeline", "k8s_cluster_inventory", "prometheus_query"], calls, queries) as McpTools;
+  const stg = fakeMcp("stg", ["k8s_list_pods", "k8s_change_timeline", "k8s_cluster_inventory"], calls, queries) as BridgeTools;
   const mcp = new ClusterRouter(central, new Map([["stg", stg]]), registry);
   const recorder = new TraceRecorder({ insert: async () => {} }, { source: "bench", sha: "test" });
   return { agent: new DevOpsAgent({ llm, mcp, recorder, clusters: registry }), calls, seen, queries };
@@ -183,12 +187,31 @@ test("a bound thread asked about another cluster is told how to switch, never an
   assert.match(JSON.stringify(seen[0]!.messages), /unused resources on dev cluster/);
 });
 
-test("the dashboard's /cluster reads the local cluster; another cluster's thread gets no local model", async () => {
+// Part 3 task 5: the model cache used to be keyed by namespace only, so dev's and stg's models
+// collapsed into the SAME entry — a tour in an stg thread could read dev's model, or vice versa.
+// Now there is one cache per cluster, each built under its own withCluster.
+test("each cluster has its own model", async () => {
+  const { agent, calls } = setup([]);
+  await withCluster("stg", () => agent.clusterModel());
+  assert.ok(calls.includes("stg:k8s_cluster_inventory"), calls.join(", "));
+  await withCluster("dev", () => agent.clusterModel());
+  assert.ok(calls.includes("dev:k8s_cluster_inventory"), calls.join(", "));
+  const before = calls.length;
+  await withCluster("stg", () => agent.clusterModel());
+  assert.equal(calls.length, before, "a second stg call within the TTL made no new call");
+});
+
+test("the dashboard reads the cluster it is asked for", async () => {
   const { agent, calls } = setup([]);
   await agent.clusterInventory();
   assert.deepEqual(calls, ["dev:k8s_cluster_inventory"]);
-  assert.equal(await withCluster("stg", () => agent.clusterModel("default")), null);
-  assert.deepEqual(calls, ["dev:k8s_cluster_inventory"], "no model built for stg from the local cache");
+  await agent.clusterInventory("stg");
+  assert.deepEqual(calls, ["dev:k8s_cluster_inventory", "stg:k8s_cluster_inventory"]);
+});
+
+test("mcpTools in strict mode lists the local cluster's tools", async () => {
+  const { agent } = setup([]);
+  assert.ok(agent.mcpTools().some((t) => t.name === "k8s_list_pods"), "outside any withCluster, mcpTools() still sees the local cluster's tools");
 });
 
 test("a delegate runs on its lead's cluster, not its own unbound sub-thread", async () => {
