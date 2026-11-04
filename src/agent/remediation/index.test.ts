@@ -696,6 +696,7 @@ test("each listed action actually parses", () => {
     k8s_cordon: { node: "worker1" },
     k8s_uncordon: { node: "worker1" },
     k8s_drain: { node: "worker1" },
+    vm_restart_service: { host: "vm-a", unit: "nginx.service" },
   };
   for (const action of PROPOSABLE_ACTIONS) {
     assert.ok(parseProposal(JSON.stringify({ action, ...minimal[action] })), `${action} did not parse`);

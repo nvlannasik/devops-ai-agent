@@ -153,6 +153,15 @@ export class SlackApp {
   /** A VM's report on an approved restart. Task 2 posts it into the card's thread. */
   private async postVmResult(host: string, id: number, remediationId: number | null, result: Record<string, unknown>): Promise<void> {
     logger.info(`[vm] ${host} action ${id} (remediation ${remediationId ?? "none"}): ${String(result.status)}`);
+    const card = remediationId === null ? null : await this.agent.remediationCard(remediationId);
+    if (!card) return;
+    const ok = result.status === "succeeded";
+    const head =
+      result.status === "refused"
+        ? `🚫 *VM \`${host}\` refused the restart* — the unit is not in its own allowlist. Nothing ran.`
+        : `${ok ? "✅" : "❌"} *VM \`${host}\` ${ok ? "restarted the unit" : "could not restart the unit"}* — exit code \`${String(result.exitCode ?? "?")}\`, now \`${String(result.active ?? "unknown")}\`.`;
+    const journal = typeof result.journal === "string" && result.journal.trim() ? `\n\`\`\`${result.journal.slice(-2500)}\`\`\`` : "";
+    await this.app.client.chat.postMessage({ channel: card.channel, thread_ts: card.threadTs, text: head + journal, mrkdwn: true });
   }
 
   // Mount /alert and /health onto any Express router (used by both modes)

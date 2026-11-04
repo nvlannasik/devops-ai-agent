@@ -72,6 +72,13 @@ export class RemediationStore {
   }
 
   /** Remember where the card was posted, so `expireStale` can close the message and tell the thread. */
+  /** Where a card was posted — a VM's report on an approved restart goes to that thread. */
+  async cardOf(id: number): Promise<{ channel: string; threadTs: string } | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(`SELECT card_channel, card_thread_ts FROM remediations WHERE id = $1`, [id]);
+    return rows[0]?.card_channel && rows[0]?.card_thread_ts ? { channel: rows[0].card_channel, threadTs: rows[0].card_thread_ts } : null;
+  }
+
   async recordCard(id: number, channel: string, ts: string, threadTs: string): Promise<void> {
     if (!this.pool) return;
     await this.pool

@@ -72,6 +72,8 @@ const RolloutUndo = z.object({
 
 // Nodes are cluster-scoped: the proposal carries namespace "" (spec 2026-11-04-node-ops, Part A).
 const NodeAction = z.object({ node: s });
+// A systemd unit on a VM (spec 2026-11-04 Part B). The pending-card key is the host.
+const VmRestart = z.object({ host: s, unit: s });
 
 export function parseProposal(text: string): Proposal | null {
   const match = text.match(/\{[\s\S]*\}/);
@@ -92,7 +94,7 @@ export function parseProposal(text: string): Proposal | null {
   // list: a registry path is lowercase by Docker's rules, but a TAG may legitimately carry
   // uppercase (`v1.2-RC1`), and lowercasing it would point the rollout at an image that does not
   // exist. `kind` is handled above because its allowed values are an enum, not a name.
-  for (const k of ["namespace", "workload", "pod", "container", "node"]) {
+  for (const k of ["namespace", "workload", "pod", "container", "node", "host"]) {
     const v = raw[k];
     if (typeof v === "string") raw[k] = v.toLowerCase();
   }
@@ -212,6 +214,19 @@ export function parseProposal(text: string): Proposal | null {
             ? `uncordon node \`${node}\` (it takes new pods again)`
             : `drain node \`${node}\` (cordon, then evict its pods; DaemonSet pods stay)`;
       return { action: raw.action, namespace: "", name: node, reason, toolParams: { node }, summary };
+    }
+    case "vm_restart_service": {
+      const p = VmRestart.safeParse(raw);
+      if (!p.success) return null;
+      const { host, unit } = p.data;
+      return {
+        action: "vm_restart_service",
+        namespace: "",
+        name: host,
+        reason,
+        toolParams: { host, unit },
+        summary: `restart \`${unit}\` on VM \`${host}\` (systemctl restart, run by the VM's own agent)`,
+      };
     }
     case "k8s_rollout_undo": {
       const p = RolloutUndo.safeParse(raw);
@@ -534,6 +549,7 @@ export const PROPOSABLE_ACTIONS = [
   "k8s_cordon",
   "k8s_uncordon",
   "k8s_drain",
+  "vm_restart_service",
 ] as const;
 
 export const PROPOSAL_SYSTEM =
@@ -592,6 +608,8 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     "   — ONLY when the investigation shows the NODE itself failing (NotReady, a pressure condition, a disk or I/O fault on that node) — not one workload that happens to run there. Cordon stops new pods landing; drain also moves the running ones off (DaemonSet pods stay). Never the control-plane node\n" +
     '10. {"action":"k8s_uncordon","node":"...","reason":"..."}\n' +
     "   — ONLY for a node cordoned earlier whose fault the evidence shows is gone\n" +
+    '11. {"action":"vm_restart_service","host":"...","unit":"...","reason":"..."}\n' +
+    "   — ONLY for a VM incident (the context names a VM, not a Kubernetes workload) whose evidence shows that unit is wedged and a restart fixes it. host is the VM's name and unit one of the units its context lists as restartable — nothing else is possible on a VM\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
     // of real faults, and saying so is what stops the model reaching for a restart to have
     // something to say.
@@ -670,6 +688,7 @@ const REQUIRED: Record<string, string> = {
   k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
   k8s_delete_orphan:
     "namespace, name, and kind as one of configmap / service / serviceaccount / deployment / statefulset. The object must appear in a `k8s_find_unused_resources` result's `orphanKeys` as `namespace/kind/name` — there is no delete for a secret or a PVC",
+  vm_restart_service: "host — the VM's name — and unit, one of the units the context lists for that VM",
   k8s_cordon: "node — the exact node name from the context",
   k8s_uncordon: "node — the exact node name from the context",
   k8s_drain: "node — the exact node name from the context",

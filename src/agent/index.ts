@@ -40,6 +40,7 @@ import { lastToolResultIn } from "./remediation/evidence-refusals.js";
 import { ThreadSkills, SkillView } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
 import { VmStore } from "./vm/store.js";
+import { withVmTools } from "./vm/tools.js";
 import { InvestigationRunner } from "./loop/runner.js";
 import { IncidentLifecycle } from "./incidents/lifecycle.js";
 import { extractText } from "./loop/control.js";
@@ -121,11 +122,13 @@ export class DevOpsAgent {
     let dispatcher: SqsMcpDispatcher | undefined;
     this.mcp = instrumentMCP(
       deps.mcp ??
-        createMcp(this.clusters, new MCPClient(), (b) => {
-          if ("url" in b) return new MCPClient(b);
-          dispatcher ??= new SqsMcpDispatcher(config.mcp.sqs.responseQueueName);
-          return new SqsMCPClient(b.name, b.requestQueueName, dispatcher);
-        }),
+        this.withVm(
+          createMcp(this.clusters, new MCPClient(), (b) => {
+            if ("url" in b) return new MCPClient(b);
+            dispatcher ??= new SqsMcpDispatcher(config.mcp.sqs.responseQueueName);
+            return new SqsMCPClient(b.name, b.requestQueueName, dispatcher);
+          })
+        ),
       () => this.trace
     );
     this.memory = new ConversationMemory(); // default in-memory; replaced in initialize() if Redis configured
@@ -311,6 +314,18 @@ export class DevOpsAgent {
    *  for a specific one; the plain mention/alert paths still call this with none. */
   async clusterInventory(cluster?: string): Promise<string> {
     return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
+  }
+
+  /** The VM restart as a virtual tool, only when VM agents are configured (agent/vm/tools). Lambdas:
+   *  `vmStore` is swapped for the Postgres-backed one in initialize(), after this runs. */
+  private withVm(mcp: McpTools): McpTools {
+    if (config.vm.tokens.size === 0) return mcp;
+    return withVmTools(mcp, { registered: (h) => this.vmStore.registered(h), enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r) });
+  }
+
+  /** Where remediation `id`'s card was posted — the VM's report goes to that thread. */
+  remediationCard(id: number): Promise<{ channel: string; threadTs: string } | null> {
+    return this.remediations.cardOf(id);
   }
 
   /** Work with no thread (the dashboard's /cluster) reads the local cluster, as before multi-cluster —
