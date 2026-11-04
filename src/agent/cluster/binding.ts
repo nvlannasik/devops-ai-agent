@@ -67,6 +67,15 @@ export const clusterReply = {
       : `🔀 This thread now uses cluster ${to}. Earlier answers were about ${from}.`,
 };
 
+/** The note a VM incident's run opens with (spec 2026-11-04 Part B). */
+export function vmNote(vm: { host: string; units: string[] }, label: string): string {
+  return (
+    `[Target: VM \`${vm.host}\`] Not a Kubernetes workload: there are no Kubernetes tools in this investigation. Its metrics, ` +
+    `logs and traces are in the central stack under \`${label}="${vm.host}"\`. The only action available is restarting one of ` +
+    `its units: ${vm.units.map((u) => `\`${u}\``).join(", ") || "none listed"}.`
+  );
+}
+
 /**
  * The cluster an alert is about: its `cluster` label when the registry knows it, null when it has
  * none or names a cluster the registry does not know (an unlabelled alert — no Kubernetes, capped to

@@ -318,3 +318,15 @@ test("recallRemediations passes no scope in single-cluster mode", async () => {
   await agent.recallRemediations({ alertname: "KubePodCrashLooping", namespace: "kube-system" });
   assert.deepEqual(seen, [["KubePodCrashLooping", "kube-system", 3]]);
 });
+
+test("an alert about a registered VM is a VM incident: VM note, no Kubernetes, not capped", async () => {
+  const high: LLMResponse = { content: [{ type: "text", text: "*📍 Root Cause*\nA.\n\n*📊 Evidence*\nB.\n\n*📈 Confidence:* `High` — sure." }], stopReason: "end_turn", usage };
+  const { agent, calls, seen } = setup([high, high, high]);
+  const out = await agent.investigate("V", "OrdersApiDown on vm-web-01", { mode: "alert", cluster: null, vm: { host: "vm-web-01", units: ["orders.service"] } });
+  assert.ok(!seen[0]!.tools.some((t) => t.name.startsWith("k8s_")));
+  assert.match(JSON.stringify(seen[0]!.messages), /\[Target: VM `vm-web-01`\]/);
+  assert.match(JSON.stringify(seen[0]!.messages), /restarting one of its units: `orders\.service`/);
+  assert.doesNotMatch(JSON.stringify(seen[0]!.messages), /\[Cluster: unknown\]/);
+  assert.match(out, /Confidence:\* `High`/);
+  assert.deepEqual(calls, []);
+});

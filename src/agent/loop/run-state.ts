@@ -29,6 +29,9 @@ export interface InvestigateOptions {
    * the thread's binding; `null` = no cluster (an unlabelled alert) — no Kubernetes tools at all.
    */
   cluster?: string | null;
+  /** A VM incident (agent/vm): the alert names a registered VM, not a Kubernetes workload. Runs with
+   *  no cluster (no Kubernetes, no injected matcher) but is not "unlabelled": no confidence cap. */
+  vm?: { host: string; units: string[] };
   /**
    * Called once per tool round, before the tools run, with the round number and the tool
    * names that round will actually execute. Optional and fire-and-forget: the loop ignores

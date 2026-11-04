@@ -40,7 +40,7 @@ export function finalizeAnswer(ctx: RunCtx, s: RunState, trace: TraceRecorder, t
   // capConfidence. Here, so the alert path and a mention both pass through it.
   const { text: logRated, capped } = capConfidence(text, s.sawLogLines);
   // Multi-cluster: an alert that ran with no cluster read no Kubernetes at all (agent/cluster).
-  const unbound = ctx.mode === "alert" && ctx.depth === 0 && currentCluster() === null;
+  const unbound = ctx.mode === "alert" && ctx.depth === 0 && currentCluster() === null && !ctx.opts.vm;
   const { text: rated, capped: clusterCapped } = unbound ? capForUnboundCluster(logRated) : { text: logRated, capped: false };
   if (clusterCapped) {
     logger.info(`[${ctx.threadId}] capped Confidence → Low — the alert names no known cluster`);

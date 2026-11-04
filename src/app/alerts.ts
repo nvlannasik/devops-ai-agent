@@ -414,12 +414,15 @@ export class AlertFlow {
       // registry does not know, investigates with no Kubernetes at all. Single-cluster: undefined, a no-op.
       const cluster = alertCluster(labels, this.host.agent.clusters);
       if (cluster) await this.host.agent.bindThreadCluster(threadId, cluster).catch(() => {});
+      // No cluster: is it a registered VM (agent/vm)? Then a VM incident, not an unlabelled one.
+      const vm = cluster ? null : await this.host.agent.vmFor(labels).catch(() => null);
       const rca = toMrkdwn(
         await this.host.agent.investigate(threadId, fullIssue, {
           mode: "alert",
           trigger: issueText,
           namespace: labels.namespace,
           cluster,
+          ...(vm ? { vm } : {}),
           onProgress,
           onComplete: (m) => { alertMeta = m; },
         })

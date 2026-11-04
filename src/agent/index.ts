@@ -4,7 +4,7 @@ import { MCPClient } from "./mcp/client.js";
 import { type McpTools } from "./mcp/types.js";
 import { SqsMCPClient, SqsMcpDispatcher } from "./mcp/sqs-client.js";
 import { clusterRegistry, currentCluster, storedCluster, withCluster, type ClusterRegistry } from "./cluster/index.js";
-import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksIndonesian } from "./cluster/binding.js";
+import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksIndonesian, vmNote } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
 import { IncidentMemory } from "./incidents/index.js";
@@ -323,6 +323,14 @@ export class DevOpsAgent {
     return withVmTools(mcp, { registered: (h) => this.vmStore.registered(h), enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r) });
   }
 
+  /** The registered VM an alert's host label names (agent/vm), or null — Kubernetes alerts carry no such label. */
+  async vmFor(labels: Record<string, string>): Promise<{ host: string; units: string[] } | null> {
+    const host = labels[config.vm.hostLabel];
+    if (config.vm.tokens.size === 0 || !host) return null;
+    const vm = await this.vmStore.registered(host);
+    return vm ? { host, units: vm.units } : null;
+  }
+
   /** Where remediation `id`'s card was posted — the VM's report goes to that thread. */
   remediationCard(id: number): Promise<{ channel: string; threadTs: string } | null> {
     return this.remediations.cardOf(id);
@@ -536,6 +544,8 @@ export class DevOpsAgent {
     // exactly the run someone will want to look at.
     const run = (message: string) =>
       withTrace(threadId, () => this.runner.run(threadId, message, opts).finally(() => this.trace.finish(threadId)));
+    // A VM incident: no cluster at all (no Kubernetes, no matcher injection), and its own note.
+    if (opts.vm) return withCluster(null, () => run(`${vmNote(opts.vm!, config.vm.hostLabel)}\n\n${userMessage}`));
     if (!this.clusters.strict) return run(userMessage);
     // Multi-cluster (agent/cluster): the run is about exactly one cluster or none — never a guess.
     return (async () => {
