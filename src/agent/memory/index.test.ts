@@ -143,7 +143,7 @@ test("clear() drops the playbooks with the conversation on both backends", async
   const redisMemory = new ConversationMemory(stubRedis(store, calls));
   await redisMemory.setSkills("t1", ["rca-format"]);
   await redisMemory.clear("t1");
-  assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1", "cluster:t1"]);
+  assert.deepEqual(calls.find((c) => c.cmd === "del")!.args, ["conv:t1", "rca:t1", "skills:t1", "cluster:t1", "vm:t1"]);
   assert.deepEqual(await redisMemory.getSkills("t1"), []);
 });
 

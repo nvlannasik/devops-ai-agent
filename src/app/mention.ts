@@ -202,7 +202,9 @@ export class MentionFlow {
         await say({ text: clusterReply.switched(switchedFrom, cluster, speaksIndonesian(text)), thread_ts: threadId });
       }
       // Cluster not settled (none yet, or another one named): ask, before the tour prefetch and the LLM.
-      const ask = await this.host.agent.askForCluster(threadId, text, message).catch(() => null);
+      // A VM thread (agent/vm) is about one VM, not a cluster: no cluster question for it.
+      const vm = await this.host.agent.applyMentionVm(threadId, text).catch(() => null);
+      const ask = vm ? null : await this.host.agent.askForCluster(threadId, text, message).catch(() => null);
       if (ask) {
         this.host.semaphore.release();
         await say({ text: ask, thread_ts: threadId });
@@ -233,8 +235,8 @@ export class MentionFlow {
         const mode = investigation ? "investigation" : "conversation";
         let reply = toMrkdwn(
           investigation
-            ? await this.host.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress })
-            : await withRoute("light", () => this.host.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress }))
+            ? await this.host.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress, ...(vm ? { vm } : {}) })
+            : await withRoute("light", () => this.host.agent.investigate(threadId, tourMessage, { ...turnBudget, mode, onComplete, onProgress, ...(vm ? { vm } : {}) }))
         );
 
         await progress.clear();

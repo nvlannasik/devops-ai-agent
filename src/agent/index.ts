@@ -331,6 +331,30 @@ export class DevOpsAgent {
     return vm ? { host, units: vm.units } : null;
   }
 
+  /**
+   * A mention's VM (agent/vm): a registered VM named in the text binds the thread to it, a CLUSTER
+   * named in the text unbinds it (the cluster path takes over), and a message naming neither keeps
+   * whatever the thread had. Null = not a VM thread. Names match as whole words, like cluster names.
+   */
+  async applyMentionVm(threadId: string, text: string): Promise<{ host: string; units: string[] } | null> {
+    if (config.vm.tokens.size === 0) return null;
+    if (this.clusters.strict && parseClusterMention(text, this.clusters.names)) {
+      await this.memory.setVm(threadId, "");
+      return null;
+    }
+    const alive = await this.vmStore.registeredHosts();
+    const word = (n: string) => new RegExp(`(?<![a-z0-9.-])${n.replace(/[.]/g, "\\.")}(?![a-z0-9.-])`, "i");
+    const named = alive.filter((v) => word(v.host).test(text));
+    if (named.length === 1) {
+      await this.memory.setVm(threadId, named[0]!.host);
+      return named[0]!;
+    }
+    const bound = await this.memory.getVm(threadId);
+    if (!bound) return null;
+    const vm = await this.vmStore.registered(bound);
+    return vm ? { host: bound, units: vm.units } : null;
+  }
+
   /** Where remediation `id`'s card was posted — the VM's report goes to that thread. */
   remediationCard(id: number): Promise<{ channel: string; threadTs: string } | null> {
     return this.remediations.cardOf(id);

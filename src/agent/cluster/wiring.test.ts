@@ -6,6 +6,7 @@ import type { LLMClient, LLMResponse, Message, ToolDefinition } from "../llm/typ
 import type { BridgeTools, McpTools } from "../mcp/types.js";
 import { clusterRegistry, withCluster } from "./index.js";
 import { ClusterRouter } from "./router.js";
+import { config } from "../../config/index.js";
 import { resetServiceGraphCache } from "../correlation/topology.js";
 import { type GitOpsClient } from "../gitops/types.js";
 
@@ -329,4 +330,24 @@ test("an alert about a registered VM is a VM incident: VM note, no Kubernetes, n
   assert.doesNotMatch(JSON.stringify(seen[0]!.messages), /\[Cluster: unknown\]/);
   assert.match(out, /Confidence:\* `High`/);
   assert.deepEqual(calls, []);
+});
+
+test("a mention naming a registered VM binds the thread to it; a cluster name unbinds it", async () => {
+  const { agent } = setup([]);
+  const saved = config.vm.tokens;
+  config.vm.tokens = new Map([["vm-web-01", "t"]]);
+  agent.vmStore = {
+    registeredHosts: async () => [{ host: "vm-web-01", units: ["orders.service"] }],
+    registered: async (h: string) => (h === "vm-web-01" ? { units: ["orders.service"] } : null),
+  } as never;
+  try {
+    assert.deepEqual(await agent.applyMentionVm("M", "restart orders.service di vm-web-01"), { host: "vm-web-01", units: ["orders.service"] });
+    assert.deepEqual(await agent.applyMentionVm("M", "sudah normal belum?"), { host: "vm-web-01", units: ["orders.service"] }, "the binding holds");
+    assert.equal(await agent.applyMentionVm("M", "sekarang cek pod di stg"), null, "a cluster name wins");
+    assert.equal(await agent.applyMentionVm("M", "sudah normal belum?"), null, "and the VM binding is gone");
+    assert.equal(await agent.applyMentionVm("N", "restart nginx di vm-db-99"), null, "an unregistered VM binds nothing");
+    assert.equal(await agent.applyMentionVm("O", "restart di xvm-web-01x"), null, "a name inside a longer word does not count");
+  } finally {
+    config.vm.tokens = saved;
+  }
 });

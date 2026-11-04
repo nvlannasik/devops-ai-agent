@@ -23,6 +23,13 @@ export class VmStore {
     return rows[0] ? { units: rows[0].units as string[] } : null;
   }
 
+  /** Every VM alive now (a heartbeat within 5 minutes) — what a mention can name. */
+  async registeredHosts(): Promise<Array<{ host: string; units: string[] }>> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(`SELECT name, units FROM vm_hosts WHERE last_seen > now() - interval '5 minutes' ORDER BY name`);
+    return rows.map((r: { name: string; units: string[] }) => ({ host: r.name, units: r.units }));
+  }
+
   async enqueue(host: string, unit: string, remediationId: number | null): Promise<number | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(`INSERT INTO vm_actions (host, unit, remediation_id) VALUES ($1, $2, $3) RETURNING id`, [host, unit, remediationId]);

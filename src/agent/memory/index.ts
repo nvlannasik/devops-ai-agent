@@ -20,6 +20,7 @@ export const REDIS_KEYS = {
   rca: { prefix: "rca", holds: "whether an RCA has been sent, per thread" },
   skills: { prefix: "skills", holds: "playbook names selected for a thread" },
   cluster: { prefix: "cluster", holds: "the cluster a thread is bound to (multi-cluster)" },
+  vm: { prefix: "vm", holds: "the VM a thread is bound to (VM agent)" },
 } as const;
 
 /** What one thread still holds — the dashboard's /memory/threads row. */
@@ -46,6 +47,7 @@ export class ConversationMemory {
   private rcaThreads = new Set<string>(); // in-memory; Redis uses a separate key
   private skillThreads = new Map<string, string[]>(); // ditto — playbook names per thread
   private clusterThreads = new Map<string, string>(); // ditto — the cluster a thread is bound to
+  private vmThreads = new Map<string, string>(); // ditto — the VM a thread is bound to
   private redis: Redis | null;
 
   constructor(redis?: Redis) {
@@ -102,6 +104,20 @@ export class ConversationMemory {
   async getCluster(threadId: string): Promise<string | null> {
     if (!this.redis) return this.clusterThreads.get(threadId) ?? null;
     return (await this.redis.get(`${REDIS_KEYS.cluster.prefix}:${threadId}`)) ?? null;
+  }
+
+  /** The VM a thread is bound to (agent/vm), or null. An empty value is an unbinding. */
+  async getVm(threadId: string): Promise<string | null> {
+    const v = this.redis ? await this.redis.get(`${REDIS_KEYS.vm.prefix}:${threadId}`) : this.vmThreads.get(threadId);
+    return v || null;
+  }
+
+  async setVm(threadId: string, host: string): Promise<void> {
+    if (!this.redis) {
+      this.vmThreads.set(threadId, host);
+      return;
+    }
+    await this.redis.set(`${REDIS_KEYS.vm.prefix}:${threadId}`, host, "EX", REDIS_TTL_SEC);
   }
 
   async setCluster(threadId: string, cluster: string): Promise<void> {
@@ -190,12 +206,13 @@ export class ConversationMemory {
 
   async clear(threadId: string): Promise<void> {
     if (this.redis) {
-      await this.redis.del(`${REDIS_KEYS.conv.prefix}:${threadId}`, `${REDIS_KEYS.rca.prefix}:${threadId}`, `${REDIS_KEYS.skills.prefix}:${threadId}`, `${REDIS_KEYS.cluster.prefix}:${threadId}`);
+      await this.redis.del(`${REDIS_KEYS.conv.prefix}:${threadId}`, `${REDIS_KEYS.rca.prefix}:${threadId}`, `${REDIS_KEYS.skills.prefix}:${threadId}`, `${REDIS_KEYS.cluster.prefix}:${threadId}`, `${REDIS_KEYS.vm.prefix}:${threadId}`);
     } else {
       this.store.delete(threadId);
       this.rcaThreads.delete(threadId);
       this.skillThreads.delete(threadId);
       this.clusterThreads.delete(threadId);
+      this.vmThreads.delete(threadId);
     }
   }
 }
