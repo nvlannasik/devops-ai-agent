@@ -7,12 +7,18 @@ in this VM's own allowlist. The VM pulls; nothing connects to it. Design:
 ## Install (on the VM, as root)
 
 ```bash
-install -m 0755 devops-vm-agent.py /usr/local/bin/devops-vm-agent.py
-install -m 0600 devops-vm-agent.conf.example /etc/devops-vm-agent.conf   # then edit name, url, token, units
-install -m 0644 devops-vm-agent.service /etc/systemd/system/devops-vm-agent.service
-systemctl daemon-reload && systemctl enable --now devops-vm-agent
-journalctl -u devops-vm-agent -f
+# straight from the repo
+curl -fsSL https://raw.githubusercontent.com/nvlannasik/devops-ai-agent/main/vm-agent/install.sh \
+  | sudo VM_AGENT_TOKEN=<token> bash -s -- --units "nginx.service orders.service"
+
+# or from a copy of this directory
+sudo ./install.sh --token <token> --units "nginx.service orders.service"
 ```
+
+`--name` defaults to `hostname`, `--url` to `https://agent.annasik.cloud`; `--poll` and `--ca-file`
+set the rest. It writes `/etc/devops-vm-agent.conf` (0600), installs the script and unit, starts the
+service and warns on a unit systemd does not know or an `http://` URL. Re-run it without a token to
+upgrade the script and keep the config; `--uninstall` removes it all.
 
 Needs Python 3 (standard library only). The token comes from the agent's `VM_AGENT_TOKENS`
 (`<name>=<token>`); the name must equal this VM's `hostname` label in the central telemetry.
