@@ -1,4 +1,5 @@
 import { createServer, type Server } from "http";
+import { vmRoutes } from "./vm-routes.js";
 import { App, ExpressReceiver, type AllMiddlewareArgs, type SlackEventMiddlewareArgs } from "@slack/bolt";
 import express, { type Request, type Response } from "express";
 import { config } from "../config/index.js";
@@ -149,12 +150,21 @@ export class SlackApp {
     this.mentions = new MentionFlow(this.host);
   }
 
+  /** A VM's report on an approved restart. Task 2 posts it into the card's thread. */
+  private async postVmResult(host: string, id: number, remediationId: number | null, result: Record<string, unknown>): Promise<void> {
+    logger.info(`[vm] ${host} action ${id} (remediation ${remediationId ?? "none"}): ${String(result.status)}`);
+  }
+
   // Mount /alert and /health onto any Express router (used by both modes)
   private _mountAlertRoute(router: express.IRouter): void {
     if (!config.alertWebhook.token) {
       logger.warn(
         "ALERT_WEBHOOK_TOKEN not set — /alert is UNAUTHENTICATED. Anyone who can reach this port can trigger investigations and remediation proposals. Set it and configure Alertmanager http_config.authorization.credentials."
       );
+    }
+    // The VM agent's routes (spec 2026-11-04 Part B) — only when VM tokens are configured.
+    if (config.vm.tokens.size > 0) {
+      router.use(vmRoutes({ tokens: config.vm.tokens, store: this.agent.vmStore, onResult: (host, id, remediationId, result) => this.postVmResult(host, id, remediationId, result) }));
     }
     router.post("/alert", (req: Request, res: Response) => {
       if (!this._authorizeAlert(req)) {

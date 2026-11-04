@@ -61,6 +61,24 @@ export function parseHttpClusters(raw: string | undefined): Array<{ name: string
   return out;
 }
 
+/**
+ * VM_AGENT_TOKENS="vm-web-01=<token>,vm-db-01=<token>" — one bearer token per VM agent (spec
+ * 2026-11-04 Part B). The name a token maps to IS that caller's identity. Unset = no VM routes and
+ * no VM actions. Malformed fails boot, like the cluster lists above.
+ */
+export function parseVmTokens(raw: string | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const part of (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0 || eq === part.length - 1) throw new Error(`VM_AGENT_TOKENS entry "${part.slice(0, eq > 0 ? eq : part.length)}=…" is not name=token`);
+    const name = part.slice(0, eq).trim();
+    if (!/^[a-z0-9][a-z0-9.-]*$/.test(name)) throw new Error(`VM_AGENT_TOKENS: bad VM name "${name}" (lowercase letters, digits, . and -)`);
+    if (out.has(name)) throw new Error(`VM_AGENT_TOKENS: duplicate VM "${name}"`);
+    out.set(name, part.slice(eq + 1).trim());
+  }
+  return out;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -178,6 +196,12 @@ export const config = {
       // would keep the LLM dispatcher releasing messages that aren't its own)
       responseQueueName: process.env.MCP_SQS_RESPONSE_QUEUE ?? "devops-mcp-response.fifo",
     },
+  },
+
+  // VM agent (spec 2026-11-04 Part B): per-VM tokens, and the alert label that names a VM.
+  vm: {
+    tokens: parseVmTokens(process.env.VM_AGENT_TOKENS),
+    hostLabel: process.env.VM_HOST_LABEL || "hostname",
   },
 
   // wall-clock budget (seconds) for a single investigation — bounds how long a semaphore slot is held

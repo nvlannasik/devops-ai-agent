@@ -39,6 +39,7 @@ import { TraceStore } from "./trace/store.js";
 import { lastToolResultIn } from "./remediation/evidence-refusals.js";
 import { ThreadSkills, SkillView } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
+import { VmStore } from "./vm/store.js";
 import { InvestigationRunner } from "./loop/runner.js";
 import { IncidentLifecycle } from "./incidents/lifecycle.js";
 import { extractText } from "./loop/control.js";
@@ -89,6 +90,8 @@ export class DevOpsAgent {
   private usage: UsageStore;
   private remediations: RemediationStore;
   private checks: RemediationCheckStore;
+  /** The VM agent's storage (migrations/018) — public: the app layer mounts its routes on it. */
+  vmStore: VmStore;
   private postmortems: PostmortemStore;
   private gitops: GitOpsClient | null;
   private readonly remediator: Remediator;
@@ -130,6 +133,7 @@ export class DevOpsAgent {
     this.usage = new UsageStore(null); // no-op until initialize() wires Postgres
     this.remediations = deps.remediations ?? new RemediationStore(null); // no-op until initialize() wires Postgres
     this.checks = new RemediationCheckStore(null); // no-op until initialize() wires Postgres
+    this.vmStore = new VmStore(null); // no-op until initialize() wires Postgres
     this.postmortems = new PostmortemStore(null); // no-op until initialize() wires Postgres
     this.gitops = deps.gitops ?? (config.gitops.enabled ? new SqsGitOpsClient() : null); // GitOps PR-flow bridge (opt-in)
 
@@ -211,6 +215,7 @@ export class DevOpsAgent {
       this.incidents = new IncidentMemory(pool, (id, ts) => void this.usage.linkToIncident(id, ts));
       this.remediations = new RemediationStore(pool);
       this.checks = new RemediationCheckStore(pool);
+      this.vmStore = new VmStore(pool);
       this.postmortems = new PostmortemStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
