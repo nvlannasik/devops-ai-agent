@@ -31,21 +31,33 @@ export class MCPClient implements McpTools {
   private connected = false;
   private reconnectMutex = new Mutex();
 
-  constructor() {
+  /**
+   * No `remote`: this agent's own MCP server, from MCP_TRANSPORT / MCP_HTTP_URL. With `remote`: another
+   * cluster's server over HTTP (MCP_HTTP_CLUSTERS) — one connect attempt, then a retry every
+   * `retryMs` while it is down, so a cluster that is off at boot neither stalls the agent's start
+   * (the local retries back off for ~30 s) nor stays toolless once it comes back.
+   */
+  constructor(private readonly remote?: { name: string; url: string; retryMs?: number }) {
     this.client = new Client({ name: "devops-ai-agent", version: "1.0.0" });
+    if (remote) {
+      setInterval(() => {
+        if (!this.connected) this.connect().catch((err) => logger.warn(`[mcp-http] ${remote.name} still unreachable: ${errDetail(err)}`));
+      }, remote.retryMs ?? 300_000).unref();
+    }
   }
 
   async connect(): Promise<void> {
-    await this.connectWithRetry(0);
+    // Starting a remote at the last attempt makes its first failure final (see the constructor).
+    await this.connectWithRetry(this.remote ? MAX_RETRIES : 0);
   }
 
   private async connectWithRetry(attempt: number): Promise<void> {
     try {
       const authToken = config.mcp.http.authToken;
       const transport =
-        config.mcp.transport === "http"
+        this.remote || config.mcp.transport === "http"
           ? new StreamableHTTPClientTransport(
-              new URL(config.mcp.http.url),
+              new URL(this.remote?.url ?? config.mcp.http.url),
               authToken ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } } : undefined
             )
           : new StdioClientTransport({
@@ -57,7 +69,7 @@ export class MCPClient implements McpTools {
       this.client = new Client({ name: "devops-ai-agent", version: "1.0.0" });
       await this.client.connect(transport);
       this.connected = true;
-      logger.info(`MCP client connected via ${config.mcp.transport}`);
+      logger.info(this.remote ? `[mcp-http] ${this.remote.name} connected (${this.remote.url})` : `MCP client connected via ${config.mcp.transport}`);
       await this.discoverTools();
     } catch (err) {
       if (attempt >= MAX_RETRIES) {
@@ -65,7 +77,7 @@ export class MCPClient implements McpTools {
       }
       const delay = BASE_DELAY_MS * Math.pow(2, attempt);
       // the reason was previously dropped, so a wrong URL and a bad token looked identical
-      const target = config.mcp.transport === "http" ? config.mcp.http.url : config.mcp.stdio.command;
+      const target = this.remote?.url ?? (config.mcp.transport === "http" ? config.mcp.http.url : config.mcp.stdio.command);
       logger.warn(`MCP connect attempt ${attempt + 1}/${MAX_RETRIES + 1} to ${target} failed, retrying in ${delay}ms: ${errDetail(err)}`);
       await sleep(delay);
       await this.connectWithRetry(attempt + 1);

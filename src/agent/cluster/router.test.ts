@@ -119,3 +119,10 @@ test("central queries are held to the current cluster; none bound, as written", 
     { query: "up" },
   ]);
 });
+
+test("createMcp hands each bridge entry to the factory as written, HTTP or SQS", () => {
+  const seen: unknown[] = [];
+  const reg = clusterRegistry({ localCluster: "dev", sqs: { clusters: [{ name: "prd", requestQueueName: "q.fifo" }] }, http: { clusters: [{ name: "stg", url: "http://10.10.10.105:30300/mcp" }] } });
+  createMcp(reg, fake("central", centralTools) as McpTools, (b) => { seen.push(b); return fake(b.name, []); });
+  assert.deepEqual(seen, [{ name: "prd", requestQueueName: "q.fifo" }, { name: "stg", url: "http://10.10.10.105:30300/mcp" }]);
+});

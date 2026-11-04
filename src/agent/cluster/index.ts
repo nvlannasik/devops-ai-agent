@@ -8,21 +8,31 @@ import { config } from "../../config/index.js";
 export interface ClusterRegistry {
   /** The cluster the agent's own HTTP MCP server reads (MCP_LOCAL_CLUSTER), or null. */
   local: string | null;
-  bridges: Array<{ name: string; requestQueueName: string }>;
+  /** Remote clusters: an SQS bridge (`requestQueueName`) or an MCP server over HTTP (`url`). */
+  bridges: Bridge[];
   /** Cluster-aware behaviour at all. Off = today's single-cluster agent, byte for byte. */
   strict: boolean;
   /** Local first, then the bridges. */
   names: string[];
 }
 
-type McpRegistryConfig = { localCluster: string | null; sqs: { clusters: Array<{ name: string; requestQueueName: string }> } };
+export type Bridge = { name: string; requestQueueName: string } | { name: string; url: string };
+
+type McpRegistryConfig = {
+  localCluster: string | null;
+  sqs: { clusters: Array<{ name: string; requestQueueName: string }> };
+  http?: { clusters: Array<{ name: string; url: string }> };
+};
 
 export function clusterRegistry(mcp: McpRegistryConfig = config.mcp): ClusterRegistry {
   const local = mcp.localCluster;
-  const bridges = mcp.sqs.clusters;
+  const http = mcp.http?.clusters ?? [];
+  const both = mcp.sqs.clusters.find((b) => http.some((h) => h.name === b.name));
+  if (both) throw new Error(`cluster "${both.name}" is in both MCP_SQS_CLUSTERS and MCP_HTTP_CLUSTERS — one transport per cluster`);
+  const bridges: Bridge[] = [...mcp.sqs.clusters, ...http];
   if (local !== null) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(local)) throw new Error(`MCP_LOCAL_CLUSTER: bad cluster name "${local}" (lowercase letters, digits, -)`);
-    if (bridges.some((b) => b.name === local)) throw new Error(`MCP_LOCAL_CLUSTER "${local}" is also a bridge in MCP_SQS_CLUSTERS`);
+    if (bridges.some((b) => b.name === local)) throw new Error(`MCP_LOCAL_CLUSTER "${local}" is also a remote cluster in MCP_SQS_CLUSTERS / MCP_HTTP_CLUSTERS`);
   }
   return {
     local,

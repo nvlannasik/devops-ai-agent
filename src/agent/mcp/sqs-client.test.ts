@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SqsMcpDispatcher, SqsMCPClient } from "./sqs-client.js";
-import { parseSqsClusters } from "../../config/index.js";
+import { parseHttpClusters, parseSqsClusters } from "../../config/index.js";
 
 // The same contract keys are pinned in devops-mcp-server/src/app/sqs-bridge.test.ts (CONTRACT_REQUEST).
 const CONTRACT_REQUEST_KEYS = ["args", "deadline", "op", "requestId", "tool"]; // + traceId inside an investigation
@@ -165,4 +165,16 @@ test("tracing: the request carries the caller's traceparent, the dispatcher's po
   } finally {
     await d.shutdown();
   }
+});
+
+test("parseHttpClusters: name=url pairs; unset is none; malformed fails boot", () => {
+  assert.deepEqual(parseHttpClusters(undefined), []);
+  assert.deepEqual(parseHttpClusters(" stg=http://10.10.10.105:30300/mcp , prd=https://mcp.prd.internal/mcp "), [
+    { name: "stg", url: "http://10.10.10.105:30300/mcp" },
+    { name: "prd", url: "https://mcp.prd.internal/mcp" },
+  ]);
+  assert.throws(() => parseHttpClusters("stg"), /name=url/);
+  assert.throws(() => parseHttpClusters("Stg=http://x/mcp"), /bad cluster name/);
+  assert.throws(() => parseHttpClusters("stg=ftp://x/mcp"), /http/);
+  assert.throws(() => parseHttpClusters("stg=http://a/mcp,stg=http://b/mcp"), /duplicate/);
 });

@@ -119,6 +119,7 @@ export class DevOpsAgent {
     this.mcp = instrumentMCP(
       deps.mcp ??
         createMcp(this.clusters, new MCPClient(), (b) => {
+          if ("url" in b) return new MCPClient(b);
           dispatcher ??= new SqsMcpDispatcher(config.mcp.sqs.responseQueueName);
           return new SqsMCPClient(b.name, b.requestQueueName, dispatcher);
         }),

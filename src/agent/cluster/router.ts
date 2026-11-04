@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "../llm/types.js";
 import type { BridgeTools, McpTools } from "../mcp/types.js";
-import { currentCluster, type ClusterRegistry } from "./index.js";
+import { currentCluster, type Bridge, type ClusterRegistry } from "./index.js";
 import { queryLanguage, scopeQuery } from "./scope.js";
 import logger, { errDetail } from "../../utils/logger/index.js";
 
@@ -79,7 +79,7 @@ function scoped(name: string, input: Record<string, unknown>): Record<string, un
 export function createMcp(
   registry: ClusterRegistry,
   central: McpTools,
-  bridgeFor: (b: { name: string; requestQueueName: string }) => BridgeTools
+  bridgeFor: (b: Bridge) => BridgeTools
 ): McpTools {
   if (!registry.strict) return central;
   return new ClusterRouter(central, new Map(registry.bridges.map((b) => [b.name, bridgeFor(b)])), registry);

@@ -41,6 +41,26 @@ export function parseSqsClusters(raw: string | undefined): Array<{ name: string;
   return out;
 }
 
+/**
+ * MCP_HTTP_CLUSTERS="stg=http://10.10.10.105:30300/mcp" — clusters whose MCP server the agent can
+ * reach over the network (a LAN, VPC peering), called over HTTP with the same MCP_AUTH_TOKEN as the
+ * local one. No SQS bridge and no AWS identity on that cluster. Malformed fails boot, as above.
+ */
+export function parseHttpClusters(raw: string | undefined): Array<{ name: string; url: string }> {
+  const out: Array<{ name: string; url: string }> = [];
+  for (const part of (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) throw new Error(`MCP_HTTP_CLUSTERS entry "${part}" is not name=url`);
+    const name = part.slice(0, eq).trim();
+    const url = part.slice(eq + 1).trim();
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`MCP_HTTP_CLUSTERS: bad cluster name "${name}" (lowercase letters, digits, -)`);
+    if (!/^https?:\/\/[^\s/]+/.test(url)) throw new Error(`MCP_HTTP_CLUSTERS: the URL for "${name}" must be http:// or https://`);
+    if (out.some((c) => c.name === name)) throw new Error(`MCP_HTTP_CLUSTERS: duplicate cluster "${name}"`);
+    out.push({ name, url });
+  }
+  return out;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -143,6 +163,8 @@ export const config = {
       url: process.env.MCP_HTTP_URL ?? "http://localhost:3001/mcp",
       // Sent as `Authorization: Bearer <token>` when set — must match the server's MCP_AUTH_TOKEN.
       authToken: process.env.MCP_AUTH_TOKEN,
+      // Remote clusters reached over the network (parseHttpClusters); the token above serves them too.
+      clusters: parseHttpClusters(process.env.MCP_HTTP_CLUSTERS),
     },
     // per-tool-call timeout (seconds) so a hung MCP server / upstream can't stall an investigation
     toolTimeoutMs: parseInt(process.env.MCP_TOOL_TIMEOUT_SECONDS ?? "45") * 1000,
