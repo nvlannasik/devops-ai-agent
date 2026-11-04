@@ -63,8 +63,15 @@ const MIN_LENGTH = 4;
  */
 const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*$/;
 
+/**
+ * Labels our own RCA format writes. The Source column scopes a call that read the whole cluster as
+ * "_alertmanager_get_alerts_ `cluster-wide`" — flagged twice on 2026-11-02 as a resource no tool
+ * returned, on RCAs whose only fault was running a cluster-wide tool.
+ */
+const SCOPE_LABELS = new Set(["cluster-wide"]);
+
 const looksLikeIdentifier = (name: string): boolean =>
-  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name) && !NOT_A_NAME.test(name);
+  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name) && !NOT_A_NAME.test(name) && !SCOPE_LABELS.has(name);
 
 /** Names the answer asserts, namespace-qualified ones split into their parts. */
 export function citedNames(answer: string): string[] {

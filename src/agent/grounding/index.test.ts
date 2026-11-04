@@ -164,3 +164,11 @@ test("a two-part manifest field path is not a resource name", () => {
   // a real hyphenated name still has to be grounded, dot or no dot
   assert.deepEqual(groundingGaps("pod `orders-api-7d9f-x2k` is unready", []), ["orders-api-7d9f-x2k"]);
 });
+
+// Live 2026-11-02 (twice): the RCA format's own Source column scopes a cluster-wide call as
+// "_alertmanager_get_alerts_ `cluster-wide`", and the check flagged that scope label as a resource
+// no tool returned — a warning produced by our format, on every RCA that ran a cluster-wide tool.
+test("`cluster-wide`, the Source column's scope label, is not a cited name", () => {
+  const answer = "• *Fact:* 3 alerts active — _alertmanager_get_alerts_ `cluster-wide`\n• `checkout-gateway` restarted";
+  assert.deepEqual(citedNames(answer), ["checkout-gateway"]);
+});
