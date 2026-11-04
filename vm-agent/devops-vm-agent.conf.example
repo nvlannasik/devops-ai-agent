@@ -1,0 +1,10 @@
+[agent]
+# Must match a name in the agent's VM_AGENT_TOKENS, and the `hostname` label this VM's telemetry carries.
+name = vm-web-01
+# https:// for anything beyond a lab (the agent's Ingress path /vm/). http:// works and logs a warning.
+url = https://agent.annasik.cloud
+token = <this VM's token from VM_AGENT_TOKENS>
+# The ONLY units the agent may ever ask this VM to restart. Anything else is refused here.
+units = nginx.service orders.service
+poll_seconds = 10
+# ca_file = /etc/ssl/certs/internal-ca.pem
