@@ -693,6 +693,9 @@ test("each listed action actually parses", () => {
     k8s_delete_pod: { namespace: "a", pod: "b-123" },
     k8s_delete_orphan: { namespace: "a", name: "b", kind: "configmap" },
     k8s_rollout_undo: { namespace: "a", workload: "b", kind: "deployment", to_revision: 1 },
+    k8s_cordon: { node: "worker1" },
+    k8s_uncordon: { node: "worker1" },
+    k8s_drain: { node: "worker1" },
   };
   for (const action of PROPOSABLE_ACTIONS) {
     assert.ok(parseProposal(JSON.stringify({ action, ...minimal[action] })), `${action} did not parse`);

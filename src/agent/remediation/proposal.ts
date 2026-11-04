@@ -70,6 +70,9 @@ const RolloutUndo = z.object({
   to_revision: z.number().int().min(1),
 });
 
+// Nodes are cluster-scoped: the proposal carries namespace "" (spec 2026-11-04-node-ops, Part A).
+const NodeAction = z.object({ node: s });
+
 export function parseProposal(text: string): Proposal | null {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
@@ -89,7 +92,7 @@ export function parseProposal(text: string): Proposal | null {
   // list: a registry path is lowercase by Docker's rules, but a TAG may legitimately carry
   // uppercase (`v1.2-RC1`), and lowercasing it would point the rollout at an image that does not
   // exist. `kind` is handled above because its allowed values are an enum, not a name.
-  for (const k of ["namespace", "workload", "pod", "container"]) {
+  for (const k of ["namespace", "workload", "pod", "container", "node"]) {
     const v = raw[k];
     if (typeof v === "string") raw[k] = v.toLowerCase();
   }
@@ -195,6 +198,20 @@ export function parseProposal(text: string): Proposal | null {
         // mechanism named reads as reassurance; a stored manifest is a fact.
         summary: `delete abandoned ${kind} \`${namespace}/${name}\` (manifest is backed up first — restore by re-applying it)`,
       };
+    }
+    case "k8s_cordon":
+    case "k8s_uncordon":
+    case "k8s_drain": {
+      const p = NodeAction.safeParse(raw);
+      if (!p.success) return null;
+      const { node } = p.data;
+      const summary =
+        raw.action === "k8s_cordon"
+          ? `cordon node \`${node}\` (no new pods are scheduled there; running pods stay)`
+          : raw.action === "k8s_uncordon"
+            ? `uncordon node \`${node}\` (it takes new pods again)`
+            : `drain node \`${node}\` (cordon, then evict its pods; DaemonSet pods stay)`;
+      return { action: raw.action, namespace: "", name: node, reason, toolParams: { node }, summary };
     }
     case "k8s_rollout_undo": {
       const p = RolloutUndo.safeParse(raw);
@@ -514,6 +531,9 @@ export const PROPOSABLE_ACTIONS = [
   "k8s_delete_pod",
   "k8s_delete_orphan",
   "k8s_rollout_undo",
+  "k8s_cordon",
+  "k8s_uncordon",
+  "k8s_drain",
 ] as const;
 
 export const PROPOSAL_SYSTEM =
@@ -568,6 +588,10 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     "   — there is NO delete for a secret or a persistentvolumeclaim, and asking for one is not an option: a Secret's backup is its credentials and a PVC's manifest is not its data, so neither can be made reversible. Output null and say which of those two applies\n" +
     '8. {"action":"k8s_rollout_undo","namespace":"...","workload":"...","kind":"deployment","to_revision":N,"reason":"..."}\n' +
     "   — UNDO A RECENT CHANGE: ONLY when the investigation names a recent rollout of this Deployment as the cause — the [CHANGE TIMELINE] (or ReplicaSet history) shows a new revision whose diff IS the fault (an env value, args, resources, probes). to_revision is the revision just BEFORE that change. Not for a restart: the images are :latest, so undoing a restart changes nothing. On a Flux-managed workload this becomes a revert PR of the commit — propose it the same way\n" +
+    '9. {"action":"k8s_cordon","node":"...","reason":"..."} / {"action":"k8s_drain","node":"...","reason":"..."}\n' +
+    "   — ONLY when the investigation shows the NODE itself failing (NotReady, a pressure condition, a disk or I/O fault on that node) — not one workload that happens to run there. Cordon stops new pods landing; drain also moves the running ones off (DaemonSet pods stay). Never the control-plane node\n" +
+    '10. {"action":"k8s_uncordon","node":"...","reason":"..."}\n' +
+    "   — ONLY for a node cordoned earlier whose fault the evidence shows is gone\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
     // of real faults, and saying so is what stops the model reaching for a restart to have
     // something to say.
@@ -646,6 +670,9 @@ const REQUIRED: Record<string, string> = {
   k8s_delete_pod: "namespace and pod, the exact pod name including its hash suffix",
   k8s_delete_orphan:
     "namespace, name, and kind as one of configmap / service / serviceaccount / deployment / statefulset. The object must appear in a `k8s_find_unused_resources` result's `orphanKeys` as `namespace/kind/name` — there is no delete for a secret or a PVC",
+  k8s_cordon: "node — the exact node name from the context",
+  k8s_uncordon: "node — the exact node name from the context",
+  k8s_drain: "node — the exact node name from the context",
   k8s_rollout_undo:
     'namespace, workload, kind "deployment", and to_revision as an integer — the revision just BEFORE the change the investigation names as the cause (the [CHANGE TIMELINE] lists each rollout\'s revision)',
 };

@@ -792,7 +792,7 @@ export class Remediator {
         // check that came back five minutes later with "inconclusive — 0/0 pods ready", which is
         // not an inconclusive result, it is a question that was never answerable. The GitOps PR
         // path already returns no target for the same reason one level along: nothing to look at.
-        ...(claim.action === "k8s_delete_orphan"
+        ...(NO_POD_TARGET.has(claim.action)
           ? {}
           : { target: { namespace: String(toolParams.namespace ?? ""), name: targetName } }),
         // Handed back so the caller can post it into the thread. Two copies on purpose: this one
@@ -1014,6 +1014,13 @@ export class Remediator {
     return flipped ? `🚫 Remediation rejected by <@${by}>. Nothing was executed.` : "⚠️ Already handled (or expired).";
   }
 }
+
+/**
+ * Actions whose result leaves no pods to measure, so no readiness check is scheduled: an orphan
+ * delete removes an object with none, and a node action's own result already reports the node's
+ * state (cordoned; evicted / blocked / left in place).
+ */
+export const NO_POD_TARGET: ReadonlySet<string> = new Set(["k8s_delete_orphan", "k8s_cordon", "k8s_uncordon", "k8s_drain"]);
 
 /** What an opened GitOps PR leaves for the apply-watch: the workload, and what it should end up running. */
 export type AwaitApply = { target: { namespace: string; name: string; kind: string }; expect: ApplyExpectation };
