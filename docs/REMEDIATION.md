@@ -20,7 +20,17 @@ an RCA (alert-driven or mention-driven). It is off unless the MCP server enables
 | `k8s_delete_orphan` | an orphaned object (e.g. a ConfigMap nothing references) found by a scan in the same thread | the manifest is backed up to Postgres and posted into the thread before the delete; the server re-checks provenance/ownership/age live |
 | `k8s_rollout_undo` (rollback) | a bad rollout on the thread's change timeline | gated on the timeline; on a Flux-managed workload it opens a **revert PR** (`revert_pr`) instead of patching the cluster |
 
+| `k8s_cordon` / `k8s_uncordon` | a node that is the cause (pressure, a bad kernel, hardware) — keep new pods off it, or put it back | never a control-plane node or the cluster's last schedulable node; needs chart `rbac.allowNodeOps` |
+| `k8s_drain` | the node must be emptied | cordons, then evicts through the Eviction API, so PodDisruptionBudgets hold (a protected pod is reported `blocked`); DaemonSet, static and finished pods stay |
+| `vm_restart_service` | a systemd service on a VM (not Kubernetes) | the VM must have heartbeated in the last 5 min and list the unit; the VM's own agent re-checks its allowlist and runs `systemctl restart` — see [`../vm-agent/README.md`](../vm-agent/README.md) |
+
 All workload actions support deployment/statefulset/daemonset (except `k8s_scale`: no daemonset).
+The node and VM actions get no 5-minute verification (there is no pod to re-check): a node action's
+result is the tool's own answer, and a VM restart's is the VM's report (exit code, `is-active`, last
+journal lines), posted into the card's thread when it arrives.
+
+On a run bound to a cluster other than the local one, every action goes to that cluster's MCP
+server, and a GitOps PR is opened against that cluster's own overlay — or not at all.
 
 ## The gate chain
 

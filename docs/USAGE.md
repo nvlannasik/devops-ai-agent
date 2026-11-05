@@ -9,6 +9,26 @@ alerts arrive from Alertmanager. Approval-gated fixes have their own page: [REME
 @devops-agent pods in namespace payment-service are crashing with OOMKilled
 ```
 
+## Which cluster (multi-cluster)
+
+With more than one cluster configured, a mention that names none gets one question back ("which
+cluster?"); the answer binds the thread. Asking about another cluster in a bound thread is refused
+with a pointer to start a new thread — the agent never answers one cluster's question with another's
+data. Alerts carry their `cluster` label and are bound automatically.
+
+```
+@devops-agent cek pod crashloop di stg
+```
+
+## VMs
+
+A service on a VM running `devops-vm-agent` can be restarted through the same approval card.
+Naming a registered VM binds the thread to it; naming a cluster later moves it back.
+
+```
+@devops-agent restart orders.service on vm-web-01
+```
+
 ## Follow-up questions
 
 After RCA is posted, follow-up messages are answered conversationally:
@@ -92,7 +112,7 @@ receivers:
           authorization:       # must equal the agent's ALERT_WEBHOOK_TOKEN (omit if unset)
             credentials: <ALERT_WEBHOOK_TOKEN>
 route:
-  group_by: ["alertname", "namespace"]   # one webhook per group → the agent investigates the group ONCE
+  group_by: ["alertname", "namespace", "cluster"]   # one webhook per group → the agent investigates the group ONCE
   repeat_interval: 12h
   receiver: devops-ai-agent
 ```

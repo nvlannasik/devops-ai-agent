@@ -12,6 +12,10 @@ set `DASHBOARD_ENABLED=true` and a `DASHBOARD_PASSWORD` (see [CONFIGURATION.md](
 /incidents/N/postmortem.md   the same draft as a raw Markdown download
 /topology        the agent stack's own map: LLM backends, MCP tools, Postgres/Redis/SQS stores
 /cluster         the cluster inventory as a map: namespaces, then host → Service → workload → managed by
+                 (?cluster=<name> picks the cluster when more than one is configured)
+/memory          alert memory: what the agent will recall per alert + namespace
+/memory/threads  conversation memory: each Slack thread's window, TTL, RCA flag
+/people          who may mention, approve and is on call, and who decided which card
 /harness         every gate's activity across recorded runs, LLM latency per backend
 /harness/<gate>  one gate's runs; each links to its full trace
 /bench           benchmark history (pass rates per scenario and axis)

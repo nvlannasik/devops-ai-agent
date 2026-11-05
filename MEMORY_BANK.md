@@ -4,10 +4,10 @@
 AI Agent for DevOps incident investigation and Root Cause Analysis (RCA). Uses Slack as the interface, Claude/private LLM as the reasoning engine, and devops-mcp-server as the observability data source.
 
 ## Tech Stack
-- **Runtime:** Node.js >= 24, TypeScript (ESM)
+- **Runtime:** Node.js 26, TypeScript (ESM)
 - **Slack:** `@slack/bolt` v4 (Socket Mode or HTTP Mode)
 - **LLM:** `@anthropic-ai/sdk` v0.100.1 (Claude) + `openai` SDK (OpenAI-compatible) + `SQSLLMClient` (private LLM)
-- **MCP Client:** `@modelcontextprotocol/sdk` v1.29.0
+- **MCP Client:** `@modelcontextprotocol/sdk` v1.32.2 (zod 4)
 - **Memory:** In-memory Map or Redis (`ioredis`)
 - **Build:** `tsc` → `dist/`, dev via `tsx watch`
 
@@ -1941,15 +1941,21 @@ One trace per investigation across the agent, the MCP server and llm-worker, exp
 
 ### Next — ordered
 - [x] **D. Resolved-alert loop** ✅ shipped — `status: resolved` now: releases the dedup claim (`AlertDeduplicator.clear` — a re-fire re-investigates instead of being suppressed 12h), marks the newest unresolved incident (`markResolved`, migration `003_resolved_at.sql`), posts "✅ Alert resolved" into the thread with a learn-reaction hint.
-- [ ] **C. Guarded Remediation** — Design → **`docs/DESIGN_guarded_remediation.md`**. ✅ **v1.1 shipped**: schema + proposal flow + approval buttons + **4 typed actions** (`k8s_rollout_restart` dep/sts/ds, `k8s_set_image`, `k8s_set_resources`, `k8s_scale` with `MAX_SCALE_DELTA` + no scale-to-zero) + mention-path support (`incident_id` nullable) + write tools excluded from the agentic loop (`[WRITE]` prefix convention). Remaining: Step 5 (ops: least-privilege RBAC — now needs `patch` on deployments/statefulsets/daemonsets + `get` in allowed namespaces), then v2 (rollback action, rate limiting, resolved-loop outcome tracking).
+- [x] **C. Guarded Remediation** — Design → **`docs/DESIGN_guarded_remediation.md`**. ✅ **v1.1 shipped**: schema + proposal flow + approval buttons + **4 typed actions** (`k8s_rollout_restart` dep/sts/ds, `k8s_set_image`, `k8s_set_resources`, `k8s_scale` with `MAX_SCALE_DELTA` + no scale-to-zero) + mention-path support (`incident_id` nullable) + write tools excluded from the agentic loop (`[WRITE]` prefix convention). Remaining: Step 5 (ops: least-privilege RBAC — now needs `patch` on deployments/statefulsets/daemonsets + `get` in allowed namespaces), then v2 (rollback action, rate limiting, resolved-loop outcome tracking).
   - ✅ **GitOps guard shipped (2026-07-17, design doc §10):** the MCP server refuses direct spec-mutating patches on Flux-managed workloads (`kustomize.toolkit.fluxcd.io/name` / `helm.toolkit.fluxcd.io/name` labels — error names the owning object) and plain Helm-managed ones (`app.kubernetes.io/managed-by: Helm`); `rollout_restart`/`delete_pod` stay allowed.
   - ✅ **GitOps PR flow shipped (2026-07-23, `DESIGN_gitops_pr_remediation.md`, IMPLEMENTED):** for a Flux HelmRelease the dry-run returns a structured PR preview → agent opens a **PR** via the llm-worker over SQS (GHE is private-network-only). PAT auth for the initial phase; all 3 mutating actions supported (image/scale single-scalar, set_resources nested via parent-stack). See the Guarded Remediation section above for the runtime path. Remaining: ops (mount PAT in worker, create `gitops` queue, RBAC for Flux CRDs), live E2E.
 - [x] **E. On-call feedback learning** ✅ steps 1–5 shipped — v1 (migration 002, feedback store/recall, `@agent learn` router + extraction, confirmed-tier recall + prompt framing) + step 5: `reaction_added` trigger (`SLACK_LEARN_REACTION` default `white_check_mark`; needs `reactions:read` + event subscription). Reaction-learn is **silent** when the thread has no stored incident or was already learned (`trigger_key = reaction:<message ts>`); the reaction payload has no `thread_ts` → resolved via `conversations.replies(ts, limit 1)`. Remaining: v2 ideas (passive capture).
 - Migration **`002_remediations_and_feedback.sql`** ships the shared schema for C+E in one transaction; `store()` now takes an optional `{channel, threadTs}` and returns `incidents.id` (`Number()`-cast — pg returns BIGSERIAL as string).
 
+### Done 2026-11 (details in `CLAUDE.md` and the specs under `docs/superpowers/`)
+- [x] **Multi-cluster** — 2a registry/routing + cluster question + switch guard, 2b `cluster=` in every PromQL/LogQL selector, 2c per-cluster `/cluster` page, part 3 per-cluster overlays + state keyed per cluster; remote clusters over HTTP (`MCP_HTTP_CLUSTERS`, stg since 2026-11-04) or the SQS bridge.
+- [x] **Node ops** — `k8s_cordon` / `k8s_uncordon` / `k8s_drain` through the card (chart 0.8.1 `rbac.allowNodeOps`).
+- [x] **VM agent** — `vm_restart_service`, VM incidents (`VM_HOST_LABEL`), VM mention binding, `vm-agent/install.sh`.
+- [x] **Heavy backends `maxTokens: 16384`** — 8096 truncated 4 RCAs in 14 days.
+
 ### Parked (design captured, revisit when prioritized)
 - **FinOps** (cost Q&A, waste audit, cost-anomaly-as-incident, rightsizing) — mostly config/prompt via OpenCost→Prometheus; see **`docs/DESIGN_finops.md`**.
-- **VM/baremetal execution** via Ansible-backed MCP tools — deemed too complex for now; K8s + observability scope only. Key notes: whitelist = curated playbooks (never generic exec), `--check` = dry-run, plain-CLI-vs-AWX decides the architecture.
+- ~~**VM/baremetal execution** via Ansible-backed MCP tools~~ — superseded 2026-11-04 by the pull-based `devops-vm-agent` (`vm-agent/`, `vm_restart_service`): the VM pulls approved restarts of units in its own allowlist, so the agent holds no SSH key and opens no connection. See `docs/superpowers/specs/2026-11-04-node-ops-and-vm-agent-design.md`.
 
 ### Resolved 2026-10-07 — a restart of a HEALTHY workload passed every gate
 **Fixed by `healthyTargetRefusal`** (`agent/remediation/replace-guard.ts`, run inside the

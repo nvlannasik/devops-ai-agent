@@ -45,6 +45,8 @@ The full pipeline, step by step: [docs/INVESTIGATION.md](docs/INVESTIGATION.md).
 - **Guarded remediation** — one whitelisted fix, gate chain, mandatory dry-run, human Approve, durable verification; GitOps PR / revert PR for Flux workloads — [REMEDIATION](docs/REMEDIATION.md)
 - **Incident memory** — human-confirmed causes (`@agent learn`), past RCAs, possibly-related incidents, past remediations with verdicts — [MEMORY](docs/MEMORY.md)
 - **Change timeline and cross-alert correlation** — what changed in the last 24h; a neighbouring alert joins the open incident's thread — [INVESTIGATION](docs/INVESTIGATION.md)
+- **More than one cluster** — every run bound to one cluster (asked when unnamed); tools, PromQL/LogQL and GitOps PRs held to it; remote clusters over HTTP or an SQS bridge — [CONFIGURATION](docs/CONFIGURATION.md#more-than-one-cluster)
+- **Nodes and VMs** — cordon/uncordon/drain through the card; restart a systemd service on a VM via the pull-based `devops-vm-agent` — [REMEDIATION](docs/REMEDIATION.md), [vm-agent](vm-agent/README.md)
 - **Cluster tour** — onboarding tables built from the cluster, request flow, and where in Git to change a workload — [USAGE](docs/USAGE.md#cluster-tour-onboarding)
 - **Postmortem draft** — `@agent postmortem`, with the timeline and numbers rendered from Postgres — [USAGE](docs/USAGE.md#postmortem-draft)
 - **Multi-LLM** — Claude, OpenAI-compatible, a private LLM over SQS, or a light/heavy router with up-only failover; cost per investigation; identifier masking — [LLM](docs/LLM.md)
@@ -56,7 +58,7 @@ The full pipeline, step by step: [docs/INVESTIGATION.md](docs/INVESTIGATION.md).
 
 **Requirements**
 
-- Node.js >= 24
+- Node.js 26 (what the images run)
 - A running [devops-mcp-server](../devops-mcp-server)
 - Slack app with scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`, `users:read` (names on the dashboard's /people page)
 - Optional: Postgres (incident memory, dashboard) and Redis (multi-pod conversation memory + dedup)

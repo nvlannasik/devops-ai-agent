@@ -15,6 +15,7 @@ the defaults are what the agent uses when the variable is unset.
 | `ALERT_WEBHOOK_TOKEN` | Shared secret required on `POST /alert` (`Authorization: Bearer <token>`). Unset = open + a startup warning. Set it on the Alertmanager side via `http_config.authorization.credentials` | — |
 | `SLACK_ALLOWED_USERS` | Comma-separated user IDs allowed to mention the agent and ✅-learn (`SLACK_ONCALL_USERS` and `SLACK_APPROVER_USERS` are always admitted too). Anyone else gets an ephemeral "not registered" reply and is logged. Unset = anyone in the channel, with a startup warning. Alerts are unaffected | optional |
 | `SLACK_ONCALL_USERS` | Comma-separated user IDs, mentioned on Low confidence | optional |
+| `SLACK_LEARN_REACTION` | Reaction name that teaches the agent a thread's conclusion, same as `@agent learn` | `white_check_mark` |
 | `SLACK_APPROVER_USERS` | User IDs allowed to approve/reject remediations (falls back to `SLACK_ONCALL_USERS`; both empty = anyone, with a log warning) | optional |
 
 ## LLM
@@ -27,7 +28,7 @@ See [LLM.md](LLM.md) for the router, the private LLM and pricing.
 | `ANTHROPIC_API_KEY` | Required if claude | — |
 | `CLAUDE_MODEL` | | `claude-opus-5-5` |
 | `LLM_EFFORT` | Thinking effort on Opus 5.5+ (`low`…`max`). The only dial for how much of `MAX_TOKENS` goes to thinking rather than the answer. Not `CLAUDE_EFFORT` — the Claude Code harness owns that name | model default (`medium`) |
-| `MAX_TOKENS` | Output token ceiling (claude + openai-compatible). On Opus 5.5+ this covers thinking **plus** the answer | `8096` |
+| `MAX_TOKENS` | Output token ceiling (claude + openai-compatible). On Opus 5.5+ this covers thinking **plus** the answer. A router backend sets its own (`LLM_BACKEND_<N>_MAX_TOKENS`; the gitops heavy backends use `16384`, because 8096 cut long RCAs off mid-sentence) | `8096` |
 | `OPENAI_COMPATIBLE_BASE_URL` | Required if openai-compatible | — |
 | `OPENAI_COMPATIBLE_API_KEY` | | — |
 | `OPENAI_COMPATIBLE_MODEL` | | `gpt-4` |
@@ -60,6 +61,31 @@ See [LLM.md](LLM.md) for the router, the private LLM and pricing.
 | `MCP_HTTP_URL` | | `http://localhost:3001/mcp` |
 | `MCP_AUTH_TOKEN` | Bearer token sent to the MCP server (http transport); must match the server's `MCP_AUTH_TOKEN` | — |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Per-tool-call timeout (a hung MCP server can't stall an investigation) | `45` |
+
+## More than one cluster
+
+All unset = single-cluster mode, unchanged. Setting any of them turns on **strict mode**: every
+run is bound to one cluster (asked for when a mention names none), Kubernetes tools go to that
+cluster's MCP server only, and every PromQL/LogQL selector gets `cluster="<name>"`. A name must
+equal the `cluster` label on that cluster's series, logs and alerts. Design:
+[`superpowers/specs/2026-11-02-multi-cluster-routing-design.md`](superpowers/specs/2026-11-02-multi-cluster-routing-design.md).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_LOCAL_CLUSTER` | The cluster `MCP_HTTP_URL` reads (e.g. `dev`) | — |
+| `MCP_HTTP_CLUSTERS` | Remote clusters on a routed network: `name=http://host:port/mcp,…`. They get `MCP_AUTH_TOKEN` too | — |
+| `MCP_SQS_CLUSTERS` | Clusters that accept no inbound traffic: `name=devops-mcp-<name>-request.fifo,…` (the server side runs `TRANSPORT=sqs`) | — |
+| `MCP_SQS_RESPONSE_QUEUE` | Response queue for those bridges — never the LLM one | `devops-mcp-response.fifo` |
+
+## VMs (`devops-vm-agent`)
+
+Unset = no `/vm/*` routes (404) and no `vm_restart_service` tool. The VM side and its installer:
+[`../vm-agent/README.md`](../vm-agent/README.md).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VM_AGENT_TOKENS` | One bearer token per VM: `vm-web-01=<token>,…`. The name is the VM's identity; it must equal the VM's `name` and its `VM_HOST_LABEL` value in the telemetry. Keep it in a Secret | — |
+| `VM_HOST_LABEL` | The alert/series label that names a VM; an alert carrying a registered VM's name is a VM incident | `hostname` |
 
 ## Storage (conversation memory, incident memory)
 
@@ -127,6 +153,8 @@ See [DASHBOARD.md](DASHBOARD.md).
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `TRACE_ENABLED` | Record every investigation into `agent_events` (needs `DB_HOST`). `false` disables | `true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry collector (OTLP/HTTP). Unset = no spans; the chart sets it from `global.tracing` | — |
+| `TRACING_UI_URL` | Jaeger UI base for the incident page's **Open in Jaeger** button; unset = no button | — |
 | `GIT_SHA` | Baked in by CI; stamped on every trace so a run can be tied to the build that made it | `unknown` |
 | `LOG_LEVEL` | `error\|warn\|info\|http\|debug` | `debug` (dev), `info` (prod) |
 
