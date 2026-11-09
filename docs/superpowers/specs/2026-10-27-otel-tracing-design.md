@@ -65,6 +65,14 @@ preload module started with `node --import <preload> dist/index.js`, which:
    and continues;
 3. exposes the handle so the service's existing shutdown/drain flushes it on SIGTERM.
 
+> **Superseded 2026-11-10 (step 1):** `module.register()` is deprecated (DEP0205) and warned on
+> every boot. All four preloads now use import-in-the-middle's synchronous loader
+> (`import-in-the-middle/register-hooks.mjs`, i.e. `module.registerHooks()`), called with
+> `include` built from the instrumentations' own `getModuleDefinitions()` names. The sync hook
+> cannot learn names from `Hook()` calls the way the async message channel did, and without
+> `include` it wraps every ESM module — which crashlooped the agent's openai SDK on 2026-10-27.
+> The agent's `preload.test.ts` fails if `include` is dropped (verified by negative control).
+
 Reference implementation: `devops-sample-apps/packages/platform/src/tracing-preload.ts` and its
 `tracing-preload.test.ts` (a real ESM child process against a fake OTLP receiver).
 
