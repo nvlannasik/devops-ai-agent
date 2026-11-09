@@ -163,3 +163,6 @@ bench/results/*
 # deletion with extra steps, and the whole reason to move these rather than drop them is that a
 # regression is only ever visible against what came before.
 !bench/results/history-archive.jsonl
+
+# Serena (local code-assistant config/cache)
+.serena/
