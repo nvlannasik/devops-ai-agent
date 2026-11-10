@@ -14,7 +14,7 @@ import type { Message } from "../agent/llm/types.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
 import type { MemoryKeyDetail, MemoryKeyPage, MemoryKeyRow } from "./queries.js";
-import { ICON, badge, dash, empty, pager, section, severityBadge, statList } from "./parts.js";
+import { ICON, badge, dash, empty, pager, section, severityBadge, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 export interface MemoryFilters { page: number; alertname: string | null; namespace: string | null }
@@ -175,12 +175,9 @@ export function memoryKeyPage(
      ${section(ICON.memory, "What the agent will read")}
      <p class="meta">The text recall puts in front of the model when this alert fires again, produced by the agent's own recall. The weakest tier — <em>possibly related</em> incidents, matched on the words of the alert's own text — is computed from that text when an alert arrives, so it cannot be shown here.</p>
      ${recallBlock}
-     ${section(ICON.speech, "Confirmed by people")}
-     ${learned}
-     ${section(ICON.memory, "The agent's own RCAs")}
-     ${rcas}
-     ${section(ICON.wrench, "Remediations and their verdicts")}
-     ${rems}
+     ${panel("Confirmed by people", learned)}
+     ${panel("The agent's own RCAs", rcas)}
+     ${panel("Remediations and their verdicts", rems)}
      </div>`,
     { current: "/memory", openIncidents }
   );

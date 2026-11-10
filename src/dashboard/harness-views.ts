@@ -1,7 +1,7 @@
 import { cell, esc, fmtInt, fmtLatency, fmtPct, headers, table, timeTag } from "./html.js";
 import { lineChart } from "./chart.js";
 import type { GateDrill, GateStat, HarnessView } from "./queries.js";
-import { ICON, badge, empty, section, statList } from "./parts.js";
+import { ICON, badge, empty, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 // --- Harness (agent/trace, migrations/011) ---
@@ -116,8 +116,7 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
     )
     .join("");
   const latency = llmRows
-    ? `${section(ICON.chip, "LLM latency", '<span class="meta">7 days · per chat() call, failover included · slowest first</span>')}
-         ${table(headers("Backend", ["Calls", "num"], ["p50", "num"], ["p95", "num"], "Spread"), llmRows, "pairs")}`
+    ? panel("LLM latency", table(headers("Backend", ["Calls", "num"], ["p50", "num"], ["p95", "num"], "Spread"), llmRows, "pairs"), '<span class="meta">7 days · per chat() call, failover included · slowest first</span>')
     : "";
   const body =
     v.stats.length === 0
@@ -126,16 +125,14 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
           "Every investigation since the trace recorder shipped writes them; the first alert after a deploy fills this page.",
           ICON.harness
         )
-      : `${section(ICON.harness, "Gates", '<span class="meta">most active first · production only</span>')}
-         ${table(headers("Gate", ["7 days", "num"], ["30 days", "num"], ["Per run", "num"], "Outcomes (30d)"), rows, "pairs")}
+      : `${panel("Gates", table(headers("Gate", ["7 days", "num"], ["30 days", "num"], ["Per run", "num"], "Outcomes (30d)"), rows, "pairs"), '<span class="meta">most active first · production only</span>')}
          ${
            fateRows
-             ? `${section(ICON.overview, "What each nudge led to", '<span class="meta">30 days</span>')}
-         <p class="meta">A nudge buys the model one more round. <strong>accepted</strong>: its answer was used.
+             ? panel("What each nudge led to", `<p class="meta">A nudge buys the model one more round. <strong>accepted</strong>: its answer was used.
            <strong>restored</strong>: the round fetched nothing and the earlier answer was kept.
            <strong>kept-earlier</strong>: the round made the answer worse and was thrown away — a gate whose
            nudges mostly end here costs more than it buys.</p>
-         ${table(headers("Gate", ["Nudges", "num"], "What it led to"), fateRows, "stack")}`
+         ${table(headers("Gate", ["Nudges", "num"], "What it led to"), fateRows, "stack")}`, '<span class="meta">30 days</span>')
              : ""
          }
          ${latency}`;
@@ -178,12 +175,13 @@ export function harnessGatePage(name: string, d: GateDrill, now: Date, openIncid
      <h1><code translate="no">${esc(name)}</code></h1>
      <p class="meta">${fmtInt(total)} ${total === 1 ? "fire" : "fires"} in the last 30 days, production only.</p>
      ${total > 0 ? `<div class="card">${lineChart(d.daily.map((p) => ({ label: p.day.slice(5), value: p.n })), { label: "Fires per day, last 30 days" })}</div>` : ""}
-     ${section(ICON.incidents, "Latest", '<span class="meta">newest first · 100 at most</span>')}
-     ${
+     ${panel(
+       "Latest",
        rows
          ? table(headers("When", "Outcome", "Detail", "Thread"), rows, "stack")
-         : empty("This gate has not fired in production yet.", "It will appear here the first time it does.", ICON.harness)
-     }
+         : empty("This gate has not fired in production yet.", "It will appear here the first time it does.", ICON.harness),
+       '<span class="meta">newest first · 100 at most</span>'
+     )}
      </div>`,
     { current: "/harness", openIncidents }
   );

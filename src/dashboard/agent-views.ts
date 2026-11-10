@@ -4,7 +4,7 @@ import type { Assets } from "./assets.js";
 import { renderMarkdown } from "./markdown.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
-import { ICON, badge, empty, jsonBlock, section, statList } from "./parts.js";
+import { ICON, badge, empty, jsonBlock, section, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 // `group` is only ever the anchor prefix: each box in the diagram links to its own row here,
@@ -210,14 +210,10 @@ export function topologyPage(
      </div>
      ${topologyShelf(t)}
      ${topoFrame(t, nonce, assets)}
-     ${section(ICON.inbound, "Inbound")}
-     ${nodeRows(t.inbound, "in")}
-     ${section(ICON.outbound, "Outbound")}
-     ${nodeRows(t.outbound, "out")}
-     ${section(ICON.plug, "MCP tools")}
-     ${capabilityRows(t.capabilities)}
-     ${section(ICON.chip, "LLM backends")}
-     ${router}`,
+     ${panel("Inbound", nodeRows(t.inbound, "in"))}
+     ${panel("Outbound", nodeRows(t.outbound, "out"))}
+     ${panel("MCP tools", capabilityRows(t.capabilities))}
+     ${panel("LLM backends", router)}`,
     // The one page with an external stylesheet. It is linked ahead of the inline <style> so
     // the dashboard's own rules win over React Flow's at equal specificity.
     { current: "/topology", openIncidents, stylesheet: assets?.css.path }
@@ -417,24 +413,19 @@ export function contextPage(v: ContextView, openIncidents?: number): string {
        },
      ])}
 
-     ${section(ICON.layers, "Core prompt", `<a class="standalone" href="/prompt">Read the prompt →</a>`)}
-     <p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
+     ${panel("Core prompt", `<p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
        ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
-       every investigation. The skills below are shown in full; so is this.</p>
-
-     ${section(ICON.context, "Skills")}
-     <p class="meta">Selected from the alert text and carried in the first user message, never in
+       every investigation. The skills below are shown in full; so is this.</p>`, `<a class="standalone" href="/prompt">Read the prompt →</a>`)}
+     ${panel("Skills", `<p class="meta">Selected from the alert text and carried in the first user message, never in
        the system prompt — a system prompt that varied per investigation would miss the model's
        prompt cache on every call. Open a skill to read the text the model is handed.</p>
-     ${skillRows(v.skills)}
-
-     ${section(ICON.chip, "Budget per backend")}
-     <p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
+     ${skillRows(v.skills)}`)}
+     ${panel("Budget per backend", `<p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
        the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
        The router picks a backend after the request is assembled, so the request has to fit the
        smallest one it might land in.</p>
      <p class="stack-legend"><span><i data-k="reserve"></i>reserve</span><span><i data-k="core"></i>core prompt</span><span><i data-k="tools"></i>tools</span><span><i data-k="available"></i>available</span></p>
-     ${budgetRows(v.backends)}`,
+     ${budgetRows(v.backends)}`)}`,
     { current: "/context", openIncidents }
   );
 }

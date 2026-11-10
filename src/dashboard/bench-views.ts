@@ -1,7 +1,7 @@
 import { cell, esc, fmtAgo, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
 import { byCase, byConfig, spotChecks, suiteRuns, type BenchRun } from "./bench.js";
 import { thrownAttempts } from "../bench/store.js";
-import { ICON, badge, delta, section, statList } from "./parts.js";
+import { ICON, badge, delta, section, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 // ---- Benchmark ------------------------------------------------------------------------------
@@ -208,8 +208,7 @@ function byCaseTable(history: BenchRun[]): string {
         `</tr>`
     )
     .join("");
-  return `${section(ICON.incidents, "By case", '<span class="meta">hardest first</span>')}
-    ${table(headers("Case", "Pass rate", ["Attempts", "num"], ["Runs", "num"]), body, "pairs", "bench-table")}`;
+  return panel("By case", table(headers("Case", "Pass rate", ["Attempts", "num"], ["Runs", "num"]), body, "pairs", "bench-table"), '<span class="meta">hardest first</span>');
 }
 
 /**
@@ -267,8 +266,7 @@ function byConfigTable(history: BenchRun[]): string {
     )
     .join("");
   const caption = rows.length === 1 ? "only one measured so far" : "best first";
-  return `${section(ICON.bench, "By configuration", `<span class="meta">${caption}</span>`)}
-    ${table(headers("Backends", "Pass rate", ["Attempts", "num"], ["Clean runs", "num"]), body, "pairs", "bench-table")}`;
+  return panel("By configuration", table(headers("Backends", "Pass rate", ["Attempts", "num"], ["Clean runs", "num"]), body, "pairs", "bench-table"), `<span class="meta">${caption}</span>`);
 }
 
 /** The four figures a reader opens this page for, from the newest whole-suite run. */

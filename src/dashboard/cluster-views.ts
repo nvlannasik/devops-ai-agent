@@ -1,7 +1,7 @@
 import type { ClusterInventory, DashboardClusterModel, ManagedBy } from "./cluster-types.js";
 import { cell, esc, fmtInt, headers, table } from "./html.js";
 import type { Assets } from "./assets.js";
-import { ICON, badge, breakable, empty, jsonBlock, section, statList } from "./parts.js";
+import { ICON, badge, breakable, empty, jsonBlock, section, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 // --- /cluster (spec 2026-10-07-cluster-tour §3.5) ---
@@ -74,7 +74,7 @@ export function clusterPage(
       : "";
   const nsBlock = (ns: ClusterInventory["namespaces"][number]): string => {
     if (ns.workloads.length === 0) {
-      return `${section(ICON.layers, ns.name)}${empty("Nothing deployed here.", "No Deployment, StatefulSet, DaemonSet or CronJob in this namespace.", ICON.layers)}`;
+      return panel(ns.name, empty("Nothing deployed here.", "No Deployment, StatefulSet, DaemonSet or CronJob in this namespace.", ICON.layers));
     }
     const rows = ns.workloads
       .map(
@@ -100,11 +100,11 @@ export function clusterPage(
     const svc = ns.services.map((x) => `<code translate="no">${esc(x.name)}</code> ${esc(x.ports.join(", "))}`).join(" · ");
     const hosts = ns.ingresses.flatMap((x) => x.hosts).map((h) => `<code translate="no">${esc(h)}</code>`).join(" · ");
     return (
-      `${section(ICON.layers, ns.name)}` +
+      panel(ns.name,
       table(headers("Workload", "Kind", ["Ready", "num"], "Image", "Managed by"), rows, "pairs") +
       (svc || hosts
         ? `<p class="meta">${svc ? `Services: ${svc}` : ""}${svc && hosts ? "<br>" : ""}${hosts ? `Ingress: ${hosts}` : ""}</p>`
-        : "")
+        : ""))
     );
   };
   let body: string;

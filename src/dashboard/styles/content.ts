@@ -404,6 +404,7 @@ export const CONTENT_CSS = `
 /* A line of prose in a flush card — a note above or instead of its table — brings the padding
    the card does not have. */
 .card.flush > p { margin: 0; padding: 0 var(--sp-5) var(--sp-4); }
+.card.flush > .table-wrap + p { padding-top: var(--sp-3); }
 /* Panels down a document page keep the page's block distance between them. */
 .doc > * + .card { margin-top: var(--stack); }
 /* An empty state inside a card is a sentence in that card, not a second panel in it. */

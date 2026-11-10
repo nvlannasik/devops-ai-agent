@@ -3430,3 +3430,15 @@ test("the incident page sets the facts beside the analysis, facts first in the m
   assert.doesNotMatch(grid, /On-call feedback/);
   assert.match(html, /<section class="card flush"><header class="card-head"><h2 class="card-title">Remediation<\/h2><\/header>/);
 });
+
+// Pass 3: every page's tables sit in titled panels. The mono section caption survives only
+// where what follows is not a table — a fold, a transcript, the recall text.
+test("a page's tables are titled panels, on every converted page", async () => {
+  const { harnessPage, clusterPage } = await import("./views.js");
+  const harness = harnessPage({ runs7: 1, runs30: 1, stats: [{ name: "placeholder", outcome: "refused", d7: 1, d30: 1 }] });
+  assert.match(harness, /<section class="card flush"><header class="card-head"><h2 class="card-title">Gates<\/h2><span class="meta">[^<]+<\/span><\/header><div class="table-wrap"/);
+  const cluster = clusterPage({ scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "empty", system: false, workloads: [], services: [], ingresses: [] }] } as never, null);
+  assert.match(cluster, /<h2 class="card-title">empty<\/h2><\/header><div class="empty">/);
+  // a note under a panel's table brings its own padding: the flush card has none
+  assert.match(STYLES, /\.card\.flush > p \{[^}]*padding: 0 var\(--sp-5\) var\(--sp-4\)/);
+});
