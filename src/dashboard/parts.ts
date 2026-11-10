@@ -213,6 +213,11 @@ export const pageHead = (h: { eyebrow: string; title: string; lede?: string; too
 // A panel's own heading: the title of ONE card, set inside it, with an optional way onward at
 // the far end. `section()` above is the other kind — a caption over a run of blocks, with a
 // hairline out to the edge of the column. A card already has an edge, so its title needs none.
+// A titled card around a table (or the empty state standing in for one): the overview's panel,
+// for any page. The table gives up its own frame inside it (.card.flush > .table-wrap).
+export const panel = (title: string, body: string, trailing = ""): string =>
+  `<section class="card flush">${cardHead(title, trailing)}${body}</section>`;
+
 export const cardHead = (title: string, trailing = ""): string =>
   `<header class="card-head"><h2 class="card-title">${esc(title)}</h2>${trailing}</header>`;
 

@@ -1,6 +1,6 @@
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
 import type { PersonActivity } from "./queries.js";
-import { ICON, badge, dash, empty, section, statList } from "./parts.js";
+import { ICON, badge, dash, empty, panel, statList } from "./parts.js";
 import { layout } from "./layout.js";
 
 // --- /people: who the agent pages, who may approve, who may talk to it ---
@@ -192,11 +192,9 @@ export function peoplePage(v: PeopleView, now: Date, openIncidents?: number): st
     .join("");
 
   const members = memberRows
-    ? `${section(ICON.people, "Members", `<span class="meta">${people(ids.length)}</span>`)}
-     ${v.profilesError ? `<p class="meta">Slack names unavailable (<code>${esc(v.profilesError)}</code>) — showing user ids. The bot needs the <code>users:read</code> scope, and the app reinstalled after adding it.</p>` : ""}
-     ${table(headers("Member", "Roles", "Activity · 30d", "Last approval"), memberRows, "stack")}`
-    : `${section(ICON.people, "Members")}
-     ${empty("No one is configured.", "Set SLACK_ONCALL_USERS, SLACK_APPROVER_USERS and SLACK_ALLOWED_USERS in the release values.", ICON.people)}`;
+    ? panel("Members", `${v.profilesError ? `<p class="meta">Slack names unavailable (<code>${esc(v.profilesError)}</code>) — showing user ids. The bot needs the <code>users:read</code> scope, and the app reinstalled after adding it.</p>` : ""}
+     ${table(headers("Member", "Roles", "Activity · 30d", "Last approval"), memberRows, "stack")}`, `<span class="meta">${people(ids.length)}</span>`)
+    : panel("Members", empty("No one is configured.", "Set SLACK_ONCALL_USERS, SLACK_APPROVER_USERS and SLACK_ALLOWED_USERS in the release values.", ICON.people));
 
   return layout(
     "People",
@@ -206,8 +204,7 @@ export function peoplePage(v: PeopleView, now: Date, openIncidents?: number): st
      <p class="meta">Who the agent pages, who may approve its remediation cards, and who may talk to it — read from
        this process's configuration, so a change is a deploy.</p>
      ${shelf}
-     ${section(ICON.check, "Access policy")}
-     ${table(headers("Permission", "Who", "Status"), policyRows, "stack")}
+     ${panel("Access policy", table(headers("Permission", "Who", "Status"), policyRows, "stack"))}
      ${members}
      </div>`,
     { current: "/people", openIncidents }

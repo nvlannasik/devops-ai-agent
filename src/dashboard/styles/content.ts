@@ -395,6 +395,49 @@ export const CONTENT_CSS = `
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--sp-3) var(--sp-6); margin-bottom: var(--sp-5); }
 .page-head h1 { margin-bottom: var(--sp-1); }
 .page-head strong { color: var(--text); font-weight: 600; }
+/* The incident list is ONE card: the filter form is the table's toolbar and the pager its
+   foot. Each brings its own padding because a flush card has none, and gives up the margin
+   it carried when it stood alone on the page. */
+.card.flush > form.filters { margin: 0; padding: var(--sp-4) var(--sp-5); }
+.card.flush > .chips { margin: 0; padding: 0 var(--sp-5) var(--sp-4); }
+.card.flush > .pager { margin: 0; padding: var(--sp-3) var(--sp-5); border-top: 1px solid var(--border); }
+/* A line of prose in a flush card — a note above or instead of its table — brings the padding
+   the card does not have. */
+.card.flush > p { margin: 0; padding: 0 var(--sp-5) var(--sp-4); }
+/* Panels down a document page keep the page's block distance between them. */
+.doc > * + .card { margin-top: var(--stack); }
+/* An empty state inside a card is a sentence in that card, not a second panel in it. */
+.card > .empty { background: none; border: 0; border-radius: 0; box-shadow: none; }
+
+/* The incident page: the analysis, with the facts about the incident beside it. One column
+   until the page has room for both, and then the facts become a narrow panel that stays in
+   view while the RCA scrolls — the namespace and the duration are what a reader checks the
+   argument against, and they were a screen above it. The facts come first in the markup, so
+   in one column they are the shelf above the analysis they always were.
+   Only the RCA shares the row: the record tables below ask for five columns and keep the
+   full width. */
+.detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--stack); margin-bottom: var(--stack); }
+.detail-main { min-width: 0; }
+.detail-main > .card-head { margin-bottom: var(--sp-5); }
+@container page (min-width: 58rem) {
+  .detail { grid-template-columns: minmax(0, 1fr) 18rem; align-items: start; }
+  .detail-main { grid-column: 1; grid-row: 1; }
+  .detail-side { grid-column: 2; grid-row: 1; position: sticky; top: var(--sp-6); }
+  /* Four tiles down a narrow column are one panel with hairline dividers — the construction
+     the fact shelf already takes on a phone, for the same reason: four bordered cards stacked
+     are mostly border. */
+  .detail-side .stats.facts {
+    grid-template-columns: minmax(0, 1fr); gap: 0; background: var(--surface-raised);
+    border: 1px solid var(--border); border-radius: var(--r);
+    box-shadow: var(--shadow-sm); overflow: hidden;
+  }
+  .detail-side .stats.facts .stat {
+    background: none; border: 0; border-radius: 0; box-shadow: none;
+    padding: var(--sp-4) var(--sp-5);
+  }
+  .detail-side .stats.facts .stat + .stat { border-top: 1px solid var(--border); }
+  .detail-side .stats.facts .stat[data-tone] { box-shadow: inset var(--spine-w) 0 0 var(--spine, transparent); }
+}
 .seg-count {
   display: inline-block; min-width: 1.4em; margin-left: .35em; padding: 0 .4em; border-radius: var(--r-pill);
   background: var(--tint-critical); color: var(--critical); font-size: var(--fs-2xs); font-weight: 700; text-align: center;

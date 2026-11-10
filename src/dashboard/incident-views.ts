@@ -4,7 +4,7 @@ import { renderRca } from "./rca.js";
 import type { Filters } from "./filters.js";
 import type { ChildIncident, FeedbackRow, IncidentDetail, IncidentPage, PostmortemListRow, PostmortemRow, RemediationRow, TimelineEvent, TokenLine } from "./queries.js";
 import { renderMarkdown } from "./markdown.js";
-import { ICON, badge, breakable, costCell, dash, empty, fmtUsd, pager, section, severityBadge, statList, stateBadge, toneAttr } from "./parts.js";
+import { ICON, badge, breakable, cardHead, costCell, dash, empty, fmtUsd, pager, panel, severityBadge, statList, stateBadge, toneAttr } from "./parts.js";
 import { layout } from "./layout.js";
 import { incidentTable } from "./overview-views.js";
 
@@ -102,15 +102,19 @@ export function listPage(
   // `Prod`, which matches nothing), spellcheck off (every alert name is a red squiggle).
   return layout(
     "Incidents",
-    `<div class="page-head">
-       <div>
+    `<header class="page-head">
+       <div class="page-title">
+         <p class="eyebrow">Monitor</p>
          <h1>Incidents</h1>
          <p class="meta">${esc(fmtInt(p.total))}${p.capped ? "+" : ""} incident${p.total === 1 ? "" : "s"}${filtered ? " match these filters" : ""}${
            openIncidents ? ` · <strong>${esc(fmtInt(openIncidents))} firing now</strong>` : ""
          }</p>
        </div>
-       ${clusterSwitch ? `<div class="page-actions">${stateSwitch}${clusterSwitch}</div>` : stateSwitch}
-     </div>
+       <div class="page-tools">${stateSwitch}${clusterSwitch}</div>
+     </header>
+     <!-- One card: the filters are the table's toolbar, the pager its foot. Loose on the page
+          they were three objects a reader had to work out belonged together. -->
+     <section class="card flush">
      <form class="filters" method="get" action="/incidents">
        <label>From<input type="date" name="from" value="${esc(f.from ? f.from.toISOString().slice(0, 10) : "")}"></label>
        <label>To<input type="date" name="to" value="${esc(f.to ? f.to.toISOString().slice(0, 10) : "")}"></label>
@@ -133,7 +137,8 @@ export function listPage(
      </form>
      ${chips}
      ${incidentTable(p.rows, nothing, now, clusters.length > 0)}
-     ${pager(p, f, qs)}`,
+     ${pager(p, f, qs)}
+     </section>`,
     {
       current: "/incidents",
       // Only while nothing is filtered and nothing is paged. A refresh reloads the URL, so a
@@ -320,7 +325,7 @@ export function detailPage(
   const ch = i.changes;
   const changes = !ch
     ? ""
-    : section(ICON.changes, "Recent changes") +
+    : panel("Recent changes",
       (ch.changes.length + ch.commits.length === 0
         ? `<p class="sub">No changes found in the sources that were read.</p>`
         : table(
@@ -344,7 +349,7 @@ export function detailPage(
             ].join(""),
             "stack"
           )) +
-      (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : "");
+      (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : ""));
 
   // Related alerts (agent/correlation, migrations/013): other alert groups correlate() matched
   // to the same open incident and filed as children of this row, same Slack thread. A child
@@ -354,7 +359,7 @@ export function detailPage(
   const relatedAlerts =
     children.length === 0
       ? ""
-      : section(ICON.link, "Related alerts") +
+      : panel("Related alerts",
         table(
           headers("Alertname", "Subjects", "Started", "Status"),
           children
@@ -368,7 +373,7 @@ export function detailPage(
             )
             .join(""),
           "stack"
-        );
+        ));
 
   // The mirror of the above: THIS incident is a child, merged into another thread. The row's
   // own rca already says so in prose ("Merged into the incident in this thread…") but a reader
@@ -416,6 +421,11 @@ export function detailPage(
        <span class="badge" translate="no">☸ ${esc(d.cluster)}</span>` : ""}
        ${mergedInto || slack || postmortemLink || jaegerLink ? `<span class="page-actions">${mergedInto}${slack}${jaegerLink}${postmortemLink}</span>` : ""}
      </div>
+     <!-- The facts come first in the document and sit BESIDE the analysis where there is room
+          (the .detail grid, styles/content.ts): a reader keeps namespace, duration and times
+          in view down the whole RCA instead of scrolling back up for them. -->
+     <div class="detail">
+     <aside class="detail-side" aria-label="Incident facts">
      ${statList(
        [
          { label: "Namespace", value: i.namespace ?? "—", sub: i.confidence ? `${i.confidence} confidence` : "unrated" },
@@ -437,18 +447,20 @@ export function detailPage(
        ],
        "facts"
      )}
-     ${section(ICON.search, "Root cause analysis")}
+     </aside>
+     <section class="card detail-main">
+     ${cardHead("Root cause analysis")}
      ${
        i.rca && i.rca.trim()
          ? renderRca(i.rca)
          : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.", ICON.search)
      }
+     </section>
+     </div>
      ${changes}
      ${relatedAlerts}
-     ${section(ICON.wrench, "Remediation")}
-     ${remediations}
-     ${section(ICON.speech, "On-call feedback")}
-     ${feedback}
+     ${panel("Remediation", remediations)}
+     ${panel("On-call feedback", feedback)}
      ${usageSection(d.usage ?? [], prices)}
      ${timelineSection(d.timeline ?? [])}
      </div>`,
@@ -553,8 +565,7 @@ function usageSection(usage: TokenLine[], prices: ReadonlyMap<string, Price>): s
     .join("");
   const priced = usage.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
   const total = priced.length ? `<span class="meta">${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends</span>` : "";
-  return `${section(ICON.chip, "LLM usage", total)}
-    ${table(headers("Backend", ["Calls", "num"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]), rows, "pairs")}`;
+  return panel("LLM usage", table(headers("Backend", ["Calls", "num"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]), rows, "pairs"), total);
 }
 
 function timelineSection(all: TimelineEvent[]): string {
@@ -588,6 +599,5 @@ function timelineSection(all: TimelineEvent[]): string {
         `</tr>`
     )
     .join("");
-  return `${section(ICON.harness, "What the harness did", '<span class="meta">from the investigation trace</span>')}
-    ${table(headers("Run", "Event", "What"), rows, "pairs")}`;
+  return panel("What the harness did", table(headers("Run", "Event", "What"), rows, "pairs"), '<span class="meta">from the investigation trace</span>');
 }

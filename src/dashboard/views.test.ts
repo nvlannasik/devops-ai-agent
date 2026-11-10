@@ -3400,3 +3400,33 @@ test("the lying bar places the theme control instead of flowing it", () => {
 test("the map canvas takes the card's ground in both schemes", () => {
   assert.match(STYLES, /^\.react-flow \{ --xy-background-color: var\(--surface\); \}/m);
 });
+
+// ---------- layout pass 2: the incident list and the incident page ----------
+
+// The filters are the table's toolbar and the pager its foot: one card, in that order.
+test("the incident list is one card: filters, rows, pager", () => {
+  const html = listPage(page([row]), parseFilters(new URLSearchParams("")));
+  const card = html.slice(html.indexOf(`<section class="card flush">`), html.indexOf("</section>"));
+  const at = [card.indexOf(`<form class="filters"`), card.indexOf(`<table role="table"`), card.indexOf(`<nav class="pager"`)];
+  assert.ok(at.every((i) => i !== -1), "the form, the table and the pager are all inside the card");
+  assert.deepEqual(at, [...at].sort((a, b) => a - b));
+  assert.match(html, /<header class="page-head">\s*<div class="page-title">\s*<p class="eyebrow">Monitor<\/p>\s*<h1>Incidents<\/h1>/);
+  assert.match(html, /<div class="page-tools"><nav class="seg" aria-label="Incident state">/);
+});
+
+// The facts come first in the document and sit beside the analysis only where there is room,
+// so in one column the page reads in the order it always did.
+test("the incident page sets the facts beside the analysis, facts first in the markup", () => {
+  const html = detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] });
+  const side = html.indexOf(`<aside class="detail-side"`);
+  const main = html.indexOf(`<section class="card detail-main">`);
+  assert.ok(side !== -1 && main !== -1 && side < main);
+  assert.ok(html.indexOf(`<dl class="stats facts">`) > side && html.indexOf(`<dl class="stats facts">`) < main);
+  assert.match(html, /<h2 class="card-title">Root cause analysis<\/h2>/);
+  const wide = STYLES.match(/@container page \(min-width: 58rem\) \{\n  \.detail \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(wide, /\.detail-side \{[^}]*grid-column: 2[^}]*position: sticky/);
+  // the record tables keep the full width: they are panels after the grid, not inside it
+  const grid = html.slice(html.indexOf(`<div class="detail">`), html.indexOf(`<h2 class="card-title">Remediation</h2>`));
+  assert.doesNotMatch(grid, /On-call feedback/);
+  assert.match(html, /<section class="card flush"><header class="card-head"><h2 class="card-title">Remediation<\/h2><\/header>/);
+});
