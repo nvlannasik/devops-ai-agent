@@ -38,7 +38,6 @@ export const ICON = {
     `<path d="M4 5.4A1.8 1.8 0 0 1 5.8 3.6H19v13.6H5.8A1.8 1.8 0 0 0 4 19v-13.6Z"/>` +
       `<path d="M4 19a1.8 1.8 0 0 0 1.8 1.8H19"/><path d="M8.4 8h6.4"/><path d="M8.4 11.6h4.2"/>`
   ),
-  signout: ico(`<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="m10 16 4-4-4-4"/><path d="M14 12H4"/>`),
   // The two states of the drawer control. Both ship in the markup and CSS shows one at a time:
   // a single glyph that morphed would need a transform per line, and there is nothing to gain
   // from animating a control that is only on screen at phone widths.
@@ -196,6 +195,27 @@ export const empty = (headline: string, next: string, icon = ""): string =>
 export const section = (icon: string, title: string, trailing = ""): string =>
   `<h2><span class="sec">${icon}${esc(title)}</span>${trailing}</h2>`;
 
+// A page's heading as one row: where it is, what it is and one line about it on the left, and
+// on the right the controls that govern the WHOLE page — today the overview's time range and
+// its live mark. They sat in a bar across the top of the window until 2026-11-10; a control
+// that changes what a page shows belongs beside that page's title, and the bar is gone.
+// The row wraps, so on a narrow column the controls drop under the title instead of squeezing it.
+// `tools` is markup, built by the caller from literals and escaped values — the contract
+// Stat.icon has. The three strings are text and are escaped here.
+export const pageHead = (h: { eyebrow: string; title: string; lede?: string; tools?: string }): string =>
+  `<header class="page-head"><div class="page-title">` +
+  `<p class="eyebrow">${esc(h.eyebrow)}</p><h1>${esc(h.title)}</h1>` +
+  (h.lede ? `<p class="meta">${esc(h.lede)}</p>` : "") +
+  `</div>` +
+  (h.tools ? `<div class="page-tools">${h.tools}</div>` : "") +
+  `</header>`;
+
+// A panel's own heading: the title of ONE card, set inside it, with an optional way onward at
+// the far end. `section()` above is the other kind — a caption over a run of blocks, with a
+// hairline out to the edge of the column. A card already has an edge, so its title needs none.
+export const cardHead = (title: string, trailing = ""): string =>
+  `<header class="card-head"><h2 class="card-title">${esc(title)}</h2>${trailing}</header>`;
+
 // The icon is markup, not text, so it is passed pre-built by the caller rather than escaped
 // here — every value that came from a row or from the LLM still goes through esc().
 interface Stat {
@@ -222,6 +242,10 @@ interface Stat {
   // is two words ("Open") and the destination is a filtered list, so the anchor needs to say
   // more than the tile shows. Required whenever href is set.
   hrefLabel?: string;
+  // The one figure the page is ABOUT, filled with the accent so the shelf reads as one statement
+  // and three supporting ones. At most one per shelf — two leads is no lead — and only where a
+  // page really has a headline figure: today the overview's Open count and nothing else.
+  lead?: boolean;
 }
 // Four to a shelf, always. The grid is a fixed 4 → 2 → 1 ladder, so a fifth figure does not wrap
 // into a row of its own — it either earns a place among the four or it belongs in a sub-line.
@@ -237,7 +261,7 @@ export const statList = (items: Stat[], variant: "" | "facts" | "pair" = ""): st
   `<dl class="stats${variant ? ` ${variant}` : ""}">` +
   items
     .map(
-      (s) => `<div class="stat"${toneAttr(s.tone)}${s.href ? " data-linked" : ""}>` +
+      (s) => `<div class="stat"${toneAttr(s.tone)}${s.href ? " data-linked" : ""}${s.lead ? " data-lead" : ""}>` +
         `<dt>` +
         // The glyph gets a chip of its own. Wrapped rather than styled directly, because the
         // chip is a box with padding and a background and .ico is sized by every other caller

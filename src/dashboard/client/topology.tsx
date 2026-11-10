@@ -21,6 +21,7 @@ import type { TopoFlowNode } from "./layout.js";
 import { nodeTypes } from "./nodes.js";
 import { Legend } from "./legend.js";
 import { justDragged, markDragEnd } from "./drag-state.js";
+import { mapColorMode } from "./color-mode.js";
 
 // The interactive dependency map. The server renders the mount point and the topology as a
 // JSON data block; everything visible here is built in the browser.
@@ -123,9 +124,9 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
       fitViewOptions={{ padding: 0.06 }}
       minZoom={0.2}
       maxZoom={2.5}
-      // The dashboard follows prefers-color-scheme and states no toggle; "system" is React
-      // Flow reading the same signal rather than a second source of truth about the scheme.
-      colorMode="system"
+      // The reader's own choice when they made one, the system's otherwise — the same signal
+      // the stylesheet reads, rather than a second source of truth about the scheme.
+      colorMode={mapColorMode()}
       // A trackpad two-finger scroll pans the PAGE by default and the map only on ctrl/cmd —
       // matching what the old script did, and the reason it did it: a map that swallows the
       // scroll wheel traps a reader who is only trying to get to the tables below it.

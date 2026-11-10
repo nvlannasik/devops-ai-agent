@@ -13,6 +13,9 @@ import type { DashboardClusterModel } from "./cluster-types.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
+import { PUBLIC_ASSETS } from "./stylesheet.js";
+import { THEME_COOKIE, parseTheme, themeCookie, themeReturn, type Theme } from "./theme.js";
+import { withTheme } from "./layout.js";
 import { backendPrices, type Price } from "../agent/llm/pricing.js";
 import { buildContextView, type ContextView, type SkillView } from "./context.js";
 import type { McpTool } from "./topology.js";
@@ -34,6 +37,7 @@ export type Route =
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
   | { kind: "asset"; path: string }
+  | { kind: "theme"; theme: Theme }
   | { kind: "detail"; id: number }
   | { kind: "postmortem"; id: number }
   | { kind: "postmortemMd"; id: number }
@@ -67,10 +71,14 @@ export function matchRoute(pathname: string): Route {
   // A Slack ts and only that. Delegate sub-threads are included by the query, never addressed.
   const tr = /^\/api\/trace\/(\d{1,12}\.\d{1,9})$/.exec(p);
   if (tr) return { kind: "trace", threadTs: tr[1]! };
-  // The dashboard's only static assets: the topology map's bundle and stylesheet. The path is
-  // NOT resolved against a directory — it is a key into a Map of the two files read at boot —
-  // so path traversal has nothing to traverse. An unknown key falls through to 404 below.
+  // The dashboard's static assets: its own stylesheet and font (stylesheet.ts) and the maps'
+  // bundles (assets.ts). The path is NOT resolved against a directory — it is a key into a Map
+  // built at boot — so path traversal has nothing to traverse. An unknown key is a 404 below.
   if (p.startsWith("/assets/")) return { kind: "asset", path: p };
+  // The theme links in the rail. A closed set of three, so nothing a URL says becomes a cookie
+  // value or an attribute unless it is one of these words.
+  const th = /^\/theme\/(auto|light|dark)$/.exec(p);
+  if (th) return { kind: "theme", theme: th[1] as Theme };
   if (p === "/context") return { kind: "context" };
   // Top level, NOT /context/something, and that is structural rather than stylistic: a skill's
   // name is a filename, the skill route below matches one path segment under /context, and so
@@ -127,7 +135,7 @@ export const METHODS: Partial<Record<Route["kind"], readonly string[]>> = {
   logout: ["POST"],
 };
 
-type Send = (code: number, body: string, type?: string, extra?: Record<string, string>) => void;
+type Send = (code: number, body: string | Buffer, type?: string, extra?: Record<string, string>) => void;
 type Redirect = (to: string, extra?: Record<string, string>) => void;
 
 // Every page but one runs no JavaScript at all — views.test.ts asserts it — and gets no
@@ -138,18 +146,22 @@ type Redirect = (to: string, extra?: Record<string, string>) => void;
 // /topology is the exception. Its pan/zoom needs a listener, so that ONE response names a
 // fresh nonce and the inline block carries it. Never 'unsafe-inline': that would hand the
 // exemption to any injected <script> too, and the nonce is what keeps it to ours.
-// style-src 'unsafe-inline' remains for the inline <style> block. form-action pins where the
-// password may be posted (it does NOT inherit from default-src), and frame-ancestors stops
-// the page being framed and clickjacked into a sign-out.
+// form-action pins where the password may be posted (it does NOT inherit from default-src),
+// and frame-ancestors stops the page being framed and clickjacked into a sign-out.
 const csp = (nonce?: string): string =>
   "default-src 'none'; " +
-  // `'self'` rides with the nonce, and only with it: /topology is the one page that links an
-  // external stylesheet (React Flow's), and widening style-src for every other page would give
-  // an injected <link> somewhere to point. 'unsafe-inline' stays on both — the whole dashboard
-  // is one inline <style> block, and the chart's per-point `style="--h:…"` depends on it.
-  (nonce
-    ? `style-src 'self' 'unsafe-inline'; script-src 'nonce-${nonce}'; `
-    : "style-src 'unsafe-inline'; ") +
+  // `'self'` on every page since the stylesheet stopped being inlined (stylesheet.ts): each
+  // page links /assets/app.<hash>.css, and that file loads the one font, hence font-src.
+  // It used to ride with the nonce only, on the argument that 'self' gives an injected <link>
+  // somewhere to point. What it can point at is worth being exact about: this origin serves
+  // CSS from a closed Map of content-hashed paths and nothing else — every page is sent
+  // `nosniff` as text/html, so a browser will not apply one as a stylesheet — and nothing a
+  // visitor writes is ever stored under /assets. 'unsafe-inline' already allowed an injected
+  // style attribute; 'self' adds no file an attacker controls.
+  // 'unsafe-inline' stays: the charts carry per-point `style="--h:…"`, and React Flow sets
+  // inline styles on the maps. It is styles only — script-src is still absent or a nonce.
+  "style-src 'self' 'unsafe-inline'; font-src 'self'; " +
+  (nonce ? `script-src 'nonce-${nonce}'; ` : "") +
   "form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 // Per response, never reused: a nonce an attacker can predict is 'unsafe-inline' with extra
@@ -430,22 +442,27 @@ export class DashboardServer {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    // The reader's theme, from a cookie that carries no authority (theme.ts). Read before the
+    // session is checked on purpose: the sign-in page is themed too.
+    const theme = parseTheme(cookieValue(req.headers.cookie, THEME_COOKIE));
     const send = (
       code: number,
-      body: string,
+      body: string | Buffer,
       type = "text/html; charset=utf-8",
       extra: Record<string, string> = {}
     ) => {
       res.writeHead(code, {
         "content-type": type,
         "cache-control": "no-store",
-        // The script-free policy. /topology overrides it through `extra` with its own
+        // The script-free policy. The two maps override it through `extra` with their own
         // nonce — see csp() above for what each directive is holding down.
         "content-security-policy": csp(),
         "x-content-type-options": "nosniff",
         ...extra,
       });
-      res.end(body);
+      // Every page is rendered theme-neutral and dressed here, in the one place all of them
+      // pass through — see withTheme() for why this is not an argument to layout().
+      res.end(typeof body === "string" && type.startsWith("text/html") ? withTheme(body, theme) : body);
     };
 
     // 303, not 302: after a POST it is the status that tells every browser to follow with a
@@ -482,6 +499,18 @@ export class DashboardServer {
     // a misconfigured dashboard must not be able to take the agent out of service. It reads
     // nothing and reveals nothing.
     if (route.kind === "health") return send(200, "ok", "text/plain; charset=utf-8");
+
+    // Also ahead of the password gate, and ahead of the session check: the sign-in page and the
+    // 503 below are styled by this stylesheet, and neither has a session to present. These are
+    // a stylesheet and an OFL font built from constants — stylesheet.ts states the rule that
+    // keeps it so. Content-addressed, so the one response class here that is not `no-store`.
+    // A path that is not one of these falls through: the maps' bundles stay behind the gate.
+    if (route.kind === "asset") {
+      const pub = PUBLIC_ASSETS.get(route.path);
+      if (pub) {
+        return send(200, pub.body, pub.type, { "cache-control": "public, max-age=31536000, immutable" });
+      }
+    }
 
     // Fail closed, and say why. Serving the incident history anonymously because a secret is
     // missing is the one outcome worth an outage on this port — but only on this port: the
@@ -525,6 +554,16 @@ export class DashboardServer {
     // unrelated path rides the "no database configured" 200 (or, worse, reaches the query
     // layer once a database IS configured) instead of a plain not-found
     if (route.kind === "notfound") return send(404, errorPage("Not found", "No such page."));
+
+    // A preference, not data: the only thing this writes is a cookie in the browser that asked.
+    // GET because it has to be a link (no script, and a form would need the page's own URL
+    // threaded into every layout() call); the worst a cross-site link can do with it is change
+    // which of two palettes a signed-in reader sees.
+    if (route.kind === "theme") {
+      return redirect(themeReturn(req.headers.referer), {
+        "set-cookie": themeCookie(route.theme, config.dashboard.cookieSecure),
+      });
+    }
 
     // Content-addressed (assets.ts hashes the body into the name), so this is the one response
     // on the dashboard that is not `no-store`: a new build is a new URL, and the old URL can

@@ -686,10 +686,11 @@ Rotating the password invalidates every session; that is the revocation mechanis
 - CSP gained `form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. `form-action` does
   **not** inherit from `default-src`, so the login form worked without it; it is there to pin
   where the password may be posted now that there is a session to steal. The policy is built by
-  `csp(nonce?)` and is **per route**: only `/topology` passes a nonce, and it is the only route
-  with a `script-src` **or** a `style-src 'self'` at all. Everywhere else there is no exemption,
-  which is what keeps a missed `esc()` inert on the pages that render an RCA and gives an
-  injected `<link>` nowhere to point.
+  `csp(nonce?)` and is **per route**: only the two maps pass a nonce, and they are the only routes
+  with a `script-src` at all. Everywhere else there is no script exemption, which is what keeps a
+  missed `esc()` inert on the pages that render an RCA. (`style-src 'self'` used to be
+  map-only too; since 2026-11-10 it is on every page, with `font-src 'self'`, because the
+  stylesheet is a linked asset — see "Atlas" below for what that does and does not open.)
 
 **Its own pool, `max: 3`, with `statement_timeout = 3s`.** Sharing the agent's pool would let
 one slow dashboard query starve `storeIncident` of connections — the investigation finishes and
@@ -731,7 +732,7 @@ security-relevant one in this module.
 
 **The rail (`layout()` in `layout.ts` + `.rail` in `styles/chrome.ts`).** Navigation is a left sidebar, not a top bar:
 `<body>` is a two-column grid (`var(--rail-w) minmax(0, 1fr)`) and `body.bare` collapses it to
-one for sign-in and not-configured — without that class those pages would open 13.5rem short of
+one for sign-in and not-configured — without that class those pages would open a rail's width (`--rail-w`, 14.5rem) short of
 the left edge. Everything about it is constrained by **zero client JS outside `/topology`**:
 - No hamburger, no toggle, no stored collapse state. The rail is CSS only, so it responds to the
   viewport and nothing else: a full sidebar wide, a horizontal bar under 60rem, icons-only under
@@ -753,14 +754,14 @@ to be laid out from `@media` breakpoints against a fixed `--maxw: 76rem`, and bo
 were wrong: on a 1920 display the page sat in a 76rem ribbon with the rest of the screen empty,
 and on every width in between the components kept proportions that were chosen for one width.
 The rules now:
-- **`main` is a container** (`container: page / inline-size`), and the hero and the chart declare
-  their own (`hero`, `chart`). A media query cannot size these correctly: the rail is a 13.5rem
-  column above 60rem and a top bar below it, so the same viewport width means two different
+- **`main` is a container** (`container: page / inline-size`), and the chart declares
+  its own (`chart`). A media query cannot size these correctly: the rail is a 14.5rem
+  column (`--rail-w`) above 60rem and a top bar below it, so the same viewport width means two different
   content widths. Container queries ask the only question that matters — how wide is *this* box.
   Note `cqi` inside a custom property resolves at the **use** site against the nearest *ancestor*
   container; an element's own `container-type` never applies to itself.
 - **Padding, gaps and the stat type scale are `clamp()`, not fixed steps** (`--fs-stat`, `main`'s
-  padding, `h2` margins, `.hero` padding). A breakpoint is a cliff between two sizes that are each
+  padding, `h2` margins, `.chart-card` padding). A breakpoint is a cliff between two sizes that are each
   right once; a clamp is right everywhere in between, which is what removes the dead space.
 - **The stat shelf steps 4 → 2 → 1** (`@container page` at 54rem and 26rem) and never `auto-fit`.
   `auto-fit` on the token shelf produced a 3+1 band with an orphan tile, and a shelf that is not a
@@ -793,7 +794,8 @@ The rules now:
   row`: caption left, value right, the shape of a spec sheet. Two abreast there is no room for it,
   and wider the tiles are already short. `views.test.ts`'s shelf assertions match the variants too —
   a variant changes how a tile lays out, never what a shelf may hold.
-- **Two faces, not three.** `--font-ui` for the interface and everything written in sentences,
+- **Two faces, not three** — *until 2026-11-10, when a display face was added under the rule this
+  entry ends on; see "Atlas" below.* `--font-ui` for the interface and everything written in sentences,
   `--font-data` for what the system *measured* (ids, endpoints, timestamps, counts). There was a
   third — a serif `--font-prose` on the RCA, on the argument that what the agent wrote is a
   different kind of content from what it measured. It is, but `font-src` is blocked outright, so no
@@ -901,7 +903,7 @@ own width. Load-bearing details:
 - `vector-effect: non-scaling-stroke` on `.chart-stroke`. The stretch is non-uniform, so a plain
   `stroke-width` renders as a wedge — thin where the box is wide, thick where it is tall.
 - Heights ride in `style="--h:63.6%"`. That works only because the dashboard CSP is
-  `style-src 'unsafe-inline'` with **no** `script-src` — inline style attributes are permitted, and
+  `style-src 'self' 'unsafe-inline'` with **no** `script-src` — inline style attributes are permitted, and
   the value is re-derived with `Number()` (Postgres hands `int8` back as a string) so a hostile row
   can put neither a script nor a `NaN` in the attribute or in the path data.
 - Ticks are pre-marked `data-thin` **counting from the end**, and CSS hides them below 26rem. The
@@ -983,8 +985,10 @@ Load-bearing, and each cost something to get right:
   not gated by `script-src`, so operator-supplied strings cannot become script. `<`/`>`/`&` are
   still escaped to `\uXXXX`: a raw `</script>` would close the element early and drop the rest
   into the document as markup. Both that block and the bundle `<script src>` carry the
-  per-response nonce; `style-src` gains `'self'` on this route only, for React Flow's stylesheet.
-- **The two assets are content-addressed** (`assets.ts`, hashed at boot) and are the only
+  per-response nonce. (`style-src 'self'` was added for React Flow's stylesheet on this route only;
+  every page has it since 2026-11-10 — "Atlas" below.)
+- **The two assets are content-addressed** (`assets.ts`, hashed at boot) and — with the
+  stylesheet and its font, which follow the same scheme since 2026-11-10 — are the only
   responses on this dashboard that are not `no-store`. The path is a key into a two-entry `Map`,
   never a filesystem lookup.
 - **The wheel is not captured** (`zoomOnScroll={false}`, `preventScrolling={false}`) — the map
@@ -1010,7 +1014,7 @@ Load-bearing, and each cost something to get right:
   the CSP posture exists to prevent. Four seam rules, all in `src/dashboard/CLAUDE.md`: no
   preflight (and therefore a local reset for UA button styling), shadcn tokens as ALIASES of the
   dashboard's variables (so dark mode needs no `.dark` class), `styles.ts` must not style a card
-  (it is the inline `<style>` and would win), and overrides must go through `cn` plain and last
+  (it is linked last in the head and would win), and overrides must go through `cn` plain and last
   (neither important form merges under Tailwind v4 — measured). The legend moved into the bundle
   so its swatches call the same `cardClass()` the cards do.
 - **Both SQS cards expand into their queues, and the response queue is one shared node
@@ -1046,6 +1050,67 @@ Load-bearing, and each cost something to get right:
   `topology-graph.test.ts` pins the claims and `client/layout.test.ts` runs dagre headless
   (finite positions, left-to-right order, non-overlap, and that the SQS class marks exactly one
   edge). Everything else needs a browser.
+
+**"Atlas" — the 2026-11-10 redesign, the theme toggle, and the stylesheet as an asset.** Three
+changes shipped as one because each makes the next one cheap. The working rules are in
+`src/dashboard/CLAUDE.md`; this is why they are what they are.
+- **Direction.** An ink rail beside a light page, white cards, one indigo accent
+  (`--brand-600 #4338ca` / `--brand-500 #5b5fef` / `--brand-400 #818cf8`), radii 10/16/20px, and
+  one filled tile opening the overview. Chosen from three mock-ups ("Quiet", "Console" and this
+  one). Severity keeps its four tones and never
+  rests on colour alone; the accent is deliberately not one of them.
+- **The rail is ink in both schemes, through a scope rather than through components.** `.rail`
+  (and `.topbar` below 60rem) re-point `--text`, `--text-dim`, `--surface-2`, `--border`,
+  `--accent` and `--on-accent` at the rail ramp. The alternative — `.rail .seg a`,
+  `.rail .badge`, one override per component per ground — is the thing that drifts: the first
+  component added after it is styled for the page and unreadable on ink. With the scope, a
+  component reads generic tokens and is right on either ground without knowing which it is on.
+  The Incidents badge changed from the critical tint to the accent fill for this reason and one
+  more: a red chip on ink read as an error *in the chrome*.
+- **Theme without script.** The choice is a cookie (`dash_theme`) set by a GET route and applied
+  server-side as `<html data-theme>`; `auto` clears the cookie and leaves the decision to
+  `prefers-color-scheme`. GET because it has to be a link — a form would need the page's own URL
+  threaded through every `layout()` call — and the worst a cross-site link can do is flip which
+  of two palettes a signed-in reader sees. `withTheme()` is a post-pass over the finished HTML
+  for the same reason: the theme belongs to the request, and `layout()` is reached through some
+  twenty page functions that should not each carry it. The cookie is HttpOnly because nothing
+  client-side reads it — the maps read the attribute it becomes (`client/color-mode.ts`). The dark
+  token values are written once (`styles/dark.ts`) and emitted under both selectors by
+  `styles.ts`; a second hand-written copy is how two "dark modes" come to differ by one token.
+- **The stylesheet left the page.** It was inlined in every response (~165 KB before compression,
+  on every navigation) because the original CSP allowed nothing else. It is now
+  `/assets/app.<hash>.css`, immutable for a year, and a page is its own markup. Two costs, both
+  taken knowingly. (1) `style-src` names `'self'` on every page. What that can point at is the
+  closed `Map` of content-hashed assets — pages are `text/html` with `nosniff`, and nothing a
+  visitor writes is stored under `/assets` — and `'unsafe-inline'` for styles was already
+  there. (2) The stylesheet and the font are served **before** the password gate, because the
+  sign-in page and the 503 page are styled by them and have no session. They are built from
+  constants and say nothing the sign-in page's own inline CSS did not already say to anyone.
+  The map bundles did not move: they stay behind the session check.
+- **The layout pass followed the same day, because a re-skin is not a redesign.** The first
+  Atlas delivery changed tokens and type and left every box where it was; the review was "this is
+  only colours and a font". What moved: no top bar above 60rem (the brand heads the rail; the bar
+  survives below 60rem for the burger), the range control and live note in the page's own title
+  row (`pageHead()`), the count stacked above a full-width chart (`.chart-card`, replacing the
+  side-by-side `.hero`), three self-titled panels abreast (`.trio`: Outcomes / Most recurring /
+  Token usage) and both tables inside titled `.card.flush` frames. The donut became `shareBar()`
+  because a third-of-a-row panel has no square to give a ring. Kept on purpose: the line chart
+  (the mock-up drew bars; the line with per-point values was already built and tested) and the
+  per-backend token table (the panel shows totals only). Other pages got the new chrome and
+  title treatment, not new content layouts.
+- **One shipped typeface.** Space Grotesk (OFL 1.1), a 22 KB latin variable woff2, base64 in
+  `fonts/space-grotesk.ts` so the Dockerfile copies nothing new, served content-hashed beside the
+  stylesheet. Display type only (page title, KPI figures, chart count, brand). This reverses the
+  letter of "two faces, not three" and keeps its reason: that entry removed a face the page named
+  and could not deliver; this one is delivered, and nothing a reader must read depends on it.
+- **What looking found that the tests could not** (all pinned in `views.test.ts` since): the
+  dark map canvas was React Flow's own `#141414` (`--xy-background-color` is the hook); the
+  brand's ellipsis was on a flex container and did nothing, so a 390px phone cut the name
+  mid-letter; the drawer was 72px short of the screen (`align-self: start` on a fixed box);
+  and the theme control, flowed beside sign out between 46 and 60rem, cost the sticky bar a
+  fourth row (189px → 145px once it was placed top-right instead). Checked at 360, 390, 740,
+  800, 880, 959 and 1440px in both schemes and both forced themes: no horizontal overflow, no
+  console errors.
 
 **RCA rendering (`src/dashboard/rca.ts`).** The RCA is **Slack mrkdwn, not CommonMark** —
 `prompts/system.md` pins it: bold is a *single* asterisk, italic is `_underscores_`, bullets are

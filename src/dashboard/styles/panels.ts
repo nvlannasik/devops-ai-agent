@@ -10,7 +10,8 @@ export const PANELS_CSS = `
    heading's min-content width, so a heading inside a track that measures its content cannot
    widen that track past the screen either. */
 h1 {
-  font-size: var(--fs-xl); font-weight: 640; letter-spacing: -.025em; line-height: 1.15;
+  font-family: var(--font-display);
+  font-size: var(--fs-xl); font-weight: 600; letter-spacing: -.02em; line-height: 1.15;
   margin: 0 0 var(--sp-4); text-wrap: balance; overflow-wrap: anywhere;
 }
 /* Section headers are instrument-panel labels: a small mono caption with a hairline running
@@ -27,10 +28,16 @@ h2, .eyebrow {
   margin: clamp(var(--sp-8), 4cqi, var(--sp-10)) 0 var(--sp-4);
 }
 h2::after, .eyebrow::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
-/* The overview's <h1> wears .eyebrow — the class wins on everything it declares, and these two
-   lines finish the job for the h1 properties it does not (a balanced 11px caption is nonsense,
-   and 1.15 leading on uppercase mono sits too loose). */
+/* .eyebrow is also worn by a <p> above a page title, where h2's section margin is wrong: the
+   caption belongs to the title under it, not to the block above. */
 .eyebrow { margin: 0 0 var(--sp-3); line-height: 1; text-wrap: wrap; }
+/* The line above a page's title says WHERE the page is, and it is the one caption on the page
+   that is not a section label — so it gives up the hairline every section label carries and
+   takes the accent instead: a rule running out from "Monitor" to the far edge separated the
+   word from the title it belongs to. Two selectors because there are two shapes of page head:
+   the plain column (.doc) and the row with controls beside the title (.page-title). */
+.doc > .eyebrow:first-child, .page-title > .eyebrow { color: var(--accent); }
+.doc > .eyebrow:first-child::after, .page-title > .eyebrow::after { content: none; }
 /* Sits AFTER the hairline: ::after is the last child at order 0, so order:1 pushes the link past
    it. A section that continues elsewhere says so at the end of its own rule, not in front of it. */
 h2 a {
@@ -71,69 +78,106 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    inset — padding would leave a bare gutter around a background that is meant to be full-bleed. */
 .card.flush { padding: 0; overflow: hidden; }
 
-/* The overview's opening move is one composed object, not a rank of identical metric tiles:
-   the 30-day count set against the weekly series it summarises. The count and its shape are
-   one fact and belong in one frame — and nothing else does, which is why the supporting
-   figures moved out to their own section rather than sitting on a shelf inside this one. */
-.hero {
-  position: relative;
-  background: var(--surface-raised); border: 1px solid var(--border);
-  border-radius: var(--r-lg); padding: clamp(var(--sp-5), 2.6cqi, var(--sp-6));
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
-  container: hero / inline-size;
+/* A card that names itself. The heading is INSIDE the frame rather than a caption floating
+   above it: a section label over a card is two objects to read as one, and on a page that is
+   mostly cards the labels became a second, fainter grid drawn between the real one.
+   Sentence case in the display face, not the mono caption — the caption is still what a
+   section of a document wears (the incident page), and a panel on a dashboard is not one. */
+.card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  min-width: 0;
 }
-/* The wash. A pseudo-element rather than a background on the panel itself, because the panel
-   also has to hold a solid --surface-raised behind the chart's own translucent area fill —
-   layering the gradient over the fill instead of under it would tint the data.
-   It is a corner light, not a full-panel gradient: the strongest tint is at the top-left,
-   behind the count, and it is gone by about 60% across, so the chart is drawn on flat ground.
-   Very low alpha on purpose. This is the one piece of purely decorative colour on the page,
-   and at anything stronger it becomes a background the severity badges have to be read on. */
-.hero::before {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background:
-    radial-gradient(120% 140% at 0% 0%,
-      color-mix(in srgb, var(--brand-500) 16%, transparent) 0%,
-      transparent 60%);
+h2.card-title {
+  font-family: var(--font-display); font-size: var(--fs-md); font-weight: 600;
+  text-transform: none; letter-spacing: -.01em; color: var(--text); margin: 0;
 }
-/* Everything inside sits above the wash. Without this the gradient paints over the count. */
-.hero > * { position: relative; }
-/* A PROPORTION, not a fixed column plus whatever is left. auto sized the first column to the
-   width of the digits — so a 3-digit count took a third of the frame and a 1-digit count took a
-   tenth, and the chart's shape changed every time the number did. A percentage floor keeps the
-   split the same at every count and every width; the minmax floor stops it collapsing under the
-   count itself. Centred rather than bottom-aligned: the count is one short block against a tall
-   one, and aligning their baselines left the whole band above the number empty. */
-.hero-body {
-  display: grid; grid-template-columns: minmax(6rem, 16%) minmax(0, 1fr);
-  gap: clamp(var(--sp-5), 3cqi, var(--sp-8)); align-items: center;
+h2.card-title::after { content: none; }
+.card-head > a { font-size: var(--fs-sm); white-space: nowrap; flex: 0 0 auto; }
+/* A flush card has no padding of its own (the table inside runs edge to edge), so the heading
+   brings its own — and the table gives up the frame it wears when it stands alone, or the card
+   is a border drawn twice. */
+.card.flush > .card-head { padding: var(--sp-4) var(--sp-5); }
+.card.flush > .table-wrap {
+  background: none; border: 0; border-top: 1px solid var(--border);
+  border-radius: 0; box-shadow: none;
 }
-.hero-figure {
-  margin: 0; display: flex; flex-direction: column; gap: var(--sp-3);
-  justify-content: center;
+.card.flush > .empty { border-top: 1px solid var(--border); }
+
+/* The window's count set over the series it summarises. The count is the caption of the chart,
+   not a headline beside it: side by side, the count's column was sized against the digits and
+   the chart got what was left, which on a tablet was not enough to read twelve periods in.
+   Stacked, the chart has the full width of the page at every size and the two never compete. */
+.chart-card {
+  display: flex; flex-direction: column; gap: var(--sp-5);
+  padding: clamp(var(--sp-5), 2.4cqi, var(--sp-6));
 }
-.hero-value {
-  font-size: var(--fs-hero); font-weight: 620; letter-spacing: -.045em; line-height: .92;
-  font-variant-numeric: tabular-nums;
+.chart-head {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: var(--sp-2) var(--sp-5);
 }
-.hero-unit {
+/* A figure and the words that say what it counts. One component for the chart's count and the
+   token total: the number in the display face, the caption in the interface face under it. */
+.figure { margin: 0; display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.figure b {
+  font-family: var(--font-display); font-size: var(--fs-xl); font-weight: 600;
+  letter-spacing: -.03em; line-height: 1.05; font-variant-numeric: tabular-nums;
+}
+.figure span { font-size: var(--fs-xs); color: var(--text-dim); }
+/* Over the chart the pair lies on one baseline and the number goes up a size: it is the one
+   figure on the page that owns a whole row. */
+.chart-head .figure { flex-direction: row; align-items: baseline; gap: var(--sp-3); }
+.chart-head .figure b { font-size: clamp(2rem, 1.5rem + 2cqi, 2.75rem); line-height: 1; }
+.chart-head .figure span { font-size: var(--fs-sm); }
+.chart-window {
   font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
-  text-transform: uppercase; letter-spacing: .14em; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
 }
-.hero-chart { min-width: 0; }
-/* One column, and the count stops being a headline set beside a chart — it becomes a caption
-   over one. Under about 30rem of frame the two-column split gives the chart too little width to
-   read twelve periods in. */
-@container hero (max-width: 30rem) {
-  .hero-body { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); align-items: start; }
-  /* justify-content has to be reset with the axis. It is 'center' on the column above, where
-     it centres the pair VERTICALLY against a tall chart — flip the direction and the same
-     declaration starts centring them horizontally, which floated the count into the middle of
-     the panel as the only block on the page not aligned to the column's left edge. */
-  .hero-figure {
-    flex-direction: row; align-items: baseline; justify-content: flex-start; gap: var(--sp-3);
-  }
+
+/* Three panels abreast: how the incidents split, which ones keep coming back, what the
+   investigating cost. THREE, then two with the third across the full row, then one — an
+   explicit ladder for the same reason the stat shelf has one: auto-fit lands on two as soon as
+   three stop fitting and leaves the third alone beside a hole. Spanning it instead keeps every
+   row full. Queried against page, because the rail's width is not the panel's to spend. */
+.trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); }
+@container page (max-width: 60rem) {
+  .trio { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .trio > :last-child { grid-column: 1 / -1; }
+}
+@container page (max-width: 38rem) {
+  .trio { grid-template-columns: minmax(0, 1fr); }
+  .trio > :last-child { grid-column: auto; }
+  /* One column: nothing beside the list to match, and a scroller inside a scrolling phone page
+     is a trap for a thumb. */
+  .trio .rank { max-height: none; }
+}
+/* Grid stretches the three to one height, so each is a column whose LAST block is pushed to the
+   floor: a short panel then reads as one with room in it rather than one that ran out. */
+.trio > .card { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.trio > .card > :last-child:not(:only-child):not(.card-head) { margin-top: auto; }
+.trio .meta { margin: 0; }
+/* The pair under the severity split is a second fact about the same incidents, so it sits under
+   a rule rather than in a card of its own. */
+.trio .stats.pair { padding-top: var(--sp-4); border-top: 1px solid var(--border); }
+
+/* What recurred, most first. Rows rather than a table: three facts a row, and the count is the
+   one a reader came for, so it stands alone at the end in the accent. */
+/* Ten rows at most, and about four of them are what the panels beside this one are tall: past that the
+   list scrolls inside its own frame rather than making the row three times the height of its
+   shortest card. Every row holds a link, so the scrolled region is reachable from a keyboard. */
+.rank {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2);
+  max-height: 17.5rem; overflow-y: auto;
+}
+.rank li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-sm); background: var(--surface-2);
+}
+.rank a { font-weight: 600; color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
+.rank-sub { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); }
+.rank-n {
+  font-family: var(--font-display); font-size: var(--fs-md); font-weight: 600;
+  color: var(--accent); font-variant-numeric: tabular-nums;
 }
 
 /* One stat shelf, three homes: the overview's summary panel, its token totals, and the incident
@@ -167,7 +211,7 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    and above that the tiles are already short. */
 @container page (max-width: 26rem) {
   .stats.facts .stat { flex-direction: row; align-items: baseline; justify-content: space-between; gap: var(--sp-4); }
-  .stats.facts .stat dd { margin-top: 0; font-size: var(--fs-base); text-align: right; }
+  .stats.facts .stat dd { margin-top: 0; font-size: var(--fs-base); font-weight: 600; text-align: right; }
   /* And the shelf gives up the card treatment entirely, which is the other half of the same
      decision. Laying the caption and the value on one line exists to buy height back — four
      stacked tiles were a third of a phone screen above the analysis a reader came for — and
@@ -222,7 +266,7 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    most of the "modern dashboard" reading actually comes from — a KPI card is recognisable by
    the chip, the number and the delta, in that arrangement — and it costs nothing in meaning:
    the chip is brand-tinted, never severity-tinted, so it labels the CATEGORY and leaves the
-   severity vocabulary to the spine, the badges and the donut.
+   severity vocabulary to the spine, the badges and the share bar.
    A toned tile is the exception: there the chip picks up the tone, because on that one card the
    category and the alarm are the same fact. */
 /* The whole card is the target, not just the label. A stretched link: the anchor wraps only
@@ -260,15 +304,50 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
    top edge otherwise. */
 .stat dt { display: flex; align-items: center; gap: var(--sp-3); }
 .stat dt .lbl { min-width: 0; }
+/* A figure, in the display face and at a display size: on a shelf of four the number is what
+   the eye is meant to land on, and at the old 24px ceiling it was the same size as a heading
+   two levels down. The sub-line under it goes back to the interface face — it is a sentence. */
 .stat dd {
-  margin: 0; margin-top: auto; font-size: var(--fs-stat); font-weight: 640;
-  letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.2;
+  margin: 0; margin-top: auto;
+  font-family: var(--font-display); font-size: var(--fs-stat); font-weight: 600;
+  letter-spacing: -.025em; font-variant-numeric: tabular-nums; line-height: 1.1;
   overflow-wrap: anywhere;
 }
 .stat dd span {
-  display: block; font-size: var(--fs-xs); font-weight: 400;
-  letter-spacing: 0; color: var(--text-dim); margin-top: 3px;
+  display: block; font-family: var(--font-ui); font-size: var(--fs-xs); font-weight: 400;
+  letter-spacing: 0; line-height: 1.4; color: var(--text-dim); margin-top: var(--sp-1);
 }
+/* The fact shelf is the exception, and it is an exception about CONTENT: its values are a
+   namespace, a confidence and two timestamps. Identity, not figures — set as display type a
+   timestamp becomes a headline and a namespace wraps mid-word. It keeps the interface face and
+   the size the shelf had before the figures grew. */
+.stats.facts .stat dd {
+  font-family: var(--font-ui); font-size: var(--fs-fact); font-weight: 640;
+  letter-spacing: -.02em; line-height: 1.2;
+}
+/* The lead tile: the one figure on a page that the page is ABOUT, filled with the accent so a
+   shelf of four reads as one statement and three supporting ones instead of four of equal
+   rank. One per shelf at most (statList's lead flag), and only the overview sets it — on Open,
+   the count a reader came to see.
+   Everything inside reads --on-accent. The caption and the sub-line are that colour mixed 85%
+   toward itself over the fill, which measures 6.16:1 light and 5.72:1 dark; --text-dim on the
+   fill would be 1.3:1. The glyph chip is a veil of the same ink rather than the brand tint,
+   which on this ground is a pale box with nothing in it. */
+.stat[data-lead] {
+  background: var(--accent); border-color: transparent; color: var(--on-accent);
+}
+.stat[data-lead] dt, .stat[data-lead] dd span {
+  color: color-mix(in srgb, var(--on-accent) 85%, var(--accent));
+}
+.stat[data-lead]:not([data-tone]) .kpi-icon {
+  background: color-mix(in srgb, var(--on-accent) 18%, transparent); color: var(--on-accent);
+}
+/* A lead tile that also carries a tone — Open, when anything is — keeps the tone in its chip,
+   which is a self-contained tint with its own ink and reads the same on any ground, and gives
+   up the spine: a 3px red edge on an indigo fill is 1.3:1 against it, a mark nobody can see,
+   and the same fact is already stated by the chip and by the delta beside it. */
+.stat[data-lead][data-tone] { box-shadow: var(--shadow-sm); }
+.stat[data-lead][data-tone] .kpi-icon { background: var(--tint); color: var(--ink); }
 
 /* ---------- delta ---------- */
 /* What the same figure said over the previous window of equal length. A KPI without one states
@@ -295,36 +374,6 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 .delta[data-dir="down"]::before { content: "\\2193"; }
 .delta[data-dir="flat"]::before { content: "\\2192"; }
 
-/* Two panels side by side, halving to one. Not a shelf: these hold different KINDS of thing
-   (a figure drawn as a ring, and a pair of counts), which is exactly what a shelf's equal
-   tracks are wrong for — a ring wants its own square and a stat pair wants the rest.
-   The floor is where the ring plus its legend stops fitting beside a two-tile shelf. */
-.split {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* --stack, not the grid step. These two are not peer tiles the way four KPI cards are —
-     they hold different KINDS of thing (a ring, a pair of counts) — and below 58rem they stop
-     being a row at all and become two stacked blocks, which is precisely what --stack is the
-     distance for. One value covers both arrangements. */
-  gap: var(--stack);
-  /* Stretch, which is the default and is stated here because it was wrongly overridden with
-     'start'. With 'start' each panel took its own content height: the ring is about 90px
-     taller than a two-tile shelf, so above 58rem the two cards ended on different lines and
-     the row read as ragged. Two cards side by side are one row and end together — the panel
-     is the unit, not its contents. Below 58rem there is one column and this does nothing. */
-  align-items: stretch;
-}
-/* A stretched panel is taller than what is inside it, so the contents have to be told where to
-   sit in the extra room, or the shorter card ends in a hundred pixels of nothing.
-   The caption stays where a caption goes — at the top, labelling the panel. The FIGURE block
-   below it takes the leftover space symmetrically, so the shorter card reads as a panel with
-   generous padding rather than as one that ran out of content. Centred rather than spread to
-   the bottom: two stat tiles with their labels at the top of a card and their numbers at the
-   floor is a gap, not a layout, and only reads as deliberate on a single-figure card.
-   One rule for both panels, because whichever of them is shorter is a function of the data. */
-.split > .card { display: flex; flex-direction: column; }
-.split > .card > .donut,
-.split > .card > .stats { margin-top: auto; margin-bottom: auto; }
-@container page (max-width: 58rem) { .split { grid-template-columns: minmax(0, 1fr); } }
 /* A shelf inside a panel. The panel is already the card, so the tiles drop the border, the
    shadow and the raised surface and become plain blocks — a card inside a card is a border
    drawn twice with 16px of nothing between the two. */
@@ -334,9 +383,4 @@ code, .mono { font-family: var(--font-data); font-size: .92em; }
 }
 .stats.pair .stat[data-tone] { box-shadow: none; padding-left: var(--sp-4); }
 @container page (max-width: 34rem) { .stats.pair { grid-template-columns: minmax(0, 1fr); } }
-/* The panel's own caption. .eyebrow already carries the mono-caption-with-a-hairline treatment;
-   inside a card the hairline has a border two rems away to run into, so it is dropped and only
-   the caption is kept. */
-.card > .eyebrow::after { content: none; }
-.card > .eyebrow { margin-bottom: var(--sp-4); }
 `;

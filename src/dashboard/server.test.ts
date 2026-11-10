@@ -213,15 +213,13 @@ test("responses carry a no-JS CSP and nosniff", async () => {
       const res = await raw(port, `GET ${path} HTTP/1.1`, authed);
       assert.match(
         res,
-        /content-security-policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'/i,
+        /content-security-policy: default-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'/i,
         `${path} should carry the script-free policy`
       );
-      // Split at the header boundary. Asserting over the WHOLE response made the test
-      // constrain prose: the stylesheet is inlined into every page, and a CSS comment
-      // explaining why the drawer cannot use a script mentioned the directive by name and
-      // failed this. The header is what carries the policy, so the header is what is checked —
-      // and the body gets the stronger assertion the old one never made, that no page which
-      // claims a script-free policy actually ships a script.
+      // Split at the header boundary: the header is what carries the policy, so the header is
+      // what is checked (asserting over the WHOLE response once made this test constrain the
+      // prose of a CSS comment, back when the sheet was inlined). The body gets the stronger
+      // assertion — that no page which claims a script-free policy actually ships a script.
       const [head, body = ""] = res.split("\r\n\r\n");
       assert.doesNotMatch(head, /script-src/i, `${path} needs no script-src at all`);
       assert.doesNotMatch(body, /<script/i, `${path} declares no script-src but ships a script`);
@@ -258,20 +256,133 @@ test("/topology allows scripts only by nonce, minted per response", async () => 
   });
 });
 
-// style-src gains 'self' on this page and NOWHERE else. The map links React Flow's stylesheet,
-// and widening the policy for every other page would give an injected <link> somewhere to
-// point — on the pages that render LLM output, which is the whole reason those pages have no
-// script-src either.
-test("only /topology may load an external stylesheet", async () => {
+// style-src is 'self' on every page since the stylesheet became a linked asset (stylesheet.ts),
+// and font-src 'self' rides with it for the one display face that sheet loads. What must NOT
+// have widened with it: no remote origin in either directive, and script-src still exists on
+// the two map pages only — the pages that render LLM output stay script-free.
+test("styles and the font load from this origin only, and only the maps get a script-src", async () => {
   await withServer(async (port) => {
-    const map = header(await raw(port, "GET /topology HTTP/1.1", authed), "content-security-policy") ?? "";
-    assert.match(map, /style-src 'self' 'unsafe-inline'/);
-
-    for (const path of ["/", "/incidents", "/context"]) {
+    for (const path of ["/", "/incidents", "/context", "/topology", "/cluster", "/login"]) {
       const csp = header(await raw(port, `GET ${path} HTTP/1.1`, authed), "content-security-policy") ?? "";
-      assert.match(csp, /style-src 'unsafe-inline';/, `${path} should not widen style-src`);
-      assert.doesNotMatch(csp, /style-src[^;]*'self'/, `${path} needs no external stylesheet`);
+      assert.match(csp, /(^|; )style-src 'self' 'unsafe-inline';/, `${path}: ${csp}`);
+      assert.match(csp, /(^|; )font-src 'self';/, `${path}: ${csp}`);
+      assert.doesNotMatch(csp, /https?:|\*|data:/, `${path} names a remote or wildcard source`);
+      assert.equal(/script-src/.test(csp), path === "/topology" || path === "/cluster", `${path}: ${csp}`);
     }
+  });
+});
+
+// The sheet and the font are the only two things this port serves without a session, and the
+// reason is the sign-in page: it is styled by them and has no session to present. Everything
+// else under /assets — the maps' bundles — stays behind the gate.
+test("the stylesheet and its font are public and immutable; nothing else under /assets is", async () => {
+  await withServer(async (port) => {
+    const login = await raw(port, "GET /login HTTP/1.1");
+    const href = /<link rel="stylesheet" href="(\/assets\/app\.[0-9a-f]{8}\.css)">/.exec(login)?.[1];
+    assert.ok(href, "the sign-in page links the sheet");
+
+    const css = await raw(port, `GET ${href} HTTP/1.1`);
+    assert.match(status(css), /^HTTP\/1\.1 200\b/);
+    assert.match(header(css, "content-type") ?? "", /^text\/css/);
+    assert.match(header(css, "cache-control") ?? "", /immutable/);
+    assert.match(header(css, "x-content-type-options") ?? "", /nosniff/);
+    assert.equal(header(css, "set-cookie"), undefined);
+    // the page's own tokens are in it, so this is the dashboard's sheet and not an empty 200
+    assert.match(css, /--rail-w:/);
+
+    const font = /url\("(\/assets\/space-grotesk\.[0-9a-f]{8}\.woff2)"\)/.exec(css)?.[1];
+    assert.ok(font, "the sheet names its font by a hashed, same-origin path");
+    const woff = await raw(port, `GET ${font} HTTP/1.1`);
+    assert.match(status(woff), /^HTTP\/1\.1 200\b/);
+    assert.equal(header(woff, "content-type"), "font/woff2");
+    assert.match(header(woff, "cache-control") ?? "", /immutable/);
+
+    // A hash that is not the current one is not served from some other build's copy, and a
+    // path that is not public gets the same redirect every other unauthenticated request gets.
+    for (const path of ["/assets/app.00000000.css", "/assets/topology.js", "/assets/nope.woff2"]) {
+      const res = await raw(port, `GET ${path} HTTP/1.1`);
+      assert.match(status(res), /^HTTP\/1\.1 303\b/, path);
+      assert.match(header(res, "location") ?? "", /^\/login\?next=/, path);
+    }
+    assert.match(status(await raw(port, "GET /assets/app.00000000.css HTTP/1.1", authed)), /^HTTP\/1\.1 404\b/);
+  });
+
+  // With no password the dashboard is a styled 503 — which needs the sheet too.
+  await withServer(async (port) => {
+    const page = await raw(port, "GET / HTTP/1.1");
+    assert.match(status(page), /^HTTP\/1\.1 503\b/);
+    const href = /<link rel="stylesheet" href="([^"]+)">/.exec(page)?.[1];
+    assert.ok(href);
+    assert.match(status(await raw(port, `GET ${href} HTTP/1.1`)), /^HTTP\/1\.1 200\b/);
+  }, { unconfigured: true });
+});
+
+// ---------- theme ----------
+
+test("matchRoute knows the three theme links and nothing else under /theme", () => {
+  assert.deepEqual(matchRoute("/theme/auto"), { kind: "theme", theme: "auto" });
+  assert.deepEqual(matchRoute("/theme/light"), { kind: "theme", theme: "light" });
+  assert.deepEqual(matchRoute("/theme/dark"), { kind: "theme", theme: "dark" });
+  for (const p of ["/theme", "/theme/", "/theme/sepia", "/theme/dark/x", "/theme/DARK"]) {
+    assert.equal(matchRoute(p).kind, "notfound", p);
+  }
+  assert.deepEqual(METHODS.theme ?? ["GET"], ["GET"]);
+});
+
+test("a theme link sets the cookie and returns to the page it was clicked on", async () => {
+  await withServer(async (port) => {
+    const res = await raw(port, "GET /theme/dark HTTP/1.1", {
+      headers: [...authed.headers, "Referer: http://x/incidents?severity=critical"],
+    });
+    assert.match(status(res), /^HTTP\/1\.1 303\b/);
+    assert.equal(header(res, "location"), "/incidents?severity=critical");
+    const cookie = header(res, "set-cookie") ?? "";
+    assert.match(cookie, /^dash_theme=dark; Max-Age=\d+; Path=\/; HttpOnly; SameSite=Lax; Secure$/);
+
+    // "auto" is the absence of a choice, so it clears the cookie rather than storing a third value
+    const auto = await raw(port, "GET /theme/auto HTTP/1.1", authed);
+    assert.match(header(auto, "set-cookie") ?? "", /^dash_theme=; Max-Age=0; /);
+    assert.equal(header(auto, "location"), "/", "no Referer falls back to the overview");
+
+    // The Referer is attacker-influenced input: only its path survives, on this origin.
+    const off = await raw(port, "GET /theme/light HTTP/1.1", {
+      headers: [...authed.headers, "Referer: https://evil.example//evil.example/x"],
+    });
+    assert.doesNotMatch(header(off, "location") ?? "", /evil|^\/\//);
+    assert.match(header(off, "location") ?? "", /^\/(?!\/)/);
+
+    // Behind the session like every page: an anonymous caller gets the sign-in, and no cookie.
+    const anon = await raw(port, "GET /theme/dark HTTP/1.1");
+    assert.match(header(anon, "location") ?? "", /^\/login\?next=/);
+    assert.equal(header(anon, "set-cookie"), undefined);
+  });
+});
+
+test("the theme cookie decides data-theme, and anything but the two real values is auto", async () => {
+  await withServer(async (port) => {
+    const page = (theme?: string) =>
+      raw(port, "GET /prompt HTTP/1.1", {
+        headers: [authed.headers[0] + (theme === undefined ? "" : `; dash_theme=${theme}`)],
+      });
+    // from the doctype on: the response is chunked, so the body proper starts after a size line
+    const body = (res: string): string => res.slice(res.indexOf("<!doctype html>"));
+
+    assert.match(body(await page()), /^<!doctype html>\n<html lang="en"><head>/);
+    assert.match(body(await page("dark")), /^<!doctype html>\n<html lang="en" data-theme="dark"><head>/);
+    assert.match(body(await page("light")), /^<!doctype html>\n<html lang="en" data-theme="light"><head>/);
+    // an edited cookie cannot write an attribute: it is not one of the two words, so it is auto
+    for (const junk of ['"><script>', "sepia", "DARK", ""]) {
+      assert.match(body(await page(junk)), /^<!doctype html>\n<html lang="en"><head>/, junk);
+    }
+
+    const dark = body(await page("dark"));
+    assert.match(dark, /<a href="\/theme\/dark" aria-current="true">Dark<\/a>/);
+    assert.doesNotMatch(dark, /<a href="\/theme\/auto" aria-current/);
+    assert.equal(dark.match(/<meta name="theme-color"/g)?.length, 1, "one colour, not one per system scheme");
+
+    // The sign-in page is themed too — the cookie is read before the session is.
+    const login = await raw(port, "GET /login HTTP/1.1", { headers: ["Cookie: dash_theme=dark"] });
+    assert.match(body(login), /^<!doctype html>\n<html lang="en" data-theme="dark"><head>/);
   });
 });
 

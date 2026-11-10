@@ -71,7 +71,7 @@ test("a thread page shows the window in order, pins the issue, and never prints 
 });
 
 test("an expired or unknown thread says so", () => {
-  assert.match(threadPage(null, null, now, "9.9"), /expired|no longer/i);
+  assert.match(threadPage(null, null, now, "9.9"), /no conversation any more/i);
 });
 
 // Render check 2026-10-20: `.when` is `white-space: nowrap` (it is for timestamps), and the key and

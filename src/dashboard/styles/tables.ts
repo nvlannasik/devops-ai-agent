@@ -61,7 +61,7 @@ tbody td:first-child {
    only draws where something consumes it (the first cell of a row, a toned tile), so declaring
    it on a badge as well costs nothing. */
 /* Three properties per tone, and which one a rule reaches for is decided by what it paints:
-     --spine  every MARK — a row's leading bar, a badge's dot, a donut arc, a legend swatch.
+     --spine  every MARK — a row's leading bar, a badge's dot, a share-bar segment, a legend swatch.
               Drawn from the --mark-* ramp, which is the saturated one (3:1, a graphic).
      --ink    every piece of TEXT in a tone — a badge's label, a delta's figure. Drawn from
               the --critical/--warning/... ramp, which is the readable one (4.5:1, on its tint).
@@ -354,13 +354,14 @@ form.filters button, .signin-form button {
    from the .rail nav a rule it shares a selector with; this adds only what a <button> needs
    to stop looking like one. */
 form.signout { display: flex; }
-/* A step lighter than a destination. The rule it shares with .rail nav a gives it the same
-   geometry — so the glyphs stay in one column and the foot lines up with the nav above it —
-   and this is where it gives up the weight. Together with the rule above .rail-foot, that is
-   what stops a reader scanning four destinations from finding five. */
+/* A step lighter than a destination, and only as wide as its two words. The rule it shares
+   with .rail nav a gives it the same height and padding — so it is the same target a nav item
+   is — and this is where it gives up the weight, the glyph and the full-width row. Together
+   with the rule above .rail-foot, that is what stops a reader scanning the destinations from
+   finding one more. */
 form.signout button {
   font-family: inherit; line-height: inherit; cursor: pointer; text-align: left;
-  width: 100%; background: none; border: 0; font-weight: 500;
+  background: none; border: 0; font-weight: 500;
 }
 
 /* ---------- prose ---------- */

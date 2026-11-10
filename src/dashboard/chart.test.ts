@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { donutChart, lineChart } from "./chart.js";
+import { lineChart, shareBar } from "./chart.js";
 import { STYLES } from "./styles.js";
 
 const series = [
@@ -153,7 +153,7 @@ test("the stroke does not scale with the non-uniform stretch", () => {
   assert.match(lineChart(series), /preserveAspectRatio="none"/);
 });
 
-// ---------- donut ----------
+// ---------- share bar ----------
 
 const split = [
   { label: "critical", value: 12, tone: "critical" },
@@ -161,55 +161,53 @@ const split = [
   { label: "info", value: 7, tone: "info" },
 ];
 
-test("donutChart draws one arc per slice, sized as a share of the whole", () => {
-  const html = donutChart(split);
-  assert.equal(html.match(/class="donut-arc"/g)?.length, 3);
-  // 50 total: 12 -> 24, 31 -> 62, 7 -> 14. The dash array is <arc> <rest of the ring>,
-  // which only works because the circle's circumference is exactly 100 units.
-  assert.match(html, /stroke-dasharray="24 76"/);
-  assert.match(html, /stroke-dasharray="62 38"/);
-  assert.match(html, /stroke-dasharray="14 86"/);
+test("shareBar draws one segment per slice, grown by its own value", () => {
+  const html = shareBar(split);
+  const bar = html.slice(html.indexOf(`class="share-bar"`), html.indexOf("</div>"));
+  // the proportions are flex-grow's arithmetic: the markup carries the values, not percentages
+  assert.deepEqual([...bar.matchAll(/style="--w:(\d+)"/g)].map((m) => m[1]), ["12", "31", "7"]);
 });
 
-// A ring where every arc starts at twelve o'clock is a stack of overlapping arcs, not a
-// breakdown — each slice has to begin where the one before it ended.
-test("each arc starts where the previous one ended", () => {
-  const html = donutChart(split);
-  const offsets = [...html.matchAll(/stroke-dashoffset="(-?[\d.]+)"/g)].map((m) => m[1]);
-  // offset runs backwards around the ring: 0, -24, -86 (24+62)
-  assert.deepEqual(offsets, ["0", "-24", "-86"]);
-});
-
-test("donutChart carries the tone on the arc AND names the slice in the legend", () => {
-  const html = donutChart(split);
-  assert.match(html, /data-tone="critical"/);
+test("shareBar carries the tone on the segment AND names the slice in the legend", () => {
+  const html = shareBar(split, { label: "incidents by severity" });
+  assert.match(html, /<span data-tone="critical" style="--w:12"><\/span>/);
   // severity must never be colour-alone: the legend prints the name and the count beside
-  // every swatch, so the ring is a summary of the legend rather than the only reading.
-  assert.match(html, /critical/);
-  assert.match(html, /31/);
+  // every swatch, and the bar itself is named for a screen reader.
+  assert.match(html, /role="img" aria-label="incidents by severity: critical 12, warning 31, info 7"/);
+  assert.match(html, /<span class="share-name">warning<\/span><span class="share-n">31<\/span>/);
 });
 
-test("donutChart escapes a slice label — severity is an Alertmanager label, not a literal", () => {
-  const html = donutChart([{ label: `<img src=x>`, value: 1, tone: "" }]);
+test("a slice with no tone can lead, and can state its value its own way", () => {
+  const html = shareBar([
+    { label: "Input", value: 90, tone: "", lead: true, display: "90 · 90%" },
+    { label: "Output", value: 10, tone: "" },
+  ]);
+  assert.match(html, /<span data-lead style="--w:90"><\/span>/);
+  assert.match(html, /<li data-lead>[\s\S]*?<span class="share-n">90 · 90%<\/span>/);
+  assert.match(html, /<span style="--w:10"><\/span>/);
+});
+
+test("a zero slice keeps its legend row and draws no segment", () => {
+  const html = shareBar([{ label: "critical", value: 0, tone: "critical" }, { label: "low", value: 3, tone: "info" }]);
+  assert.equal([...html.matchAll(/style="--w:/g)].length, 1);
+  assert.match(html, /<span class="share-name">critical<\/span><span class="share-n">0<\/span>/);
+});
+
+test("shareBar escapes a slice label — severity is an Alertmanager label, not a literal", () => {
+  const html = shareBar([{ label: `<img src=x>`, value: 1, tone: "" }]);
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x&gt;/);
 });
 
-test("donutChart renders an empty breakdown without dividing by zero", () => {
-  const html = donutChart([]);
-  assert.doesNotMatch(html, /NaN/);
-  assert.match(html, /no data yet/i);
+test("shareBar renders an empty or all-zero breakdown as a sentence, never as NaN", () => {
+  for (const html of [shareBar([]), shareBar([{ label: "critical", value: 0, tone: "critical" }]), shareBar([{ label: "x", value: Number.NaN, tone: "" }])]) {
+    assert.doesNotMatch(html, /NaN|Infinity/);
+    assert.match(html, /no data yet/i);
+  }
 });
 
-// An all-zero series is what a window with no incidents looks like — it must not become
-// three arcs of Infinity.
-test("donutChart survives an all-zero breakdown", () => {
-  const html = donutChart([{ label: "critical", value: 0, tone: "critical" }]);
-  assert.doesNotMatch(html, /NaN|Infinity/);
-});
-
-test("the donut's classes all exist in the stylesheet", () => {
-  for (const cls of ["donut", "donut-ring", "donut-arc", "donut-legend", "donut-total"]) {
+test("the share bar's classes all exist in the stylesheet", () => {
+  for (const cls of ["share", "share-bar", "share-legend", "share-swatch", "share-n", "share-blank", "share-item"]) {
     assert.ok(STYLES.includes(`.${cls}`), `.${cls} is emitted but never styled`);
   }
 });

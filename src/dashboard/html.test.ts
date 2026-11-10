@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { esc, fmtAgo, fmtDate, fmtDuration, fmtPct, fmtInt, timeTag } from "./html.js";
+import { esc, fmtAgo, fmtCompact, fmtDate, fmtDuration, fmtPct, fmtInt, timeTag } from "./html.js";
 
 // THE security test. `rca` and `root_cause` are LLM output — arbitrary text that can
 // contain markup — and alertname/namespace come from Alertmanager labels. Rendering
@@ -94,4 +94,18 @@ test("fmtDuration reads as time, in at most two units", () => {
 test("fmtDuration keeps 'no data' and 'instant' apart", () => {
   assert.equal(fmtDuration(null), "—");
   assert.equal(fmtDuration(0), "0s");
+});
+
+// Three significant figures, and exact below the point where abbreviating would hide anything.
+test("fmtCompact abbreviates large counts and leaves small ones exact", () => {
+  assert.equal(fmtCompact(0), "0");
+  assert.equal(fmtCompact(9_999), "9,999");
+  assert.equal(fmtCompact(10_000), "10k");
+  assert.equal(fmtCompact(612_000), "612k");
+  assert.equal(fmtCompact(1_293_199), "1.29M");
+  assert.equal(fmtCompact(10_032_000), "10M");
+  // rounding up across a unit lands on the next unit, never on "1000k"
+  assert.equal(fmtCompact(999_950), "1M");
+  assert.equal(fmtCompact(-1_500_000), "-1.5M");
+  assert.equal(fmtCompact(Number.NaN), "—");
 });

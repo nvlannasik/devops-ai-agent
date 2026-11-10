@@ -127,6 +127,26 @@ export function fmtInt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+// A count at the size of a headline: three significant figures and a unit — 1.84M, 232k, 12.3k.
+// For the ONE place a figure is read as a magnitude rather than as a number (a card's lead
+// figure); the exact count always sits beside it or in the table under it, through fmtInt.
+// Below ten thousand there is nothing to abbreviate, and the exact number is shorter anyway.
+export function fmtCompact(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs < 10_000) return fmtInt(Math.round(n));
+  const units: [number, string][] = [[1e3, "k"], [1e6, "M"], [1e9, "B"], [1e12, "T"]];
+  // Pick the unit AFTER rounding: 999,950 is "1M", not "1000k".
+  for (let i = 0; i < units.length; i++) {
+    const [size, suffix] = units[i]!;
+    const v = abs / size;
+    const digits = v >= 100 ? 0 : v >= 10 ? 1 : 2;
+    const shown = Number(v.toFixed(digits));
+    if (shown < 1000 || i === units.length - 1) return (n < 0 ? "-" : "") + String(shown) + suffix;
+  }
+  return fmtInt(n);
+}
+
 // Lives here rather than in views.ts because rca.ts renders tables too, and views.ts already
 // imports rca.ts — a shared helper in either of those makes an import cycle. The wrapper is
 // what gives a wide table its own horizontal scroll instead of widening the page.

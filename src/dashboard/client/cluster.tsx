@@ -9,6 +9,7 @@ import { layoutClusterGraph } from "./cluster-layout.js";
 import type { ClusterFlowNode } from "./cluster-layout.js";
 import { clusterNodeTypes } from "./cluster-nodes.js";
 import { markDragEnd } from "./drag-state.js";
+import { mapColorMode } from "./color-mode.js";
 
 const MOUNT_ID = "cluster-root";
 const DATA_ID = "cluster-data";
@@ -94,7 +95,7 @@ function ClusterMap({ inv, model }: { inv: ClusterInventory; model: DashboardClu
           fitViewOptions={{ padding: 0.06 }}
           minZoom={0.2}
           maxZoom={2.5}
-          colorMode="system"
+          colorMode={mapColorMode()}
           zoomOnScroll={false}
           panOnScroll={false}
           zoomActivationKeyCode={["Meta", "Control"]}

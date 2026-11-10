@@ -10,9 +10,9 @@
 
    2. THE TOKENS ARE ALIASES, NOT VALUES. Every shadcn colour name points at the variable the
       rest of the dashboard already uses, so the map cannot drift into being a grey shadcn
-      island inside a teal-accented page — and dark mode needs no `.dark` class and no variant
-      config at all, because those variables already flip under prefers-color-scheme in
-      styles.ts. One source of truth for colour, two systems reading it. */
+      island inside an indigo-accented page — and dark mode needs no `.dark` class and no variant
+      config at all, because those variables already flip in styles.ts — under
+      prefers-color-scheme, or under the reader's own data-theme choice. One source of truth for colour, two systems reading it. */
 
 /* 3. THE UTILITIES ARE UNLAYERED, AND THAT IS THE WHOLE REASON THEY APPLY.
       An unlayered declaration beats ANY layered one, whatever the specificity — so with

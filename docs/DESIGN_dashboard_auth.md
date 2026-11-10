@@ -91,6 +91,12 @@ Order in `handle()`, and why each step sits where it does:
    dashboard is still read-only by contract.
 3. **`/healthz`** — 200, unauthenticated, ahead of everything below. The probe decides whether
    the pod stays Ready; a dashboard secret must never be able to take the agent out of service.
+   Since 2026-11-10 the dashboard's **stylesheet and its one font** (`/assets/app.<hash>.css`,
+   `/assets/space-grotesk.<hash>.woff2` — the `PUBLIC_ASSETS` map in `stylesheet.ts`) are answered
+   here too, ahead of the two gates below: the sign-in page and the 503 page are styled by them
+   and have no session to present. They are built from constants, content-hashed and immutable,
+   and hold nothing the sign-in page did not already carry inline. Any other `/assets` path —
+   the map bundles — falls through and stays behind the session gate.
 4. **Password-configured gate** — 503 with an explanation. Fail closed: serving the incident
    history anonymously because a Secret did not make it into the pod is the one outcome worth
    an outage on this port. Only on this port — the listener still never stops the pod.
@@ -132,6 +138,14 @@ and it is the only record that anyone is trying the door.
 ```
 default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
 ```
+
+*(As decided here. Since 2026-11-10 the header reads
+`default-src 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`
+on every page: the stylesheet became a linked, cached asset and loads one self-hosted font.
+`'self'` can only name the closed set of content-hashed assets this server builds from
+constants; the script posture below is untouched. A `/theme/(auto|light|dark)` GET route was
+added behind the session gate at the same time — it sets a preference cookie and redirects,
+and writes no data. Rationale: `MEMORY_BANK.md`, "Atlas".)*
 
 The first two are unchanged. `form-action` does **not** inherit from `default-src`, so the login
 form worked without it — it is there to pin where a password may be posted now that there is a

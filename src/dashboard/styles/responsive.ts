@@ -9,10 +9,11 @@ export const RESPONSIVE_CSS = `
   /* 44px: the floor for a target a finger has to hit. The pager especially — its controls sit
      next to each other, so an undersized one is not merely hard to hit but easy to mis-hit. */
   .rail nav a, form.signout button { min-height: 2.75rem; }
+  .theme a { height: 2.75rem; }
   .pages a, .pages .cur, .pages .step { min-width: 2.75rem; height: 2.75rem; }
 }
 
-/* The rail lies down. Below this width a 13.5rem column is a third of the screen spent on
+/* The rail lies down. Below this width a 14.5rem column is a third of the screen spent on
    three links, so it becomes a sticky bar across the top — the same items, the same order,
    the same current-page mark rotated a quarter turn onto the bottom edge. */
 @media (max-width: 60rem) and (min-width: 46.0625rem) {
@@ -29,11 +30,9 @@ export const RESPONSIVE_CSS = `
     padding: var(--sp-2) var(--gutter);
     border-right: 0; border-bottom: 1px solid var(--border);
   }
-  /* Only here: the bar now has content scrolling underneath it, which is the one condition
-     that makes a translucent background mean anything. The side rail never overlaps. */
-  @supports (backdrop-filter: blur(1px)) {
-    .rail { background: var(--glass); backdrop-filter: blur(14px) saturate(1.6); }
-  }
+  /* The bar used to go translucent here, blurring the page that scrolls under it. It is ink
+     now, like the column it was a moment ago: glass over a light page is a light bar, and a
+     rail that changes ground when it changes shape reads as a different component. */
   /* Who gives way when the bar runs out of room. Down the side there is always room; across
      the top there is not, and flex shrinks every item by its share — so the nav took a cut it
      cannot absorb (its links are nowrap, so being narrowed only makes them spill past the
@@ -59,20 +58,45 @@ export const RESPONSIVE_CSS = `
     border-top: 0; flex-direction: row; align-items: center; flex: 0 0 auto;
   }
   .rail-note { display: none; }
+  /* The line the note shared with sign out dissolves with it: sign out becomes a plain item of
+     the foot's own row, which is all it was before the two were paired. */
+  .rail-session { display: contents; }
+  /* The theme control leaves the foot for the top-right corner of the bar, and it is placed
+     rather than flowed because of where the empty room is. The Monitor list is three
+     destinations and never fills the first row; the Agent list is eight and wraps. Flowed
+     beside sign out, the control took 180px from the nav and cost the Agent list a third row
+     — four rows of sticky bar, 189px, measured at 880px. Row one has that width to spare at
+     every size in this range (the Monitor list ends near 430px; the control starts at 518px
+     at the narrow end), so it sits there and the nav gets the width back: three rows.
+     The top offset centres it on a 2.5rem link row. The rail is sticky, so it is the
+     containing block. */
+  .theme {
+    position: absolute; top: calc(var(--sp-2) + .25rem); right: var(--gutter);
+    margin: 0; grid-template-columns: repeat(3, auto);
+  }
+  .theme a { padding: 0 var(--sp-3); }
+  /* Sign out then belongs at the end of the LAST row, not centred against three of them. */
+  .rail-foot { align-self: flex-end; }
   form.signout { margin-top: 0; flex: 0 0 auto; }
-  form.signout button { width: auto; }
 }
-/* The note is the first thing to go: it is a courtesy (how fresh the page is, how long the
-   session has), and the range control beside it is a control. Dropped at the width where the
-   two together start squeezing the brand rather than at the width where the note itself stops
-   fitting — a bar whose brand is ellipsised to keep a note is the wrong trade. */
-@media (max-width: 52rem) { .topbar-note { display: none; } }
+/* Below the width where the rail is a column, the top bar exists: there is no column for the
+   brand to head, so the brand moves up into a bar of its own — and the copy at the head of the
+   rail goes, or the lying bar would open with the name the bar above it has just said.
+   AFTER the lying-bar block on purpose: views.test.ts reads the first (max-width: 60rem) block
+   in the sheet as that one. */
+@media (max-width: 60rem) {
+  .topbar { display: flex; }
+  .rail .brand { display: none; }
+}
 @media (max-width: 46rem) {
   :root { --gutter: max(var(--sp-4), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px)); }
   /* One step shorter, and the brand tile with it: 3.5rem of fixed chrome plus a nav bar under
      it is a lot of a phone screen spent before the first row of data. */
   :root { --topbar-h: 3rem; }
-  .topbar .brand-mark { width: 1.5rem; height: 1.5rem; }
+  .brand-mark { width: 1.5rem; height: 1.5rem; }
+  /* A phone's bar holds the burger and the brand and nothing else, so the name has the whole
+     width; the tighter gap is what keeps the burger's 36px box from pushing it off centre. */
+  .topbar { gap: var(--sp-2); }
   main { padding: var(--sp-6) var(--gutter) var(--sp-10); }
   footer.bottom { padding: 0 var(--gutter) var(--sp-8); }
   .rca-sec + .rca-sec { margin-top: var(--sp-6); padding-top: var(--sp-5); }
@@ -106,7 +130,10 @@ export const RESPONSIVE_CSS = `
   .rail {
     position: fixed; z-index: 30;
     top: var(--topbar-h); bottom: 0; left: 0;
-    width: min(17rem, 82vw); height: auto;
+    /* align-self: start is the column's (a sticky rail must not stretch its grid row), and on
+       a positioned box it means "shrink to the content" — the drawer stopped 72px short of the
+       bottom of an 844px screen, with the page showing under it. */
+    width: min(17rem, 82vw); height: auto; align-self: stretch;
     padding: var(--sp-4) var(--sp-3);
     border-right: 1px solid var(--border);
     box-shadow: var(--shadow-md);
@@ -144,7 +171,7 @@ export const RESPONSIVE_CSS = `
   #nav-open:checked ~ .nav-scrim { opacity: 1; pointer-events: auto; }
 }
 @media (prefers-reduced-motion: no-preference) {
-  a, .pages a, .rail nav a, .seg a, form.filters button, .signin-form button,
+  a, .pages a, .rail nav a, .seg a, .theme a, form.filters button, .signin-form button,
   form.signout button, .chart-dot, .chart-value, tbody tr {
     transition: color .12s ease, background-color .12s ease, border-color .12s ease,
                 fill .12s ease, text-decoration-color .12s ease, transform .12s ease;

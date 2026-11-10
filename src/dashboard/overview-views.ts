@@ -1,10 +1,10 @@
 import { costUsd, type Price } from "../agent/llm/pricing.js";
-import { cell, esc, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
+import { cell, esc, fmtCompact, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
 import { incidentSummary } from "./rca.js";
-import { donutChart, lineChart } from "./chart.js";
+import { lineChart, shareBar } from "./chart.js";
 import type { IncidentRow, Overview, Tokens } from "./queries.js";
-import { ICON, breakable, costCell, delta, empty, fmtUsd, section, severityBadge, statList, stateBadge, tone, toneAttr } from "./parts.js";
-import { WINDOW_LABEL, layout, rangeControl } from "./layout.js";
+import { ICON, breakable, cardHead, costCell, delta, empty, fmtUsd, pageHead, severityBadge, statList, stateBadge, tone, toneAttr } from "./parts.js";
+import { WINDOW_LABEL, layout, liveNote, rangeControl } from "./layout.js";
 
 
 // Every cell carries a class, including the two that hold nothing but a badge. Below 46rem the
@@ -33,10 +33,16 @@ export function incidentTable(rows: IncidentRow[], whenEmpty: string, now: Date 
   return table(head, body, "cards");
 }
 
-// What the investigations cost. The stats are totals over the window; the table is per
-// backend AND model, because under the router "which model did that" is the question — a
-// heavy backend answering what a light one could have is the finding this section exists for.
-function tokenUsage(t: Tokens, prices: ReadonlyMap<string, Price> = new Map()): string {
+// Only the priced backends add up — an unpriced one is not $0, so the total says what it covers.
+function pricedTotal(t: Tokens, prices: ReadonlyMap<string, Price>): string {
+  const priced = t.byBackend.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
+  return priced.length ? `${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends` : "";
+}
+
+// What the investigating cost, as one panel: the total, how it split, what the cache saved.
+// The total is abbreviated because a third of a row is not where a ten-digit figure fits; the
+// exact count is the line directly under it, so nothing is rounded away.
+function tokenCard(t: Tokens, prices: ReadonlyMap<string, Price>): string {
   if (t.calls === 0) {
     return empty(
       "No LLM calls recorded in this window.",
@@ -44,9 +50,33 @@ function tokenUsage(t: Tokens, prices: ReadonlyMap<string, Price> = new Map()): 
       ICON.chip
     );
   }
-  // Six columns is the widest table on the site, and the two that fall off a phone first are
-  // Output and Cache read — the halves of the ratio this section exists to show. Stacked, a
-  // backend's whole accounting is one captioned block.
+  const total = t.input + t.output;
+  const cost = pricedTotal(t, prices);
+  return (
+    `<p class="figure"><b>${esc(fmtCompact(total))}</b>` +
+    `<span>${esc(`${fmtInt(total)} tokens over ${fmtInt(t.calls)} calls`)}</span></p>` +
+    // The split, not just the two counts. An investigation that is 95% input is a caching
+    // problem; one that is 40% output is a verbosity problem. The shares say which.
+    shareBar(
+      [
+        { label: "Input", value: t.input, tone: "", lead: true, display: `${fmtCompact(t.input)} · ${fmtPct(t.input, total)}` },
+        { label: "Output", value: t.output, tone: "", display: `${fmtCompact(t.output)} · ${fmtPct(t.output, total)}` },
+      ],
+      { label: "tokens by direction" }
+    ) +
+    // Cache reads are the tokens that were NOT re-sent, so the pair reads as a saving and its
+    // price: you pay for a write once, deliberately.
+    `<p class="meta">${esc(
+      `${fmtCompact(t.cacheRead)} cache reads · ${fmtCompact(t.cacheCreation)} written` + (cost ? ` · ${cost}` : "")
+    )}</p>`
+  );
+}
+
+// Per backend AND model, because under the router "which model did that" is the question — a
+// heavy backend answering what a light one could have is the finding this table exists for.
+// Seven columns is the widest table on the site, and the two that fall off a phone first are
+// Output and Cache read; stacked ("pairs"), a backend's whole accounting is one captioned block.
+function tokenTable(t: Tokens, prices: ReadonlyMap<string, Price>): string {
   const rows = t.byBackend
     .map(
       (b) => `<tr role="row">` +
@@ -60,32 +90,7 @@ function tokenUsage(t: Tokens, prices: ReadonlyMap<string, Price> = new Map()): 
         `</tr>`
     )
     .join("");
-  // Only the priced backends add up — an unpriced one is not $0, so the total says what it covers.
-  const priced = t.byBackend.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
-  const total = priced.length ? ` · ${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends` : "";
-  return (
-    statList(
-      [
-        // The call count rides in the sub-line rather than taking a fifth tile: it is the
-        // denominator of the figure above it ("how much, over how many calls"), and as its own
-        // tile it was the odd one out on a four-wide shelf — a count of events among three
-        // counts of tokens.
-        { icon: ICON.layers, label: "Total tokens", value: fmtInt(t.input + t.output), sub: `input + output over ${fmtInt(t.calls)} calls${total}` },
-        // The split, not just the two counts. An investigation that is 95% input is a caching
-        // problem; one that is 40% output is a verbosity problem. The shares say which.
-        { icon: ICON.inTokens, label: "Input", value: fmtInt(t.input), sub: `${fmtPct(t.input, t.input + t.output)} of tokens` },
-        { icon: ICON.outTokens, label: "Output", value: fmtInt(t.output), sub: `${fmtPct(t.output, t.input + t.output)} of tokens` },
-        // Cache reads are the tokens that were NOT re-sent, so the pair reads as a saving
-        // and its price. Writes sit in the sub-line: you pay for them once, deliberately.
-        { icon: ICON.bolt, label: "Cache reads", value: fmtInt(t.cacheRead), sub: `${fmtInt(t.cacheCreation)} written` },
-      ]
-    ) +
-    table(
-      headers("Backend", "Model", "Calls", "Input", "Output", "Cache read", "Cost"),
-      rows,
-      "pairs"
-    )
-  );
+  return table(headers("Backend", "Model", "Calls", "Input", "Output", "Cache read", "Cost"), rows, "pairs");
 }
 
 // `now` is the instant the response is being built, taken once by the caller and threaded
@@ -116,45 +121,33 @@ export function overviewPage(
   // not a success; counting it as either moves the percentage for a reason nobody did.
   const verdicts = recovered + unchanged + worse + inconclusive;
 
-  const topRecurring = Math.max(1, ...o.recurring.map((r) => r.n));
+  // Rows, not a table: the panel is a third of the page wide, and what a reader wants from it
+  // is the ranking — which alert, how many times — with where and when as the line under it.
   const recurring =
     o.recurring.length === 0
       ? empty("Nothing has recurred.", `Every alert in the last ${WINDOW_LABEL[o.range]} fired exactly once.`, ICON.repeat)
-      : table(
-          headers("Alert", "Namespace", "Times", "Last seen"),
-          o.recurring
-            .map(
-              (r) => `<tr role="row">` +
-                // The alert name is a link into the list filtered to it. It is the one obvious
-                // question this table raises — "show me those twelve" — and before this the
-                // answer was to read the name, go to Incidents, and type it back in.
-                cell(
-                  "Alert",
-                  // Both layers, the same pair detailPage's Slack link takes: encodeURIComponent
-                  // makes the value safe INSIDE the URL (a stray & cannot open a second query
-                  // parameter), esc makes the whole string safe inside the attribute.
-                  `<a href="${esc(`/incidents?alertname=${encodeURIComponent(r.alertname)}`)}">${breakable(r.alertname)}</a>`,
-                  "primary"
-                ) +
-                cell("Namespace", `<span translate="no">${esc(r.namespace ?? "—")}</span>`, "mono") +
-                // A ranking bar against the most frequent alert — it says "twice as often", which
-                // the bare count makes the reader work out.
-                cell(
-                  "Times",
-                  `${fmtInt(r.n)}<span class="ratio under" style="--a:${Math.round((r.n / topRecurring) * 100)}" aria-hidden="true"><span></span></span>`,
-                  "num"
-                ) +
-                cell("Last seen", timeTag(r.last_seen, now), "when") +
-                `</tr>`
-            )
-            .join(""),
-          "pairs"
-        );
+      : `<ol class="rank">` +
+        o.recurring
+          .map(
+            (r) => `<li><div>` +
+              // The alert name is a link into the list filtered to it. It is the one obvious
+              // question this panel raises — "show me those twelve" — and before this the answer
+              // was to read the name, go to Incidents, and type it back in.
+              // Both layers, the same pair detailPage's Slack link takes: encodeURIComponent
+              // makes the value safe INSIDE the URL (a stray & cannot open a second query
+              // parameter), esc makes the whole string safe inside the attribute.
+              `<a href="${esc(`/incidents?alertname=${encodeURIComponent(r.alertname)}`)}">${breakable(r.alertname)}</a>` +
+              `<span class="rank-sub"><span translate="no">${esc(r.namespace ?? "—")}</span> · ${timeTag(r.last_seen, now)}</span>` +
+              `</div>` +
+              `<span class="rank-n">×${fmtInt(r.n)}<span class="sr-only"> times</span></span></li>`
+          )
+          .join("") +
+        `</ol>`;
 
   // The severity mix, and what came back from the humans who read the RCAs. Two figures of the
-  // same kind — what the window turned out to BE — set beside the ring that shows the first of
-  // them. The on-call numbers moved here from the state shelf when MTTR took their place on it:
-  // a reply is not the state of an incident, it is an outcome, and this is the outcomes panel.
+  // same kind — what the window turned out to BE — in one panel, the bar that shows the first of
+  // them over the pair that states the second. The on-call numbers are here rather than on the
+  // state shelf: a reply is not the state of an incident, it is an outcome.
   const severitySlices = o.severity.map((r) => ({
     label: r.severity,
     value: r.n,
@@ -168,17 +161,15 @@ export function overviewPage(
     tone: tone(r.severity),
   }));
 
-  // State first, then volume, then cost. The panel across the top is where the page answers the
-  // only question that can need an answer right now — how many are still open — and it answers
-  // it in the first line of the page rather than below a chart. It carries the page's single
-  // toned figure: open incidents wear the critical spine when there are any, and nothing else on
-  // the shelf is coloured, so the tone means "look here" and not "this tile is a stat".
+  // The page, top to bottom: the title row with the controls that govern the whole page; the
+  // state shelf, which answers the only question that can need an answer right now — how many
+  // are still open — in the first line of data; the window's count over the series it
+  // summarises, one fact in one frame at the full width of the page; then three panels abreast
+  // (how the incidents split and what on-call said, which ones keep coming back, what the
+  // investigating cost); and the two tables, each inside a card that names itself.
   //
-  // The hero below it is one composed object and nothing else: the 30-day count set against the
-  // weekly series it summarises, because the count and the shape of it are one fact. The outcome
-  // figures used to sit in a section of their own between the two; they are the state of those
-  // incidents, so they belong in the state panel, and repeating them in both places would make
-  // the page say the same thing twice.
+  // The shelf carries the page's toned figures: open incidents wear the critical tone when
+  // there are any, so the tone means "look here" and not "this tile is a stat".
   const open = o.totalIncidents - o.resolvedIncidents;
   const resolvedPct = o.totalIncidents ? (o.resolvedIncidents / o.totalIncidents) * 100 : null;
   const prevResolved = o.prev.totalIncidents
@@ -186,13 +177,14 @@ export function overviewPage(
     : null;
   return layout(
     "Overview",
-    // One block: laid into <main> as three children, main > * + * spaced the title from its own
-    // caption like two unrelated sections.
-    `<div class="doc">
-       <p class="eyebrow">Monitor</p>
-       <h1>Overview</h1>
-       <p class="meta">What the agent investigated in the last ${esc(WINDOW_LABEL[o.range])}, and how it went.</p>
-     </div>
+    `${pageHead({
+      eyebrow: "Monitor",
+      title: "Overview",
+      lede: `What the agent investigated in the last ${WINDOW_LABEL[o.range]}, and how it went.`,
+      // The range governs every figure below it and the note says how fresh they are, so both
+      // sit in the title row rather than in the chrome: they are about this page, not the site.
+      tools: liveNote() + rangeControl(o.range),
+    })}
      ${statList(
        [
          {
@@ -205,6 +197,8 @@ export function overviewPage(
            // incidents wants to know WHICH.
            href: "/incidents?resolved=false",
            hrefLabel: `Open — see the ${fmtInt(open)} incidents still firing`,
+           // The headline figure of the page: what is firing is what a reader opened it to learn.
+           lead: true,
          },
          {
            icon: ICON.check, label: "Resolved", value: fmtPct(o.resolvedIncidents, o.totalIncidents),
@@ -231,23 +225,17 @@ export function overviewPage(
          },
        ]
      )}
-     <section class="hero">
-       <div class="hero-body">
-         <p class="hero-figure">
-           <span class="hero-value">${esc(fmtInt(o.totalIncidents))}</span>
-           <span class="hero-unit">investigated</span>
-         </p>
-         <div class="hero-chart">${lineChart(o.weekly, { label: `incidents ${o.seriesUnit}` })}</div>
-       </div>
+     <section class="card chart-card">
+       <header class="chart-head">
+         <p class="figure"><b>${esc(fmtInt(o.totalIncidents))}</b><span>incidents investigated</span></p>
+         <span class="chart-window">last ${esc(WINDOW_LABEL[o.range])} · ${esc(o.seriesUnit)}</span>
+       </header>
+       ${lineChart(o.weekly, { label: `incidents ${o.seriesUnit}` })}
      </section>
-     ${section(ICON.layers, "Outcomes")}
-     <div class="split">
+     <div class="trio">
        <section class="card">
-         <p class="eyebrow">By severity</p>
-         ${donutChart(severitySlices, { label: "incidents by severity" })}
-       </section>
-       <section class="card">
-         <p class="eyebrow">On-call feedback</p>
+         ${cardHead("Outcomes")}
+         ${shareBar(severitySlices, { label: "incidents by severity" })}
          ${statList(
            [
              {
@@ -277,16 +265,29 @@ export function overviewPage(
            "pair"
          )}
        </section>
+       <section class="card">
+         ${cardHead("Most recurring")}
+         ${recurring}
+       </section>
+       <section class="card">
+         ${cardHead("Token usage")}
+         ${tokenCard(o.tokens, prices)}
+       </section>
      </div>
-     ${section(ICON.chip, "Token usage")}
-     ${tokenUsage(o.tokens, prices)}
-     ${section(ICON.repeat, "Most recurring")}
-     ${recurring}
-     ${section(ICON.incidents, "Recent incidents", `<a class="standalone" href="/incidents">All incidents →</a>`)}
-     ${incidentTable(recent, empty("No incidents yet.", "The agent posts here once it has investigated its first alert.", ICON.incidents), now)}`,
+     <section class="card flush">
+       ${cardHead("Recent incidents", `<a class="standalone" href="/incidents">All incidents →</a>`)}
+       ${incidentTable(recent, empty("No incidents yet.", "The agent posts here once it has investigated its first alert.", ICON.incidents), now)}
+     </section>${
+       o.tokens.calls > 0
+         ? `
+     <section class="card flush">
+       ${cardHead("Token usage by backend")}
+       ${tokenTable(o.tokens, prices)}
+     </section>`
+         : ""
+     }`,
     {
       current: "/",
-      tools: rangeControl(o.range),
       // The overview is the page someone leaves open on a second monitor, so it refreshes
       // itself. A <meta> refresh rather than a script: the CSP sends no script-src on this
       // route, and a full re-request is also what re-runs the queries — a fetch would need an
