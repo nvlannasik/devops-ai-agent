@@ -256,7 +256,16 @@ export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<str
 function messageContent(m: Message): string {
   // Text is the model's or the operator's own mrkdwn — the RCA most of all — so it is rendered the
   // way Slack shows it (bold, italics, code), line breaks kept. inlineMrkdwn escapes first.
-  const text = (t: string): string => `<div class="mem-text">${inlineMrkdwn(t)}</div>`;
+  // A ``` fence (the RCA's Runbook commands) is verbatim and escaped, with no inline markup —
+  // an asterisk in a kubectl line is part of the command. An unclosed fence stays text.
+  const text = (t: string): string =>
+    `<div class="mem-text">${t
+      .split(/(```[^\n`]*\n[\s\S]*?```)/)
+      .map((part) => {
+        const fence = /^```[^\n`]*\n([\s\S]*?)\n?```$/.exec(part);
+        return fence ? `<pre class="mem-code"><code translate="no">${esc(fence[1]!)}</code></pre>` : inlineMrkdwn(part);
+      })
+      .join("")}</div>`;
   if (typeof m.content === "string") return text(m.content);
   const calls = m.content.filter((b) => b.type === "tool_use");
   const results = m.content.filter((b) => b.type === "tool_result");

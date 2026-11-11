@@ -625,6 +625,11 @@ h2.ns-title::after { content: none; }
 .mem-calls .mem-name { flex: 0 0 auto; font-weight: 600; }
 /* A code span inside the model's prose — a pod, a metric, a timestamp — reads as an identifier. */
 .mem-text code { font-family: var(--font-data); font-size: .92em; padding: 0 .25em; border-radius: 4px; background: var(--surface-2); }
+.mem-code {
+  margin: var(--sp-1) 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm);
+  background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.mem-code code { padding: 0; background: none; }
 .mem-calls .mem-dim { min-width: 0; overflow-wrap: anywhere; }
 .mem-arrow { flex: 0 0 auto; color: var(--text-dim); font-family: var(--font-data); }
 .mem-size { flex: 0 0 auto; font-family: var(--font-data); color: var(--text-dim); font-variant-numeric: tabular-nums; }

@@ -158,3 +158,18 @@ test("a thread renders the model's mrkdwn and folds a long pinned message", () =
   assert.match(html, /<details class="turn-fold"><summary class="turn-head">[\s\S]*?the alert and its context · [\d,]+ chars<\/span><\/summary>/);
   assert.match(html, /<a href="\/context\/rca-format"><code translate="no">rca-format<\/code><\/a>/, "a carried skill links to its page");
 });
+
+// The RCA's Runbook carries ``` fenced commands; they render as a block, verbatim, never as markup.
+test("a fenced block in the model's text is a code block, its asterisks left alone", () => {
+  const html = threadPage(
+    { threadId: "1.1", ttlSeconds: 60, rcaSent: true, skills: [], messages: [
+      { role: "user", content: "q" },
+      { role: "assistant", content: [{ type: "text", text: "*Verify:* run\n```\nkubectl get pods -o jsonpath={.items[*].metadata.name} <b>\n```\ndone" }] },
+    ] } as never,
+    null,
+    now
+  );
+  assert.match(html, /<pre class="mem-code"><code translate="no">kubectl get pods -o jsonpath=\{\.items\[\*\]\.metadata\.name\} &lt;b&gt;<\/code><\/pre>/);
+  assert.doesNotMatch(html, /```/);
+  assert.match(html, /<strong>Verify:<\/strong>/);
+});
