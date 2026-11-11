@@ -347,6 +347,8 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   .rank a:hover { color: var(--accent); text-decoration: underline; }
   .ns-list a:not([aria-current="true"]):hover { background: var(--surface-2); }
   .toc a:hover { background: var(--surface-2); color: var(--accent); }
+  .chips-list a:hover { border-color: var(--accent); color: var(--accent); }
+  .skill-card header a:hover { text-decoration: underline; }
   /* The dot grows rather than changing colour: the accent is the line's identity, and a point
      that turns a different hue on hover reads as a different KIND of point. */
   .chart-col:hover .chart-dot { transform: scale(1.5); }

@@ -96,7 +96,39 @@ function isTableSeparatorRow(line: string): boolean {
  * the first of its own. Emitting `<h1>` here would put two on the page and break the sequence
  * a screen reader navigates by.
  */
+// A heading's anchor: its words, lower-cased, runs of anything else one hyphen, prefixed so it
+// can never collide with an id the page itself uses, and numbered on a repeat. One instance per
+// document, shared by renderMarkdown and outlineOf, so the outline links where the text lands.
+function slugger(): (text: string) => string {
+  const seen = new Map<string, number>();
+  return (text) => {
+    const base = "md-" + (text.replace(/[`*_]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "section");
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}-${n}`;
+  };
+}
+
+/**
+ * The document's headings, in order, with the ids renderMarkdown gives them — the same fence
+ * rule (a `#` inside a fence is a PromQL comment, not a heading) and the same slugger, so a link
+ * to one always lands on it. `level` is the source's (`##` is 2).
+ */
+export function outlineOf(src: string): Array<{ level: number; text: string; id: string }> {
+  const slug = slugger();
+  const out: Array<{ level: number; text: string; id: string }> = [];
+  let fenced = false;
+  for (const line of src.split("\n")) {
+    if (fenced) { if (/^```\s*$/.test(line)) fenced = false; continue; }
+    if (/^```(\w*)\s*$/.test(line)) { fenced = true; continue; }
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) out.push({ level: h[1]!.length, text: h[2]!.replace(/[`*]/g, ""), id: slug(h[2]!) });
+  }
+  return out;
+}
+
 export function renderMarkdown(src: string): string {
+  const slug = slugger();
   const out: string[] = [];
   const lines = src.split("\n");
   let i = 0;
@@ -134,7 +166,7 @@ export function renderMarkdown(src: string): string {
     if (heading) {
       closeLists();
       const level = Math.min(heading[1]!.length + 2, 6);
-      out.push(`<h${level}>${inline(esc(heading[2]!))}</h${level}>`);
+      out.push(`<h${level} id="${esc(slug(heading[2]!))}">${inline(esc(heading[2]!))}</h${level}>`);
       i++;
       continue;
     }

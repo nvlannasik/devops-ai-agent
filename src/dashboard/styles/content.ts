@@ -420,7 +420,10 @@ export const CONTENT_CSS = `
 .detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--stack); margin-bottom: var(--stack); }
 .detail-main { min-width: 0; display: flex; flex-direction: column; gap: var(--stack); }
 .rca-card > .card-head { margin-bottom: var(--sp-5); }
+/* The column may scroll as a whole when it is taller than the window; its cards never shrink to
+   fit it, or a long outline crushes the facts above it to one row. */
 .detail-side { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.detail-side > * { flex-shrink: 0; }
 @container page (min-width: 58rem) {
   .detail { grid-template-columns: minmax(0, 1fr) 18rem; align-items: start; }
   .detail-main { grid-column: 1; grid-row: 1; }
@@ -570,4 +573,47 @@ h2.ns-title::after { content: none; }
 }
 /* Anchored panels stop clear of the window's top edge rather than flush against it. */
 .detail-main > [id], .doc > section[id] { scroll-margin-top: var(--sp-6); }
+
+/* ---------- /context ---------- */
+/* The window the request is built to fit, as one bar — the overview's chart card, holding a
+   share bar instead of a line. */
+.window-card { display: flex; flex-direction: column; gap: var(--sp-4); }
+.window-card > .meta { margin: 0; }
+.prompt-card { display: flex; flex-direction: column; gap: var(--sp-3); }
+.prompt-card > .meta { margin: 0; }
+/* The prompt's sections as links straight to them on /prompt — a table of contents a reader can
+   scan here and land on there. */
+.chips-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.chips-list a {
+  display: inline-flex; align-items: center; min-height: 2rem; padding: 0 var(--sp-3);
+  border-radius: var(--r-pill); border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--text); font-size: var(--fs-xs); text-decoration: none;
+}
+.skill-group { display: flex; flex-direction: column; gap: var(--sp-3); }
+.skill-group > .card-head { flex-wrap: wrap; align-items: baseline; }
+.skill-group > .card-head .meta { margin: 0; }
+/* A list of equal cards, so the grid fills by what fits: a partial last row is the end of a
+   list, not an orphaned figure the way a short KPI row would be. */
+.skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr)); gap: var(--sp-4); }
+.skill-card { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; padding: var(--sp-4) var(--sp-5); }
+.skill-card header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-width: 0; }
+.skill-card header a { font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.skill-card p { margin: 0; font-size: var(--fs-sm); color: var(--text-dim); }
+/* A trigger is a regex — read character by character, so it is shown whole on its own page and
+   only its opening here: two lines, then cut, with the full pattern in the title. */
+.skill-when {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  font-size: var(--fs-2xs); color: var(--text-dim); overflow-wrap: anywhere;
+}
+.skill-size { margin-top: auto; display: flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-2xs); color: var(--text-dim); font-family: var(--font-data); }
+.skill-size .ratio { flex: 1 1 auto; max-width: none; margin: 0; }
+.skill-size > span:last-child { white-space: nowrap; }
+/* /prompt and a skill page: the note above the text, and the trigger card. */
+.callout {
+  margin: 0; padding: var(--sp-4) var(--sp-5); border-radius: var(--r);
+  background: var(--brand-tint); color: var(--text); font-size: var(--fs-sm);
+}
+.trigger-card { display: flex; flex-direction: column; gap: var(--sp-3); }
+.trigger-card .meta, .trigger-card pre { margin: 0; }
+.detail-main > .card.md { min-width: 0; }
 `;

@@ -1457,7 +1457,9 @@ const CTX: ContextView = {
 // layout each takes is decided by what the cells hold, and it only shows at 390px.
 test("each context table takes the narrow layout its own cells call for", () => {
   const html = contextPage(CTX);
-  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 1, "the skills table");
+  // the skills are cards now (a grid of equal cards, not a table); the budget stays a pairs table
+  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 0, "no skills table");
+  assert.equal([...html.matchAll(/<article class="card skill-card">/g)].length, CTX.skills.length, "one card per skill");
   assert.equal([...html.matchAll(/<table role="table" data-stack data-pairs>/g)].length, 1, "the budget table");
 
   for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
@@ -1510,7 +1512,7 @@ test("a skill page carries the whole body, its trigger, and the way back", () =>
   assert.match(html, /<h1 translate="no">oomkilled<\/h1>/);
   // Rendered, not shown as source: the body is a markdown file and a reader should see what
   // the asterisks and backticks MEAN. "1. …" is an ordered item now.
-  assert.match(html, /<div class="card md">/, "the body keeps the panel the pre block gave it");
+  assert.match(html, /<section class="card md">/, "the body keeps the panel the pre block gave it");
   assert.match(html, /<ol><li>k8s_describe_pod<\/li>/);
   // The trigger is NOT markdown — it is a regex an operator reads character by character, and
   // formatting it would be a lie. It stays verbatim in a pre block.
@@ -1524,7 +1526,7 @@ test("a skill page carries the whole body, its trigger, and the way back", () =>
 // present a literal as if it were the thing being matched.
 test("an always-on skill states that instead of showing a pattern", () => {
   const html = skillPage(CTX.skills[0]!);
-  assert.match(html, /<span class="badge">ALWAYS<\/span>/);
+  assert.match(html, /Carried<\/span><\/dt><dd>Always<span>every investigation/);
   assert.match(html, /whatever the alert says/);
   assert.doesNotMatch(html, /<pre class="skill-body" translate="no">/);
 });
@@ -1552,7 +1554,8 @@ const HOSTILE_SKILL = {
 test("a skill regex is escaped, not rendered, in the list", () => {
   const html = contextPage({ ...CTX, skills: [{ ...HOSTILE_SKILL }] });
   assert.match(html, /5xx\|&lt;b&gt;\|&quot;q&quot;/);
-  assert.doesNotMatch(html, /<b>/);
+  // scoped to the skills: the page's own figure markup uses <b> for the window's count
+  assert.doesNotMatch(html.slice(html.indexOf(`class="skill-grid"`)), /<b>/);
 });
 
 test("a skill body and a regex are escaped, not rendered, on the skill page", () => {
@@ -2537,9 +2540,10 @@ test("the context page leads to the prompt instead of only measuring it", () => 
 // budget table under four screens of prompt.
 test("the prompt page renders the text the process is holding", () => {
   const html = promptPage(CTX);
-  assert.match(html, /<div class="card md"><p>You are an expert DevOps AI Agent\./);
-  assert.match(html, /prompts\/system\.md/);
-  assert.match(html, /267 lines · 24,100 chars · about 8,034 tokens/);
+  assert.match(html, /<section class="card md"><p>You are an expert DevOps AI Agent\./);
+  assert.match(html, /<h1 translate="no">prompts\/system\.md<\/h1>/);
+  assert.match(html, /Lines<\/span><\/dt><dd>267<span>24,100 chars/);
+  assert.match(html, /Tokens<\/span><\/dt><dd>~8,034<span>/);
   // the rail keeps Context lit, the way a skill page does
   assert.match(html, /<a href="\/context" aria-current="page">/);
 });

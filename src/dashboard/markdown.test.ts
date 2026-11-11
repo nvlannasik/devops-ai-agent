@@ -28,9 +28,10 @@ test("markup never comes from the source text", () => {
 // prompt file is the third level of THIS document. Two h1s would break the sequence a screen
 // reader navigates by.
 test("headings continue the page's hierarchy instead of restarting it", () => {
-  assert.match(renderMarkdown("# One"), /^<h3>One<\/h3>$/);
-  assert.match(renderMarkdown("## Two"), /^<h4>Two<\/h4>$/);
-  assert.match(renderMarkdown("### Three"), /^<h5>Three<\/h5>$/);
+  // each carries an anchor the page's outline links to
+  assert.match(renderMarkdown("# One"), /^<h3 id="md-one">One<\/h3>$/);
+  assert.match(renderMarkdown("## Two"), /^<h4 id="md-two">Two<\/h4>$/);
+  assert.match(renderMarkdown("### Three"), /^<h5 id="md-three">Three<\/h5>$/);
   assert.doesNotMatch(renderMarkdown("# One"), /<h1>|<h2>/);
 });
 
@@ -215,4 +216,16 @@ test("the shipped prompt's Pod State Awareness table renders as a real table", a
   const html = renderMarkdown(src);
   assert.match(html, /<table>/);
   assert.match(html, /<th>Pod Status<\/th>/);
+});
+
+// The outline and the rendered text agree on every anchor — a repeat is numbered in both, and a
+// `#` inside a fence (a PromQL comment) is not a heading in either.
+test("outlineOf gives the ids renderMarkdown gives, and skips fenced comments", async () => {
+  const { outlineOf } = await import("./markdown.js");
+  const src = "## Loki `logs`\n\n```\n# not a heading\n```\n\n## Loki logs\n### Deep";
+  const outline = outlineOf(src);
+  assert.deepEqual(outline.map((h) => [h.level, h.id]), [[2, "md-loki-logs"], [2, "md-loki-logs-2"], [3, "md-deep"]]);
+  const html = renderMarkdown(src);
+  for (const h of outline) assert.match(html, new RegExp(`id="${h.id}"`));
+  assert.doesNotMatch(html, /id="md-not-a-heading"/);
 });

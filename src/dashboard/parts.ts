@@ -202,9 +202,10 @@ export const section = (icon: string, title: string, trailing = ""): string =>
 // The row wraps, so on a narrow column the controls drop under the title instead of squeezing it.
 // `tools` is markup, built by the caller from literals and escaped values — the contract
 // Stat.icon has. The three strings are text and are escaped here.
-export const pageHead = (h: { eyebrow: string; title: string; lede?: string; tools?: string }): string =>
+// `code`: the title is an identifier (a file, a skill name) — kept out of page translation.
+export const pageHead = (h: { eyebrow: string; title: string; lede?: string; tools?: string; code?: boolean }): string =>
   `<header class="page-head"><div class="page-title">` +
-  `<p class="eyebrow">${esc(h.eyebrow)}</p><h1>${esc(h.title)}</h1>` +
+  `<p class="eyebrow">${esc(h.eyebrow)}</p><h1${h.code ? ` translate="no"` : ""}>${esc(h.title)}</h1>` +
   (h.lede ? `<p class="meta">${esc(h.lede)}</p>` : "") +
   `</div>` +
   (h.tools ? `<div class="page-tools">${h.tools}</div>` : "") +

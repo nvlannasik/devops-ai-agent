@@ -1,10 +1,12 @@
-import { cell, esc, fmtInt, headers, table } from "./html.js";
+import { cell, esc, fmtCompact, fmtInt, headers, table } from "./html.js";
 import { rowId } from "./topology.js";
 import type { Assets } from "./assets.js";
-import { renderMarkdown } from "./markdown.js";
+import { outlineOf, renderMarkdown } from "./markdown.js";
+import { shareBar } from "./chart.js";
+import { SKILL_MAX_CHARS } from "../agent/skills/index.js";
 import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
-import { ICON, badge, empty, jsonBlock, section, statList, panel } from "./parts.js";
+import { ICON, badge, cardHead, empty, jsonBlock, pageHead, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
 
 // `group` is only ever the anchor prefix: each box in the diagram links to its own row here,
@@ -225,44 +227,6 @@ export function topologyPage(
 // html.ts:32-34 rewritten, in the one file that already imports the original, and it would put a
 // function named `num` beside the CSS class named "num" that these very cells pass.
 
-// A skill row is a name, a pattern, a size and a sentence — the sentence is what makes this a
-// stack rather than pairs. The body does NOT hang off the row: it is 8000 chars at most and a
-// <details> inside a table cell expands the row it sits in, so opening one pushed every skill
-// below it off the screen and gave the text the width of one column to wrap in. It gets its own
-// page instead (skillPage), which the name links to.
-function skillRows(skills: ContextView["skills"]): string {
-  // No empty state on purpose: loadSkills throws at boot on a directory with no .md files, so a
-  // running agent always has skills. An "empty" table here would be a state the process cannot
-  // reach — do not add one later.
-  return table(
-    headers("Skill", "When", "Size"),
-    skills
-      .map((s) =>
-        `<tr role="row">` +
-        // The name is the link, not a "view" column: it is what the reader is already looking
-        // at, and a row whose target is named twice reads as two destinations. `skillHref`
-        // encodes because nothing here may assume the loader's name rule still holds.
-        // The description rides under the name, the way an incident's summary rides under its
-        // alert. As a fourth column it was the one a person reads and the one the table cut off:
-        // the `when` regexes are long unbroken tokens, they took the width, and the description
-        // sat past the frame's right edge behind a scroll nothing pointed at (2026-09-28).
-        cell(
-          "Skill",
-          `<a href="${esc(skillHref(s.name))}"><code translate="no">${esc(s.name)}</code></a>` +
-            `<div class="sub">${esc(s.description)}</div>`,
-          "primary"
-        ) +
-        cell("When", s.when === "always"
-          ? `<span class="badge">ALWAYS</span>`
-          : `<code translate="no">${esc(s.when)}</code>`, "trigger") +
-        cell("Size", `${fmtInt(s.chars)} chars`, "size") +
-        `</tr>`
-      )
-      .join(""),
-    "stack"
-  );
-}
-
 // encodeURIComponent inside the path segment, esc() on the whole attribute at the call site —
 // the same two layers the incident page's Slack link takes. A skill name matches [a-z0-9-] at
 // load time (NAME_RE in agent/skills), so today neither layer has anything to do; that rule
@@ -270,86 +234,98 @@ function skillRows(skills: ContextView["skills"]): string {
 const skillHref = (name: string): string => `/context/${encodeURIComponent(name)}`;
 
 /**
- * One skill, whole. The body is the text the model is handed verbatim, so it is rendered
- * preformatted and escaped — never parsed as markdown. What the agent reads and what this page
- * shows have to be the same string, and a renderer is a second interpretation of it.
+ * A document page — the core prompt, or one skill — as the incident page is laid out: the text
+ * in the main column and, beside it where there is room, a facts shelf and the document's own
+ * outline as in-page links. The text is long (the prompt is ~24,000 chars), and a reader looking
+ * for the Loki section scrolled four screens past it with nothing pointing the way.
  */
-/**
- * The core prompt, in full.
- *
- * On its own page rather than inline on /context, and for the reason skillPage exists: 24,000
- * characters in a <pre> would bury the budget table under four screens of prompt, which is the
- * same failure a <details> in a table row caused for skills.
- *
- * The text is the RUNNING process's copy. buildStaticSystemPrompt() reads prompts/system.md
- * once and caches it, and the file is editable without a rebuild — so git, the pod's disk and
- * this string can all disagree, and only this one decides what the agent says. The page states
- * that, because a reader who takes it for "what the repo holds" would be reading the wrong
- * thing at the exact moment it matters.
- */
-export function promptPage(v: ContextView, openIncidents?: number): string {
+function docPage(
+  title: string,
+  head: { eyebrow: string; h1: string; lede: string; back: [href: string, label: string] },
+  facts: Parameters<typeof statList>[0],
+  body: string,
+  note: string,
+  openIncidents: number | undefined
+): string {
+  const outline = outlineOf(body);
+  // The shallowest level the document uses: `##` in the prompt, whatever a skill starts at.
+  const top = Math.min(7, ...outline.map((h) => h.level));
+  const items = outline.filter((h) => h.level === top);
   return layout(
-    "System prompt",
+    title,
     `<div class="doc">
-     <p class="eyebrow">Core prompt</p>
-     <h1 translate="no">prompts/system.md</h1>
-     <div class="title-meta">
-       <span class="badge">EVERY ITERATION</span>
-       <span class="meta">${fmtInt(v.core.lines)} lines · ${fmtInt(v.core.chars)} chars · about ${fmtInt(v.core.tokens)} tokens</span>
-       <span class="page-actions"><a class="standalone" href="/context">← Context and skills</a></span>
+     ${pageHead({ eyebrow: head.eyebrow, title: head.h1, lede: head.lede, code: true, tools: `<a class="standalone" href="${esc(head.back[0])}">${esc(head.back[1])}</a>` })}
+     <div class="detail">
+     <aside class="detail-side" aria-label="About this text">
+     ${statList(facts, "facts")}
+     ${
+       items.length > 1
+         ? `<nav class="card toc" aria-label="Sections"><p class="toc-title">Sections · ${fmtInt(items.length)}</p><ul>` +
+           items.map((h) => `<li><a href="#${esc(h.id)}">${esc(h.text)}</a></li>`).join("") +
+           `</ul></nav>`
+         : ""
+     }
+     </aside>
+     <div class="detail-main">
+     ${note}
+     <section class="card md">${renderMarkdown(body)}</section>
      </div>
-     <p class="meta">Sent whole at the head of every request, on every iteration of every
-       investigation — the largest and the only unconditional part of what this agent is told.</p>
-
-     ${section(ICON.layers, "What you are reading")}
-     <p class="meta">This is the copy <strong>this process is holding</strong>, not the file as it
-       stands on disk: it is read once at boot and cached for the life of the pod, and
-       <code translate="no">prompts/system.md</code> is editable without a rebuild. If someone
-       changed the file after this pod started, the change is not here — and it is not reaching
-       the model either. That is the question this page exists to answer.</p>
-
-     ${section(ICON.context, "Prompt text")}
-     <div class="card md">${renderMarkdown(v.core.body)}</div>
+     </div>
      </div>`,
     { current: "/context", openIncidents }
   );
 }
 
+/**
+ * The core prompt, in full, on its own page — 24,000 characters inline would bury the budget.
+ * The text is the RUNNING process's copy: buildStaticSystemPrompt() reads prompts/system.md once
+ * and caches it, and the file is editable without a rebuild — so git, the pod's disk and this
+ * string can all disagree, and only this one decides what the agent says. The page says so.
+ */
+export function promptPage(v: ContextView, openIncidents?: number): string {
+  return docPage(
+    "System prompt",
+    {
+      eyebrow: "Core prompt",
+      h1: "prompts/system.md",
+      lede: "Sent whole at the head of every request, on every iteration of every investigation — the largest and the only unconditional part of what this agent is told.",
+      back: ["/context", "← Context and skills"],
+    },
+    [
+      { label: "Sent", value: "Every call", sub: "unconditional" },
+      { label: "Tokens", value: `~${fmtInt(v.core.tokens)}`, sub: "estimated" },
+      { label: "Lines", value: fmtInt(v.core.lines), sub: `${fmtInt(v.core.chars)} chars` },
+      { label: "Sections", value: fmtInt(outlineOf(v.core.body).filter((h) => h.level === 2).length), sub: "## headings" },
+    ],
+    v.core.body,
+    `<p class="callout">This is the copy <strong>this process is holding</strong>, not the file as it
+       stands on disk: it is read once at boot and cached for the life of the pod, and
+       <code translate="no">prompts/system.md</code> is editable without a rebuild. A change made
+       after this pod started is not here — and it is not reaching the model either.</p>`,
+    openIncidents
+  );
+}
+
 export function skillPage(s: ContextView["skills"][number], openIncidents?: number): string {
   const always = s.when === "always";
-  // Everything below is ONE block, not a stack of strips laid straight into <main>. The
-  // difference is real: loose children each take the column's full width and their own content
-  // height, so a page of them is a run of full-bleed bands (an eyebrow renders 880x11) with
-  // nothing declaring that they are one document. .doc is that declaration — it establishes the
-  // block formatting context the sections' margins collapse inside, and it is the element the
-  // width rule attaches to, so the page follows the column instead of a measure of its own.
-  return layout(
+  return docPage(
     s.name,
-    `<div class="doc">
-     <p class="eyebrow">Skill</p>
-     <h1 translate="no">${esc(s.name)}</h1>
-     <div class="title-meta">
-       ${always ? `<span class="badge">ALWAYS</span>` : `<span class="badge" data-tone="info">MATCHED</span>`}
-       <span class="meta">${fmtInt(s.chars)} chars</span>
-       <span class="page-actions"><a class="standalone" href="/context">← All skills</a></span>
-     </div>
-     <p class="meta">${esc(s.description)}</p>
-
-     ${section(ICON.bolt, "Trigger")}
-     <p class="meta">${
-       always
-         ? `Carried into every investigation, whatever the alert says.`
-         : `Carried when this pattern matches the alert text. The match is case-insensitive, and ` +
-           `it is distinct matches that rank a skill against the others, not how often one word repeats.`
-     }</p>
-     ${always ? "" : `<pre class="skill-body" translate="no">${esc(s.when)}</pre>`}
-
-     ${section(ICON.context, "Skill text")}
-     <p class="meta">Injected verbatim into the first user message of an investigation — never into
-       the system prompt, which is cached whole and would miss on every call if it varied.</p>
-     <div class="card md">${renderMarkdown(s.body)}</div>
-     </div>`,
-    { current: "/context", openIncidents }
+    { eyebrow: "Skill", h1: s.name, lede: s.description, back: ["/context", "← All skills"] },
+    [
+      { label: "Carried", value: always ? "Always" : "On a match", sub: always ? "every investigation" : "when the trigger matches" },
+      { label: "Size", value: `${fmtInt(s.chars)}`, sub: `of ${fmtInt(SKILL_MAX_CHARS)} chars` },
+      { label: "Tokens", value: `~${fmtInt(Math.ceil(s.chars / 4))}`, sub: "estimated" },
+      { label: "Lines", value: fmtInt(s.body.split("\n").length), sub: "of skill text" },
+    ],
+    s.body,
+    `<section class="card trigger-card"><h2 class="card-title">Trigger</h2>` +
+      (always
+        ? `<p class="meta">Carried into every investigation, whatever the alert says.</p>`
+        : `<p class="meta">Carried when this pattern matches the alert text — case-insensitive; distinct
+           matches, not repeats of one word, rank a skill against the others. Injected verbatim into the
+           first user message, never the system prompt.</p><pre class="skill-body" translate="no">${esc(s.when)}</pre>`) +
+      `</section>`,
+    openIncidents
   );
 }
 
@@ -386,21 +362,74 @@ function budgetRows(backends: ContextView["backends"]): string {
 }
 
 export function contextPage(v: ContextView, openIncidents?: number): string {
+  const always = v.skills.filter((k) => k.when === "always");
+  const matched = v.skills.filter((k) => k.when !== "always");
+  const eff = v.backends.find((b) => b.name === v.effective.backend) ?? v.backends[0];
+  // The question this page is opened for — how much room is left — as one bar of the window the
+  // request is built to fit, split the way the budget table below splits every window.
+  const windowCard = eff
+    ? `<section class="card window-card">` +
+      `<header class="chart-head"><p class="figure"><b>~${esc(fmtInt(v.effective.available))}</b><span>tokens left for skills and conversation</span></p>` +
+      `<span class="chart-window" translate="no">${esc(eff.name)} · ${esc(fmtInt(eff.window))} window</span></header>` +
+      shareBar(
+        [
+          { label: "core prompt", value: eff.core, tone: "", lead: true, display: fmtCompact(eff.core) },
+          { label: "tools", value: eff.tools, tone: "info", display: fmtCompact(eff.tools) },
+          { label: "reserve", value: eff.reserve, tone: "", display: fmtCompact(eff.reserve) },
+          { label: "available", value: eff.available, tone: "ok", display: fmtCompact(eff.available) },
+        ],
+        { label: `${eff.name} context window` }
+      ) +
+      `<p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>, the
+        smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation. The router picks a
+        backend after the request is assembled, so it has to fit the smallest one it might land in. Under pressure
+        skills drop before history.</p>` +
+      `</section>`
+    : "";
+  const prompt = outlineOf(v.core.body).filter((h) => h.level === 2);
+  const promptCard =
+    `<section class="card prompt-card">` +
+    cardHead("Core prompt", `<a class="standalone" href="/prompt">Read the prompt →</a>`) +
+    `<p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines, ${fmtInt(v.core.chars)} chars,
+      about ${fmtInt(v.core.tokens)} tokens, on every iteration of every investigation.</p>` +
+    (prompt.length
+      ? `<ul class="chips-list">${prompt.map((h) => `<li><a href="/prompt#${esc(h.id)}">${esc(h.text)}</a></li>`).join("")}</ul>`
+      : "") +
+    `</section>`;
+  const skillCard = (k: ContextView["skills"][number]): string => {
+    const pct = Math.min(100, Math.round((k.chars / SKILL_MAX_CHARS) * 100));
+    return (
+      `<article class="card skill-card">` +
+      `<header><a href="${esc(skillHref(k.name))}"><code translate="no">${esc(k.name)}</code></a>` +
+      (k.when === "always" ? `<span class="badge">ALWAYS</span>` : "") +
+      `</header>` +
+      `<p>${esc(k.description)}</p>` +
+      (k.when === "always" ? "" : `<code class="skill-when" translate="no" title="${esc(k.when)}">${esc(k.when)}</code>`) +
+      // How close the skill is to the 8,000-char cap a skill file is refused at, at boot.
+      `<div class="skill-size"><span class="ratio" style="--a:${pct}" aria-hidden="true"><span></span></span>` +
+      `<span>${fmtInt(k.chars)} / ${fmtInt(SKILL_MAX_CHARS)} chars</span></div>` +
+      `</article>`
+    );
+  };
+  const skillGroup = (title: string, list: ContextView["skills"], note: string): string =>
+    list.length
+      ? `<section class="skill-group"><header class="card-head"><h2 class="card-title">${esc(title)} · ${fmtInt(list.length)}</h2><span class="meta">${esc(note)}</span></header>` +
+        `<div class="skill-grid">${list.map(skillCard).join("")}</div></section>`
+      : "";
   return layout(
     "Context",
-    `<div class="doc">
-       <p class="eyebrow">Agent</p>
-       <h1>Context and skills</h1>
-       <p class="meta">What this agent knows before it reads a single metric, and how much room it
-         has to say it. Read from the running process — no database, no call leaves it.</p>
-     </div>
+    `${pageHead({
+      eyebrow: "Agent",
+      title: "Context and skills",
+      lede: "What this agent knows before it reads a single metric, and how much room it has to say it. Read from the running process — no database, no call leaves it.",
+    })}
      ${statList([
        { icon: ICON.layers, label: "Core prompt", value: `~${fmtInt(v.core.tokens)}`, sub: `tokens on every call · ${fmtInt(v.core.lines)} lines` },
        {
          icon: ICON.context,
          label: "Skills",
          value: fmtInt(v.skills.length),
-         sub: `${fmtInt(v.skills.filter((k) => k.when === "always").length)} always · ${fmtInt(v.skills.filter((k) => k.when !== "always").length)} matched on the alert`,
+         sub: `${fmtInt(always.length)} always · ${fmtInt(matched.length)} matched on the alert`,
        },
        { icon: ICON.plug, label: "Tool definitions", value: `~${fmtInt(v.backends[0]?.tools ?? 0)}`, sub: "tokens, sent with every call" },
        {
@@ -412,20 +441,11 @@ export function contextPage(v: ContextView, openIncidents?: number): string {
          tone: v.effective.available < 8000 ? "warning" : undefined,
        },
      ])}
-
-     ${panel("Core prompt", `<p class="meta"><code translate="no">prompts/system.md</code> — ${fmtInt(v.core.lines)} lines,
-       ${fmtInt(v.core.chars)} chars, about ${fmtInt(v.core.tokens)} tokens. Sent on every iteration of
-       every investigation. The skills below are shown in full; so is this.</p>`, `<a class="standalone" href="/prompt">Read the prompt →</a>`)}
-     ${panel("Skills", `<p class="meta">Selected from the alert text and carried in the first user message, never in
-       the system prompt — a system prompt that varied per investigation would miss the model's
-       prompt cache on every call. Open a skill to read the text the model is handed.</p>
-     ${skillRows(v.skills)}`)}
-     ${panel("Budget per backend", `<p class="meta">Every request is built to fit <code translate="no">${esc(v.effective.backend)}</code>,
-       the smallest window — about ${fmtInt(v.effective.available)} tokens for skills and conversation.
-       The router picks a backend after the request is assembled, so the request has to fit the
-       smallest one it might land in.</p>
-     <p class="stack-legend"><span><i data-k="reserve"></i>reserve</span><span><i data-k="core"></i>core prompt</span><span><i data-k="tools"></i>tools</span><span><i data-k="available"></i>available</span></p>
-     ${budgetRows(v.backends)}`)}`,
+     ${windowCard}
+     ${promptCard}
+     ${skillGroup("Always carried", always, "in every investigation")}
+     ${skillGroup("Matched on the alert", matched, "selected from the alert text, in the first user message — never the system prompt")}
+     ${panel("Budget per backend", `<p class="stack-legend"><span><i data-k="reserve"></i>reserve</span><span><i data-k="core"></i>core prompt</span><span><i data-k="tools"></i>tools</span><span><i data-k="available"></i>available</span></p>` + budgetRows(v.backends))}`,
     { current: "/context", openIncidents }
   );
 }
