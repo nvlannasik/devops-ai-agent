@@ -211,3 +211,115 @@ export function shareBar(slices: Slice[], opts: { label?: string } = {}): string
     `</figure>`
   );
 }
+
+// ---------- donut ----------
+// Back on 2026-11-11 for the overview's severity split, now that the Outcomes card is half a row
+// wide again (it was dropped when the panel was a third of one). The share bar stays for the token
+// split and the context window, whose shares are too lopsided for a ring.
+
+// Slice is the share bar's type above: a donut reads the same fields (label, value, tone, href).
+
+// The circumference trick, and the reason this needs no arc maths at all: a circle of radius
+// 100/(2π) has a circumference of exactly 100 units, so `stroke-dasharray: <share> <rest>`
+// draws an arc of <share> PERCENT and `stroke-dashoffset` rotates it into place. No sin, no
+// cos, no path commands — one <circle> per slice, each a share and a rotation.
+//
+// 15.9155 is 100/(2π) to four places; at the sizes this renders (a ~180px ring) the error is
+// under a hundredth of a pixel.
+const R = 15.9155;
+// The viewBox is square and the ring is centred in it. 42 leaves room for the stroke width
+// without the arcs being clipped at the edges of the box.
+const BOX = 42;
+// Units of the 100-unit circumference left between neighbouring arcs.
+const GAP = 0.8;
+
+/**
+ * A ring of severity shares, drawn server-side with no script.
+ *
+ * The ring is NOT the reading — the legend beside it is. Severity is the one thing on this
+ * dashboard that must never rest on colour alone (WCAG 1.4.1), so every slice prints its name
+ * and its count as text; the arc is what makes the proportion visible at a glance, and it
+ * carries the same `data-tone` the table rows and the badges use, so the whole page draws
+ * "critical" in one colour.
+ *
+ * Rotated -90deg in CSS so the first arc starts at twelve o'clock rather than at three.
+ */
+export function donutChart(slices: Slice[], opts: { label?: string } = {}): string {
+  const chartLabel = opts.label ?? "breakdown";
+
+  // Re-derived with Number() for the same reason lineChart does it: these counts come out of
+  // Postgres, and a non-numeric one must land on 0 rather than on a NaN inside an attribute.
+  const values = slices.map((s) => {
+    const n = Number(s.value);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  });
+  const total = values.reduce((a, b) => a + b, 0);
+  const drawn = values.filter((v) => v > 0).length;
+
+  if (slices.length === 0 || total === 0) {
+    // The normal state of a fresh deployment, and of any window nothing fired in.
+    return (
+      `<figure class="donut">` +
+      `<p class="donut-blank">no data yet</p>` +
+      `</figure>`
+    );
+  }
+
+  // Shares are rounded to one decimal, and the running offset is accumulated from the ROUNDED
+  // values — not from the exact ones. Accumulating the exact share and rounding each offset
+  // separately leaves a sub-pixel gap or overlap at every boundary; carrying the rounding
+  // forward means each arc starts exactly where the drawn edge of the previous one is.
+  let cursor = 0;
+  const arcs = slices
+    .map((s, i) => {
+      const share = Math.round((values[i]! / total) * 1000) / 10;
+      // Each arc stops GAP short of the next, so two slices in one tone — medium and low share
+      // the info blue by design — still read as two. Offsets keep the full share: the gap is
+      // taken out of the drawn length only, never out of where the next slice starts.
+      const arc = (v: number): number => (drawn > 1 ? Math.max(0.3, Math.round((v - GAP) * 10) / 10) : v);
+      const offset = cursor;
+      cursor = Math.round((cursor + share) * 10) / 10;
+      const tone = s.tone ? ` data-tone="${esc(s.tone)}"` : "";
+      return (
+        `<circle class="donut-arc"${tone} cx="${BOX / 2}" cy="${BOX / 2}" r="${R}"` +
+        // The dash pattern is the arc and the gap that closes the ring; the offset is negative
+        // because dashoffset runs against the direction the arc is drawn in.
+        ` stroke-dasharray="${arc(share)} ${Math.round((100 - arc(share)) * 10) / 10}"` +
+        ` stroke-dashoffset="${offset === 0 ? 0 : -offset}"/>`
+      );
+    })
+    .join("");
+
+  // The row is the target where there is one, and the whole row rather than the name: a
+  // three-column grid whose middle cell is the only thing clickable is a target a pointer has
+  // to aim at. The swatch and the count come along inside the anchor.
+  const legend = slices
+    .map((s, i) => {
+      const inner =
+        `<span class="donut-swatch" aria-hidden="true"></span>` +
+        `<span class="donut-name">${esc(s.label)}</span>` +
+        `<span class="donut-n">${esc(values[i])}</span>`;
+      const row = s.href
+        ? `<a href="${esc(s.href)}" aria-label="${esc(`${s.label}: ${values[i]} incidents`)}">${inner}</a>`
+        : inner;
+      return `<li${s.tone ? ` data-tone="${esc(s.tone)}"` : ""}>${row}</li>`;
+    })
+    .join("");
+
+  // One accessible name for the whole figure, the same way lineChart states its series — a ring
+  // of <circle>s is unreadable one element at a time.
+  const readOut = slices.map((s, i) => `${s.label} ${values[i]}`).join(", ");
+
+  return (
+    `<figure class="donut">` +
+    `<div class="donut-ring" role="img" aria-label="${esc(`${chartLabel}: ${readOut}`)}">` +
+    `<svg viewBox="0 0 ${BOX} ${BOX}" aria-hidden="true" focusable="false">` +
+    // The track behind the arcs, so a ring that does not close (it always does) or a single
+    // tiny slice still reads as a ring rather than as a stray mark.
+    `<circle class="donut-track" cx="${BOX / 2}" cy="${BOX / 2}" r="${R}"/>${arcs}</svg>` +
+    `<p class="donut-total"><b>${esc(total)}</b><span>total</span></p>` +
+    `</div>` +
+    `<ul class="donut-legend">${legend}</ul>` +
+    `</figure>`
+  );
+}

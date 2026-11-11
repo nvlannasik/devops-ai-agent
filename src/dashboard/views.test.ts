@@ -2581,7 +2581,7 @@ test("the severity legend rows lead to the incidents behind them", () => {
   assert.match(html, /<a href="\/incidents\?severity=critical" aria-label="critical: 27 incidents">/);
   assert.match(html, /<a href="\/incidents\?severity=warning"/);
   // the whole row is the target, not just the name
-  assert.match(html, /<a href="\/incidents\?severity=critical"[^>]*><span class="share-swatch"/);
+  assert.match(html, /<a href="\/incidents\?severity=critical"[^>]*><span class="donut-swatch"/);
 });
 
 // The most consequential figure on the page, and until now it went nowhere.

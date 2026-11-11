@@ -1,7 +1,7 @@
 import { costUsd, type Price } from "../agent/llm/pricing.js";
 import { cell, esc, fmtCompact, fmtDuration, fmtInt, fmtPct, headers, table, timeTag } from "./html.js";
 import { incidentSummary } from "./rca.js";
-import { lineChart, shareBar } from "./chart.js";
+import { donutChart, lineChart, shareBar } from "./chart.js";
 import type { IncidentRow, Overview, Tokens } from "./queries.js";
 import { ICON, breakable, cardHead, costCell, delta, empty, fmtUsd, pageHead, severityBadge, statList, stateBadge, tone, toneAttr } from "./parts.js";
 import { WINDOW_LABEL, layout, liveNote, rangeControl } from "./layout.js";
@@ -235,7 +235,7 @@ export function overviewPage(
      <div class="panels">
        <section class="card">
          ${cardHead("Outcomes")}
-         ${shareBar(severitySlices, { label: "incidents by severity" })}
+         ${donutChart(severitySlices, { label: "incidents by severity" })}
          ${statList(
            [
              {

@@ -1,4 +1,4 @@
-// Part of STYLES (../styles.ts): charts, the share bar, the topology map and hover. A template literal — read the rules in styles.ts first.
+// Part of STYLES (../styles.ts): charts, the share bar, the donut, the topology map and hover. A template literal — read the rules in styles.ts first.
 export const CHARTS_CSS = `
 /* ---------- charts ---------- */
 /* An SVG line over an HTML grid. The SVG holds the line and NOTHING else; every piece of text —
@@ -162,6 +162,101 @@ li[data-lead] .share-swatch { background: var(--accent); }
 }
 .share-blank {
   margin: 0; padding: var(--sp-6) 0; text-align: center;
+  color: var(--text-dim); font-size: var(--fs-sm);
+}
+
+/* ---------- donut ---------- */
+/* The ring and its legend, side by side, collapsing to stacked when the panel is narrow. The
+   legend is the reading and the ring is the glance — see the note in chart.ts — so on a narrow
+   panel the legend goes UNDER the ring rather than the ring shrinking to make room for it. */
+/* The legend is CAPPED and the pair is grouped to the left. With a 1fr track the count column
+   was pushed to the far edge of the panel — on a wide card the number ended up hundreds of
+   pixels from the name it belonged to, which is the one relationship a legend exists to state.
+   24rem is where the longest severity label plus a five-figure count stops needing more. */
+.donut {
+  margin: 0; display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 24rem);
+  justify-content: start;
+  gap: clamp(var(--sp-4), 3cqi, var(--sp-6)); align-items: center;
+  container: donut / inline-size;
+}
+@container page (max-width: 40rem) {
+  .donut { grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: center; }
+}
+/* The ring is a square that follows the panel between a floor and a ceiling. The total sits in
+   the hole, which is what makes a donut worth drawing rather than a pie: the middle of a pie is
+   the one part of it that carries no data. */
+.donut-ring { position: relative; width: clamp(7rem, 34cqi, 10rem); aspect-ratio: 1; }
+.donut-ring svg {
+  display: block; width: 100%; height: 100%;
+  /* Arcs are drawn from three o'clock. A quarter turn back puts the first slice at the top,
+     which is where a reader starts. */
+  transform: rotate(-90deg);
+}
+.donut-track { fill: none; stroke: var(--surface-2); stroke-width: 4.4; }
+/* One rule for every arc: the tone variable supplies the colour, exactly as it does for a row's
+   spine and a badge's dot. stroke-linecap stays butt — a round cap on a 4.4-unit stroke
+   overhangs its neighbour by half that on each side, which on a small slice draws an arc wider
+   than its own share. */
+.donut-arc {
+  fill: none; stroke: var(--spine, var(--border-strong)); stroke-width: 4.4;
+}
+/* Centred in the hole by the same inset-0 grid the ring uses, so it stays centred at every
+   size without a transform to fight the SVG's own rotation. */
+.donut-total {
+  position: absolute; inset: 0; margin: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  line-height: 1.1; pointer-events: none;
+}
+.donut-total b {
+  font-size: var(--fs-lg); font-weight: 640; letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+}
+.donut-total span {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+}
+/* The legend, and the half of the figure that survives greyscale. Each row is swatch, name,
+   count — the count right-aligned into its own column so a reader can run down the numbers
+   without reading the names. */
+.donut-legend {
+  list-style: none; margin: 0; padding: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  width: 100%;
+}
+.donut-legend li { font-size: var(--fs-sm); }
+/* The grid moved off the <li> and onto whatever is inside it, so a linked row and an inert one
+   lay out identically — the anchor takes the grid when there is one, the li keeps it when
+   there is not. Without this the anchor would be a third grid item and the three cells would
+   collapse into one. */
+.donut-legend li > a,
+.donut-legend li > .donut-swatch {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: var(--sp-3);
+}
+.donut-legend li > a {
+  color: inherit; text-decoration: none;
+  margin: calc(var(--sp-1) * -1) calc(var(--sp-2) * -1);
+  padding: var(--sp-1) var(--sp-2); border-radius: var(--r-sm);
+}
+/* An inert row has no anchor to carry the grid, so the li carries it instead. */
+.donut-legend li:not(:has(> a)) {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: var(--sp-3);
+}
+.donut-swatch {
+  width: .625rem; height: .625rem; border-radius: 3px;
+  background: var(--spine, var(--border-strong));
+}
+.donut-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.donut-n {
+  font-family: var(--font-data); font-variant-numeric: tabular-nums;
+  font-weight: 600; color: var(--text-dim);
+}
+/* Same shape as the line chart's empty state, for the same reason: a window nothing fired in is
+   the ordinary case on a fresh deployment, not an error. */
+.donut-blank {
+  grid-column: 1 / -1; margin: 0; padding: var(--sp-8) 0; text-align: center;
   color: var(--text-dim); font-size: var(--fs-sm);
 }
 
@@ -344,6 +439,7 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   .pages a:hover { border-color: var(--accent); color: var(--accent); }
   .chips a:hover { background: var(--surface-raised); color: var(--text); }
   .share-legend li > a:hover { background: var(--surface-2); }
+  .donut-legend li > a:hover { background: var(--surface-2); }
   .rank a:hover { color: var(--accent); text-decoration: underline; }
   .ns-list a:not([aria-current="true"]):hover { background: var(--surface-2); }
   .toc a:hover { background: var(--surface-2); color: var(--accent); }

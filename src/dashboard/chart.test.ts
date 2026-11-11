@@ -232,3 +232,27 @@ test("a dense series names every second period, and the newest always", () => {
 test("a short series is not marked dense", () => {
   assert.doesNotMatch(lineChart([{ label: "a", value: 1 }, { label: "b", value: 2 }]), /data-dense|data-thin4/);
 });
+
+// ---------- donut (back for the overview's severity split, 2026-11-11) ----------
+
+test("donutChart draws one arc per slice, each a share of 100 less the gap between neighbours", async () => {
+  const { donutChart } = await import("./chart.js");
+  const html = donutChart(split);
+  assert.equal(html.match(/class="donut-arc"/g)?.length, 3);
+  // 50 total: 12 -> 24, 31 -> 62, 7 -> 14; each drawn 0.8 short so same-tone neighbours stay two
+  assert.match(html, /stroke-dasharray="23\.2 76\.8"/);
+  assert.match(html, /stroke-dasharray="61\.2 38\.8"/);
+  assert.match(html, /stroke-dasharray="13\.2 86\.8"/);
+  // offsets keep the full share: the gap comes out of the drawn length, not the start
+  assert.deepEqual([...html.matchAll(/stroke-dashoffset="(-?[\d.]+)"/g)].map((m) => m[1]), ["0", "-24", "-86"]);
+});
+
+test("a donut with one slice is a closed ring, and an empty one says so without dividing by zero", async () => {
+  const { donutChart } = await import("./chart.js");
+  assert.match(donutChart([{ label: "critical", value: 5, tone: "critical" }]), /stroke-dasharray="100 0"/);
+  for (const html of [donutChart([]), donutChart([{ label: "critical", value: 0, tone: "critical" }])]) {
+    assert.doesNotMatch(html, /NaN|Infinity/);
+    assert.match(html, /no data yet/i);
+  }
+  assert.doesNotMatch(donutChart([{ label: "<img src=x>", value: 1, tone: "" }]), /<img src=x/);
+});
