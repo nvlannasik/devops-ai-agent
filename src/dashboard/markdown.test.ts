@@ -30,8 +30,12 @@ test("markup never comes from the source text", () => {
 test("headings continue the page's hierarchy instead of restarting it", () => {
   // each carries an anchor the page's outline links to
   assert.match(renderMarkdown("# One"), /^<h3 id="md-one">One<\/h3>$/);
-  assert.match(renderMarkdown("## Two"), /^<h4 id="md-two">Two<\/h4>$/);
-  assert.match(renderMarkdown("### Three"), /^<h5 id="md-three">Three<\/h5>$/);
+  assert.match(renderMarkdown("# One\n## Two"), /<h4 id="md-two">Two<\/h4>/);
+  assert.match(renderMarkdown("# One\n### Three"), /<h5 id="md-three">Three<\/h5>/);
+  // The shallowest heading is h3 whatever its source depth — system.md opens at `##`, and
+  // h4 straight under the page's h2 was a skipped level. A `#` in a fence is not a heading.
+  assert.match(renderMarkdown("## Two\n### Sub"), /^<h3 id="md-two">Two<\/h3>\n?<h4 id="md-sub">Sub<\/h4>$/);
+  assert.match(renderMarkdown("```\n# comment\n```\n## Two"), /<h3 id="md-two">/);
   assert.doesNotMatch(renderMarkdown("# One"), /<h1>|<h2>/);
 });
 

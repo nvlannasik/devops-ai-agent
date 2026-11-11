@@ -493,6 +493,10 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 .ns-detail { flex: 999 1 30rem; min-width: 0; display: flex; flex-direction: column; gap: var(--stack); }
 .ns-detail > .meta, .ns-detail > ul.meta { margin: 0; }
 .ns-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-4) var(--sp-8); }
+/* The Flux revision is one unbroken token (branch@sha1:<40 hex>); at 390px it held the card 32px
+   past the screen. */
+.ns-summary > div { min-width: 0; }
+.ns-summary .meta code { overflow-wrap: anywhere; }
 .ns-summary .meta { margin: var(--sp-1) 0 0; }
 h2.ns-title {
   font-family: var(--font-data); font-size: var(--fs-lg); font-weight: 600;

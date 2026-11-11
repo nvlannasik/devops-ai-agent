@@ -94,7 +94,9 @@ function isTableSeparatorRow(line: string): boolean {
  * Headings start at `<h3>`: the page itself already owns `<h1>` (its title) and `<h2>` (its
  * sections), so a `#` in a prompt file is the third level of THIS document even though it is
  * the first of its own. Emitting `<h1>` here would put two on the page and break the sequence
- * a screen reader navigates by.
+ * a screen reader navigates by. The shallowest heading in the document is the one that lands on
+ * `<h3>`, whatever its depth in the source: `prompts/system.md` opens at `##`, and mapping that
+ * to `<h4>` skipped a level under the page's `<h2>`.
  */
 // A heading's anchor: its words, lower-cased, runs of anything else one hyphen, prefixed so it
 // can never collide with an id the page itself uses, and numbered on a repeat. One instance per
@@ -131,6 +133,7 @@ export function renderMarkdown(src: string): string {
   const slug = slugger();
   const out: string[] = [];
   const lines = src.split("\n");
+  const top = Math.min(6, ...outlineOf(src).map((h) => h.level));
   let i = 0;
   // Open list stack, so one level of nesting closes in the right order.
   let open: ("ul" | "ol")[] = [];
@@ -165,7 +168,7 @@ export function renderMarkdown(src: string): string {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       closeLists();
-      const level = Math.min(heading[1]!.length + 2, 6);
+      const level = Math.min(heading[1]!.length - top + 3, 6);
       out.push(`<h${level} id="${esc(slug(heading[2]!))}">${inline(esc(heading[2]!))}</h${level}>`);
       i++;
       continue;

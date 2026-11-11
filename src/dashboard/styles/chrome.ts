@@ -177,6 +177,12 @@ a.standalone { color: var(--accent); font-weight: 550; text-decoration: none; }
    somewhere else, so an un-gated hover leaves a row highlighted after you have already
    navigated away from it and come back. */
 a, button, select, input, summary { touch-action: manipulation; }
+/* WCAG 2.5.8: no target under 24px tall. The padding grows the hit box and the equal negative
+   margin gives the height back, so no row moves — most of these are flex items, where padding
+   alone would. A summary is a block and simply takes a floor. */
+a.standalone:not(.page-actions a), .skill-card header a { padding-block: .25rem; margin-block: -.25rem; }
+.eyebrow a { padding-block: .4rem; margin-block: -.4rem; }
+details > summary { min-height: 1.5rem; }
 /* The ring, plus a soft halo of the same colour. The ring is what meets the requirement — the
    halo is what makes it visible against a card that is itself bordered, where a 2px outline
    2px off the edge reads as a slightly thicker border. color-mix keeps one source of truth:

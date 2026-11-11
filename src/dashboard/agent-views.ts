@@ -268,7 +268,7 @@ function docPage(
      </aside>
      <div class="detail-main">
      ${note}
-     <section class="card md">${renderMarkdown(body)}</section>
+     <h2 class="sr-only">Text</h2><section class="card md">${renderMarkdown(body)}</section>
      </div>
      </div>
      </div>`,

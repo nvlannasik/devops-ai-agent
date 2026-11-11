@@ -578,7 +578,7 @@ export function postmortemPage(incidentId: number, pm: PostmortemRow, openIncide
        writes them; the narrative sections are drafted by the model and marked as a draft for
        review. Review before sharing.</p>
 
-     <div class="card md">${renderMarkdown(pm.markdown)}</div>
+     <h2 class="sr-only">Draft</h2><div class="card md">${renderMarkdown(pm.markdown)}</div>
      </div>`,
     { current: "/postmortems", openIncidents }
   );
