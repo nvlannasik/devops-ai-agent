@@ -84,8 +84,9 @@ export function clusterPage(
       ? `<p class="meta"><strong>Not known</strong></p><ul class="meta">${model.unknowns.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`
       : "";
   // A link, not a script: the selection is in the URL, so it survives a reload and can be shared.
-  const nsHref = (name: string): string =>
-    esc(`/cluster?${view ? `cluster=${encodeURIComponent(view.current)}&` : ""}ns=${encodeURIComponent(name)}`);
+  const nsPath = (name: string): string =>
+    `/cluster?${view ? `cluster=${encodeURIComponent(view.current)}&` : ""}ns=${encodeURIComponent(name)}`;
+  const nsHref = (name: string): string => esc(nsPath(name));
   const nsLinks = (list: Ns[], current: string): string =>
     `<ul>` +
     list
@@ -188,6 +189,7 @@ export function clusterPage(
     const short = workloads.filter(isShort);
     // The map's own predicate (cluster-graph.ts card()): applied by hand, not plain Helm.
     const outside = workloads.filter(isOutside);
+    const firstShort = user.find((n) => n.workloads.some(isShort));
     const names = (ws: typeof workloads) => ws.slice(0, 2).map((w) => w.name).join(", ") + (ws.length > 2 ? ` +${ws.length - 2}` : "");
     const shelf = statList([
       { icon: ICON.layers, label: "Namespaces", value: fmtInt(user.length), sub: system.length ? `+${fmtInt(system.length)} system` : "application namespaces" },
@@ -198,14 +200,18 @@ export function clusterPage(
         value: fmtInt(short.length),
         sub: short.length ? names(short) : "every workload at its desired count",
         tone: short.length ? "warning" : undefined,
+        // The tile names the problem, so it opens the namespace holding it.
+        ...(firstShort ? { href: nsPath(firstShort.name), hrefLabel: `Not ready: open namespace ${firstShort.name}` } : {}),
       },
       { icon: ICON.changes, label: "Outside GitOps", value: fmtInt(outside.length), sub: outside.length ? names(outside) : "everything is declared in Git" },
     ]);
-    // The namespace the URL names; else the first application namespace with something to act on,
-    // else the first one — so the page opens on the thing a reader came to look at.
+    // The namespace the URL names; else the first application namespace with something to act on —
+    // a workload short of its count before one merely outside GitOps, since only the first is
+    // broken — else the first one, so the page opens on the thing a reader came to look at.
     const pick =
       inv.namespaces.find((n) => n.name === ns) ??
-      user.find((n) => n.workloads.some((w) => isShort(w) || isOutside(w))) ??
+      firstShort ??
+      user.find((n) => n.workloads.some(isOutside)) ??
       user[0] ??
       system[0];
     body =

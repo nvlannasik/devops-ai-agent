@@ -3124,6 +3124,21 @@ test("the cluster page lists every namespace as a link and shows one namespace's
   assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
 });
 
+test("the cluster page opens on a broken namespace before one merely outside GitOps, and the Not ready tile leads there", async () => {
+  const { clusterPage } = await import("./views.js");
+  const w = (name: string, ready: number, managedBy: object) => ({ kind: "Deployment", name, ready, desired: 1, images: ["x:1"], managedBy });
+  const inv = {
+    scanned: { namespaces: 2, complete: true },
+    namespaces: [
+      { name: "cloudflared", system: false, services: [], ingresses: [], workloads: [w("cloudflared", 1, { type: "unmanaged" })] },
+      { name: "monitoring", system: false, services: [], ingresses: [], workloads: [w("node-exporter", 0, { type: "helmrelease", name: "m", namespace: "flux-app" })] },
+    ],
+  } as never;
+  const html = clusterPage(inv, null);
+  assert.match(html, /<a href="\/cluster\?ns=monitoring" aria-current="true">/);
+  assert.match(html, /<a class="stat-link" href="\/cluster\?ns=monitoring" aria-label="Not ready: open namespace monitoring"/);
+});
+
 test("a partial scan says so, and an unreachable tool is a note, not a crash", async () => {
   const { clusterPage } = await import("./views.js");
   assert.match(clusterPage({ scanned: { namespaces: 1, complete: false }, namespaces: [] }, null), /partial/i);
@@ -3358,7 +3373,7 @@ test("the cluster shelf names what is short of desired and what was applied by h
     { name: "kube-system", system: true, services: [], ingresses: [], workloads: [] },
   ] }, null);
   assert.match(html, /<dd>1<span>\+1 system</);
-  assert.match(html, /<div class="stat" data-tone="warning">[\s\S]*?Not ready[\s\S]*?<dd>1<span>api/);
+  assert.match(html, /<div class="stat" data-tone="warning" data-linked>[\s\S]*?Not ready[\s\S]*?<dd>1<span>api/);
   assert.match(html, /Outside GitOps[\s\S]*?<dd>1<span>web/);
   // the short workload's ready count is toned in its row too
   assert.match(html, /<span class="badge" data-tone="warning">1\/2<\/span>/);
