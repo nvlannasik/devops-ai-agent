@@ -83,6 +83,9 @@ COPY migrations/ ./migrations/
 # so it needs no database and no migration. The transcripts beside it are excluded in
 # .dockerignore; they are tens of kilobytes of RCA text each and nothing reads them here.
 COPY bench/ ./bench/
+# The dashboard embeds Space Grotesk in the build output; the OFL requires its licence to travel
+# with it, so the text sits beside the compiled font module.
+COPY src/dashboard/fonts/OFL.txt ./dist/src/dashboard/fonts/OFL.txt
 
 EXPOSE 3000
 EXPOSE 3001

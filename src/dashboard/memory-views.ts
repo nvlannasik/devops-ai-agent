@@ -79,6 +79,7 @@ export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = n
        <p class="meta">${p.total ? `${esc(fmtInt(p.total))} alert key${p.total === 1 ? "" : "s"}${filtered ? " match" : " remembered"} · ` : ""}what the agent
          recalls when an alert fires again, keyed the way it recalls it — by alert name and namespace.</p>
      </div>
+     <section class="card flush">
      <form class="filters" method="get" action="/memory">
        <label>Alert<input type="text" name="alertname" value="${esc(f.alertname)}" placeholder="KubePodCrashLooping"
          autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -87,7 +88,8 @@ export function memoryListPage(p: MemoryKeyPage, f: MemoryFilters, now: Date = n
        <div class="actions"><button type="submit">Apply filters</button>${filtered ? `<a href="/memory">Clear</a>` : ""}</div>
      </form>
      ${body}
-     ${pager(p, f, qs, "alert")}`,
+     ${pager(p, f, qs, "alert")}
+     </section>`,
     { current: "/memory", openIncidents }
   );
 }
