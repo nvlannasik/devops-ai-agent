@@ -7,7 +7,7 @@ import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
 import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
-import { memoryKeyPage, memoryListPage, threadPage, threadsPage } from "./memory-views.js";
+import { memoryKeyPage, memoryListPage, threadPage, threadsPage, type ThreadIncident } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
@@ -684,11 +684,11 @@ export class DashboardServer {
         const now = new Date();
         if (threadTs === null) {
           const threads = await this.memory.threads();
-          const links = await this.queries.threadIncidents(threads.map((t) => t.threadId)).catch(() => new Map<string, number>());
+          const links = await this.queries.threadIncidents(threads.map((t) => t.threadId)).catch(() => new Map<string, ThreadIncident>());
           return send(200, threadsPage(threads, links, now, await this.openCount()));
         }
         const t = await this.memory.thread(threadTs);
-        const links = await this.queries.threadIncidents([threadTs]).catch(() => new Map<string, number>());
+        const links = await this.queries.threadIncidents([threadTs]).catch(() => new Map<string, ThreadIncident>());
         return send(200, threadPage(t, links.get(threadTs) ?? null, now, threadTs, await this.openCount()));
       } catch (err) {
         logger.error(`[dashboard] conversation memory read failed: ${errDetail(err)}`);

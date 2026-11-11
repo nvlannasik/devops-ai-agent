@@ -990,15 +990,21 @@ export class DashboardQueries {
     };
   }
 
-  /** thread ts → the top-level incident opened in it, for linking a conversation to its incident. */
-  async threadIncidents(threadTs: string[]): Promise<Map<string, number>> {
+  /** thread ts → the top-level incident opened in it: its id to link to, and its alertname,
+   *  which is what names the thread for a reader (a Slack timestamp names nothing). */
+  async threadIncidents(threadTs: string[]): Promise<Map<string, { id: number; alertname: string; severity: string | null; resolved: boolean }>> {
     if (!this.pool || threadTs.length === 0) return new Map();
     const { rows } = await this.pool.query(
-      `SELECT DISTINCT ON (thread_ts) thread_ts, id FROM incidents
+      `SELECT DISTINCT ON (thread_ts) thread_ts, id, alertname, severity, resolved_at IS NOT NULL AS resolved FROM incidents
         WHERE thread_ts = ANY($1) AND ${TOP_LEVEL} ORDER BY thread_ts, created_at`,
       [threadTs]
     );
-    return new Map(rows.map((r: Record<string, unknown>) => [String(r.thread_ts), num(r.id)] as [string, number]));
+    return new Map(
+      rows.map((r: Record<string, unknown>) => [
+        String(r.thread_ts),
+        { id: num(r.id), alertname: String(r.alertname ?? ""), severity: r.severity == null ? null : String(r.severity), resolved: r.resolved === true },
+      ])
+    );
   }
 
   async close(): Promise<void> {

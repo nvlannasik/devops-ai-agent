@@ -13,8 +13,9 @@
 import type { Message } from "../agent/llm/types.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
+import { inlineMrkdwn } from "./rca.js";
 import type { MemoryKeyDetail, MemoryKeyPage, MemoryKeyRow } from "./queries.js";
-import { ICON, badge, dash, empty, pager, section, severityBadge, statList, panel } from "./parts.js";
+import { ICON, badge, breakable, dash, empty, pageHead, pager, panel, section, severityBadge, statList, toneAttr } from "./parts.js";
 import { layout } from "./layout.js";
 
 export interface MemoryFilters { page: number; alertname: string | null; namespace: string | null }
@@ -185,75 +186,127 @@ export function memoryKeyPage(
   );
 }
 
-export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<string, number>, now: Date = new Date(), openIncidents?: number): string {
-  const started = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
-  const body = threads.length
-    ? table(
-        headers("Thread", ["Messages", "num"], "Expires in", "RCA sent", "Skills carried", "Incident"),
-        threads
-          .map((t) => {
-            const inc = incidents.get(t.threadId);
-            return (
-              `<tr role="row">` +
-              cell("Thread", `<a href="/memory/threads/${esc(t.threadId)}" translate="no">${esc(t.threadId)}</a> <span class="when">${timeTag(started(t.threadId), now)}</span>`, "primary") +
-              cell("Messages", esc(fmtInt(t.messages)), "num") +
-              cell("Expires in", esc(fmtTtl(t.ttlSeconds))) +
-              cell("RCA sent", t.rcaSent ? badge("rca sent", "ok") : `<span class="meta">no</span>`) +
-              cell("Skills carried", t.skills.length ? `<span class="roles">${t.skills.map((s) => badge(s, "")).join("")}</span>` : dash) +
-              cell("Incident", inc === undefined ? "—" : `<a href="/incidents/${esc(inc)}">#${esc(inc)}</a>`) +
-              `</tr>`
-            );
-          })
-          .join(""),
-        "stack"
-      )
-    : empty("No conversation is held right now.", "A thread's conversation stays for 24 hours after its last message.", ICON.chats);
+/** The incident a thread was opened for — what the thread is ABOUT, which its timestamp is not. */
+export interface ThreadIncident { id: number; alertname: string; severity: string | null; resolved: boolean }
+
+const startedAt = (ts: string): Date => new Date(Number(ts.split(".")[0]) * 1000);
+/** A day is the longest a conversation is kept, so it is what a TTL bar is measured against. */
+const DAY_S = 24 * 3600;
+const ttlBar = (s: number | null): string =>
+  s === null ? "" : `<span class="ratio" style="--a:${Math.max(0, Math.min(100, Math.round((s / DAY_S) * 100)))}" aria-hidden="true"><span></span></span>`;
+/** At most three carried skills by name; the rest as a count, so a row stays one or two lines. */
+const skillChips = (skills: string[]): string =>
+  skills.length === 0
+    ? dash
+    : `<span class="roles">${skills.slice(0, 3).map((s) => badge(s, "")).join("")}${skills.length > 3 ? `<span class="meta">+${fmtInt(skills.length - 3)}</span>` : ""}</span>`;
+
+export function threadsPage(threads: ThreadSummary[], incidents: ReadonlyMap<string, ThreadIncident>, now: Date = new Date(), openIncidents?: number): string {
+  const rows = threads
+    .map((t) => {
+      const inc = incidents.get(t.threadId);
+      return (
+        `<tr role="row"${inc ? toneAttr(inc.severity) : ""}>` +
+        // The alert the thread was opened for is the name a reader recognises; a thread with no
+        // incident is a conversation someone started by mentioning the agent.
+        cell(
+          "Thread",
+          `<a href="/memory/threads/${esc(t.threadId)}">${inc ? breakable(inc.alertname) : "Conversation"}</a>` +
+            `<div class="sub"><span translate="no">${esc(t.threadId)}</span> · started ${timeTag(startedAt(t.threadId), now)}</div>`,
+          "primary"
+        ) +
+        cell("Messages", esc(fmtInt(t.messages)), "num") +
+        cell("Expires in", `${esc(fmtTtl(t.ttlSeconds))}${ttlBar(t.ttlSeconds)}`) +
+        cell("RCA sent", t.rcaSent ? badge("rca sent", "ok") : `<span class="meta">no</span>`) +
+        cell("Skills carried", skillChips(t.skills)) +
+        cell("Incident", inc ? `<a href="/incidents/${esc(inc.id)}">#${esc(inc.id)}</a> ${severityBadge(inc.severity)}` : dash) +
+        `</tr>`
+      );
+    })
+    .join("");
+  const held = threads.length;
+  const messages = threads.reduce((a, t) => a + t.messages, 0);
+  const rca = threads.filter((t) => t.rcaSent).length;
+  const ttls = threads.map((t) => t.ttlSeconds).filter((s): s is number => s !== null);
+  const soonest = ttls.length ? Math.min(...ttls) : null;
   return layout(
     "Conversation memory",
-    `<div class="doc">
-       <p class="eyebrow">Agent</p>
-       <h1>Conversation memory</h1>
-       <p class="meta">${threads.length ? `${esc(fmtInt(threads.length))} thread${threads.length === 1 ? "" : "s"} held · ` : ""}the conversation each Slack thread
-         still holds — what the model reads on that thread's next turn. Kept 24 hours after the last message.</p>
-     </div>
-     ${body}`,
+    `${pageHead({
+      eyebrow: "Agent",
+      title: "Conversation memory",
+      lede: "The conversation each Slack thread still holds — what the model reads on that thread's next turn. Kept 24 hours after the last message.",
+    })}
+     ${statList([
+       { icon: ICON.chats, label: "Threads held", value: fmtInt(held), sub: held === 1 ? "one conversation" : "in Redis now" },
+       { icon: ICON.layers, label: "Messages", value: fmtInt(messages), sub: held ? `${fmtInt(Math.round(messages / held))} a thread on average` : "none held" },
+       { icon: ICON.check, label: "RCA sent", value: fmtInt(rca), sub: `of ${fmtInt(held)} threads` },
+       { icon: ICON.repeat, label: "Next to expire", value: soonest === null ? "—" : fmtTtl(soonest), sub: soonest === null ? "nothing expires in-memory" : "then the thread is forgotten" },
+     ])}
+     ${panel(
+       "Threads",
+       held
+         ? table(headers("Thread", ["Messages", "num"], "Expires in", "RCA sent", "Skills carried", "Incident"), rows, "stack")
+         : empty("No conversation is held right now.", "A thread's conversation stays for 24 hours after its last message.", ICON.chats),
+       held ? `<span class="meta">newest first</span>` : ""
+     )}`,
     { current: "/memory/threads", openIncidents }
   );
 }
 
 /** One message as rows of what it holds; a tool result is its size and first line, never more. */
 function messageContent(m: Message): string {
-  if (typeof m.content === "string") return `<div class="mem-text">${esc(m.content)}</div>`;
-  return m.content
-    .map((b) => {
-      if (b.type === "text") return `<div class="mem-text">${esc(b.text ?? "")}</div>`;
-      if (b.type === "tool_use") {
-        const input = JSON.stringify(b.input ?? {});
-        return `<p>Called <code translate="no">${esc(b.name ?? "?")}</code> <code class="mem-dim">${esc(input.length > 300 ? `${input.slice(0, 300)}…` : input)}</code></p>`;
-      }
-      if (b.type === "tool_result") {
-        const text = typeof b.content === "string" ? b.content : JSON.stringify(b.content ?? "");
-        const first = text.split("\n")[0] ?? "";
-        return `<p>Tool result, ${esc(fmtInt(text.length))} chars — <code class="mem-dim">${esc(first.length > 160 ? `${first.slice(0, 160)}…` : first)}</code></p>`;
-      }
-      return `<p class="meta">(${esc(b.type)} block)</p>`;
-    })
-    .join("");
+  // Text is the model's or the operator's own mrkdwn — the RCA most of all — so it is rendered the
+  // way Slack shows it (bold, italics, code), line breaks kept. inlineMrkdwn escapes first.
+  const text = (t: string): string => `<div class="mem-text">${inlineMrkdwn(t)}</div>`;
+  if (typeof m.content === "string") return text(m.content);
+  const calls = m.content.filter((b) => b.type === "tool_use");
+  const results = m.content.filter((b) => b.type === "tool_result");
+  const rest = m.content.filter((b) => b.type !== "tool_use" && b.type !== "tool_result");
+  return (
+    rest.map((b) => (b.type === "text" ? text(b.text ?? "") : `<p class="meta">(${esc(b.type)} block)</p>`)).join("") +
+    (calls.length
+      ? `<ul class="mem-calls">` +
+        calls
+          .map((b) => {
+            const input = JSON.stringify(b.input ?? {});
+            return `<li><span class="mem-arrow" aria-hidden="true">→</span><code class="mem-name" translate="no">${esc(b.name ?? "?")}</code> <code class="mem-dim">${esc(input.length > 300 ? `${input.slice(0, 300)}…` : input)}</code></li>`;
+          })
+          .join("") +
+        `</ul>`
+      : "") +
+    (results.length
+      ? `<ul class="mem-calls">` +
+        results
+          .map((b) => {
+            const body = typeof b.content === "string" ? b.content : JSON.stringify(b.content ?? "");
+            const first = body.split("\n")[0] ?? "";
+            return `<li><span class="mem-arrow" aria-hidden="true">←</span><span class="mem-size">${esc(fmtInt(body.length))} chars</span> <code class="mem-dim">${esc(first.length > 160 ? `${first.slice(0, 160)}…` : first)}</code></li>`;
+          })
+          .join("") +
+        `</ul>`
+      : "")
+  );
 }
 
-export function threadPage(t: ThreadMemory | null, incidentId: number | null, now: Date = new Date(), threadId = t?.threadId ?? "", openIncidents?: number): string {
+export function threadPage(t: ThreadMemory | null, inc: ThreadIncident | null, now: Date = new Date(), threadId = t?.threadId ?? "", openIncidents?: number): string {
+  const head = (lede: string, tools: string): string =>
+    `<header class="page-head"><div class="page-title">` +
+    `<p class="eyebrow"><a href="/memory/threads">Conversation memory</a></p>` +
+    `<h1>${inc ? breakable(inc.alertname) : "Conversation"}</h1>` +
+    `<p class="meta">${lede}</p></div>` +
+    (tools ? `<div class="page-tools page-actions">${tools}</div>` : "") +
+    `</header>`;
+  const trace = `<a class="standalone" href="/api/trace/${esc(threadId)}">Open the trace</a>`;
+  const incLink = inc ? `<a class="standalone" href="/incidents/${esc(inc.id)}">Incident #${esc(inc.id)} →</a>` : "";
   if (!t) {
     return layout(
       "Conversation memory",
-      `<div class="doc"><p class="eyebrow"><a href="/memory/threads">Conversation memory</a></p><h1 translate="no">${esc(threadId)}</h1>` +
+      `<div class="doc">${head(`Thread <span translate="no">${esc(threadId)}</span>`, incLink + trace)}` +
         empty("This thread holds no conversation any more.", "Conversations expire 24 hours after their last message; the trace keeps the full record.", ICON.chats) +
-        `<p><a href="/api/trace/${esc(threadId)}">Open the trace</a></p></div>`,
+        `</div>`,
       { current: "/memory/threads", openIncidents }
     );
   }
-  // A transcript, not a table: a conversation is read top to bottom by who said it, and a
-  // three-column grid made every turn the same grey row. The agent's turns are tinted; the
-  // order and the pinned first message are stated in words, not by position alone.
+  // A transcript, not a table: a conversation is read top to bottom by who said it.
   // A user-role message that only carries tool results is the tool talking, not the person.
   const who = (m: Message): string =>
     m.role === "assistant"
@@ -261,27 +314,55 @@ export function threadPage(t: ThreadMemory | null, incidentId: number | null, no
       : Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => b.type === "tool_result")
         ? "tool"
         : m.role;
+  const size = (m: Message): number =>
+    typeof m.content === "string" ? m.content.length : m.content.reduce((a, b) => a + (b.text?.length ?? 0), 0);
   const turns = t.messages
-    .map(
-      (m, i) =>
-        `<li class="turn" data-role="${who(m)}">` +
-        `<div class="turn-head"><span class="turn-who">${esc(who(m))}</span>` +
-        `<span class="meta">#${esc(i + 1)}</span>${i === 0 ? badge("pinned", "info") : ""}</div>` +
-        `<div class="turn-body">${messageContent(m)}</div>` +
-        `</li>`
-    )
+    .map((m, i) => {
+      const role = who(m);
+      const calls = Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_use").length : 0;
+      const results = Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result").length : 0;
+      const label =
+        role === "agent" ? (calls ? `agent · ${fmtInt(calls)} call${calls === 1 ? "" : "s"}` : "agent · answer")
+        : role === "tool" ? `tools · ${fmtInt(results)} result${results === 1 ? "" : "s"}`
+        : "user";
+      const headHtml = `<span class="turn-who">${esc(label)}</span><span class="meta">#${esc(i + 1)}</span>${i === 0 ? badge("pinned", "info") : ""}`;
+      // The pinned first message is the alert plus everything the agent was handed with it — time
+      // context, the change timeline, recall — often a screen or two. It folds, so the turns
+      // that follow are not pushed below the fold; its own heading says what it holds.
+      return i === 0 && size(m) > 600
+        ? `<li class="turn" data-role="${role}"><details class="turn-fold"><summary class="turn-head">${headHtml}<span class="meta">the alert and its context · ${esc(fmtInt(size(m)))} chars</span></summary>` +
+            `<div class="turn-body">${messageContent(m)}</div></details></li>`
+        : `<li class="turn" data-role="${role}"><div class="turn-head">${headHtml}</div><div class="turn-body">${messageContent(m)}</div></li>`;
+    })
     .join("");
+  const agentTurns = t.messages.filter((m) => m.role === "assistant").length;
+  const callCount = t.messages.reduce((a, m) => a + (Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_use").length : 0), 0);
   return layout(
-    "Conversation memory",
+    inc ? `${inc.alertname} · conversation` : "Conversation memory",
     `<div class="doc">
-     <p class="eyebrow"><a href="/memory/threads">Conversation memory</a></p>
-     <h1 translate="no">${esc(t.threadId)}</h1>
-     <p class="meta">Started ${timeTag(new Date(Number(t.threadId.split(".")[0]) * 1000), now)} · ${esc(fmtInt(t.messages.length))} messages · expires in ${esc(fmtTtl(t.ttlSeconds))} · RCA sent: ${t.rcaSent ? "yes" : "no"}` +
-      `${t.skills.length ? ` · skills carried: ${t.skills.map((s) => `<code>${esc(s)}</code>`).join(" ")}` : ""}` +
-      `${incidentId !== null ? ` · <a href="/incidents/${esc(incidentId)}">incident #${esc(incidentId)}</a>` : ""}</p>
-     <p class="meta">The window the model reads on this thread's next turn, in order. The first message is pinned — trimming never drops it. Tool results show their size and first line only; the full run is in <a href="/api/trace/${esc(t.threadId)}">the trace</a>.</p>
-     ${section(ICON.chats, "Conversation window")}
+     ${head(`Thread <span translate="no">${esc(t.threadId)}</span> · started ${timeTag(startedAt(t.threadId), now)}. The window the model reads on this thread's next turn, in order — the first message is pinned and trimming never drops it.`, incLink + trace)}
+     <div class="detail">
+     <aside class="detail-side" aria-label="About this conversation">
+     ${statList(
+       [
+         { label: "Messages", value: fmtInt(t.messages.length), sub: `${fmtInt(agentTurns)} from the agent` },
+         { label: "Tool calls", value: fmtInt(callCount), sub: "results show their first line only" },
+         { label: "Expires in", value: fmtTtl(t.ttlSeconds), sub: t.ttlSeconds === null ? "held in this process" : "24h after the last message" },
+         { label: "RCA sent", value: t.rcaSent ? "Yes" : "No", sub: t.rcaSent ? "follow-ups answer as chat" : "the next alert turn writes one" },
+       ],
+       "facts"
+     )}
+     ${
+       t.skills.length
+         ? `<section class="card skills-carried"><p class="toc-title">Skills carried · ${fmtInt(t.skills.length)}</p>` +
+           `<ul class="chips-list">${t.skills.map((s) => `<li><a href="/context/${esc(encodeURIComponent(s))}"><code translate="no">${esc(s)}</code></a></li>`).join("")}</ul></section>`
+         : ""
+     }
+     </aside>
+     <div class="detail-main">
      <ol class="transcript">${turns}</ol>
+     </div>
+     </div>
      </div>`,
     { current: "/memory/threads", openIncidents }
   );

@@ -39,10 +39,13 @@ test("the thread list links each thread and its incident, with TTL, RCA flag and
   const html = threadsPage(
     [{ threadId: "1792421141.306329", messages: 12, ttlSeconds: 3960, rcaSent: true, skills: ["cluster-tour"] },
      { threadId: "1700000000.000100", messages: 1, ttlSeconds: null, rcaSent: false, skills: [] }],
-    new Map([["1792421141.306329", 42]]),
+    new Map([["1792421141.306329", { id: 42, alertname: "KubePodCrashLooping", severity: "critical", resolved: false }]]),
     now
   );
   assert.match(html, /href="\/memory\/threads\/1792421141\.306329"/);
+  // the thread is named by the alert it was opened for; one without an incident is a conversation
+  assert.match(html, /<a href="\/memory\/threads\/1792421141\.306329">Kube<wbr>Pod<wbr>Crash<wbr>Looping<\/a>/);
+  assert.match(html, /<a href="\/memory\/threads\/1700000000\.000100">Conversation<\/a>/);
   assert.match(html, /href="\/incidents\/42"/);
   assert.match(html, /1h 6m/);
   assert.match(html, /cluster-tour/);
@@ -58,7 +61,7 @@ test("a thread page shows the window in order, pins the issue, and never prints 
         { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "first line\nDB_PASSWORD=SECRET-LINE-2" }] },
       ],
     } as never,
-    42,
+    { id: 42, alertname: "KubePodCrashLooping", severity: "critical", resolved: false },
     now
   );
   assert.match(html, /why &lt;b&gt;is&lt;\/b&gt; it down\?/);
@@ -119,8 +122,8 @@ test("a thread reads as a transcript: agent, user and tool turns named in words,
     null
   );
   assert.match(html, /<li class="turn" data-role="user"><div class="turn-head"><span class="turn-who">user<\/span><span class="meta">#1<\/span><span class="badge"[^>]*>pinned/);
-  assert.match(html, /data-role="agent"/);
-  assert.match(html, /<span class="turn-who">tool<\/span>/);
+  assert.match(html, /<li class="turn" data-role="agent"><div class="turn-head"><span class="turn-who">agent · 1 call<\/span>/);
+  assert.match(html, /<span class="turn-who">tools · 1 result<\/span>/);
   assert.doesNotMatch(html, /line two/);
 });
 
@@ -133,4 +136,25 @@ test("the key shelf counts recoveries and names a worse verdict without painting
     ],
   });
   assert.match(html, /<div class="stat"><dt>[\s\S]*?Recovered[\s\S]*?<dd>1<span>of 2 verified · 1 made it worse/);
+});
+
+// The model's text is Slack mrkdwn — an RCA most of all — and the page renders it the way Slack
+// shows it, escaped first. A long pinned first message folds behind a header that says what it is.
+test("a thread renders the model's mrkdwn and folds a long pinned message", () => {
+  const html = threadPage(
+    {
+      threadId: "1.1", ttlSeconds: 60, rcaSent: true, skills: ["rca-format"],
+      messages: [
+        { role: "user", content: "alert: *FluxControllerDown*\n" + "context line\n".repeat(80) },
+        { role: "assistant", content: [{ type: "text", text: "*Fact:* `up` was `1` <script>x</script> — _prometheus_query_" }] },
+      ],
+    } as never,
+    null,
+    now
+  );
+  assert.match(html, /<strong>Fact:<\/strong> <code translate="no">up<\/code> was <code translate="no">1<\/code>/);
+  assert.match(html, /&lt;script&gt;x&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>x/);
+  assert.match(html, /<details class="turn-fold"><summary class="turn-head">[\s\S]*?the alert and its context · [\d,]+ chars<\/span><\/summary>/);
+  assert.match(html, /<a href="\/context\/rca-format"><code translate="no">rca-format<\/code><\/a>/, "a carried skill links to its page");
 });

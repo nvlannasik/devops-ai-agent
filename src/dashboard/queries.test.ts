@@ -555,10 +555,10 @@ test("memoryKey reads one key's tiers with the namespace matched exactly, NULL i
 
 test("threadIncidents maps thread ts to its incident, and asks nothing for an empty list", async () => {
   const calls: Call[] = [];
-  const q = new DashboardQueries(stub(calls, () => [{ thread_ts: "1.1", id: 7 }]));
+  const q = new DashboardQueries(stub(calls, () => [{ thread_ts: "1.1", id: 7, alertname: "A", severity: "high", resolved: true }]));
   assert.deepEqual([...(await q.threadIncidents([]))], []);
   assert.equal(calls.length, 0);
-  assert.deepEqual([...(await q.threadIncidents(["1.1", "2.2"]))], [["1.1", 7]]);
+  assert.deepEqual([...(await q.threadIncidents(["1.1", "2.2"]))], [["1.1", { id: 7, alertname: "A", severity: "high", resolved: true }]]);
   assert.deepEqual(calls[0].params, [["1.1", "2.2"]]);
 });
 

@@ -616,4 +616,25 @@ h2.ns-title::after { content: none; }
 .trigger-card { display: flex; flex-direction: column; gap: var(--sp-3); }
 .trigger-card .meta, .trigger-card pre { margin: 0; }
 .detail-main > .card.md { min-width: 0; }
+
+/* ---------- conversation memory: a turn's calls and results ---------- */
+/* A tool round is a list, one call or result a line, with an arrow saying which way it went —
+   the old page ran them together as sentences ("Called x {…}"), which read as prose. */
+.mem-calls { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.mem-calls li { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; font-size: var(--fs-xs); }
+.mem-calls .mem-name { flex: 0 0 auto; font-weight: 600; }
+/* A code span inside the model's prose — a pod, a metric, a timestamp — reads as an identifier. */
+.mem-text code { font-family: var(--font-data); font-size: .92em; padding: 0 .25em; border-radius: 4px; background: var(--surface-2); }
+.mem-calls .mem-dim { min-width: 0; overflow-wrap: anywhere; }
+.mem-arrow { flex: 0 0 auto; color: var(--text-dim); font-family: var(--font-data); }
+.mem-size { flex: 0 0 auto; font-family: var(--font-data); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* The pinned first message folds: its summary IS the turn's header row. */
+.turn-fold > summary { cursor: pointer; list-style: none; margin-bottom: 0; flex-wrap: wrap; }
+.turn-fold > summary::-webkit-details-marker { display: none; }
+.turn-fold > summary::before { content: "▸"; color: var(--text-dim); font-size: var(--fs-xs); }
+.turn-fold[open] > summary::before { content: "▾"; }
+.turn-fold[open] > summary { margin-bottom: var(--sp-2); }
+.skills-carried { padding: var(--sp-3) var(--sp-4) var(--sp-4); }
+.skills-carried .toc-title { padding-left: 0; }
+td .ratio { margin-top: var(--sp-1); max-width: 6rem; }
 `;
