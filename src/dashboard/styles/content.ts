@@ -418,12 +418,16 @@ export const CONTENT_CSS = `
    Only the RCA shares the row: the record tables below ask for five columns and keep the
    full width. */
 .detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--stack); margin-bottom: var(--stack); }
-.detail-main { min-width: 0; }
-.detail-main > .card-head { margin-bottom: var(--sp-5); }
+.detail-main { min-width: 0; display: flex; flex-direction: column; gap: var(--stack); }
+.rca-card > .card-head { margin-bottom: var(--sp-5); }
+.detail-side { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
 @container page (min-width: 58rem) {
   .detail { grid-template-columns: minmax(0, 1fr) 18rem; align-items: start; }
   .detail-main { grid-column: 1; grid-row: 1; }
-  .detail-side { grid-column: 2; grid-row: 1; position: sticky; top: var(--sp-6); }
+  .detail-side {
+    grid-column: 2; grid-row: 1; position: sticky; top: var(--sp-6);
+    max-height: calc(100vh - var(--sp-12)); overflow-y: auto;
+  }
   /* Four tiles down a narrow column are one panel with hairline dividers — the construction
      the fact shelf already takes on a phone, for the same reason: four bordered cards stacked
      are mostly border. */
@@ -507,4 +511,63 @@ h2.ns-title::after { content: none; }
    viewport share. A phone's frame is too narrow to read the lanes unzoomed; it gets a short one. */
 #cluster-root[data-ns] .topo-view { height: clamp(14rem, calc(var(--rows, 4) * 3.6rem + 7rem), 44rem); }
 @container page (max-width: 38rem) { #cluster-root[data-ns] .topo-view { height: 16rem; } }
+
+/* ---------- the incident's lifecycle ---------- */
+/* Five steps across the page, a dot and a rule joining them; the words carry the state and the
+   dot repeats it — filled is done, a ring is waiting, the warning mark needs a look, a dashed
+   ring did not happen. Below 46rem of page the row turns into a column with the rule running
+   down the left. */
+.lifecycle {
+  list-style: none; margin: 0 0 var(--stack); padding: var(--sp-5);
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-4);
+}
+.lifecycle li { position: relative; min-width: 0; padding-top: var(--sp-6); display: flex; flex-direction: column; gap: 2px; }
+.lifecycle li::before {
+  content: ""; position: absolute; top: 0; left: 0; box-sizing: border-box;
+  width: .875rem; height: .875rem; border-radius: 50%;
+  border: 2px solid var(--mark-line); background: var(--surface-raised);
+}
+.lifecycle li:not(:last-child)::after {
+  content: ""; position: absolute; top: calc(.4375rem - 1px); left: 1.25rem; right: calc(var(--sp-2) * -1);
+  height: 2px; background: var(--border);
+}
+.lifecycle li[data-state="done"]::before { background: var(--accent); border-color: var(--accent); }
+.lifecycle li[data-state="wait"]::before { border-color: var(--accent); }
+.lifecycle li[data-state="warn"]::before { background: var(--mark-warning); border-color: var(--mark-warning); }
+.lifecycle li[data-state="none"]::before { border-style: dashed; }
+.lc-label {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+}
+.lc-value { font-weight: 600; overflow-wrap: anywhere; }
+.lifecycle li[data-state="warn"] .lc-value { color: var(--warning); }
+.lifecycle li[data-state="none"] .lc-value { color: var(--text-dim); font-weight: 500; }
+.lc-sub { font-size: var(--fs-xs); color: var(--text-dim); }
+@container page (max-width: 46rem) {
+  .lifecycle { grid-template-columns: minmax(0, 1fr); gap: var(--sp-5); }
+  .lifecycle li { padding: 0 0 0 var(--sp-8); }
+  .lifecycle li::before { top: .125rem; }
+  .lifecycle li:not(:last-child)::after {
+    top: 1.25rem; bottom: calc(var(--sp-5) * -1 + .25rem); left: calc(.4375rem - 1px); right: auto;
+    width: 2px; height: auto;
+  }
+}
+
+/* "On this page": the incident's panels as anchors, in the side column under the facts. */
+/* Only where the side column exists: in one column it would sit between the facts and the RCA,
+   a list of links standing in front of the thing they link to. */
+.toc { display: none; padding: var(--sp-3); }
+@container page (min-width: 58rem) { .toc { display: block; } }
+.toc-title {
+  margin: 0; padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+}
+.toc ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.toc a {
+  display: flex; align-items: center; min-height: 2.25rem; padding: 0 var(--sp-2);
+  border-radius: var(--r-sm); color: var(--text); font-size: var(--fs-sm); text-decoration: none;
+}
+/* Anchored panels stop clear of the window's top edge rather than flush against it. */
+.detail-main > [id], .doc > section[id] { scroll-margin-top: var(--sp-6); }
 `;

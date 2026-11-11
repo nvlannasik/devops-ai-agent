@@ -3430,16 +3430,16 @@ test("the incident list is one card: filters, rows, pager", () => {
 test("the incident page sets the facts beside the analysis, facts first in the markup", () => {
   const html = detailPage({ incident: { ...row, rca: null, channel: null, thread_ts: null }, remediations: [], feedback: [] });
   const side = html.indexOf(`<aside class="detail-side"`);
-  const main = html.indexOf(`<section class="card detail-main">`);
+  const main = html.indexOf(`<div class="detail-main">`);
   assert.ok(side !== -1 && main !== -1 && side < main);
   assert.ok(html.indexOf(`<dl class="stats facts">`) > side && html.indexOf(`<dl class="stats facts">`) < main);
-  assert.match(html, /<h2 class="card-title">Root cause analysis<\/h2>/);
+  assert.match(html, /<section class="card rca-card" id="rca">\s*<header class="card-head"><h2 class="card-title">Root cause analysis<\/h2>/);
   const wide = STYLES.match(/@container page \(min-width: 58rem\) \{\n  \.detail \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(wide, /\.detail-side \{[^}]*grid-column: 2[^}]*position: sticky/);
   // the record tables keep the full width: they are panels after the grid, not inside it
   const grid = html.slice(html.indexOf(`<div class="detail">`), html.indexOf(`<h2 class="card-title">Remediation</h2>`));
-  assert.doesNotMatch(grid, /On-call feedback/);
-  assert.match(html, /<section class="card flush"><header class="card-head"><h2 class="card-title">Remediation<\/h2><\/header>/);
+  assert.doesNotMatch(grid, /<h2 class="card-title">On-call feedback/);
+  assert.match(html, /<section class="card flush" id="remediation"><header class="card-head"><h2 class="card-title">Remediation<\/h2><\/header>/);
 });
 
 // Pass 3: every page's tables sit in titled panels. The mono section caption survives only
@@ -3471,4 +3471,30 @@ test("where to change a workload is a line under its owner, from the cluster mod
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   // a cold cache prints no location at all, rather than "not located" for something nobody looked for
   assert.doesNotMatch(clusterPage(inv, null, undefined, "n", null, null), /not located in Git|class="sub"/);
+});
+
+// The lifecycle reads five steps off what was recorded, each stated in words; the side column's
+// "On this page" links only to panels the incident actually has.
+test("the incident page opens with its lifecycle and links only the panels it has", () => {
+  const fired = new Date("2026-08-24T02:00:00Z");
+  const now = new Date("2026-08-24T05:30:00Z");
+  const bare = detailPage({ incident: { ...row, created_at: fired, resolved_at: null, rca: "x", channel: null, thread_ts: null }, remediations: [], feedback: [] }, now);
+  const steps = [...bare.matchAll(/<li data-state="(\w+)"><span class="lc-label">([^<]+)<\/span><span class="lc-value"[^>]*>([^<]+)</g)].map((m) => [m[2], m[1], m[3]]);
+  assert.deepEqual(steps, [
+    ["Fired", "done", "3h ago"],
+    ["Remediation", "none", "None proposed"],
+    ["Verified", "none", "Nothing to verify"],
+    ["On-call", "none", "No reply yet"],
+    ["Resolved", "warn", "Still firing"],
+  ]);
+  assert.match(bare, /<nav class="card toc" aria-label="On this page">/);
+  assert.match(bare, /<a href="#remediation">Remediation<\/a>/);
+  assert.doesNotMatch(bare, /href="#usage"|href="#harness"|href="#changes"/, "no link to a panel the page does not have");
+  assert.match(bare, /<section class="card flush" id="remediation">/);
+
+  const rem = { action: "k8s_rollout_restart", params: {}, status: "succeeded", approved_by: "U1", result: null, created_at: fired,
+    executed_at: new Date("2026-08-24T02:30:00Z"), verdict: "worse", verdict_detail: null, check_status: "done", checked_at: new Date("2026-08-24T02:40:00Z"), due_at: null };
+  const worse = detailPage({ incident: { ...row, created_at: fired, resolved_at: null, rca: "x", channel: null, thread_ts: null }, remediations: [rem], feedback: [] }, now);
+  assert.match(worse, /<li data-state="warn"><span class="lc-label">Verified<\/span><span class="lc-value"[^>]*>worse</, "a bad verdict is never shown as done");
+  assert.match(worse, /<li data-state="done"><span class="lc-label">Remediation<\/span><span class="lc-value" translate="no">k8s_<wbr>rollout_<wbr>restart</);
 });

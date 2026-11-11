@@ -1,10 +1,10 @@
 import { costUsd, type Price } from "../agent/llm/pricing.js";
-import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, headers, table, timeTag } from "./html.js";
+import { cell, esc, fmtAgo, fmtDate, fmtDuration, fmtInt, fmtLatency, headers, table, timeTag, fmtCompact } from "./html.js";
 import { renderRca } from "./rca.js";
 import type { Filters } from "./filters.js";
 import type { ChildIncident, FeedbackRow, IncidentDetail, IncidentPage, PostmortemListRow, PostmortemRow, RemediationRow, TimelineEvent, TokenLine } from "./queries.js";
 import { renderMarkdown } from "./markdown.js";
-import { ICON, badge, breakable, cardHead, costCell, dash, empty, fmtUsd, pager, panel, severityBadge, statList, stateBadge, toneAttr } from "./parts.js";
+import { ICON, badge, breakable, cardHead, costCell, dash, empty, fmtUsd, pager, panel, severityBadge, tone, statList, stateBadge, toneAttr } from "./parts.js";
 import { layout } from "./layout.js";
 import { incidentTable } from "./overview-views.js";
 
@@ -222,6 +222,64 @@ function verdictCell(r: RemediationRow, now: Date): string {
   return dash;
 }
 
+/** "On this page": anchors to the panels this incident actually has. A link per present panel only. */
+function toc(items: Array<[id: string, label: string]>): string {
+  const present = items.filter(([id]) => id);
+  return (
+    `<nav class="card toc" aria-label="On this page"><p class="toc-title">On this page</p><ul>` +
+    present.map(([id, label]) => `<li><a href="#${esc(id)}">${esc(label)}</a></li>`).join("") +
+    `</ul></nav>`
+  );
+}
+
+/**
+ * The incident's life as five steps read off what was recorded — fired, remediated, verified,
+ * confirmed by a human, resolved. Every step states its value in words; the dot only repeats it
+ * (done, waiting, needs a look, or did not happen), so nothing here rests on colour.
+ */
+function lifecycle(d: { incident: IncidentDetail; remediations: RemediationRow[]; feedback: FeedbackRow[] }, now: Date): string {
+  const i = d.incident;
+  type Step = { label: string; state: "done" | "wait" | "warn" | "none"; value: string; sub: string };
+  const ran = d.remediations.filter((r) => r.executed_at);
+  const last = ran.at(-1) ?? d.remediations.at(-1);
+  const verdict = [...d.remediations].reverse().find((r) => r.verdict);
+  const checking = d.remediations.find((r) => !r.verdict && r.check_status && r.check_status !== "abandoned" && r.check_status !== "done");
+  const steps: Step[] = [
+    { label: "Fired", state: "done", value: fmtAgo(i.created_at, now), sub: fmtDate(i.created_at) },
+    !last
+      ? { label: "Remediation", state: "none", value: "None proposed", sub: "the RCA is the whole answer" }
+      : last.executed_at
+        ? { label: "Remediation", state: last.status === "failed" ? "warn" : "done", value: last.action, sub: `${last.status} · ${fmtAgo(last.executed_at, now)}` }
+        : { label: "Remediation", state: "wait", value: last.action, sub: `${last.status} — not applied` },
+    verdict
+      ? { label: "Verified", state: tone(verdict.verdict ?? "") === "ok" ? "done" : "warn", value: verdict.verdict!, sub: verdict.checked_at ? fmtAgo(verdict.checked_at, now) : "" }
+      : checking
+        ? { label: "Verified", state: "wait", value: "Checking", sub: "the cluster is being re-read" }
+        : { label: "Verified", state: "none", value: ran.length ? "No verdict" : "Nothing to verify", sub: ran.length ? "no check concluded" : "no change was applied" },
+    d.feedback.length
+      ? { label: "On-call", state: "done", value: d.feedback.at(-1)!.outcome ?? "replied", sub: fmtAgo(d.feedback.at(-1)!.created_at, now) }
+      : { label: "On-call", state: "none", value: "No reply yet", sub: "reply in the Slack thread" },
+    i.resolved_at
+      ? { label: "Resolved", state: "done", value: fmtAgo(i.resolved_at, now), sub: `after ${fmtDuration(i.resolved_at.getTime() - i.created_at.getTime())}` }
+      : { label: "Resolved", state: "warn", value: "Still firing", sub: `open ${fmtDuration(now.getTime() - i.created_at.getTime())}` },
+  ];
+  return (
+    `<ol class="card lifecycle" aria-label="Incident lifecycle">` +
+    steps
+      .map(
+        (s) =>
+          `<li data-state="${s.state}"><span class="lc-label">${esc(s.label)}</span>` +
+          // An action name is snake_case with no break point; <wbr> after each underscore lets a
+          // narrow step wrap it at a word instead of mid-letter ("k8s_patch_resource / s").
+          `<span class="lc-value" translate="${s.label === "Remediation" ? "no" : "yes"}">${esc(s.value).replace(/_/g, "_<wbr>")}</span>` +
+          (s.sub ? `<span class="lc-sub">${esc(s.sub)}</span>` : "") +
+          `</li>`
+      )
+      .join("") +
+    `</ol>`
+  );
+}
+
 export function detailPage(
   d: {
     incident: IncidentDetail;
@@ -349,7 +407,7 @@ export function detailPage(
             ].join(""),
             "stack"
           )) +
-      (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : ""));
+      (ch.unread.length ? `<p class="sub">Not read: ${esc(ch.unread.join("; "))}</p>` : ""), "", "changes");
 
   // Related alerts (agent/correlation, migrations/013): other alert groups correlate() matched
   // to the same open incident and filed as children of this row, same Slack thread. A child
@@ -373,7 +431,7 @@ export function detailPage(
             )
             .join(""),
           "stack"
-        ));
+        ), "", "related");
 
   // The mirror of the above: THIS incident is a child, merged into another thread. The row's
   // own rca already says so in prose ("Merged into the incident in this thread…") but a reader
@@ -401,6 +459,10 @@ export function detailPage(
           "stack"
         );
 
+  const usage = usageSection(d.usage ?? [], prices);
+  const llmCalls = (d.usage ?? []).reduce((a, b) => a + b.calls, 0);
+  const llmTokens = (d.usage ?? []).reduce((a, b) => a + b.input + b.output, 0);
+  const harness = timelineSection(d.timeline ?? []);
   return layout(
     i.alertname,
     // The id is a real identifier, so it earns the caption slot above the title. The sections
@@ -421,6 +483,7 @@ export function detailPage(
        <span class="badge" translate="no">☸ ${esc(d.cluster)}</span>` : ""}
        ${mergedInto || slack || postmortemLink || jaegerLink ? `<span class="page-actions">${mergedInto}${slack}${jaegerLink}${postmortemLink}</span>` : ""}
      </div>
+     ${lifecycle(d, now)}
      <!-- The facts come first in the document and sit BESIDE the analysis where there is room
           (the .detail grid, styles/content.ts): a reader keeps namespace, duration and times
           in view down the whole RCA instead of scrolling back up for them. -->
@@ -428,7 +491,7 @@ export function detailPage(
      <aside class="detail-side" aria-label="Incident facts">
      ${statList(
        [
-         { label: "Namespace", value: i.namespace ?? "—", sub: i.confidence ? `${i.confidence} confidence` : "unrated" },
+         { label: "Namespace", value: i.namespace ?? "—", sub: d.cluster ? `cluster ${d.cluster}` : "where it fired" },
          // The figure this page made a reader compute. Both timestamps were on the shelf and
          // the interval between them — the only number that says how bad this incident WAS —
          // was not, so it had to be worked out by subtracting one tile from another.
@@ -442,13 +505,30 @@ export function detailPage(
            sub: i.resolved_at ? "fired to resolved" : "still firing",
            tone: i.resolved_at ? undefined : "warning",
          },
-         { label: "Fired", value: fmtAgo(i.created_at, now), sub: fmtDate(i.created_at) },
-         { label: "Resolved", value: i.resolved_at ? fmtAgo(i.resolved_at, now) : "—", sub: i.resolved_at ? fmtDate(i.resolved_at) : "not yet" },
+         // Fired and Resolved are the lifecycle's first and last steps above, so the shelf spends
+         // those two places on what the lifecycle does not say: how sure the agent was, and
+         // what the investigation took.
+         { label: "Confidence", value: i.confidence ?? "—", sub: i.confidence ? "the agent's own rating" : "unrated" },
+         {
+           label: "Investigation",
+           value: llmCalls ? `${fmtInt(llmCalls)} calls` : "—",
+           sub: llmCalls ? `${fmtCompact(llmTokens)} tokens` : "no model calls recorded",
+         },
        ],
        "facts"
      )}
+     ${toc([
+       ["rca", "Root cause analysis"],
+       [changes ? "changes" : "", "Recent changes"],
+       [relatedAlerts ? "related" : "", "Related alerts"],
+       ["remediation", `Remediation${d.remediations.length ? ` · ${d.remediations.length}` : ""}`],
+       ["feedback", `On-call feedback${d.feedback.length ? ` · ${d.feedback.length}` : ""}`],
+       [usage ? "usage" : "", "LLM usage"],
+       [harness ? "harness" : "", "What the harness did"],
+     ])}
      </aside>
-     <section class="card detail-main">
+     <div class="detail-main">
+     <section class="card rca-card" id="rca">
      ${cardHead("Root cause analysis")}
      ${
        i.rca && i.rca.trim()
@@ -456,13 +536,14 @@ export function detailPage(
          : empty("No analysis recorded.", "The investigation ended before it produced one — the Slack thread has the run.", ICON.search)
      }
      </section>
-     </div>
      ${changes}
      ${relatedAlerts}
-     ${panel("Remediation", remediations)}
-     ${panel("On-call feedback", feedback)}
-     ${usageSection(d.usage ?? [], prices)}
-     ${timelineSection(d.timeline ?? [])}
+     </div>
+     </div>
+     ${panel("Remediation", remediations, "", "remediation")}
+     ${panel("On-call feedback", feedback, "", "feedback")}
+     ${usage}
+     ${harness}
      </div>`,
     { current: "/incidents", openIncidents }
   );
@@ -565,7 +646,7 @@ function usageSection(usage: TokenLine[], prices: ReadonlyMap<string, Price>): s
     .join("");
   const priced = usage.map((b) => costUsd(prices.get(b.backend), b)).filter((c): c is number => c !== null);
   const total = priced.length ? `<span class="meta">${fmtUsd(priced.reduce((a, b) => a + b, 0))} on priced backends</span>` : "";
-  return panel("LLM usage", table(headers("Backend", ["Calls", "num"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]), rows, "pairs"), total);
+  return panel("LLM usage", table(headers("Backend", ["Calls", "num"], ["Input", "num"], ["Output", "num"], ["Cost", "num"]), rows, "pairs"), total, "usage");
 }
 
 function timelineSection(all: TimelineEvent[]): string {
@@ -599,5 +680,5 @@ function timelineSection(all: TimelineEvent[]): string {
         `</tr>`
     )
     .join("");
-  return panel("What the harness did", table(headers("Run", "Event", "What"), rows, "pairs"), '<span class="meta">from the investigation trace</span>');
+  return panel("What the harness did", table(headers("Run", "Event", "What"), rows, "pairs"), '<span class="meta">from the investigation trace</span>', "harness");
 }

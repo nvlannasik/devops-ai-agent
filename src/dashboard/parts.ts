@@ -215,8 +215,9 @@ export const pageHead = (h: { eyebrow: string; title: string; lede?: string; too
 // hairline out to the edge of the column. A card already has an edge, so its title needs none.
 // A titled card around a table (or the empty state standing in for one): the overview's panel,
 // for any page. The table gives up its own frame inside it (.card.flush > .table-wrap).
-export const panel = (title: string, body: string, trailing = ""): string =>
-  `<section class="card flush">${cardHead(title, trailing)}${body}</section>`;
+// `id` makes the panel a target for an in-page link (the incident page's "On this page").
+export const panel = (title: string, body: string, trailing = "", id = ""): string =>
+  `<section class="card flush"${id ? ` id="${esc(id)}"` : ""}>${cardHead(title, trailing)}${body}</section>`;
 
 export const cardHead = (title: string, trailing = ""): string =>
   `<header class="card-head"><h2 class="card-title">${esc(title)}</h2>${trailing}</header>`;
