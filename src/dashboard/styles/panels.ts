@@ -133,31 +133,34 @@ h2.card-title::after { content: none; }
   text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
 }
 
-/* Three panels abreast: how the incidents split, which ones keep coming back, what the
-   investigating cost. THREE, then two with the third across the full row, then one — an
-   explicit ladder for the same reason the stat shelf has one: auto-fit lands on two as soon as
-   three stop fitting and leaves the third alone beside a hole. Spanning it instead keeps every
-   row full. Queried against page, because the rail's width is not the panel's to spend. */
-.trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-4); }
-@container page (max-width: 60rem) {
-  .trio { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .trio > :last-child { grid-column: 1 / -1; }
-}
+/* Three panels: how the incidents split, what the investigating cost, and which alerts keep
+   coming back. NOT three abreast: abreast, a grid row is as tall as its tallest card, and the
+   recurring list (up to ten rows) is two or three times the height of the other two — so
+   Outcomes and Token usage stood mostly empty, at every desktop width (2026-11-11). The two
+   short ones stack in the left column and the list takes the right column at THEIR combined
+   height, scrolling inside it when it is longer. Below 38rem of page it is one column again,
+   in markup order, and nothing scrolls inside anything. */
+.panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4); }
+.panels > :nth-child(1) { grid-column: 1; grid-row: 1; }
+.panels > :nth-child(2) { grid-column: 1; grid-row: 2; }
+.panels > :nth-child(3) { grid-column: 2; grid-row: 1 / span 2; }
+.panels > .card { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+/* height 0 + flex-grow: the list adds nothing to the rows' height and then fills what the left
+   column gave it — the card cannot stretch the row the way the list's own height would. */
+.panels > :nth-child(3) .rank { flex: 1 1 0; height: 0; min-height: 10rem; max-height: none; }
+/* With nothing recurred the list is an empty state; it sits in the middle of the tall card. */
+.panels > :nth-child(3) > .empty { margin-block: auto; }
 @container page (max-width: 38rem) {
-  .trio { grid-template-columns: minmax(0, 1fr); }
-  .trio > :last-child { grid-column: auto; }
+  .panels { grid-template-columns: minmax(0, 1fr); }
+  .panels > :nth-child(n) { grid-column: auto; grid-row: auto; }
   /* One column: nothing beside the list to match, and a scroller inside a scrolling phone page
      is a trap for a thumb. */
-  .trio .rank { max-height: none; }
+  .panels > :nth-child(3) .rank { flex: none; height: auto; min-height: 0; }
 }
-/* Grid stretches the three to one height, so each is a column whose LAST block is pushed to the
-   floor: a short panel then reads as one with room in it rather than one that ran out. */
-.trio > .card { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
-.trio > .card > :last-child:not(:only-child):not(.card-head) { margin-top: auto; }
-.trio .meta { margin: 0; }
+.panels .meta { margin: 0; }
 /* The pair under the severity split is a second fact about the same incidents, so it sits under
    a rule rather than in a card of its own. */
-.trio .stats.pair { padding-top: var(--sp-4); border-top: 1px solid var(--border); }
+.panels .stats.pair { padding-top: var(--sp-4); border-top: 1px solid var(--border); }
 
 /* What recurred, most first. Rows rather than a table: three facts a row, and the count is the
    one a reader came for, so it stands alone at the end in the accent. */

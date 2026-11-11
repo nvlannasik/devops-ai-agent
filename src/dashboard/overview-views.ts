@@ -232,7 +232,7 @@ export function overviewPage(
        </header>
        ${lineChart(o.weekly, { label: `incidents ${o.seriesUnit}` })}
      </section>
-     <div class="trio">
+     <div class="panels">
        <section class="card">
          ${cardHead("Outcomes")}
          ${shareBar(severitySlices, { label: "incidents by severity" })}
@@ -266,12 +266,12 @@ export function overviewPage(
          )}
        </section>
        <section class="card">
-         ${cardHead("Most recurring")}
-         ${recurring}
-       </section>
-       <section class="card">
          ${cardHead("Token usage")}
          ${tokenCard(o.tokens, prices)}
+       </section>
+       <section class="card">
+         ${cardHead("Most recurring")}
+         ${recurring}
        </section>
      </div>
      <section class="card flush">

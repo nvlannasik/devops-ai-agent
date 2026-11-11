@@ -643,16 +643,16 @@ test("the page reads state → volume → three panels → the tables", () => {
   const order = [
     at(`<dl class="stats">`),
     at(`class="card chart-card"`),
-    at(`<div class="trio">`),
+    at(`<div class="panels">`),
     at(`<h2 class="card-title">Outcomes</h2>`),
-    at(`<h2 class="card-title">Most recurring</h2>`),
     at(`<h2 class="card-title">Token usage</h2>`),
+    at(`<h2 class="card-title">Most recurring</h2>`),
     at(`<h2 class="card-title">Recent incidents</h2>`),
     at(`<h2 class="card-title">Token usage by backend</h2>`),
   ];
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
-  // three panels, never two or four: the grid's ladder is written for exactly three
-  const trio = html.slice(at(`<div class="trio">`), at(`<h2 class="card-title">Recent incidents</h2>`));
+  // three panels, never two or four: the grid places them by position (two stacked, one beside)
+  const trio = html.slice(at(`<div class="panels">`), at(`<h2 class="card-title">Recent incidents</h2>`));
   assert.equal([...trio.matchAll(/<section class="card">/g)].length, 3);
 });
 
@@ -2131,23 +2131,18 @@ test("no comment in the stylesheet contains a backtick", async () => {
 // each take its own content height, so above 58rem the ring stood about 90px taller than the
 // two-tile shelf beside it and the row read as ragged. Only visible at wide widths — below
 // 58rem there is one column and nothing to align.
-test("the three panels are an explicit ladder: three, two with the third across, one", () => {
-  assert.match(STYLES, /^\.trio \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/m);
-  assert.doesNotMatch(STYLES, /\.trio \{[^}]*auto-fit/, "auto-fit leaves the third alone beside a hole");
-  const two = STYLES.match(/@container page \(max-width: 60rem\) \{\n  \.trio[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(two, /\.trio \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); \}/);
-  assert.match(two, /\.trio > :last-child \{ grid-column: 1 \/ -1; \}/);
-  const one = STYLES.match(/@container page \(max-width: 38rem\) \{\n  \.trio[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(one, /\.trio \{ grid-template-columns: minmax\(0, 1fr\); \}/);
-  assert.match(one, /\.trio > :last-child \{ grid-column: auto; \}/);
-});
-
-// A stretched card is taller than its contents, and the shorter of the two would otherwise end
-// in a hundred pixels of nothing. The caption stays at the top; the figure block takes the
-// leftover room symmetrically.
-test("a stretched panel pushes its last block to the floor instead of ending early", () => {
-  assert.match(STYLES, /\.trio > \.card \{[^}]*display: flex[^}]*flex-direction: column/);
-  assert.match(STYLES, /\.trio > \.card > :last-child:not\(:only-child\):not\(\.card-head\) \{ margin-top: auto; \}/);
+test("the two short panels stack beside the recurring list, which never sets the row's height", () => {
+  // Abreast, a row was as tall as the recurring list and Outcomes / Token usage stood mostly empty
+  // (2026-11-11). The short two stack in column 1; the list spans both rows of column 2.
+  assert.match(STYLES, /^\.panels \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/m);
+  assert.match(STYLES, /\.panels > :nth-child\(1\) \{ grid-column: 1; grid-row: 1; \}/);
+  assert.match(STYLES, /\.panels > :nth-child\(2\) \{ grid-column: 1; grid-row: 2; \}/);
+  assert.match(STYLES, /\.panels > :nth-child\(3\) \{ grid-column: 2; grid-row: 1 \/ span 2; \}/);
+  // the list contributes no height of its own and fills what the left column gives it
+  assert.match(STYLES, /\.panels > :nth-child\(3\) \.rank \{ flex: 1 1 0; height: 0;/);
+  const one = STYLES.match(/@container page \(max-width: 38rem\) \{\n  \.panels[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(one, /\.panels \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(one, /\.panels > :nth-child\(3\) \.rank \{ flex: none; height: auto;/, "no scroller inside a phone page");
 });
 
 // A table inside a card gives up its own frame, or the card is a border drawn twice.
