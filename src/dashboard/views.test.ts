@@ -3094,9 +3094,9 @@ test("the incident page shows the trace timeline when there is one", () => {
   assert.doesNotMatch(detailPage({ incident, remediations: [], feedback: [] }), /What the harness did/);
 });
 
-test("the cluster page lists each namespace's workloads with owner, and collapses system namespaces", async () => {
+test("the cluster page lists every namespace as a link and shows one namespace's workloads with owner", async () => {
   const { clusterPage } = await import("./views.js");
-  const html = clusterPage({
+  const inv = {
     scanned: { namespaces: 3, complete: true },
     namespaces: [
       { name: "sample-apps", system: false, services: [{ name: "storefront", type: "ClusterIP", ports: ["80/TCP→3000"] }], ingresses: [{ name: "storefront", hosts: ["shop.example.com"] }],
@@ -3104,14 +3104,24 @@ test("the cluster page lists each namespace's workloads with owner, and collapse
       { name: "empty", system: false, workloads: [], services: [], ingresses: [] },
       { name: "kube-system", system: true, workloads: [{ kind: "Deployment", name: "coredns", ready: 1, desired: 1, images: ["coredns:1.11"], managedBy: { type: "unmanaged" } }], services: [], ingresses: [] },
     ],
-  }, null);
+  } as never;
+  const html = clusterPage(inv, null);
   assert.match(html, /<h1>Cluster<\/h1>/);
   assert.match(html, /storefront/);
   assert.match(html, /1\/2/);
   assert.match(html, /HelmRelease <code[^>]*>flux-app\/storefront<\/code>/);
   assert.match(html, /shop\.example\.com/);
-  assert.match(html, /Nothing deployed here/);
-  assert.match(html, /<details[^>]*>[\s\S]*kube-system[\s\S]*<\/details>/);
+  // every namespace is a destination in the list, application and system apart; one is current
+  assert.match(html, /<nav class="card ns-list" aria-label="Namespaces"><p class="ns-group">Application<\/p>/);
+  assert.match(html, /<a href="\/cluster\?ns=sample-apps" aria-current="true">/);
+  assert.match(html, /<a href="\/cluster\?ns=empty">/);
+  assert.match(html, /<p class="ns-group">System<\/p><ul><li><a href="\/cluster\?ns=kube-system">/);
+  // the namespace the URL names is the one shown — and an unknown name falls back, never a 500
+  const empty = clusterPage(inv, null, undefined, "", null, null, undefined, "empty");
+  assert.match(empty, /<a href="\/cluster\?ns=empty" aria-current="true">/);
+  assert.match(empty, /Nothing deployed here/);
+  assert.doesNotMatch(empty.slice(empty.indexOf("<main")), /HelmRelease/);
+  assert.match(clusterPage(inv, null, undefined, "", null, null, undefined, "nope"), /<a href="\/cluster\?ns=sample-apps" aria-current="true">/);
   assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
 });
 
@@ -3123,20 +3133,21 @@ test("a partial scan says so, and an unreachable tool is a note, not a crash", a
 
 test("the cluster page mounts the map above the tables, with the inventory as an escaped JSON block", async () => {
   const { clusterPage } = await import("./views.js");
-  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "x</script><b>", system: false, workloads: [], services: [], ingresses: [] }] };
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "x</script><b>", system: false, workloads: [{ kind: "Deployment", name: "web", ready: 1, desired: 1, images: ["web:1"], managedBy: { type: "unmanaged" } }], services: [], ingresses: [] }] };
   const assets = { js: { path: "/assets/topology.a.js" }, css: { path: "/assets/topology.b.css" }, clusterJs: { path: "/assets/cluster.c.js" } } as any;
   const html = clusterPage(inv as any, null, 0, "n0nce", assets);
-  assert.match(html, /<div id="cluster-root" data-fallback>/);
+  // scoped to the namespace on show (escaped), and sized by its row count
+  assert.match(html, /<div id="cluster-root" data-fallback data-ns="x&lt;\/script&gt;&lt;b&gt;" style="--rows:1">/);
   assert.match(html, /<script type="application\/json" id="cluster-data" nonce="n0nce">/);
   assert.doesNotMatch(html, /x<\/script><b>/, "the data block cannot be closed from inside");
   assert.match(html, /<script src="\/assets\/cluster\.c\.js" nonce="n0nce" defer><\/script>/);
   assert.match(html, /<link rel="stylesheet" href="\/assets\/topology\.b\.css">/);
-  assert.ok(html.indexOf("cluster-root") < html.indexOf("Nothing deployed here"), "map above the tables");
+  assert.ok(html.indexOf("cluster-root") < html.indexOf(`<h2 class="card-title">Workloads</h2>`), "map above the table");
 });
 
 test("no bundle or no inventory: tables or note, never a broken map frame", async () => {
   const { clusterPage } = await import("./views.js");
-  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "a", system: false, workloads: [], services: [], ingresses: [] }] };
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "a", system: false, workloads: [{ kind: "Deployment", name: "web", ready: 1, desired: 1, images: ["web:1"], managedBy: { type: "unmanaged" } }], services: [], ingresses: [] }] };
   assert.match(clusterPage(inv as any, null, 0, "n", null), /The cluster map is not built/);
   assert.doesNotMatch(clusterPage(null, "MCP server not connected", 0, "n", null), /cluster-root/);
 });
@@ -3231,7 +3242,7 @@ test("a commit link renders only for http(s) URLs; any other scheme is plain tex
 
 test("clusterPage embeds the cluster model and its unknowns, or says the flow is still being computed", async () => {
   const { clusterPage } = await import("./views.js");
-  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "shop", system: false, workloads: [], services: [], ingresses: [] }] };
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "shop", system: false, workloads: [{ kind: "Deployment", name: "web", ready: 1, desired: 1, images: ["web:1"], managedBy: { type: "helm" } }], services: [], ingresses: [] }] } as never;
   const assets = { js: { path: "/assets/topology.a.js" }, css: { path: "/assets/topology.b.css" }, clusterJs: { path: "/assets/cluster.c.js" } } as any;
   const model: any = { snapshot: { at: "t", appliedRevision: null, repoRevision: null }, nodes: [], edges: [], external: [], changeAt: {}, unknowns: ["call graph unavailable (Prometheus) <b>x</b>"] };
   const withModel = clusterPage(inv, null, undefined, "n", assets, model);
@@ -3255,7 +3266,7 @@ test("clusterPage names the cluster and links the others", async () => {
   // .page-actions only right-aligns as a flex item — the switch has to share .page-head with
   // the <h1>, the same wrapper the incident list uses for its title + state/cluster switch,
   // or it renders full-width and left-aligned under the heading.
-  assert.match(html, /<div class="page-head"><h1>Cluster<\/h1><div class="page-actions"><nav class="seg"/);
+  assert.match(html, /<header class="page-head"><div class="page-title">[\s\S]*?<h1>Cluster<\/h1>[\s\S]*?<\/div><div class="page-tools"><nav class="seg"/);
 });
 
 test("clusterPage without a view is unchanged", async () => {
@@ -3264,7 +3275,7 @@ test("clusterPage without a view is unchanged", async () => {
   const before = clusterPage(inv as any, null, undefined, "n", null, null);
   const after = clusterPage(inv as any, null, undefined, "n", null, null, undefined);
   assert.equal(before, after);
-  assert.doesNotMatch(before.slice(before.indexOf("<body")), /aria-label="Cluster"|<div class="page-actions">/);
+  assert.doesNotMatch(before.slice(before.indexOf("<body")), /aria-label="Cluster"|<div class="page-tools">/);
 });
 
 // ---------- incidents: names, readable params, links, the state switch ----------
@@ -3347,7 +3358,7 @@ test("the cluster shelf names what is short of desired and what was applied by h
       { kind: "Deployment", name: "web", ready: 1, desired: 1, images: [], managedBy: { type: "unmanaged" } }] },
     { name: "kube-system", system: true, services: [], ingresses: [], workloads: [] },
   ] }, null);
-  assert.match(html, /<dd>1<span>\+1 system, hidden/);
+  assert.match(html, /<dd>1<span>\+1 system</);
   assert.match(html, /<div class="stat" data-tone="warning">[\s\S]*?Not ready[\s\S]*?<dd>1<span>api/);
   assert.match(html, /Outside GitOps[\s\S]*?<dd>1<span>web/);
   // the short workload's ready count is toned in its row too
@@ -3438,7 +3449,26 @@ test("a page's tables are titled panels, on every converted page", async () => {
   const harness = harnessPage({ runs7: 1, runs30: 1, stats: [{ name: "placeholder", outcome: "refused", d7: 1, d30: 1 }] });
   assert.match(harness, /<section class="card flush"><header class="card-head"><h2 class="card-title">Gates<\/h2><span class="meta">[^<]+<\/span><\/header><div class="table-wrap"/);
   const cluster = clusterPage({ scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "empty", system: false, workloads: [], services: [], ingresses: [] }] } as never, null);
-  assert.match(cluster, /<h2 class="card-title">empty<\/h2><\/header><div class="empty">/);
+  assert.match(cluster, /<h2 class="card-title">Workloads<\/h2><\/header><div class="empty">/);
   // a note under a panel's table brings its own padding: the flush card has none
   assert.match(STYLES, /\.card\.flush > p \{[^}]*padding: 0 var\(--sp-5\) var\(--sp-4\)/);
+});
+
+// The path a workload is declared at rides under its owner, and only where there is one to show.
+test("where to change a workload is a line under its owner, from the cluster model", async () => {
+  const { clusterPage } = await import("./views.js");
+  const inv = { scanned: { namespaces: 1, complete: true }, namespaces: [{ name: "shop", system: false, services: [], ingresses: [], workloads: [
+    { kind: "Deployment", name: "web", ready: 2, desired: 2, images: [], managedBy: { type: "unmanaged" } },
+    { kind: "Deployment", name: "api", ready: 1, desired: 2, images: [], managedBy: { type: "helmrelease", name: "api", namespace: "f" } },
+    { kind: "Deployment", name: "job", ready: 1, desired: 1, images: [], managedBy: { type: "helmrelease", name: "job", namespace: "f" } }] }] } as never;
+  const model: any = { snapshot: { at: "t", appliedRevision: "main@1", repoRevision: null }, nodes: [], edges: [], external: [], unknowns: [],
+    changeAt: { "wl/shop/api": { image: { path: "apps/<x>/release.yaml", line: 24, key: "image.tag", gitValue: "1", drift: true } } } };
+  const html = clusterPage(inv, null, undefined, "n", null, model);
+  assert.match(html, /<div class="sub"><code translate="no">apps\/&lt;x&gt;\/release\.yaml:24<\/code> <span class="badge" data-tone="warning">drift<\/span><\/div>/);
+  assert.equal([...html.matchAll(/not located in Git/g)].length, 1, "job only: web is outside GitOps, so there is nothing to locate");
+  // short of desired first, then outside GitOps, then the rest
+  const order = ["api", "web", "job"].map((n) => html.indexOf(`<code translate="no">${n}</code>`));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  // a cold cache prints no location at all, rather than "not located" for something nobody looked for
+  assert.doesNotMatch(clusterPage(inv, null, undefined, "n", null, null), /not located in Git|class="sub"/);
 });

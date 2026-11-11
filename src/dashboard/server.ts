@@ -652,7 +652,7 @@ export class DashboardServer {
       const nonce = newNonce();
       return send(
         200,
-        clusterPage(inv, error, await this.openCount(), nonce, this.assets, (this.clusterModel?.(cluster) ?? null) as DashboardClusterModel | null, view),
+        clusterPage(inv, error, await this.openCount(), nonce, this.assets, (this.clusterModel?.(cluster) ?? null) as DashboardClusterModel | null, view, url.searchParams.get("ns") ?? undefined),
         "text/html; charset=utf-8",
         { "content-security-policy": csp(nonce) }
       );

@@ -449,4 +449,62 @@ dl.kv > div { display: flex; flex-wrap: wrap; gap: 0 .5em; }
 dl.kv dt { color: var(--text-dim); }
 dl.kv dt::after { content: " ="; }
 dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ---------- /cluster: namespaces beside one namespace ---------- */
+/* The list is the map's old namespace grid, as links: the selection is ?ns= in the URL, so it
+   needs no script, survives a reload and can be pasted to a colleague. It stays in view while
+   the detail scrolls, and scrolls inside itself when the cluster has more namespaces than the
+   window is tall. Below 62rem of page the five-column workload table no longer fits beside it
+   (measured: Managed by ran off the card at 51rem), so the list goes above the detail, full
+   width, capped so a long one does not push the namespace off the screen. */
+.ns-split { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--stack); }
+.ns-list {
+  flex: 1 1 16rem; max-width: 20rem; min-width: 0; padding: var(--sp-2);
+  position: sticky; top: var(--sp-6); max-height: calc(100vh - var(--sp-12)); overflow-y: auto;
+}
+@container page (max-width: 62rem) {
+  .ns-list { flex-basis: 100%; position: static; max-width: none; max-height: 15rem; }
+}
+.ns-list ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ns-group {
+  margin: 0; padding: var(--sp-2) var(--sp-3) var(--sp-1);
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+}
+.ns-list ul + .ns-group { margin-top: var(--sp-2); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.ns-list a {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--sp-3);
+  min-height: 2.75rem; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm);
+  color: var(--text); text-decoration: none;
+}
+/* The current namespace is marked by its ground AND its weight, never the tint alone. */
+.ns-list a[aria-current="true"] { background: var(--brand-tint); }
+.ns-list a[aria-current="true"] .ns-name { font-weight: 700; }
+.ns-name { display: block; font-family: var(--font-data); font-size: var(--fs-sm); font-weight: 600; overflow-wrap: anywhere; }
+.ns-note { display: block; font-size: var(--fs-xs); color: var(--text-dim); }
+.ns-ready { font-family: var(--font-data); font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ns-detail { flex: 999 1 30rem; min-width: 0; display: flex; flex-direction: column; gap: var(--stack); }
+.ns-detail > .meta, .ns-detail > ul.meta { margin: 0; }
+.ns-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-4) var(--sp-8); }
+.ns-summary .meta { margin: var(--sp-1) 0 0; }
+h2.ns-title {
+  font-family: var(--font-data); font-size: var(--fs-lg); font-weight: 600;
+  text-transform: none; letter-spacing: 0; color: var(--text); margin: 0; overflow-wrap: anywhere;
+}
+h2.ns-title::after { content: none; }
+.ns-facts { margin: 0; display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-8); }
+.ns-facts dt {
+  font-family: var(--font-data); font-size: var(--fs-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; color: var(--text-dim);
+}
+.ns-facts dd {
+  margin: 2px 0 0; font-family: var(--font-display); font-size: var(--fs-lg); font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ns-facts dd[data-tone] { color: var(--ink); }
+/* One namespace's lanes are (rows x one card) tall and the frame's WIDTH is what binds the fit, so
+   the height follows the row count the server already knows instead of the whole-cluster frame's
+   viewport share. A phone's frame is too narrow to read the lanes unzoomed; it gets a short one. */
+#cluster-root[data-ns] .topo-view { height: clamp(14rem, calc(var(--rows, 4) * 3.6rem + 7rem), 44rem); }
+@container page (max-width: 38rem) { #cluster-root[data-ns] .topo-view { height: 16rem; } }
 `;

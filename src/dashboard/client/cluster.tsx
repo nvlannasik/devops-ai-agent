@@ -15,8 +15,10 @@ const MOUNT_ID = "cluster-root";
 const DATA_ID = "cluster-data";
 const MODEL_ID = "cluster-model";
 
-function ClusterMap({ inv, model }: { inv: ClusterInventory; model: DashboardClusterModel | null }): React.JSX.Element {
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+// `only`: the page shows ONE namespace (its list of namespaces is server-rendered beside the map),
+// so the map draws that namespace's lanes — always open, no grid card, nothing to close.
+function ClusterMap({ inv, model, only }: { inv: ClusterInventory; model: DashboardClusterModel | null; only: string | null }): React.JSX.Element {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(only ? [nsId(only)] : []));
   const [showSystem, setShowSystem] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(false);
   // The workload whose where-to-change panel is open (a model node id), or none.
@@ -32,15 +34,19 @@ function ClusterMap({ inv, model }: { inv: ClusterInventory; model: DashboardClu
   const [cols] = useState(() => ((document.getElementById(MOUNT_ID)?.clientWidth ?? 1000) < 640 ? 2 : 4));
 
   const laid = useMemo(() => {
-    const out = layoutClusterGraph(buildClusterGraph(inv, expanded, showSystem, model, showTelemetry), cols);
+    const graph = only
+      ? buildClusterGraph({ ...inv, namespaces: inv.namespaces.filter((n) => n.name === only) }, expanded, true, model, showTelemetry)
+      : buildClusterGraph(inv, expanded, showSystem, model, showTelemetry);
+    if (only) graph.nodes = graph.nodes.filter((n) => n.data.kind !== "namespace");
+    const out = layoutClusterGraph(graph, cols);
     // The card toggles itself (a real <button>), so the callback rides in its data.
     for (const n of out.nodes) {
       if (n.data.kind === "namespace") n.data = { ...n.data, onToggle: () => toggle(n.id) };
       // The panel's ✕ closes the namespace it frames — the same toggle as its grid card.
-      if (n.data.kind === "panelHead") n.data = { ...n.data, onToggle: () => toggle(nsId(n.data.namespace)) };
+      if (n.data.kind === "panelHead" && !only) n.data = { ...n.data, onToggle: () => toggle(nsId(n.data.namespace)) };
     }
     return out;
-  }, [inv, model, expanded, showSystem, showTelemetry, cols]);
+  }, [inv, model, only, expanded, showSystem, showTelemetry, cols]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<ClusterFlowNode>(laid.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(laid.edges);
@@ -68,10 +74,12 @@ function ClusterMap({ inv, model }: { inv: ClusterInventory; model: DashboardClu
   return (
     <>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 pt-3 pb-2 text-sm text-muted-foreground">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" checked={showSystem} onChange={(e) => setShowSystem(e.target.checked)} />
-          Show system namespaces
-        </label>
+        {only ? null : (
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={showSystem} onChange={(e) => setShowSystem(e.target.checked)} />
+            Show system namespaces
+          </label>
+        )}
         {model ? (
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={showTelemetry} onChange={(e) => setShowTelemetry(e.target.checked)} />
@@ -123,7 +131,7 @@ function ClusterMap({ inv, model }: { inv: ClusterInventory; model: DashboardClu
         <li className="flex items-center gap-2"><span className={`${SWATCH} border-dashed`} style={{ boxShadow: "inset 3px 0 0 var(--mark-ok)" }} aria-hidden="true" />managed by GitOps</li>
         <li className="flex items-center gap-2"><span className={`${SWATCH} border-warning`} style={{ boxShadow: "inset 3px 0 0 var(--mark-warning)" }} aria-hidden="true" />not managed by GitOps</li>
         <li className="ml-auto italic max-[46rem]:ml-0">
-          <b>+</b> opens a namespace, <b>✕</b> or <b>−</b> closes it · Ctrl + scroll to zoom
+          {only ? "Click a workload to see where it is declared" : <><b>+</b> opens a namespace, <b>✕</b> or <b>−</b> closes it · Ctrl + scroll to zoom</>}
         </li>
       </ul>
     </>
@@ -199,7 +207,7 @@ function main(): void {
   createRoot(mount).render(
     <StrictMode>
       <ReactFlowProvider>
-        <ClusterMap inv={inv} model={model} />
+        <ClusterMap inv={inv} model={model} only={mount.dataset.ns || null} />
       </ReactFlowProvider>
     </StrictMode>
   );

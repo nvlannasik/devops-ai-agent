@@ -345,6 +345,7 @@ ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
   .chips a:hover { background: var(--surface-raised); color: var(--text); }
   .share-legend li > a:hover { background: var(--surface-2); }
   .rank a:hover { color: var(--accent); text-decoration: underline; }
+  .ns-list a:not([aria-current="true"]):hover { background: var(--surface-2); }
   /* The dot grows rather than changing colour: the accent is the line's identity, and a point
      that turns a different hue on hover reads as a different KIND of point. */
   .chart-col:hover .chart-dot { transform: scale(1.5); }
