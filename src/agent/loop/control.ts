@@ -63,6 +63,40 @@ export const NO_EVIDENCE_NOTICE =
   "failing. If what you find contradicts the answer you just wrote, the answer was wrong and the " +
   "evidence wins. Say what you actually read.]";
 
+/**
+ * An alert answered with the out-of-scope line.
+ *
+ * Bench A02, 2026-11-12: three tool rounds into a `PodOOMKilled` alert — pods listed, the pod
+ * described, the OOMKill read — the model's fourth turn was "That's outside what I do — I'm a
+ * DevOps agent for this cluster", word for word the decline `## Scope of Work` gives it for a human
+ * asking about something else. Nothing objected: `needsEvidence` wants zero tool rounds, the
+ * completeness gate wants an RCA to complete, and the log-gap round that followed got the same line
+ * back and RESTORED it. In production that sentence is posted into the alert's thread.
+ *
+ * An alert cannot be out of scope: Alertmanager sent it, about this cluster. So the mode decides,
+ * not a judgement about the text — alert mode only, because an investigation request is a human's
+ * and may really be out of scope (C07). One nudge; a second decline is replaced by
+ * `alertDeclinedFallback`, because that line under an alert reads as "nothing to see here".
+ */
+const SCOPE_DECLINE = /outside what I do|di luar (?:yang saya|lingkup|cakupan|tugas|scope)/i;
+
+/** Short, not an RCA, and the decline's own words. Length keeps an RCA that QUOTES the line out. */
+export const declinesAlert = (mode: RunMode, answer: string): boolean =>
+  mode === "alert" && answer.length < 600 && SCOPE_DECLINE.test(answer);
+
+export const ALERT_IN_SCOPE_NOTICE =
+  "[THIS IS AN ALERT, NOT A QUESTION — Alertmanager fired it about a workload in this cluster, so " +
+  "it is in scope by definition, and the out-of-scope line is never an answer to one. Nobody asked " +
+  "you anything else. Carry on with the investigation: call the tools if you still need evidence, " +
+  "then write the RCA from what this thread already holds. A query that came back empty, or a " +
+  "repeated call that returned the result you already had, is a finding to state — not a reason to " +
+  "stop.]";
+
+export const alertDeclinedFallback = (toolRounds: number): string =>
+  `⚠️ The model answered this alert with its out-of-scope line, twice. That is a model failure, not ` +
+  `a finding — an alert is always in scope. The investigation ran ${toolRounds} tool round(s) and ` +
+  `produced no RCA; re-run it from this thread.`;
+
 export const FABRICATED_EVIDENCE_NOTICE =
   "[FABRICATED EVIDENCE — the answer you just wrote quotes log lines or cluster output, and you " +
   "have not called a single tool this run. Nothing in it was read from the cluster; you wrote what " +

@@ -1519,6 +1519,25 @@ capped by the limit that kills, and a fast allocator dies between two scrapes (A
   is the known-good one.
 `oom_killed` + `recommended.memoryLimit` is a contract with the mcp-server (workspace `CLAUDE.md`).
 
+### An alert answered with the out-of-scope line (`agent/loop/control.ts`, `declinesAlert`)
+
+Bench A02, 2026-11-12, the one miss of the spot check that followed the fixes above: three tool
+rounds into a `PodOOMKilled` alert — pods listed, the pod described, the OOMKill read — LLM #4 was
+"That's outside what I do — I'm a DevOps agent for this cluster", the decline `## Scope of Work`
+gives the model for a human asking about something else. The round before it had been two repeat
+calls served from the memo. Nothing objected: `needsEvidence` wants zero tool rounds, the
+completeness gate wants an RCA to complete, and the log-gap round got the same line back and
+**restored** it ("keeping the pre-nudge answer (152 chars) over the retry's 152"). The proposal
+step then drafted a restart from a 152-character non-answer.
+
+An alert cannot be out of scope, so the MODE decides, not a judgement about the text: alert mode
+only (a human's investigation request can really be out of scope — C07), short, and the decline's
+own words. First gate in `settleAnswer`; one nudge (`ALERT_IN_SCOPE_NOTICE`), not held, never
+restored. `settleAnswer` wraps the gates so that whichever of them lets the line out — a restore
+included — it is replaced by `alertDeclinedFallback`: a visible model failure with the tool-round
+count, because that sentence under an alert reads as "nothing to see here". Gate name
+`scope-decline`.
+
 ### An alert answered without reading anything (`agent/loop/answer-gates.ts`, `needsEvidence`)
 
 Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from **one LLM call and

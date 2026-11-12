@@ -11,7 +11,7 @@ import type { EventRow } from "./store.js";
  * page's rows are exactly this list (spec docs/superpowers/specs/2026-10-01-harness-trace-design.md §5).
  */
 export const GATE_NAMES = [
-  "no-evidence", "log-gap", "image-gap", "rca-completeness", "nudge-lost-rca",
+  "no-evidence", "log-gap", "image-gap", "rca-completeness", "nudge-lost-rca", "scope-decline",
   "tool-budget", "iteration-ceiling", "deadline", "delegate",
   "placeholder", "injection", "repeat-call", "log-fanout", "scope-lock", "write-blocked",
   "confidence-cap", "cluster-cap", "template-echo", "fabricated-note", "runbook", "offer",

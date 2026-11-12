@@ -96,6 +96,8 @@ export interface RunState {
   noEvidenceNudged: boolean;
   /** Same, for an RCA that stopped before the template did. */
   rcaGapNudged: boolean;
+  /** Same, for an alert answered with the out-of-scope line — see declinesAlert. */
+  scopeDeclineNudged: boolean;
   /**
    * WHICH gate is holding an answer, not merely that one is. The log-gap restore test reads
    * "the extra round ran no tools" as failure, which is true of a nudge that asked for a fetch
@@ -142,6 +144,7 @@ export const newRunState = (skills: RunState["skills"]): RunState => ({
   imageGapNudged: false,
   noEvidenceNudged: false,
   rcaGapNudged: false,
+  scopeDeclineNudged: false,
   heldBy: null,
   preNudgeSummary: "",
   toolRoundsAtNudge: -1,

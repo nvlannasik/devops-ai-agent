@@ -8,7 +8,10 @@ import { observedText } from "../grounding/index.js";
 import { rcaGaps, rcaGapNotice } from "../rca-completeness/index.js";
 import { imageGapRepo, IMAGE_GAP_NOTICE } from "../remediation/evidence-refusals.js";
 import type { TraceRecorder } from "../trace/index.js";
-import { extractText, needsEvidence, noToolRoundLeft, NO_EVIDENCE_NOTICE, FABRICATED_EVIDENCE_NOTICE } from "./control.js";
+import {
+  extractText, needsEvidence, noToolRoundLeft, NO_EVIDENCE_NOTICE, FABRICATED_EVIDENCE_NOTICE,
+  declinesAlert, ALERT_IN_SCOPE_NOTICE, alertDeclinedFallback,
+} from "./control.js";
 import { demandsLogs, logGapAction, LOG_GAP_NOTICE, nudgeLostRca } from "./log-gap.js";
 import type { RunCtx, RunState } from "./run-state.js";
 
@@ -25,6 +28,18 @@ export interface GateHost {
  * runInvestigation on 2026-10-21 without a change of order or wording.
  */
 export async function settleAnswer(h: GateHost, ctx: RunCtx, s: RunState, response: LLMResponse): Promise<string | null> {
+  const answer = await settle(h, ctx, s, response);
+  // Whichever gate let it out — including a restore of the answer a nudge interrupted — the
+  // out-of-scope line never leaves under an alert. See declinesAlert.
+  if (answer !== null && declinesAlert(ctx.mode, answer)) {
+    logger.warn(`[${ctx.threadId}] the alert was answered with the out-of-scope line again — replacing it with a visible failure`);
+    h.trace().gate(ctx.threadId, "scope-decline", "replaced", truncate(answer, 200));
+    return alertDeclinedFallback(s.toolRounds);
+  }
+  return answer;
+}
+
+async function settle(h: GateHost, ctx: RunCtx, s: RunState, response: LLMResponse): Promise<string | null> {
   const summary = extractText(response.content);
   if (!summary) {
     // never return empty — Slack chat.postMessage rejects an empty text with `no_text`
@@ -54,6 +69,15 @@ export async function settleAnswer(h: GateHost, ctx: RunCtx, s: RunState, respon
       `[${ctx.threadId}] final answer is just the tool name \`${summary.trim()}\` — the backend named a ` +
       `tool instead of calling it. Check its tool-call parser; on LLM_PROVIDER=router this escalates instead.`
     );
+  }
+  // First of all: an alert answered with the out-of-scope line. Not held and never restored —
+  // there is nothing in it to keep. Needs a call left to spend, like the completeness gate.
+  if (!s.scopeDeclineNudged && s.iterations < ctx.maxIterations && declinesAlert(ctx.mode, summary)) {
+    s.scopeDeclineNudged = true;
+    logger.warn(`[${ctx.threadId}] the alert was answered with the out-of-scope line after ${s.toolRounds} tool round(s) — one more round`);
+    h.trace().gate(ctx.threadId, "scope-decline", "nudge", `after ${s.toolRounds} tool round(s)`);
+    await h.memory.append(ctx.threadId, { role: "user", content: ALERT_IN_SCOPE_NOTICE });
+    return null;
   }
   // Before every other gate: an alert answered with no tool call at all has not been
   // investigated, and whatever the other gates would ask about is downstream of that.
