@@ -6,14 +6,16 @@
   "groupLabels": {
     "alertname": "KubernetesPodNotScheduled",
     "namespace": "bench-a05",
-    "severity": "warning"
+    "severity": "warning",
+    "cluster": "dev"
   },
   "alerts": [
     {
       "labels": {
         "alertname": "KubernetesPodNotScheduled",
         "namespace": "bench-a05",
-        "severity": "warning"
+        "severity": "warning",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Pod in bench-a05 has been Pending for 10 minutes",

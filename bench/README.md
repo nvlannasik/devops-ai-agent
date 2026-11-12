@@ -10,7 +10,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 20 (A01–A10, A13, B04, C01–C03, C05–C09) |
+| cases | 42, tiers A–F | 25 (A01–A10, A13, A14, B04, C01–C03, C05–C11, D01, D02) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -142,6 +142,23 @@ sweep — all of those live behind `proposeRemediation()` and its database.
 
 Nothing here provisions a cluster, on purpose. A harness that can reach for a cluster you did
 not name is a harness that can inject a fault into one.
+
+### Multi-cluster: run it the way production is configured
+
+Production runs strict mode (`MCP_LOCAL_CLUSTER=dev`), so the bench should too: set
+`MCP_LOCAL_CLUSTER` to the cluster the MCP server reads. Every alert case carries a
+`cluster: "dev"` label, the way Alertmanager's own groups do, and the runner binds each attempt's
+thread the way production does — an alert by that label (`app/alerts.ts`), a mention as a thread
+already bound to the local cluster — and runs the proposal phase inside it (`proposeRemediation`
+re-enters the thread's cluster). Without the binding, strict mode gives the agent NO Kubernetes
+tools and every cluster-reading gate fails open; measured 2026-11-12 on A02: "no cluster is bound
+to this thread". Single-cluster mode ignores the label. A local cluster named anything but `dev`
+needs the label changed with it, or every alert case runs unlabelled.
+
+C11 (2026-11-12) is the node-action case: a cordon asked about, then "ya". Its first attempt found
+that the node actions had reached the parser, the proposal list and the MCP server but not the
+system prompt, and that the `[OFFER]` line had no form for a node — see `skills/real.test.ts`.
+Its setup is read-only and refuses to run if `worker3-vm` is missing or already cordoned.
 
 ### The port to get right
 

@@ -6,14 +6,16 @@
   "groupLabels": {
     "alertname": "KubePodNotReady",
     "namespace": "bench-c01",
-    "severity": "warning"
+    "severity": "warning",
+    "cluster": "dev"
   },
   "alerts": [
     {
       "labels": {
         "alertname": "KubePodNotReady",
         "namespace": "bench-c01",
-        "severity": "warning"
+        "severity": "warning",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "A pod in bench-c01 has been in a non-ready state",

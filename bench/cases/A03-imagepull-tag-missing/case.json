@@ -3,10 +3,10 @@
   "tier": "A",
   "title": "ImagePullBackOff, tag does not exist",
   "settleSeconds": 20,
-  "groupLabels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "severity": "critical" },
+  "groupLabels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "severity": "critical", "cluster": "dev" },
   "alerts": [
     {
-      "labels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "container": "web", "severity": "critical" },
+      "labels": { "alertname": "KubernetesPodImagePullFailing", "namespace": "bench-a03", "container": "web", "severity": "critical", "cluster": "dev" },
       "annotations": {
         "summary": "Pod in bench-a03 cannot pull its image",
         "description": "A container in namespace `bench-a03` is in ImagePullBackOff and has not started."

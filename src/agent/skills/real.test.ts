@@ -372,6 +372,45 @@ test("the scope section admits the changes the remediation section can propose",
   assert.match(scope, /## Execution & Remediation/);
 });
 
+/**
+ * Every action the proposal step can put on a card is named in `## Execution & Remediation`, and
+ * the `[OFFER]` line has a form for each kind of target.
+ *
+ * Node ops (2026-11-04) reached the parser, the proposal list and the MCP server but not this
+ * section — "four places, not three" in CLAUDE.md, and the fourth was the one nothing tested. Bench
+ * C11 found it on its first attempt: the user said "ya" to a cordon, the reply was the bare line
+ * `[OFFER] cordon node worker3-vm`, which `parseOffer` cannot read (no backticked object), so no
+ * proposal call was made and the marker itself reached the reply.
+ */
+test("the remediation section names every proposable action, and the offer line can name a node and a VM", async () => {
+  const { PROPOSABLE_ACTIONS, parseOffer } = await import("../remediation/proposal.js");
+  const prompt = buildStaticSystemPrompt();
+  // From the heading itself: Scope of Work quotes "## Execution & Remediation" mid-line.
+  const from = prompt.indexOf("\n## Execution & Remediation");
+  assert.ok(from >= 0, "the Execution & Remediation section is gone");
+  const section = prompt.slice(from, prompt.indexOf("\n## ", from + 1));
+  // Words, not tool names: the section describes actions to a reader, and that is what it must keep.
+  const named: Record<(typeof PROPOSABLE_ACTIONS)[number], RegExp> = {
+    k8s_rollout_restart: /rolling restart/i,
+    k8s_set_image: /image change/i,
+    k8s_set_resources: /requests\/limits/i,
+    k8s_scale: /replica scaling/i,
+    k8s_delete_pod: /single-pod delete/i,
+    k8s_delete_orphan: /k8s_delete_orphan/,
+    k8s_rollout_undo: /roll back a Deployment/i,
+    k8s_cordon: /cordon/i,
+    k8s_uncordon: /uncordon/i,
+    k8s_drain: /drain a node/i,
+    vm_restart_service: /systemd service on a registered VM/i,
+  };
+  for (const action of PROPOSABLE_ACTIONS) assert.match(section, named[action], `${action} is proposable but the prompt never names it`);
+  // The examples the section gives must parse — a form parseOffer cannot read is an offer that never proposes.
+  for (const example of ["`Node/worker1`", "`VM/<host>`"]) {
+    assert.ok(section.includes(example), `offer form ${example} is gone`);
+    assert.ok(parseOffer(`[OFFER] cordon ${example}`), `${example} does not parse as an offer`);
+  }
+});
+
 test("the remediation section still names the delete action the scope section now admits", () => {
   const prompt = buildStaticSystemPrompt();
   assert.match(prompt, /`k8s_delete_orphan` removes ONE abandoned object/);

@@ -6,7 +6,8 @@
   "groupLabels": {
     "alertname": "KubernetesPodCrashLooping",
     "namespace": "bench-c08",
-    "severity": "critical"
+    "severity": "critical",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -14,7 +15,8 @@
         "alertname": "KubernetesPodCrashLooping",
         "namespace": "bench-c08",
         "container": "web",
-        "severity": "critical"
+        "severity": "critical",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Container web in bench-c08 is restarting in a loop",

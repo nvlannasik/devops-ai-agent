@@ -18,6 +18,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
+import { alertCluster } from "../agent/cluster/binding.js";
+import { withCluster } from "../agent/cluster/index.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { renderForModel } from "../agent/changes/index.js";
 import { buildAlertProposalContext, parseOffer, worthProposing } from "../agent/remediation/proposal.js";
@@ -170,8 +172,19 @@ async function attempt(
   const rounds = { mention: config.mentionToolRounds, tour: config.tourToolRounds };
   const budgetFor = (text: string) => (task.mode === "conversation" ? mentionBudget(text, rounds) : {});
   const budget = budgetFor(task.message ?? "");
+  // Multi-cluster (MCP_LOCAL_CLUSTER set, as production runs): bind the thread the way production
+  // does, or every case runs with no Kubernetes tools — strict mode never falls back to a cluster.
+  // An alert binds by its own `cluster` label (app/alerts.ts); a mention runs as a thread already
+  // bound to the local cluster, since the "which cluster?" exchange that binds it (app/mention.ts)
+  // is code before the LLM and not what a case measures. Single-cluster mode: undefined, a no-op.
+  const cluster = !agent.clusters.strict
+    ? undefined
+    : task.mode === "alert"
+      ? alertCluster(task.groupLabels!, agent.clusters)
+      : agent.clusters.local;
+  if (cluster) await agent.bindThreadCluster(threadId, cluster).catch(() => {});
   try {
-    const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode });
+    const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode, ...(task.mode === "alert" ? { cluster } : {}) });
     // The light route for a conversation mention, heavy for everything else — app/index.ts makes
     // exactly this split, and running a cheap-tier question on the heavy chain measures a model
     // production would not have used.
@@ -234,14 +247,18 @@ async function attempt(
     // orphan gate, and no user-request exemption, so it applied the replacement guard to a restart
     // the user had asked for. `byUser` is the flag production reads for that exemption.
     const userRequested = "byUser" in gate && gate.byUser;
+    // Production re-enters the thread's cluster for this phase (remediator.proposeRemediation): it
+    // runs after investigate() returned, outside its withCluster, and every guard that reads the
+    // cluster (kind, no-op, replacement) would otherwise fail OPEN — a kinder score than production.
+    const inCluster = <T>(fn: () => Promise<T>): Promise<T> => (cluster === undefined ? fn() : withCluster(cluster, fn));
     const asked = gate.propose
-      ? await proposeWithRetry(
+      ? await inCluster(() => proposeWithRetry(
           task.groupLabels ?? {},
           proposalContext,
           async (prompt) =>
             textOf((await llm.chat([{ role: "user", content: prompt }], [], PROPOSAL_SYSTEM)).content as Array<{ type: string; text?: string }>),
           (p) => agent.refusalFor(p, { userRequested, threadId, offer, labels: task.groupLabels ?? {}, rca }).catch(() => null)
-        )
+        ))
       : { proposal: null, raw: "[worthProposing] no proposal call — read-only question, no fault evidence" };
     const proposalRaw = asked.raw;
     const proposal = asked.proposal;

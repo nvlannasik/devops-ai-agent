@@ -6,7 +6,8 @@
   "groupLabels": {
     "alertname": "KubernetesPodImagePullFailing",
     "namespace": "bench-a04",
-    "severity": "critical"
+    "severity": "critical",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -14,7 +15,8 @@
         "alertname": "KubernetesPodImagePullFailing",
         "namespace": "bench-a04",
         "container": "gateway",
-        "severity": "critical"
+        "severity": "critical",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Pod in bench-a04 cannot pull its image",

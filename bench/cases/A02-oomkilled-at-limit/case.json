@@ -6,7 +6,8 @@
   "groupLabels": {
     "alertname": "PodOOMKilled",
     "namespace": "bench-a02",
-    "severity": "warning"
+    "severity": "warning",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -14,7 +15,8 @@
         "alertname": "PodOOMKilled",
         "namespace": "bench-a02",
         "container": "api-server",
-        "severity": "warning"
+        "severity": "warning",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Container api-server in bench-a02 has been OOMKilled",

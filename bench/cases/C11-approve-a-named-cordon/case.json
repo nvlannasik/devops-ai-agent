@@ -1,0 +1,13 @@
+{
+  "id": "C11-approve-a-named-cordon",
+  "tier": "C",
+  "title": "A node action approved across two turns — cordon a named node, then \"ya\"",
+  "mode": "conversation",
+  "settleSeconds": 0,
+  "message": "worker3-vm needs maintenance tonight, would cordoning it first be safe?",
+  "followUp": "ya",
+  "expect": {
+    "action": "k8s_cordon",
+    "target": "worker3-vm"
+  }
+}

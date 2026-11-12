@@ -3,10 +3,10 @@
   "tier": "C",
   "title": "Same symptom, opposite cause — the limit was lowered, usage was flat",
   "settleSeconds": 20,
-  "groupLabels": { "alertname": "KubernetesContainerOomKiller", "namespace": "bench-c02", "severity": "warning" },
+  "groupLabels": { "alertname": "KubernetesContainerOomKiller", "namespace": "bench-c02", "severity": "warning", "cluster": "dev" },
   "alerts": [
     {
-      "labels": { "alertname": "KubernetesContainerOomKiller", "namespace": "bench-c02", "container": "api-server", "severity": "warning" },
+      "labels": { "alertname": "KubernetesContainerOomKiller", "namespace": "bench-c02", "container": "api-server", "severity": "warning", "cluster": "dev" },
       "annotations": {
         "summary": "Container api-server in bench-c02 was OOMKilled",
         "description": "Container `api-server` in namespace `bench-c02` has been OOMKilled more than once in the last 10 minutes. The memory limit is the knob; whether the limit is too low or the code leaks is the question."

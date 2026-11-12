@@ -3,10 +3,10 @@
   "tier": "A",
   "title": "Service has no endpoints (selector mismatch)",
   "settleSeconds": 15,
-  "groupLabels": { "alertname": "KubernetesServiceHasNoReadyEndpoints", "namespace": "bench-a10", "severity": "critical" },
+  "groupLabels": { "alertname": "KubernetesServiceHasNoReadyEndpoints", "namespace": "bench-a10", "severity": "critical", "cluster": "dev" },
   "alerts": [
     {
-      "labels": { "alertname": "KubernetesServiceHasNoReadyEndpoints", "namespace": "bench-a10", "service": "api", "severity": "critical" },
+      "labels": { "alertname": "KubernetesServiceHasNoReadyEndpoints", "namespace": "bench-a10", "service": "api", "severity": "critical", "cluster": "dev" },
       "annotations": {
         "summary": "Service api in bench-a10 has no ready endpoints",
         "description": "Service `bench-a10/api` has had no ready endpoints for more than 5 minutes, so every request to it fails."

@@ -6,7 +6,8 @@
   "groupLabels": {
     "alertname": "KubernetesDeploymentReplicasMismatch",
     "namespace": "bench-a09",
-    "severity": "warning"
+    "severity": "warning",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -14,7 +15,8 @@
         "alertname": "KubernetesDeploymentReplicasMismatch",
         "namespace": "bench-a09",
         "deployment": "web-frontend",
-        "severity": "warning"
+        "severity": "warning",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Deployment web-frontend in bench-a09 has not matched its desired replicas for 15 minutes",

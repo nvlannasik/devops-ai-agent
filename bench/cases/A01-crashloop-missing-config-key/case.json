@@ -3,10 +3,10 @@
   "tier": "A",
   "title": "CrashLoopBackOff, missing config key",
   "settleSeconds": 20,
-  "groupLabels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "severity": "critical" },
+  "groupLabels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "severity": "critical", "cluster": "dev" },
   "alerts": [
     {
-      "labels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "container": "api", "severity": "critical" },
+      "labels": { "alertname": "KubernetesPodCrashLooping", "namespace": "bench-a01", "container": "api", "severity": "critical", "cluster": "dev" },
       "annotations": {
         "summary": "Container api in bench-a01 is restarting in a loop",
         "description": "Container `api` in namespace `bench-a01` restarted more than 2 times in the last 5 minutes."

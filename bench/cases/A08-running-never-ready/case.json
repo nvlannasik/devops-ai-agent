@@ -6,7 +6,8 @@
   "groupLabels": {
     "alertname": "KubernetesPodNotReady",
     "namespace": "bench-a08",
-    "severity": "warning"
+    "severity": "warning",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -14,7 +15,8 @@
         "alertname": "KubernetesPodNotReady",
         "namespace": "bench-a08",
         "container": "web",
-        "severity": "warning"
+        "severity": "warning",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Pod in bench-a08 has been not Ready for 10 minutes",

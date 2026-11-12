@@ -7,7 +7,8 @@
     "alertname": "AppErrorLogSpike",
     "namespace": "bench-a13",
     "severity": "warning",
-    "source": "loki"
+    "source": "loki",
+    "cluster": "dev"
   },
   "alerts": [
     {
@@ -16,7 +17,8 @@
         "namespace": "bench-a13",
         "app": "reporter",
         "severity": "warning",
-        "source": "loki"
+        "source": "loki",
+        "cluster": "dev"
       },
       "annotations": {
         "summary": "Error log spike for reporter in bench-a13",
