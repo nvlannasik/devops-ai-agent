@@ -18,6 +18,9 @@
     "namespace": "bench-a03",
     "target": "storefront",
     "params": { "kind": "deployment" },
-    "changed": { "image": "nginx:no-such-tag-9f2c" }
+    "changed": { "image": "nginx:no-such-tag-9f2c" },
+    "alternatives": [
+      { "action": "k8s_rollout_undo", "namespace": "bench-a03", "target": "storefront", "params": { "kind": "deployment", "to_revision": "1" } }
+    ]
   }
 }

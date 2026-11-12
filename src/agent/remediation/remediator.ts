@@ -6,7 +6,7 @@ import { extractSection } from "../../utils/slack/blocks.js";
 import { RemediationStore } from "./index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal, type Refusal } from "./proposal.js";
 import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSummary, rolloutFromRevision } from "./rollback-gate.js";
-import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, passingProbeRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./noop-guard.js";
 import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, expectFromRevert, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "../gitops/preview.js";
@@ -492,7 +492,10 @@ export class Remediator {
       const pods = parsePods(raw);
       return (
         replacementRefusal(proposal.action, proposal.toolParams, pods) ??
-        healthyTargetRefusal(proposal.action, proposal.toolParams, pods, mentions)
+        healthyTargetRefusal(proposal.action, proposal.toolParams, pods, mentions) ??
+        // The claim is the root cause AND the proposal's own one-line reason: C01's restart
+        // carried "Readiness probe misconfiguration" in the reason.
+        passingProbeRefusal(proposal.action, proposal.toolParams, pods, `${mentions}\n${proposal.reason}`)
       );
     } catch (err) {
       logger.debug(`[remediation] replacement guard could not list pods in ${namespace}: ${errDetail(err)}`);

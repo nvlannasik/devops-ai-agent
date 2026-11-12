@@ -270,3 +270,28 @@ test("mustNot ignores a phrase the RCA explicitly denies, and still catches the 
   // One denied mention does not launder a second, asserted one.
   assert.equal(scoreRca(spec, "Not a full outage at first; by 10:05 it was a total outage.").pass, false);
 });
+
+// A03, 2026-11-12: a rollout to a tag that does not exist, answered with a rollback to the revision
+// before it. Same pods as `k8s_set_image` back to that revision's image, and scored a miss.
+test("an alternative repair passes; anything else still reports the primary's reasons", () => {
+  const a03: Expectation = {
+    action: "k8s_set_image",
+    namespace: "bench-a03",
+    target: "storefront",
+    params: { kind: "deployment" },
+    changed: { image: "nginx:no-such-tag-9f2c" },
+    alternatives: [{ action: "k8s_rollout_undo", namespace: "bench-a03", target: "storefront", params: { kind: "deployment", to_revision: "1" } }],
+  };
+  const undo = (to_revision: number, name = "storefront") =>
+    proposal({ action: "k8s_rollout_undo", namespace: "bench-a03", name, toolParams: { namespace: "bench-a03", name, kind: "deployment", to_revision } });
+
+  assert.deepEqual(scoreProposal(a03, undo(1)), { pass: true, reasons: [], axes: { proposal: true } });
+  // an alternative pins its own fields: the wrong revision, or the wrong workload, is still a miss
+  const wrong = scoreProposal(a03, undo(3));
+  assert.equal(wrong.pass, false);
+  assert.match(wrong.reasons.join("\n"), /action k8s_rollout_undo, expected k8s_set_image/);
+  assert.equal(scoreProposal(a03, undo(1, "checkout")).pass, false);
+  // and it never turns "no proposal" into a pass
+  assert.equal(scoreProposal(a03, null).pass, false);
+  assert.equal(scoreProposal(a03, proposal({ action: "k8s_rollout_restart", namespace: "bench-a03", name: "storefront" })).pass, false);
+});

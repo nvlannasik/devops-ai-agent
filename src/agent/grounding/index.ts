@@ -70,8 +70,22 @@ const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*$/;
  */
 const SCOPE_LABELS = new Set(["cluster-wide"]);
 
+/**
+ * Kubernetes' own vocabulary that happens to be shaped like a name. `docker-registry` is the Secret
+ * TYPE in `kubectl create secret docker-registry` — bench A04, 2026-11-12: an RCA that correctly
+ * said "create a `docker-registry` secret" for a missing pull secret was failed, and in production
+ * would have been flagged to the thread, for naming a resource no tool returned. Add a word here
+ * only when it has been observed: every entry is a name an invention could hide behind.
+ */
+const K8S_VOCABULARY = new Set(["docker-registry"]);
+
 const looksLikeIdentifier = (name: string): boolean =>
-  name.length >= MIN_LENGTH && /[a-z]{3}/.test(name) && /[-./]/.test(name) && !NOT_A_NAME.test(name) && !SCOPE_LABELS.has(name);
+  name.length >= MIN_LENGTH &&
+  /[a-z]{3}/.test(name) &&
+  /[-./]/.test(name) &&
+  !NOT_A_NAME.test(name) &&
+  !SCOPE_LABELS.has(name) &&
+  !K8S_VOCABULARY.has(name);
 
 /** Names the answer asserts, namespace-qualified ones split into their parts. */
 export function citedNames(answer: string): string[] {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePods, replacementRefusal, healthyTargetRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
+import { parsePods, replacementRefusal, healthyTargetRefusal, passingProbeRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
 
 const pod = (name: string, ready: boolean, restarts = 0, status = "Running") => ({ name, ready, restarts, status });
 const del = (target: string, pods: ReturnType<typeof pod>[]) =>
@@ -306,4 +306,36 @@ test("the denial reads through any depth of escaping — Loki's result carries t
   const bs = "\\".repeat(7);
   const loki = `"pods is forbidden: User ${bs}"system:serviceaccount:bench-a13:reporter${bs}" cannot list resource ${bs}"pods${bs}" in API group`;
   assert.ok(rbacRestartRefusal("k8s_rollout_restart", { namespace: "bench-a13", name: "reporter" }, loki.toLowerCase()));
+});
+
+// Bench C01, 2026-11-12, attempt 3 — the text is the run's own. A healthy namespace, a stale alert,
+// and each pod's start-up `Readiness probe failed: connection refused` event read as a fault.
+const C01_PODS = [pod("web-55f66d8cdf-6vbfv", true), pod("web-55f66d8cdf-x2k9p", true)];
+const C01_ROOT_CAUSE =
+  "1. *Symptom:* Pods in `bench-c01/web` are generating readiness probe failure events — _k8s_list_events_ `bench-c01`\n" +
+  '2. *Because:* The readiness probe is attempting to connect to `http://<pod-ip>:80/` but receives "connection refused" — _k8s_list_events_ `bench-c01`\n' +
+  "3. *Because:* Despite the error, NGINX is running and successfully serving `GET /` requests as confirmed by access logs";
+const C01_REASON = "Readiness probe misconfiguration causing repeated failures despite functional NGINX; restarting ensures consistent state after probe fix";
+
+test("a restart argued from a failing probe is refused when every pod is passing it", () => {
+  const params = { namespace: "bench-c01", name: "web" };
+  // the door it came through: the root cause names the workload, so the healthy-target rule passes it
+  assert.equal(healthyTargetRefusal("k8s_rollout_restart", params, C01_PODS, C01_ROOT_CAUSE), null);
+  for (const claim of [C01_ROOT_CAUSE, C01_REASON, "health check gagal terus di `web`", "the misconfigured liveness probe on `web`"]) {
+    assert.match(passingProbeRefusal("k8s_rollout_restart", params, C01_PODS, claim) ?? "", /all 2 pod\(s\) of `web` are Ready with zero restarts/, claim);
+  }
+});
+
+test("the probe rule leaves alone what the pod list does not contradict", () => {
+  const params = { namespace: "bench-c01", name: "web" };
+  // a wedge that names no probe keeps its card — stale certificate, leaked pool
+  assert.equal(passingProbeRefusal("k8s_rollout_restart", params, C01_PODS, "`web` still serves the certificate from before the renewal"), null);
+  // a probe that IS failing: a pod unready, or one the kubelet has restarted — other rules own those
+  assert.equal(passingProbeRefusal("k8s_rollout_restart", params, [pod("web-55f66d8cdf-6vbfv", false)], C01_REASON), null);
+  assert.equal(passingProbeRefusal("k8s_rollout_restart", params, [pod("web-55f66d8cdf-6vbfv", true, 2)], C01_REASON), null);
+  // a probe mentioned, not blamed; another sentence's "failed" is not about it
+  assert.equal(passingProbeRefusal("k8s_rollout_restart", params, C01_PODS, "The probe passes. The upstream call failed with a stale token."), null);
+  // not this workload's pods, and not this action
+  assert.equal(passingProbeRefusal("k8s_rollout_restart", params, [pod("other-6b747db7c9-a1b2c", true)], C01_REASON), null);
+  assert.equal(passingProbeRefusal("k8s_set_image", params, C01_PODS, C01_REASON), null);
 });

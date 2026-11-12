@@ -16,13 +16,20 @@ import { join } from "node:path";
 import { z } from "zod";
 import { wantsInvestigation } from "../agent/intent/index.js";
 
-const Expectation = z.object({
-  action: z.string().nullable(),
+const ProposalShape = {
   namespace: z.string().optional(),
   target: z.string().optional(),
   params: z.record(z.string(), z.string()).optional(),
   changed: z.record(z.string(), z.string()).optional(),
   greaterThan: z.record(z.string(), z.string()).optional(),
+};
+
+const Expectation = z.object({
+  action: z.string().nullable(),
+  ...ProposalShape,
+  // Another repair for the same fault — see Expectation.alternatives in score.ts. Strict, and an
+  // action is required: "no proposal" as an alternative to a proposal would make every miss a pass.
+  alternatives: z.array(z.object({ action: z.string(), ...ProposalShape }).strict()).optional(),
   rca: z
     .object({ must: z.array(z.string()).optional(), mustNot: z.array(z.string()).optional() })
     // Compiled at load, not at scoring time: a bad pattern in a case file should stop the run

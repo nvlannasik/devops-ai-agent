@@ -9,8 +9,11 @@ Two tools answer this, and they read different things — pick by the question, 
 **Sizing — "is the limit wrong / how much does it really use":**
 1. `k8s_recommend_resources` with the namespace (and `workload` when you already know it). It
    joins the configured requests/limits with real Prometheus usage and returns the number to
-   change. Read `flags` before anything else: `oom_risk`, `cpu_throttled`,
+   change. Read `flags` before anything else: `oom_killed`, `oom_risk`, `cpu_throttled`,
    `cpu_under_provisioned`, `memory_under_provisioned`, `no_requests`, `over_provisioned`.
+   `oom_killed` means the kernel killed the container at its limit: its `memoryPeak` is capped by
+   that limit, so `recommended.memoryLimit` is sized from the LIMIT instead. Quote the limit it
+   was killed at as the evidence, never the peak — and read `observed.memoryNote`.
 2. `no_data` on the container you care about means the workload was scaled to zero, is newer
    than the window, or cadvisor is not scraped — say which is unknown, do not read it as "uses
    nothing". If `scanned.withMetrics` is `0` the metrics are missing cluster-wide; report that

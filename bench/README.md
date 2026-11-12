@@ -85,7 +85,7 @@ uses — `buildGroupAlertText()`, the same function the webhook calls.
 ```
 
 `expect` is the concrete form of `truth.expectedProposal`, which the design doc leaves as a
-placeholder. Four matchers, and each earns its place:
+placeholder. Four matchers and one list, and each earns its place:
 
 - `changed` — "raise the limit" has no single right answer. Pinning one would score the
   model's taste rather than its diagnosis; echoing the broken value back is still a miss.
@@ -104,6 +104,15 @@ placeholder. Four matchers, and each earns its place:
   Regexes, not substrings, because the agent writes prose in two languages: one entry has to
   admit "image pull secret", "imagePullSecrets" and "kredensial registry". They are compiled at
   load, so a bad pattern stops the run before the first namespace is created.
+- `alternatives` — another whitelisted repair for the same fault, each a full expectation
+  (action, target, params; never `rca`). `changed` exists because "raise the limit" has no single
+  right number; this exists because a fault can have no single right ACTION. A03 on 2026-11-12: a
+  rollout to a tag that does not exist, answered with `k8s_rollout_undo` to revision 1 instead of
+  `k8s_set_image` back to the image revision 1 runs — the same pods, the rollback gate had checked
+  the revision against the change timeline, and the run scored it a miss. The catalog's A03
+  predates the rollback action. Listed on A03 and C02 (a limit lowered by the last rollout), and
+  only for a repair the fault really has: an alternative pins its own fields, an action is
+  required, and a miss still reports the PRIMARY's reasons.
 
 ## What it needs
 

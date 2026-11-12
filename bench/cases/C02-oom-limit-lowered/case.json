@@ -19,6 +19,9 @@
     "target": "orders-api",
     "params": { "kind": "deployment" },
     "changed": { "memory_limit": "128Mi" },
-    "greaterThan": { "memory_limit": "200Mi" }
+    "greaterThan": { "memory_limit": "200Mi" },
+    "alternatives": [
+      { "action": "k8s_rollout_undo", "namespace": "bench-c02", "target": "orders-api", "params": { "kind": "deployment", "to_revision": "1" } }
+    ]
   }
 }

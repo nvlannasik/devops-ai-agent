@@ -1449,6 +1449,16 @@ Fails open everywhere: an unparseable payload, an unreachable MCP server, a pod 
 (a bare pod is not replaced when deleted at all) all return null and let the proposal through.
 This may only ever add a refusal, never remove a check that already runs.
 
+**A probe blamed on pods that are passing it** (`passingProbeRefusal`, bench C01, 2026-11-12). The
+healthy-target rule lets a restart of serving pods through once the root cause NAMES the workload —
+and a wrong RCA names it too: a stale alert on a healthy namespace, each pod's first-seconds
+`Readiness probe failed: connection refused` event read as a misconfigured probe, a card to restart
+`web` "to ensure consistent state after probe fix". The pod list contradicts the claim and that is
+all the rule reads: Ready means the readiness probe passes now, zero restarts means no liveness
+probe ever killed a container. The claim is the Root Cause plus the proposal's own `reason`. It can
+refuse wrongly for a process that fails its probe only now and then, sampled while passing — the
+refusal says what to state instead. `pod-not-ready.md` step 6 is the same rule for the RCA.
+
 Ceiling, named: a pod that is Running, not ready and has NEVER restarted — a wrong readiness probe
 path, benchmark A08 — is not decidable from `k8s_list_pods` and passes. Separating that from a
 genuinely wedged process needs the probe result, which the payload does not carry.
@@ -1479,6 +1489,35 @@ conclusion in this file — that `Confidence: High` was defensible because `args
 leaks the cause in the spec — was too generous. agus read the same spec and said Medium/Low,
 correctly: the spec tells you THAT it exits, not WHY the workload is misconfigured. **The C03
 fixture does not need replacing.**
+
+#### The two resource guards were dead on every live call (found 2026-11-12)
+
+`noOpResourcesRefusal` and `oomShrinkRefusal` parsed `k8s_recommend_resources` by slicing from the
+first `[` to the last `]`. The real response is an object whose `recommendations` array is followed
+by `idleWorkloads: [...]`, so the slice spanned two arrays, `JSON.parse` threw, and both returned
+null — "unreadable refuses nothing", by design — on every call since `idleWorkloads` shipped. Their
+tests used a bare array and stayed green; the 2026-10-07 A02 "fix" attributed to `oomShrinkRefusal`
+was variance. Found by asking why a 138Mi proposal for a container killed at 128Mi had met no gate.
+`recommendationRows()` now takes the array after the `recommendations` key, cut at its own closing
+bracket (strings skipped, text after the JSON tolerated), and the tests carry the live shape.
+**A guard that fails open needs one test against the payload the other repo really sends** — a
+fixture written from memory of that payload tests the parser against itself.
+
+#### A raise that is too small (bench A02 / C02, 2026-11-12)
+
+128Mi raised to 138Mi and to 134Mi, both "at least the observed peak". Usage read before a kill is
+capped by the limit that kills, and a fast allocator dies between two scrapes (A02's 24h peak read
+92Mi under a 128Mi limit) — so the fix was sized from the fault. The 138Mi was the MCP server's own
+`peak x 1.5`. Fixed at the source and held in code:
+- **mcp-server** reads pod state, flags the container `oom_killed`, and sizes
+  `recommended.memoryLimit` from the LIMIT (the larger of x1.2 and +100Mi, the VPA's OOM bump);
+- **`oomShrinkRefusal`** refuses a proposal under that number and puts the number in the refusal, so
+  the one re-ask can use it. The flag is a live read of the pods, so this half needs no OOMKill in
+  the thread's evidence. An older server sends no flag and it says nothing;
+- the proposal prompt (action 3) and `oomkilled.md` step 6 say the same where the number is first
+  written, and point at the change timeline when the limit was LOWERED — the value it ran on before
+  is the known-good one.
+`oom_killed` + `recommended.memoryLimit` is a contract with the mcp-server (workspace `CLAUDE.md`).
 
 ### An alert answered without reading anything (`agent/loop/answer-gates.ts`, `needsEvidence`)
 

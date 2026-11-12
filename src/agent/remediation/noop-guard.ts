@@ -161,6 +161,8 @@ interface Recommendation {
   workload?: unknown;
   container?: unknown;
   current?: { cpuRequest?: unknown; memoryRequest?: unknown; cpuLimit?: unknown; memoryLimit?: unknown };
+  flags?: unknown;
+  recommended?: { memoryLimit?: unknown };
 }
 
 /** proposal field -> the key `k8s_recommend_resources` reports the configured value under. */
@@ -170,6 +172,46 @@ const RESOURCE_FIELDS: ReadonlyArray<readonly [string, keyof NonNullable<Recomme
   ["cpu_limit", "cpuLimit"],
   ["memory_limit", "memoryLimit"],
 ];
+
+/**
+ * The `recommendations` rows out of a `k8s_recommend_resources` result, or null when unreadable.
+ *
+ * Both guards below used to slice from the first `[` to the last `]`. The real response is an
+ * object whose `recommendations` array is followed by `idleWorkloads: [...]`, so that slice spanned
+ * two arrays, never parsed, and BOTH guards returned null on every live call — while their tests,
+ * written against a bare array, stayed green. Found 2026-11-12 reading why a 138Mi proposal for a
+ * container killed at 128Mi had met no gate at all.
+ *
+ * So: the array that follows the `recommendations` key (the first array when there is no such key —
+ * a bare array), cut at ITS closing bracket, strings skipped. Text around the JSON is tolerated:
+ * a tool result can carry a notice after it.
+ */
+function recommendationRows(raw: string): Recommendation[] | null {
+  const key = raw.indexOf('"recommendations"');
+  const start = raw.indexOf("[", key < 0 ? 0 : key);
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]" && --depth === 0) {
+      try {
+        const rows: unknown = JSON.parse(raw.slice(start, i + 1));
+        return Array.isArray(rows) ? (rows as Recommendation[]) : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * The same refusal one action along: a resources change that proposes the values already configured.
@@ -197,18 +239,10 @@ export function noOpResourcesRefusal(
   const container = typeof params.container === "string" ? params.container : "";
   if (!workload) return null;
 
-  const start = recommendations.indexOf("[");
-  const end = recommendations.lastIndexOf("]");
-  if (start < 0 || end <= start) return null;
-  let items: unknown;
-  try {
-    items = JSON.parse(recommendations.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(items)) return null;
+  const items = recommendationRows(recommendations);
+  if (!items) return null;
 
-  const rows = (items as Recommendation[]).filter(
+  const rows = items.filter(
     (r) => r && r.workload === workload && (!container || r.container === container)
   );
   if (rows.length === 0) return null;
@@ -247,6 +281,14 @@ const OOM_KILL = /\b(oomkill\w*|out of memory|exit ?code\W{0,3}137)\b/i;
  *
  * Same source as `noOpResourcesRefusal` (the configured value from `k8s_recommend_resources`), and
  * the same tolerance: anything unreadable returns null.
+ *
+ * A raise that is too small is the same mistake one step on. Bench 2026-11-12: A02 raised 128Mi
+ * to 138Mi and C02 to 134Mi — "at least the observed peak" — and usage read before a kill is
+ * capped by the limit that kills, so both sized the fix from the fault. The MCP server now flags
+ * such a container `oom_killed` and sizes its `recommended.memoryLimit` from the limit; a proposal
+ * under that number is refused with the number in the refusal, so the one re-ask can use it. The
+ * flag is a live read of the pods, so it needs no OOMKill in the thread's own evidence. An older
+ * server sends no flag and this half says nothing.
  */
 export function oomShrinkRefusal(
   action: string,
@@ -254,29 +296,35 @@ export function oomShrinkRefusal(
   recommendations: string,
   observed: string | null
 ): string | null {
-  if (action !== "k8s_set_resources" || !observed || !OOM_KILL.test(observed)) return null;
+  if (action !== "k8s_set_resources") return null;
   const workload = typeof params.name === "string" ? params.name : "";
   const container = typeof params.container === "string" ? params.container : "";
   const proposed = typeof params.memory_limit === "string" ? parseQuantity(params.memory_limit) : null;
   if (!workload || proposed === null) return null;
-  const start = recommendations.indexOf("[");
-  const end = recommendations.lastIndexOf("]");
-  if (start < 0 || end <= start) return null;
-  let items: unknown;
-  try {
-    items = JSON.parse(recommendations.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(items)) return null;
-  const row = (items as Recommendation[]).find((r) => r && r.workload === workload && (!container || r.container === container));
+  const items = recommendationRows(recommendations);
+  if (!items) return null;
+  const row = items.find((r) => r && r.workload === workload && (!container || r.container === container));
+  const killed = Array.isArray(row?.flags) && row.flags.includes("oom_killed");
+  if (!killed && (!observed || !OOM_KILL.test(observed))) return null;
   const configured = typeof row?.current?.memoryLimit === "string" ? row.current.memoryLimit : null;
   const limit = configured === null ? null : parseQuantity(configured);
-  if (limit === null || proposed > limit) return null;
+  if (limit === null) return null;
+  if (proposed <= limit) {
+    return (
+      `\`${workload}\` was OOMKilled at its memory limit of ${configured}, and this proposal sets ` +
+      `memory_limit=${params.memory_limit} — ${proposed === limit ? "the same limit" : "a LOWER one"}. An OOMKill means ` +
+      `the container needed more than the limit allows; usage read before the kill is not its peak. The ` +
+      `resize that addresses it raises the limit above ${configured}.`
+    );
+  }
+  const floorText = killed && typeof row?.recommended?.memoryLimit === "string" ? row.recommended.memoryLimit : null;
+  const floor = floorText === null ? null : parseQuantity(floorText);
+  if (floor === null || proposed >= floor) return null;
   return (
-    `\`${workload}\` was OOMKilled at its memory limit of ${configured}, and this proposal sets ` +
-    `memory_limit=${params.memory_limit} — ${proposed === limit ? "the same limit" : "a LOWER one"}. An OOMKill means ` +
-    `the container needed more than the limit allows; usage read before the kill is not its peak. The ` +
-    `resize that addresses it raises the limit above ${configured}.`
+    `\`${workload}\` was OOMKilled at its memory limit of ${configured}, and this proposal raises it only to ` +
+    `${params.memory_limit}. Usage read before a kill is capped by the limit that kills — it is not the peak, so a ` +
+    `limit sized from it is sized from the fault and the container is killed again. \`k8s_recommend_resources\` ` +
+    `sizes a killed container from its limit instead: ${floorText}. Propose memory_limit=${floorText} or more — ` +
+    `or, when the change timeline shows the limit was lowered, the value the workload ran on before.`
   );
 }

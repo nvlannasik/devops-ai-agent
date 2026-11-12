@@ -341,6 +341,46 @@ export function healthyTargetRefusal(
   return null;
 }
 
+/**
+ * A restart for a probe said to be failing, on pods that are passing it.
+ *
+ * `healthyTargetRefusal` lets a restart of serving pods through once the root cause NAMES the
+ * workload — the wedged-while-ready case. Bench C01, 2026-11-12, is what that door also admits: a
+ * stale alert on a healthy namespace, an RCA that read each pod's first-seconds `Readiness probe
+ * failed: connection refused` event as a misconfigured probe, and a card to restart `web` "to
+ * ensure consistent state after probe fix". It named the workload, so it passed.
+ *
+ * The pod list contradicts the claim, and that is all this reads. Ready means the readiness probe
+ * is passing NOW; zero restarts means no liveness probe has ever killed a container. A probe that
+ * were misconfigured would hold these pods unready — it cannot be both. And were the claim true, the
+ * probe lives in the spec, which a restart rebuilds unchanged.
+ *
+ * Refused wrongly in one shape, as `replacementRefusal` admits for its own: a process that wedges
+ * and fails its probe only now and then, sampled while passing. The text says what to state instead.
+ */
+const PROBE_FAULT =
+  /\b(?:probes?|health ?checks?)\b[^.\n]{0,80}\b(?:fail\w*|misconfigur\w*|wrong|incorrect|invalid|broken|refus\w*|gagal|salah)\b|\b(?:fail\w*|misconfigur\w*|wrong|incorrect|invalid|broken|gagal|salah)\b[^.\n]{0,40}\b(?:probes?|health ?checks?)\b/i;
+
+export function passingProbeRefusal(
+  action: string,
+  params: Record<string, unknown>,
+  pods: readonly PodState[],
+  claim: string
+): string | null {
+  if (action !== "k8s_rollout_restart") return null;
+  const name = typeof params.name === "string" ? params.name : "";
+  const mine = podsOf(pods, name);
+  if (!name || mine.length === 0 || !mine.every(isServing) || !PROBE_FAULT.test(claim)) return null;
+  return (
+    `the restart is argued from a failing or misconfigured probe, and all ${mine.length} pod(s) of \`${name}\` ` +
+    `are Ready with zero restarts — the readiness probe is passing on every one of them right now, and no ` +
+    `liveness probe has ever killed a container. A \`Readiness probe failed\` event from a pod's first ` +
+    `seconds is the container starting, not a fault. If a probe really were misconfigured it would be in ` +
+    `the spec, which a restart rebuilds unchanged. Nothing here needs a change; if \`${name}\` is wedged ` +
+    `while passing its probes, say what shows that instead.`
+  );
+}
+
 /** The two actions this guard applies to — the ones that rebuild a pod from the same spec. */
 export const REPLACEMENT_ACTIONS: ReadonlySet<string> = new Set(["k8s_rollout_restart", "k8s_delete_pod"]);
 

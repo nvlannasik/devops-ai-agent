@@ -57,6 +57,21 @@ export interface Expectation {
    * has to admit "image pull secret", "imagePullSecrets" and "kredensial registry".
    */
   rca?: { must?: string[]; mustNot?: string[] };
+  /**
+   * Other proposals that repair the same fault, each scored like the fields above (never `rca`,
+   * which is about the text and stays the case's own).
+   *
+   * One fault can have two whitelisted repairs, and pinning one scores the model's choice between
+   * them rather than its diagnosis — the reason `changed` exists, one level up. A03, 2026-11-12: a
+   * rollout to a tag that does not exist, answered with `k8s_rollout_undo` to revision 1 instead of
+   * `k8s_set_image` back to the image revision 1 runs. The same pods result, the rollback gate had
+   * already checked the revision against the change timeline, and the run scored it a miss. The
+   * catalog's A03 predates the rollback action.
+   *
+   * An alternative is a full expectation, not a loosening: it pins its own action, target and
+   * params. List one only for a repair the case's fault really has.
+   */
+  alternatives?: Array<Omit<Expectation, "rca" | "alternatives">>;
 }
 
 import { parseQuantity } from "../utils/quantity/index.js";
@@ -162,7 +177,19 @@ export function combine(...scores: Score[]): Score {
 
 const str = (v: unknown): string | undefined => (v === undefined || v === null ? undefined : String(v));
 
+/**
+ * The primary expectation, or any listed alternative. A miss reports the PRIMARY's reasons: they
+ * say what the case is about, and an alternative's would describe a repair nobody attempted.
+ */
 export function scoreProposal(expect: Expectation, proposal: Proposal | null, raw?: string): Score {
+  const first = scoreOne(expect, proposal, raw);
+  if (first.pass || !proposal) return first;
+  return (expect.alternatives ?? []).some((alt) => scoreOne(alt, proposal, raw).pass)
+    ? { pass: true, reasons: [], axes: { proposal: true } }
+    : first;
+}
+
+function scoreOne(expect: Omit<Expectation, "rca" | "alternatives">, proposal: Proposal | null, raw?: string): Score {
   const reasons: string[] = [];
 
   const axed = (pass: boolean, reasons: string[]): Score => ({ pass, reasons, axes: { proposal: pass } });

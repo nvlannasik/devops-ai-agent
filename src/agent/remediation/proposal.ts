@@ -588,6 +588,11 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     "   — an image an OLDER OR STILL-SERVING ReplicaSet is running IS that working image: if the evidence names one, propose it. Answering null while the evidence holds the tag that works leaves a broken rollout in place for want of naming it\n" +
     '3. {"action":"k8s_set_resources","namespace":"...","workload":"...","kind":"...","container":"...","memory_limit":"1Gi",...,"reason":"..."}\n' +
     "   — ONLY for OOMKilled / resource-exhaustion RCAs, or a Pending pod whose scheduler message says the REQUEST is larger than any node can satisfy (\"Insufficient cpu\"/\"Insufficient memory\") — that request is the fault and lowering it is the fix; propose modest values justified by the evidence (fields: cpu_request, memory_request, cpu_limit, memory_limit)\n" +
+    // Bench 2026-11-12, A02 and C02: 128Mi raised to 138Mi and to 134Mi, "at least the observed
+    // peak". "Modest" above was read as "barely", and the peak it was sized from is the one number
+    // a kill makes unreadable. oomShrinkRefusal holds the line in code; this is the same rule said
+    // where the number is first written.
+    "   — For an OOMKilled container, memory usage read before the kill is capped by the limit that killed it — it is NOT the peak, and a new limit sized from it is killed again. Take the number from `k8s_recommend_resources` (`recommended.memoryLimit`, sized from the limit for a container flagged `oom_killed`) when the context has it; when the [CHANGE TIMELINE] shows the limit was recently LOWERED, the value it ran on before is the known-good one — propose that\n" +
     // The fallacy three benchmark C03 attempts wrote almost word for word — "memory limit not
     // set ... adding limits aims to prevent unbounded memory usage and stabilize startup" —
     // against a container running `sleep 3; exit 1`. An absent limit is the DEFAULT, and it is

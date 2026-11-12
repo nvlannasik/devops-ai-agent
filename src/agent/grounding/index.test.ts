@@ -172,3 +172,12 @@ test("`cluster-wide`, the Source column's scope label, is not a cited name", () 
   const answer = "• *Fact:* 3 alerts active — _alertmanager_get_alerts_ `cluster-wide`\n• `checkout-gateway` restarted";
   assert.deepEqual(citedNames(answer), ["checkout-gateway"]);
 });
+
+// Bench A04, 2026-11-12: the correct answer to a missing pull secret, failed on grounding.
+test("`docker-registry`, kubectl's Secret type, is not a cited name", () => {
+  const answer =
+    "1. *Immediate:* Create a `docker-registry` secret with valid credentials and reference it in `checkout-gateway`'s `imagePullSecrets`.";
+  assert.deepEqual(citedNames(answer), ["checkout-gateway"]);
+  // a workload that merely contains the word still has to be grounded
+  assert.deepEqual(groundingGaps("`docker-registry-proxy` is down", []), ["docker-registry-proxy"]);
+});
