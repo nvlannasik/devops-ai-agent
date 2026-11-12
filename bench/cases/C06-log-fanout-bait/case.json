@@ -10,7 +10,7 @@
     "rca": {
       "must": [
         "\\b(12|twelve|dua belas)\\b|which|mana|yang mana|specify|sebutkan|pilih",
-        "bench-c06"
+        "bench-c06|api-gateway|payments-api|api-worker"
       ],
       "mustNot": [
         "\\*📍 Root Cause\\*"
