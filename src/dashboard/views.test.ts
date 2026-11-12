@@ -2756,6 +2756,13 @@ const benchRun = (over: Partial<BenchRun> = {}): BenchRun => ({
   ...over,
 });
 
+test("a suite run older than two weeks is flagged stale; a fresh one is not", () => {
+  const stale = benchPage([benchRun({ at: new Date(Date.now() - 15 * 86_400_000).toISOString() })]);
+  assert.match(stale, /<div class="stat" data-tone="warning">[\s\S]*?Suite runs[\s\S]*?stale, re-run it/);
+  const fresh = benchPage([benchRun({ at: new Date(Date.now() - 2 * 86_400_000).toISOString() })]);
+  assert.doesNotMatch(fresh, /stale, re-run it/);
+});
+
 test("a run reads as a shape: one mark per attempt, in order", () => {
   const html = benchPage([benchRun()]);
   const marks = /<span class="marks" role="img"[^>]*>((?:<span class="mk-[^"]*"[^>]*>[^<]*<\/span>)*)/.exec(html);
@@ -3017,7 +3024,7 @@ test("the harness page lists gates with outcomes and the nudge resolution split"
   assert.doesNotMatch(html.slice(html.indexOf("<body")), /undefined|NaN/);
 });
 
-test("the harness shelf: fires per run, nudges accepted, and the nudge split as a bar with its words", async () => {
+test("the harness shelf: fires per run, ceiling hits, and the nudge split as a bar with its words", async () => {
   const { harnessPage } = await import("./views.js");
   const html = harnessPage({
     runs7: 4,
@@ -3027,12 +3034,20 @@ test("the harness shelf: fires per run, nudges accepted, and the nudge split as 
       { name: "log-gap", outcome: "accepted", d7: 1, d30: 3 },
       { name: "log-gap", outcome: "kept-earlier", d7: 1, d30: 1 },
       { name: "repeat-call", outcome: "dropped", d7: 3, d30: 8 },
+      { name: "iteration-ceiling", outcome: "forced", d7: 1, d30: 2 },
+      { name: "deadline", outcome: "forced", d7: 0, d30: 1 },
+      { name: "tool-budget", outcome: "forced", d7: 5, d30: 9 },
     ],
     llm: [{ backend: "slow-one", calls: 2, p50: 1000, p95: 4000 }],
   });
-  // fires exclude the fates: nudge 4 + dropped 8 = 12 over 10 runs
-  assert.match(html, /<dd>12<span>1\.2× per investigation/);
-  assert.match(html, /<dd>75%<span>3 of 4 nudges/);
+  // fires exclude the fates: nudge 4 + dropped 8 + forced 2 + 1 + 9 = 24 over 10 runs
+  assert.match(html, /<dd>24<span>2\.4× per investigation/);
+  assert.match(html, /incl\. Slack mentions/);
+  // ceilings are iteration + deadline only — a conversation's tool budget is the design
+  assert.match(html, /<div class="stat" data-tone="warning" data-linked>[\s\S]*?Hit a ceiling[\s\S]*?<dd>3<span>out of iterations or time · 10 runs/);
+  // a failure outcome carries a tone; a refusal or a drop does not
+  assert.match(html, /<span class="badge" data-tone="warning"[^>]*>[\s\S]*?forced 2/);
+  assert.doesNotMatch(html, /data-tone="warning"[^>]*>[^<]*dropped/);
   assert.match(html, /<dd>4\.0s<span>slow-one/);
   // the split is never colour alone: every segment has a legend entry naming it and its count
   assert.match(html, /data-k="accepted" style="--w:75"/);

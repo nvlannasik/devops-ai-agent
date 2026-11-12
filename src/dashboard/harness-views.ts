@@ -9,21 +9,25 @@ import { layout } from "./layout.js";
 /** The three ways a nudge ends — counted against the nudge, never as fires of their own. */
 const NUDGE_FATES = ["accepted", "restored", "kept-earlier"] as const;
 const isFate = (o: string): boolean => (NUDGE_FATES as readonly string[]).includes(o);
+/** Outcomes that mean the run went worse than planned. A refusal is the gate working and stays
+ *  untoned; these are a run out of room, a dry-run the cluster rejected, a claim no tool backed. */
+const BAD_OUTCOMES: Record<string, string> = { forced: "warning", exhausted: "warning", apology: "warning", failed: "warning", gap: "warning" };
+/** Gates that fire when a run runs out of iterations or wall-clock time. tool-budget is left
+ *  out: a conversation turn spending its small budget is the design, not a shortfall. */
+const CEILINGS = ["iteration-ceiling", "deadline"];
 
 export function harnessPage(v: HarnessView, openIncidents?: number): string {
   const byGate = new Map<string, GateStat[]>();
   for (const s of v.stats) byGate.set(s.name, [...(byGate.get(s.name) ?? []), s]);
   const fires = (ss: GateStat[], k: "d7" | "d30") => ss.filter((s) => !isFate(s.outcome)).reduce((n, s) => n + s[k], 0);
-  const count30 = (o: string) => v.stats.filter((s) => s.outcome === o).reduce((n, s) => n + s.d30, 0);
   const gates = [...byGate].sort((a, b) => fires(b[1], "d30") - fires(a[1], "d30"));
   const busiest = Math.max(1, ...gates.map(([, ss]) => fires(ss, "d30")));
   const totalFires = gates.reduce((n, [, ss]) => n + fires(ss, "d30"), 0);
-  const nudges = count30("nudge");
-  const accepted = count30("accepted");
+  const ceilingHits = v.stats.filter((s) => CEILINGS.includes(s.name)).reduce((n, s) => n + s.d30, 0);
   const slowest = v.llm?.[0];
 
   const shelf = statList([
-    { icon: ICON.incidents, label: "Investigations · 7d", value: fmtInt(v.runs7), sub: `${fmtInt(v.runs30)} in 30 days` },
+    { icon: ICON.incidents, label: "Investigations · 7d", value: fmtInt(v.runs7), sub: `${fmtInt(v.runs30)} in 30 days · incl. Slack mentions` },
     {
       icon: ICON.harness,
       label: "Gate fires · 30d",
@@ -31,10 +35,15 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
       sub: v.runs30 > 0 ? `${(totalFires / v.runs30).toFixed(1)}× per investigation` : "no investigations yet",
     },
     {
-      icon: ICON.check,
-      label: "Nudges accepted",
-      value: nudges > 0 ? fmtPct(accepted, nudges) : "—",
-      sub: nudges > 0 ? `${fmtInt(accepted)} of ${fmtInt(nudges)} nudges · 30d` : "no nudges in 30 days",
+      // The tile a reader should act on: a run that hit a ceiling answered from whatever it had.
+      // Counted in fires, so a run that hits both ceilings counts twice — rare, and said here.
+      icon: ICON.incidents,
+      label: "Hit a ceiling · 30d",
+      value: fmtInt(ceilingHits),
+      sub: v.runs30 > 0 ? `out of iterations or time · ${fmtInt(v.runs30)} runs` : "no investigations yet",
+      tone: ceilingHits > 0 ? "warning" : undefined,
+      href: "/harness/iteration-ceiling",
+      hrefLabel: "Hit a ceiling: open the iteration-ceiling gate",
     },
     {
       icon: ICON.chip,
@@ -64,7 +73,7 @@ export function harnessPage(v: HarnessView, openIncidents?: number): string {
           "Outcomes (30d)",
           `<div class="roles">${ss
             .filter((s) => !isFate(s.outcome))
-            .map((s) => badge(`${s.outcome} ${fmtInt(s.d30)}`, ""))
+            .map((s) => badge(`${s.outcome} ${fmtInt(s.d30)}`, BAD_OUTCOMES[s.outcome] ?? ""))
             .join("")}</div>`
         ) +
         `</tr>`

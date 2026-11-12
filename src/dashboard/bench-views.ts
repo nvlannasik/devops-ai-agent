@@ -269,11 +269,15 @@ function byConfigTable(history: BenchRun[]): string {
   return panel("By configuration", table(headers("Backends", "Pass rate", ["Attempts", "num"], ["Clean runs", "num"]), body, "pairs", "bench-table"), `<span class="meta">${caption}</span>`);
 }
 
+/** A suite run older than this no longer describes the agent that is deployed. */
+const STALE_AFTER_MS = 14 * 24 * 3600 * 1000;
+
 /** The four figures a reader opens this page for, from the newest whole-suite run. */
-function benchShelf(runs: BenchRun[]): string {
+function benchShelf(runs: BenchRun[], now: Date = new Date()): string {
   const suite = suiteRuns(runs);
   const [last, prev] = suite;
   if (!last) return "";
+  const stale = now.getTime() - new Date(last.at).getTime() > STALE_AFTER_MS;
   const cases = byCase(runs);
   const clean = cases.filter((c) => c.attempts > 0 && c.passed === c.attempts).length;
   const pct = (n: number) => n * 100;
@@ -302,7 +306,10 @@ function benchShelf(runs: BenchRun[]): string {
       icon: ICON.overview,
       label: "Suite runs",
       value: fmtInt(suite.length),
-      sub: `last ${fmtAgo(last.at)} · ${fmtInt(spotChecks(runs).length)} spot checks besides`,
+      sub: `last ${fmtAgo(last.at)}${stale ? " · stale, re-run it" : ""} · ${fmtInt(spotChecks(runs).length)} spot checks besides`,
+      // Every rate on this shelf describes the code as it was at that run; past two weeks of
+      // shipping it is a claim about a different agent.
+      tone: stale ? "warning" : undefined,
     },
   ]);
 }
