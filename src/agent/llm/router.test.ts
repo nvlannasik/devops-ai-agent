@@ -432,3 +432,45 @@ test("terminal is decided by wording, never by the status code alone", () => {
     "500 Internal Server Error",
   ]) assert.equal(isTerminalFailure(r), false, r);
 });
+
+// Bench B04 and C08, 2026-11-12: "tool calls written out as text" from the only backend in the
+// chain threw away an investigation three tool rounds deep.
+const TEXT_CALLS = '{"tool_calls":[{"name":"k8s_list_pods","arguments":{}}]}';
+const sequence = (responses: Array<LLMResponse | (() => never)>, calls: string[], name: string): LLMClient => ({
+  async chat() {
+    calls.push(name);
+    const next = responses[Math.min(calls.filter((c) => c === name).length - 1, responses.length - 1)]!;
+    if (typeof next === "function") next();
+    return next as LLMResponse;
+  },
+});
+
+test("a malformed answer from the last backend left is asked for once more", async () => {
+  const calls: string[] = [];
+  const r = new RouterLLMClient(new Map([["only", sequence([answer(TEXT_CALLS), answer("the RCA")], calls, "only")]]), ["only"], []);
+  const res = await r.chat([], [], "sys");
+  assert.deepEqual(calls, ["only", "only"]);
+  assert.equal(res.content[0].text, "the RCA");
+  assert.equal(res.backend, "only");
+});
+
+test("the second ask is the last: two malformed answers fail, and a thrown error is never retried", async () => {
+  const twice: string[] = [];
+  const bad = new RouterLLMClient(new Map([["only", sequence([answer(TEXT_CALLS)], twice, "only")]]), ["only"], []);
+  await assert.rejects(() => bad.chat([], [], "sys"), /tool calls written out as text/);
+  assert.deepEqual(twice, ["only", "only"]);
+
+  const thrown: string[] = [];
+  const down = new RouterLLMClient(new Map([["only", fake(boom, thrown, "only")]]), ["only"], []);
+  await assert.rejects(() => down.chat([], [], "sys"), /backend down/);
+  assert.deepEqual(thrown, ["only"]);
+});
+
+test("with another backend left, a malformed answer fails over instead of asking again", async () => {
+  const calls: string[] = [];
+  const r = build(calls, fake(answer("L"), calls, "light1"), fake(answer(TEXT_CALLS), calls, "heavy1"), sequence([answer(TEXT_CALLS), answer("H2")], calls, "heavy2"));
+  const res = await r.chat([], [], "sys");
+  // heavy1 is not the last, so it is asked once; heavy2 is, so it gets the second ask
+  assert.deepEqual(calls, ["heavy1", "heavy2", "heavy2"]);
+  assert.equal(res.content[0].text, "H2");
+});

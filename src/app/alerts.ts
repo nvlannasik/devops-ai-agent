@@ -420,6 +420,8 @@ export class AlertFlow {
         await this.host.agent.investigate(threadId, fullIssue, {
           mode: "alert",
           trigger: issueText,
+          // The same evidence warnIfUngrounded is given below — the gate and the warning must agree.
+          grounding: timeline ? `${issueText}\n${timeline}` : issueText,
           namespace: labels.namespace,
           cluster,
           ...(vm ? { vm } : {}),

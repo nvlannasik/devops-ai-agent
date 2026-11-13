@@ -1538,6 +1538,41 @@ included — it is replaced by `alertDeclinedFallback`: a visible model failure 
 count, because that sentence under an alert reads as "nothing to see here". Gate name
 `scope-decline`.
 
+### An RCA is held to its evidence BEFORE it leaves (`agent/loop/answer-gates.ts`, `groundedAnswer`)
+
+`groundingGaps` found invented names from the day it shipped, and only after the fact: a warning
+posted beside an RCA that had already reached Slack, `incidents.root_cause` and the next recall.
+Full run 2026-11-12 (`6b5e42b`, pass^3 80%): three of the six failed attempts were that —
+`postgres-primary.bench-a01.svc.cluster.local` ("e.g.") and a Role `pod-lister` ("Example:")
+written into Recommended Actions as things to create, and an Ingress `orders-api-ingress` with a
+hostname made up for the Impact section. Across every kept run the flagged names are those two
+shapes: an example of something to make (`registry-credentials`, `payments-db-secret`), or a
+detail filled in around a real finding (a pod name with an invented hash).
+
+The gate runs the same check inside the loop, last, on whatever answer is leaving:
+- only for a run whose caller passed `opts.grounding` — the alert payload + change timeline, the
+  SAME text `warnIfUngrounded` gets afterwards (`app/alerts.ts`; the bench passes `issue`). The
+  gate and the warning must agree about what was seen, so the evidence is the caller's, not a guess;
+- only an RCA, only once, and only with two calls and time left (a look-up and an answer);
+- `UNGROUNDED_NOTICE` names the names and gives both ways out: look it up, or take it out — and
+  says an example of something to create is described in words, never as a name;
+- **its own hold slot (`groundingHeld`), not `heldBy`.** A successful round may run tools or none,
+  so neither restore rule fits. The retry is taken only when it is still an RCA, lost no required
+  section, and names FEWER ungrounded resources; anything else returns the RCA it interrupted,
+  which had already passed every other gate. The loop's two apology exits (deadline, out of
+  steps) return the held RCA too — a nudge must never cost the answer it interrupted.
+Not a "reformat to RCA" call (still forbidden, see §Guarded Remediation): the model is told which
+names to fix, and the result is accepted only if the same deterministic check says it is better.
+
+### The last backend gets a second ask (`agent/llm/router.ts`)
+
+A malformed ANSWER — tool calls written out as text, serialized blocks, a bare tool name, an empty
+reply — from the last usable backend in the chain is asked for once more before "all LLM backends
+failed" throws the investigation away (bench B04 and C08, 2026-11-12, three tool rounds deep each
+time, on a one-backend chain). The answer is a sample; the same backend had called tools properly
+on every earlier round. Never for a thrown error (a timeout already cost its full wait), never
+while another backend is left (failing over is what the chain is for), and up-only is untouched.
+
 ### An alert answered without reading anything (`agent/loop/answer-gates.ts`, `needsEvidence`)
 
 Measured in a 57-attempt run: A03 #2 and A04 #1 each produced a full RCA from **one LLM call and

@@ -187,8 +187,20 @@ export class RouterLLMClient implements LLMClient {
       const backend = this.backends.get(name)!;
       logger.info(`[llm-router] route=${route} backend=${name} attempt=${i + 1}/${names.length}${traceSuffix()}`);
       try {
-        const res = await backend.chat(messages, tools, systemPrompt);
-        const failure = failureOf(res, tools);
+        let res = await backend.chat(messages, tools, systemPrompt);
+        let failure = failureOf(res, tools);
+        // A malformed ANSWER from the last backend there is gets one more ask before the whole
+        // investigation is thrown away. Bench B04 and C08, 2026-11-12: three tool rounds of
+        // evidence lost to one "tool calls written out as text", on a chain with nothing after it.
+        // The answer is a sample, and the next one is usually well-formed — the same backend had
+        // called tools properly on every round before. Never for a THROWN error: a timeout has
+        // already cost its full wait, and a dead backend answers the same way twice. Never while
+        // another backend is left: failing over is what the chain is for.
+        if (failure && !names.slice(i + 1).some((n) => usable.has(n))) {
+          logger.warn(`[llm-router] backend=${name}: ${failure.reason} — nothing left to fail over to, asking it once more${traceSuffix()}`);
+          res = await backend.chat(messages, tools, systemPrompt);
+          failure = failureOf(res, tools);
+        }
         if (!failure) {
           this.health.succeeded(name);
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop

@@ -184,7 +184,10 @@ async function attempt(
       : agent.clusters.local;
   if (cluster) await agent.bindThreadCluster(threadId, cluster).catch(() => {});
   try {
-    const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode, ...(task.mode === "alert" ? { cluster } : {}) });
+    // `grounding`: production hands the alert path its payload + timeline (app/alerts.ts), so an
+    // RCA is held to them before it leaves. `issue` is that same text here, and what
+    // ungroundedNames is scored against below.
+    const run = () => agent.investigate(threadId, issue, { ...budget, mode: task.mode, ...(task.mode === "alert" ? { cluster, grounding: issue } : {}) });
     // The light route for a conversation mention, heavy for everything else — app/index.ts makes
     // exactly this split, and running a cheap-tier question on the heavy chain measures a model
     // production would not have used.

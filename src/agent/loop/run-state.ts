@@ -33,6 +33,13 @@ export interface InvestigateOptions {
    *  no cluster (no Kubernetes, no injected matcher) but is not "unlabelled": no confidence cap. */
   vm?: { host: string; units: string[] };
   /**
+   * What CODE handed this run beside the tool results: the alert payload as Alertmanager sent it and
+   * the change timeline — the same text the caller passes to `ungroundedNames` afterwards. Given, an
+   * RCA is held to it before it leaves (the grounding gate in answer-gates.ts); absent, no gate.
+   * Never the recall block: a past incident's root cause is how an invented name comes back.
+   */
+  grounding?: string;
+  /**
    * Called once per tool round, before the tools run, with the round number and the tool
    * names that round will actually execute. Optional and fire-and-forget: the loop ignores
    * whatever it returns and never awaits it, because a progress update is not worth failing
@@ -98,6 +105,14 @@ export interface RunState {
   rcaGapNudged: boolean;
   /** Same, for an alert answered with the out-of-scope line — see declinesAlert. */
   scopeDeclineNudged: boolean;
+  /** Same, for an RCA naming resources no tool result contained — see groundedAnswer. */
+  groundingNudged: boolean;
+  /**
+   * The RCA the grounding nudge interrupted. Its own slot, not `preNudgeSummary`: the retry may be
+   * nudged again by another gate before an answer finally leaves, and this one has to survive
+   * that. The loop's two apology exits return it too — a nudge must never cost the RCA.
+   */
+  groundingHeld: string | null;
   /**
    * WHICH gate is holding an answer, not merely that one is. The log-gap restore test reads
    * "the extra round ran no tools" as failure, which is true of a nudge that asked for a fetch
@@ -145,6 +160,8 @@ export const newRunState = (skills: RunState["skills"]): RunState => ({
   noEvidenceNudged: false,
   rcaGapNudged: false,
   scopeDeclineNudged: false,
+  groundingNudged: false,
+  groundingHeld: null,
   heldBy: null,
   preNudgeSummary: "",
   toolRoundsAtNudge: -1,
