@@ -234,10 +234,11 @@ faulting namespace behind, and that is exactly when the silence is still needed.
 more than `bench-.*` — a broader matcher is how a real incident goes unnoticed. (This used to be
 a manual step; the 2026-10-08 run skipped it and paged the production agent three times.)
 
-Then point the harness at the in-cluster MCP server and use the production LLM config:
+Then point the harness at the in-cluster MCP server and use the production LLM config. Run the
+port-forward in a loop — it dies on its own, and a run lasts hours:
 
 ```bash
-kubectl -n devops-tools port-forward svc/devops-mcp-server 3000:3000 &
+( while true; do kubectl -n devops-tools port-forward svc/devops-mcp-server 3000:3000; sleep 2; done ) &
 
 MCP_TRANSPORT=http MCP_HTTP_URL=http://localhost:3000/mcp MCP_AUTH_TOKEN=<the real token> \
 LLM_PROVIDER=router \
@@ -262,6 +263,19 @@ The bench namespaces (`bench-a02`, `bench-c01`) are created and deleted by the c
 are not in the GitOps repo, so Flux will not fight them, and they are not in
 `ALLOWED_REMEDIATION_NAMESPACES`, so nothing could be executed against them even if a proposal
 were approved by hand.
+
+### An attempt without tools is not an attempt
+
+The runner asks the MCP server's `/health` before every attempt and again after it
+(`src/bench/mcp-health.ts`, HTTP transport only). One the server went away under is **void**: not
+scored, repeated once the server answers again, at most five times a run. A server that stays
+away for five minutes ends the run with exit code 2 and **no history line**; the attempts that
+did run are kept beside the other transcripts as `<timestamp>.partial.json`.
+
+It exists because of the 2026-11-13 run: the port-forward died three hours into a 25x5, and the
+runner went on for two more with every tool call failing — C02, C03 and C06 scored 0/5 against a
+model that could not read a pod, C08 "passed" four times for the same reason, and the score was
+on its way to being committed. That run was killed by hand and never recorded.
 
 ## What is kept, and what is not
 

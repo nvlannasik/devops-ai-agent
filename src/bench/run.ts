@@ -36,6 +36,7 @@ import { mentionBudget, wantsTour } from "../agent/intent/index.js";
 import { stripRepeatedInventory, tourBlocks } from "../utils/slack/tour-tables.js";
 import { routerRegistry } from "../agent/llm/registry.js";
 import { closeSilence, openSilence } from "./silence.js";
+import { healthUrl, mcpReachable, waitForMcp } from "./mcp-health.js";
 
 const CASES_DIR = join(process.cwd(), "bench", "cases");
 const RESULTS_DIR = join(process.cwd(), "bench", "results");
@@ -305,10 +306,22 @@ async function main(): Promise<void> {
   if (silence) logger.info(`[bench] Alertmanager silence ${silence} on namespace=~bench-.* for the run`);
   else logger.warn("[bench] BENCH_SILENCE=false — injected faults will page whatever Alertmanager feeds");
 
+  // An attempt without tools measures the tunnel, not the agent — see mcp-health.ts. Asked before
+  // every attempt and again after it: one the server went away under is void and repeated, and a
+  // server that stays away ends the run with NOTHING recorded.
+  const mcpHealth = config.mcp.transport === "http" ? healthUrl(config.mcp.http.url) : null;
+  const MAX_VOID_ATTEMPTS = 5;
+  let voided = 0;
+  let aborted: string | null = null;
+
   try {
-    for (const task of tasks) {
+    tasks: for (const task of tasks) {
       const scores: Score[] = [];
       for (let n = 1; n <= attempts; n++) {
+        if (mcpHealth && !(await waitForMcp(mcpHealth))) {
+          aborted = `the MCP server at ${mcpHealth} did not answer for 5 minutes before ${task.id} attempt ${n}`;
+          break tasks;
+        }
         logger.info(`[bench] ${task.id} attempt ${n}/${attempts} — setup`);
         let score: Score;
         let rca = "";
@@ -332,6 +345,15 @@ async function main(): Promise<void> {
         } finally {
           hook(task, "cleanup.sh");
         }
+        if (mcpHealth && !(await mcpReachable(mcpHealth))) {
+          if (++voided > MAX_VOID_ATTEMPTS) {
+            aborted = `the MCP server at ${mcpHealth} went away during ${voided} attempts`;
+            break tasks;
+          }
+          logger.warn(`[bench] ${task.id} attempt ${n}: VOID — the MCP server stopped answering during it; repeating once it is back`);
+          n--;
+          continue;
+        }
         logger.info(`[bench] ${task.id} attempt ${n}: ${score.pass ? "PASS" : `FAIL — ${score.reasons.join("; ")}`}`);
         scores.push(score);
         detail.push({ task: task.id, attempt: n, pass: score.pass, axes: score.axes, reasons: score.reasons, ungrounded, proposal, proposalRaw, proposalContext, rca });
@@ -345,6 +367,16 @@ async function main(): Promise<void> {
       await waitForIsolation();
       closeSilence(silence);
     }
+  }
+
+  if (aborted) {
+    // The attempts that DID run are real and took hours: keep their transcript on this machine.
+    // No history line — a suite that stopped partway is not a score.
+    mkdirSync(RESULTS_DIR, { recursive: true });
+    const partial = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.partial.json`);
+    writeFileSync(partial, JSON.stringify({ aborted, runs, detail }, null, 2));
+    logger.error(`[bench] run aborted and NOT recorded: ${aborted}. ${detail.length} attempt(s) kept in ${partial}`);
+    process.exit(2);
   }
 
   const rates = passRates(runs);
