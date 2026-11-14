@@ -174,6 +174,7 @@ guessing from logs. It carries no live CPU/memory usage; use Prometheus for that
 - `k8s_describe_pod` — ONE pod's full status: container state/lastState (OOMKilled + exit code, CrashLoopBackOff, ImagePullBackOff), conditions, QoS, configured requests/limits, **and the pod's recentEvents** (BackOff/Unhealthy/FailedMount — often the smoking gun). On a pod being deleted it also returns `deletionTimestamp`, `terminationGracePeriodSeconds` and `finalizers` (absent otherwise). The RCA workhorse for crash/OOM/not-ready
 - `k8s_get_pod_logs` — set **`previous: true`** for a crashed/restarting pod (the dead instance's logs hold the crash reason); `since_seconds` narrows to a recent window
 - `k8s_describe_node` — ONE node's conditions (MemoryPressure/DiskPressure/PIDPressure/Ready), taints, capacity vs allocatable — for Pending pods / node incidents
+- `k8s_node_pods` — everything on ONE node: every pod (all namespaces) with QoS, requests/limits and live memory working set, busiest first, plus the node's real memory and disk usage — the first call for "which pod is eating node X", MemoryPressure, DiskPressure and evictions, and before any cordon or drain
 - `k8s_get_endpoints` — ready vs not-ready backends behind a Service (readyCount=0 → 503 cause)
 - `k8s_get_rollout_status` — is a Deployment/StatefulSet/DaemonSet done rolling out? (desired vs ready + conditions)
 - `k8s_list_replicasets` — rollout history (active vs stale RS, failed old RS)

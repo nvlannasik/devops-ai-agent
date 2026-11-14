@@ -11,14 +11,19 @@ evicted pod as the cause** — find what actually grew.
 1. `k8s_describe_node` — `conditions` (MemoryPressure / DiskPressure / PIDPressure / Ready),
    `taints`, and capacity vs allocatable. The condition's own message says which resource and by
    how much.
-2. `prometheus_query` — what is actually consuming it on that node:
-   `topk(5, sum by (pod) (container_memory_working_set_bytes{node="<node>",container!=""}))`.
-   The top consumer and the evicted pod are usually different pods; say both, and say which is
-   which.
+2. `k8s_node_pods` for that node — every pod on it with QoS, requests/limits and LIVE working set
+   (busiest first), the node's real memory and root-disk usage, and what the scheduler promised
+   (`allocated`). The top consumer and the evicted pod are usually different pods; name both, and
+   say which is which. Requests are promises and working set is usage — a node can be 40%
+   requested and 95% used.
 3. `k8s_list_events` with `since_minutes: 60` — `Evicted`, `SystemOOM`, `FailedScheduling`. The
    eviction event names the threshold that was crossed.
 4. `k8s_recommend_resources` for the top consumer — an eviction loop is a sizing fault most of
    the time, and this gives the number to change rather than "reduce memory usage".
+
+**An eviction that names the POD's own limit is not node pressure.** "ephemeral local storage usage
+exceeds the total limit of containers" means that pod went over its own `ephemeral-storage` limit:
+the pod is the cause, the node is fine, and a cordon or drain fixes nothing.
 
 **`Ready: Unknown` is not pressure.** It means the kubelet stopped reporting: the node may be
 fine and unreachable, or down. Its pods will sit `Terminating` until the node returns. That is a

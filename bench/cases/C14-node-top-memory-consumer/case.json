@@ -1,0 +1,14 @@
+{
+  "id": "C14-node-top-memory-consumer",
+  "tier": "C",
+  "title": "Which pod is eating memory on a node — usage, not requests",
+  "mode": "conversation",
+  "settleSeconds": 90,
+  "message": "pod apa yang paling banyak makan memory di node worker3-vm sekarang?",
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": ["cache-warmer"]
+    }
+  }
+}

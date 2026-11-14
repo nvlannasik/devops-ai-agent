@@ -10,7 +10,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 28 (A01–A10, A13, A14, A16, B04, C01–C03, C05–C13, D01, D02) |
+| cases | 42, tiers A–F | 29 (A01–A10, A13, A14, A16, B04, C01–C03, C05–C14, D01, D02) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -170,7 +170,9 @@ OWN ephemeral-storage limit, not node pressure (no proposal). A16 cordons `worke
 attempt: the cordon carries the annotation `bench.devops-ai/cordoned-by`, cleanup uncordons only a
 node with that mark, and setup refuses a node someone else cordoned. A run killed mid-A16 leaves
 the node cordoned until the next A16 setup lifts it — check `kubectl get nodes` after a killed run.
-C12 uses `worker2-raspi` because A16's cordon events on `worker3-vm` live an hour. B02 (real node
+**C14** (conversation) asks which pod is eating memory on `worker3-vm`: `cache-warmer` holds
+~300Mi on a 32Mi request, so an answer from requests or limits names the wrong pod — it needs live
+usage (`k8s_node_pods`). C12 uses `worker2-raspi` because A16's cordon events on `worker3-vm` live an hour. B02 (real node
 pressure) is not ported: filling a node's memory or disk here would evict Postgres and Redis.
 
 C11 (2026-11-12) is the node-action case: a cordon asked about, then "ya". Its first attempt found
