@@ -3,10 +3,20 @@
   "tier": "A",
   "title": "Pod Pending because the only node it may run on was left cordoned",
   "settleSeconds": 15,
-  "groupLabels": { "alertname": "KubernetesPodNotScheduled", "namespace": "bench-a16", "severity": "warning", "cluster": "dev" },
+  "groupLabels": {
+    "alertname": "KubernetesPodNotScheduled",
+    "namespace": "bench-a16",
+    "severity": "warning",
+    "cluster": "dev"
+  },
   "alerts": [
     {
-      "labels": { "alertname": "KubernetesPodNotScheduled", "namespace": "bench-a16", "severity": "warning", "cluster": "dev" },
+      "labels": {
+        "alertname": "KubernetesPodNotScheduled",
+        "namespace": "bench-a16",
+        "severity": "warning",
+        "cluster": "dev"
+      },
       "annotations": {
         "summary": "Pod in bench-a16 has been Pending for 10 minutes",
         "description": "A pod in namespace `bench-a16` is `Pending` and has not been scheduled onto any node."
@@ -17,8 +27,14 @@
     "action": "k8s_uncordon",
     "target": "worker3-vm",
     "rca": {
-      "must": ["cordon|unschedulable|schedulingdisabled|tidak bisa dijadwalkan", "worker3-vm"],
-      "mustNot": ["insufficient (cpu|memory)|kekurangan (cpu|memori)", "(memory|disk|pid) ?pressure"]
+      "must": [
+        "cordon|unschedulable|schedulingdisabled|tidak bisa dijadwalkan",
+        "worker3-vm"
+      ],
+      "mustNot": [
+        "insufficient (cpu|memory)|kekurangan (cpu|memori)",
+        "(because of|due to|caused by|result of|karena|akibat)[^.\\n]{0,40}(memory|disk|pid) ?pressure"
+      ]
     }
   }
 }
