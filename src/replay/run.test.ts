@@ -36,7 +36,10 @@ const fakeMcp = () =>
         ? '{"logs":"' + "2026-10-01T03:01:16Z worker crashed: missing env DATABASE_URL\\n".repeat(6) + '"}'
         : name === "k8s_rollout_restart"
           ? `Dry run: would restart deployment ${String(input.namespace)}/${String(input.name)}`
-          : `[{"name":"${POD}","ready":true,"restarts":0,"status":"Running"}]`,
+          // The kind gate reads the workload listing; since 2026-11-14 a name no listing holds is refused.
+          : name === "k8s_list_deployments"
+            ? `[{"name":"worker","containers":[{"name":"worker","image":"busybox:1.36"}]}]`
+            : `[{"name":"${POD}","ready":true,"restarts":0,"status":"Running"}]`,
     disconnect: async () => {},
   }) as any;
 const acceptAll = { pendingFor: async () => null, propose: async () => 1 } as any;

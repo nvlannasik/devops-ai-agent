@@ -61,7 +61,10 @@ const MIN_LENGTH = 4;
  * one level shorter — flagged as an invented resource on an A05 attempt whose proposal was
  * correct. `[^-]*` already spans the inner dots, so one `\.` covers every depth.
  */
-const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*$/;
+const NOT_A_NAME = /\.\.|\.(io|com|org|net|dev)$|^[^-]*\.[^-]*$|^(spec|status|metadata|resources|requests|limits|containers|template|env)\./;
+// The last branch: a manifest field path whose leaf has a hyphen, which the dot-without-hyphen rule
+// cannot see — `resources.limits.ephemeral-storage`, flagged on bench C13 (2026-11-14) as a resource
+// no tool returned.
 
 /**
  * Labels our own RCA format writes. The Source column scopes a call that read the whole cluster as

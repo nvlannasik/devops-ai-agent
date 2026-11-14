@@ -474,3 +474,18 @@ test("with another backend left, a malformed answer fails over instead of asking
   assert.deepEqual(calls, ["heavy1", "heavy2", "heavy2"]);
   assert.equal(res.content[0].text, "H2");
 });
+
+// Bench C11, 2026-11-14: the reply to "ya" was our own evidence stamp and nothing else.
+test("an answer that is only the evidence stamp is a failure, and the last backend is asked again", async () => {
+  const calls: string[] = [];
+  const stamp = "[EVIDENCE READ AT] 2026-11-14T10:59:03.508Z (unix 1794653943)";
+  const r = new RouterLLMClient(new Map([["only", sequence([answer(stamp), answer("Cordoning worker3-vm is safe.\n[OFFER] cordon `Node/worker3-vm`")], calls, "only")]]), ["only"], []);
+  const res = await r.chat([], [], "sys");
+  assert.deepEqual(calls, ["only", "only"]);
+  assert.match(res.content[0].text!, /OFFER/);
+  // a real answer that cites a stamp is untouched
+  const cites: string[] = [];
+  const ok = new RouterLLMClient(new Map([["only", fake(answer(`Nodes are healthy.\n${stamp}`), cites, "only")]]), ["only"], []);
+  await ok.chat([], [], "sys");
+  assert.deepEqual(cites, ["only"]);
+});

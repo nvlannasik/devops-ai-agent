@@ -19,6 +19,13 @@ export const SERIALIZED_BLOCKS = /^\s*\[\s*\{\s*"type"\s*:\s*"(text|tool_use)"/;
 // `tool_calls` is left alone. Never parsed and run: a call the model wrote as prose is not a call.
 export const TEXT_TOOL_CALLS = /^\s*(?:```(?:json)?\s*)?\{\s*"tool_calls"\s*:\s*\[/;
 
+// Our own `[EVIDENCE READ AT] <iso> (unix N)` stamp (loop/control.ts evidenceStamp), copied back as
+// the whole answer. Bench C11, 2026-11-14: the reply to "ya" was that one line, so the approved
+// cordon never reached a card. The stamp sits in the history as a text block after every tool
+// round; a small model answering a two-letter message imitated the last text it saw. Defined here,
+// not imported, so the router does not depend on the loop.
+export const ECHOED_STAMP = /^\s*\[EVIDENCE READ AT\][^\n]*\s*$/;
+
 /**
  * Failures a retry cannot fix. Exhausted credit and a rejected key do not heal in 120 seconds,
  * and the default cool-off treats them as if they might: a bench run lost six attempts to
@@ -69,6 +76,7 @@ function failureOf(res: LLMResponse, tools: ToolDefinition[]): Failure | null {
   if (!text) return { reason: `empty response (stop=${res.stopReason})`, toolChannelDead: false };
   if (SERIALIZED_BLOCKS.test(text)) return { reason: "serialized content blocks", toolChannelDead: true };
   if (TEXT_TOOL_CALLS.test(text)) return { reason: "tool calls written out as text", toolChannelDead: true };
+  if (ECHOED_STAMP.test(text)) return { reason: "answered with the evidence stamp instead of an answer", toolChannelDead: false };
   if (namesToolOnly(text, tools)) {
     return { reason: `answered with a tool name instead of calling it (${text.trim()})`, toolChannelDead: true };
   }

@@ -68,7 +68,7 @@ const KIND_LABEL: Readonly<Record<string, string>> = { deployment: "Deployment",
  *
  * `listings` maps kind → that kind's listing output. Refuses only when the proposed kind's listing
  * is readable and lacks the name while another kind's holds it. Both holding it is not provably
- * wrong; neither holding it belongs to the target gate and the dry-run.
+ * wrong. Neither holding it, with every listing read, is refused too (2026-11-14, see below).
  */
 export function wrongKindRefusal(
   action: string,
@@ -83,7 +83,23 @@ export function wrongKindRefusal(
   const has = (k: string): boolean | null => (listings[k] === undefined ? null : holdsWorkload(listings[k]!, name));
   if (has(kind) !== false) return null;
   const actual = Object.keys(LISTING_FOR_KIND).filter((k) => k !== kind && has(k) === true);
-  if (actual.length === 0) return null;
+  if (actual.length === 0) {
+    // No kind holds it, and every listing was read: the card would act on nothing. Bench C12,
+    // 2026-11-14: a restart of `monitoring/prometheus-server` — the Deployment is
+    // `monitoring-prometheus-server` — passed the target gate (a substring of a real name) and
+    // reached a card; production's dry-run would have answered NotFound, the bench has none. Said
+    // here with the names that are close, so the one re-ask can correct it.
+    if (!Object.keys(LISTING_FOR_KIND).every((k) => has(k) === false)) return null;
+    const near = Object.keys(LISTING_FOR_KIND)
+      .flatMap((k) => (workloadItems(listings[k]!) ?? []).map((w) => ({ k, n: String(w?.name ?? "") })))
+      .filter(({ n }) => n && (n.includes(name) || name.includes(n)))
+      .map(({ k, n }) => `${KIND_LABEL[k]} \`${n}\``);
+    return (
+      `there is no Deployment, StatefulSet or DaemonSet named \`${name}\` in \`${ns}\`, so this card would act on ` +
+      `nothing.` + (near.length ? ` Close names there: ${near.slice(0, 5).join(", ")}.` : "") +
+      ` Name the workload exactly as the listing does.`
+    );
+  }
   const is = actual.map((k) => KIND_LABEL[k]).join(" and a ");
   return (
     `\`${ns}/${name}\` is a ${is}, not a ${KIND_LABEL[kind]} — no ${KIND_LABEL[kind]} of that name exists in ` +

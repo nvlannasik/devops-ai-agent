@@ -218,8 +218,23 @@ test("a workload proposed under a kind it is not is refused, naming the kind it 
 test("the kind gate lets through what it cannot judge, and what is right", () => {
   const p = { namespace: "x", name: "payments", kind: "statefulset" };
   assert.equal(wrongKindRefusal("k8s_set_image", p, { statefulset: sts }), null, "right kind");
-  assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: none, statefulset: none, daemonset: none }), null, "nowhere — the target gate's and the dry-run's");
+  // nowhere, every listing read: refused since 2026-11-14 (bench C12) — the bench has no dry-run to say NotFound
+  assert.match(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: none, statefulset: none, daemonset: none }) ?? "", /named `payments`/, "nowhere");
   assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: "Error: timeout", statefulset: sts }), null, "its own kind unreadable");
   assert.equal(wrongKindRefusal("k8s_set_image", { ...p, kind: "deployment" }, { deployment: sts, statefulset: sts }), null, "both kinds hold the name — the model's pick is not provably wrong");
   assert.equal(wrongKindRefusal("k8s_delete_pod", { namespace: "x", pod: "payments-0" }, { deployment: none, statefulset: sts }), null, "not a workload action");
+});
+
+// Bench C12, 2026-11-14: `prometheus-server` proposed; the Deployment is `monitoring-prometheus-server`.
+test("a workload no kind holds is refused, with the close names, once every listing was read", () => {
+  const deps = JSON.stringify([{ name: "monitoring-prometheus-server", containers: [] }, { name: "grafana", containers: [] }]);
+  const why = wrongKindRefusal("k8s_rollout_restart", { namespace: "monitoring", name: "prometheus-server", kind: "deployment" }, {
+    deployment: deps, statefulset: none, daemonset: none,
+  });
+  assert.match(why ?? "", /no Deployment, StatefulSet or DaemonSet named `prometheus-server`/);
+  assert.match(why ?? "", /Deployment `monitoring-prometheus-server`/);
+  // one listing unreadable: not provable, say nothing
+  assert.equal(wrongKindRefusal("k8s_rollout_restart", { namespace: "monitoring", name: "prometheus-server", kind: "deployment" }, {
+    deployment: deps, statefulset: "Error: forbidden", daemonset: none,
+  }), null);
 });

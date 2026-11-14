@@ -1563,6 +1563,22 @@ when every fault line for the target is a storage eviction with no cpu/memory fa
 `pod-pending.md` says `node.kubernetes.io/unschedulable` IS a cordon (A16: five RCAs of five told
 a human to add a toleration; the mcp-server's node listing now shows cordons too).
 
+### From the 2026-11-14 28x5 baseline (`61d3e65`, pass^5 75%)
+
+- **The model answered with our own evidence stamp.** C11: the whole reply to "ya" was
+  `[EVIDENCE READ AT] <iso> (unix N)` — the text block every tool round leaves in the history — so
+  the approved cordon never reached a card. The router treats an answer that is only the stamp as a
+  failure (`ECHOED_STAMP`), and the last backend is asked once more.
+- **A workload no kind holds is refused by the kind gate** when every listing was read. C12: a
+  restart of `monitoring/prometheus-server` (the Deployment is `monitoring-prometheus-server`)
+  passed the target gate, whose substring test grounds a prefix of a real name; production's
+  dry-run would say NotFound, the bench has none. The refusal names the close names for the re-ask.
+- **A manifest field path is not a resource name** (`resources.limits.ephemeral-storage`, C13): the
+  dot-without-hyphen rule missed a hyphenated leaf, so paths under known manifest roots are skipped.
+- **C13's `mustNot` was too wide**: it failed four RCAs that DENIED node pressure ("not under disk
+  pressure", "`DiskPressure=False`") — the node listing now reports pressure, so the model quotes
+  it. It now forbids only pressure asserted as the cause ("because of / due to … pressure").
+
 ### An RCA is held to its evidence BEFORE it leaves (`agent/loop/answer-gates.ts`, `groundedAnswer`)
 
 `groundingGaps` found invented names from the day it shipped, and only after the fact: a warning

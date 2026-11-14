@@ -181,3 +181,8 @@ test("`docker-registry`, kubectl's Secret type, is not a cited name", () => {
   // a workload that merely contains the word still has to be grounded
   assert.deepEqual(groundingGaps("`docker-registry-proxy` is down", []), ["docker-registry-proxy"]);
 });
+
+test("a manifest field path with a hyphenated leaf is not a cited name", () => {
+  assert.deepEqual(citedNames("raise `resources.limits.ephemeral-storage` on `thumbnailer-cache`"), ["thumbnailer-cache"]);
+  assert.deepEqual(citedNames("`spec.template.spec.node-selector` and `metadata.labels.app-name`"), []);
+});
