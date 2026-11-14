@@ -10,7 +10,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 25 (A01–A10, A13, A14, B04, C01–C03, C05–C11, D01, D02) |
+| cases | 42, tiers A–F | 28 (A01–A10, A13, A14, A16, B04, C01–C03, C05–C13, D01, D02) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -163,6 +163,15 @@ re-enters the thread's cluster). Without the binding, strict mode gives the agen
 tools and every cluster-reading gate fails open; measured 2026-11-12 on A02: "no cluster is bound
 to this thread". Single-cluster mode ignores the label. A local cluster named anything but `dev`
 needs the label changed with it, or every alert case runs unlabelled.
+
+Node cases (2026-11-14): **C12** a stale node alert for a Ready node (no proposal; read-only),
+**A16** a workload pinned to a node left cordoned (`k8s_uncordon`), **C13** pods evicted for their
+OWN ephemeral-storage limit, not node pressure (no proposal). A16 cordons `worker3-vm` for one
+attempt: the cordon carries the annotation `bench.devops-ai/cordoned-by`, cleanup uncordons only a
+node with that mark, and setup refuses a node someone else cordoned. A run killed mid-A16 leaves
+the node cordoned until the next A16 setup lifts it — check `kubectl get nodes` after a killed run.
+C12 uses `worker2-raspi` because A16's cordon events on `worker3-vm` live an hour. B02 (real node
+pressure) is not ported: filling a node's memory or disk here would evict Postgres and Redis.
 
 C11 (2026-11-12) is the node-action case: a cordon asked about, then "ya". Its first attempt found
 that the node actions had reached the parser, the proposal list and the MCP server but not the

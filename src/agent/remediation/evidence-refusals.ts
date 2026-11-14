@@ -177,14 +177,33 @@ export function ungroundedTargetRefusal(
 const RESOURCE_FAULT =
   /\b(oomkill\w*|out of memory|exit code 137|memory limit|memory pressure|cpu pressure|throttl\w*|insufficient (?:cpu|memory)|evicted|didn'?t have free ports|over.?provision\w*|under.?provision\w*|no_requests|oom_risk|cpu_throttled)\b/i;
 
+/**
+ * Eviction for the pod's OWN ephemeral-storage limit. RESOURCE_FAULT counts `evicted`, rightly — a
+ * node short of memory evicts too — but `k8s_set_resources` changes cpu and memory only. Bench C13,
+ * 2026-11-14, five of five: a pod evicted for "ephemeral local storage usage exceeds the total limit",
+ * and a card raising its MEMORY limit, each one's reason saying "increase ephemeral-storage limit".
+ * The field it set could not do what its reason said.
+ */
+const EPHEMERAL = /ephemeral[- ]?storage|ephemeral local storage|local storage usage|local ephemeral storage/i;
+const CPU_OR_MEMORY_FAULT = /\b(oomkill\w*|out of memory|exit code 137|memory limit|memory pressure|cpu pressure|throttl\w*|insufficient (?:cpu|memory)|cpu_throttled|oom_risk)\b/i;
+
 export function resourceFaultRefusal(proposal: Proposal, observed: string | null): string | null {
   if (proposal.action !== "k8s_set_resources") return null;
+  const storageRefusal =
+    `resizing \`${proposal.namespace}/${proposal.name}\` is refused: the eviction is for its ephemeral-storage limit, ` +
+    `and this action changes cpu and memory only — the pod would be evicted again for the same reason. No ` +
+    `whitelisted action raises an ephemeral-storage limit; say what the limit is and what the container writes, and ` +
+    `that the change belongs in its manifest.`;
+  if (EPHEMERAL.test(proposal.reason)) return storageRefusal;
   if (observed === null) return null;
   // Line-scoped to the target, like scaleOutRefusal: remediation 112 resized cloudflared on another
   // pod's OOMKill from a cluster-wide `sum by (reason)` line that named no workload. Measured on the
   // recorded A02/A05/C02 threads first: every one that passed before still passes.
   const name = proposal.name.toLowerCase();
-  if (observed.split("\n").some((line) => line.toLowerCase().includes(name) && RESOURCE_FAULT.test(line))) return null;
+  const faultLines = observed.split("\n").filter((line) => line.toLowerCase().includes(name) && RESOURCE_FAULT.test(line));
+  // Every fault seen is a storage eviction, and none is about cpu or memory: a resize addresses none of it.
+  if (faultLines.length > 0 && faultLines.every((l) => EPHEMERAL.test(l) && !CPU_OR_MEMORY_FAULT.test(l))) return storageRefusal;
+  if (faultLines.length > 0) return null;
   return (
     `resizing \`${proposal.namespace}/${proposal.name}\` is refused: nothing this investigation read ` +
     `shows a fault that a different request or limit would address — no OOMKill, no throttling, no ` +

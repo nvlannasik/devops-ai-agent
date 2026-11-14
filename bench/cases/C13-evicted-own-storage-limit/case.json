@@ -1,0 +1,26 @@
+{
+  "id": "C13-evicted-own-storage-limit",
+  "tier": "C",
+  "title": "Evicted, and not by node pressure — the pod's own ephemeral-storage limit",
+  "settleSeconds": 10,
+  "groupLabels": { "alertname": "KubernetesPodEvicted", "namespace": "bench-c13", "severity": "warning", "cluster": "dev" },
+  "alerts": [
+    {
+      "labels": { "alertname": "KubernetesPodEvicted", "namespace": "bench-c13", "severity": "warning", "cluster": "dev" },
+      "annotations": {
+        "summary": "Pods in bench-c13 are being evicted",
+        "description": "Pods in namespace `bench-c13` have been evicted by the kubelet more than once in the last 10 minutes."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": ["ephemeral|local storage|ephemeral-storage|penyimpanan lokal"],
+      "mustNot": [
+        "(disk|memory|pid) ?pressure",
+        "node[^.\\n]{0,30}(disk|storage|memory)[^.\\n]{0,20}(full|exhaust\\w*|penuh|habis)"
+      ]
+    }
+  }
+}

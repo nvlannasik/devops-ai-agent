@@ -7,6 +7,7 @@ import { RemediationStore } from "./index.js";
 import { proposeWithRetry, PROPOSAL_SYSTEM, type Proposal, type Refusal } from "./proposal.js";
 import { rollbackRefusal, staleRollbackRefusal, specChangesOf, rollbackDryRunSummary, rolloutFromRevision } from "./rollback-gate.js";
 import { parsePods, replacementRefusal, healthyTargetRefusal, passingProbeRefusal, rbacRestartRefusal, REPLACEMENT_ACTIONS } from "./replace-guard.js";
+import { nodeActionRefusal, parseNodeDetail, vmActionRefusal } from "./node-gate.js";
 import { noOpImageRefusal, noOpResourcesRefusal, oomShrinkRefusal, wrongKindRefusal, holdsWorkload, LISTING_FOR_KIND, WORKLOAD_ACTIONS } from "./noop-guard.js";
 import { RemediationCheckStore, summarizePods, alertState, decideVerdict, verdictMessage, maxAttemptsReached, type AlertState, type PodHealth, type RemediationCheck, type Verdict, applyState, expectFromChanges, expectFromRevert, AWAIT_POLL_SECONDS, AWAIT_APPLY_SECONDS, type ApplyExpectation } from "./verify.js";
 import { parseGitOpsPreview, type GitOpsPreview } from "../gitops/preview.js";
@@ -299,6 +300,12 @@ export class Remediator {
     if (wrongKind) return { gate: "kind gate", reason: wrongKind };
 
     const evidence = await this.threadEvidence(ctx.threadId);
+
+    // Node and VM actions read the node live — see node-gate.ts. Before the replacement guard
+    // because they are not workload actions at all, and nothing below speaks for them.
+    const nodeOrVm = await this.nodeRefusalFor(proposal, !!ctx.userRequested);
+    if (nodeOrVm) return { gate: "node gate", reason: nodeOrVm };
+
     if (!ctx.userRequested) {
       // What may name the target as the fault: the Root Cause (never the Immediate line — that is
       // where the reflex restart is written) and the alert's labels. Whole text when no section.
@@ -356,6 +363,28 @@ export class Remediator {
     if (image) return { gate: "image gate", reason: image };
 
     return null;
+  }
+
+  /** One `k8s_describe_node` for a node action; the tool list for a VM one. Fails open on a read error. */
+  async nodeRefusalFor(proposal: Proposal, userRequested: boolean): Promise<string | null> {
+    const p = proposal.toolParams;
+    if (proposal.action === "vm_restart_service") {
+      const host = String(p.host ?? "");
+      const names = this.host.mcp.getTools().map((t) => t.name);
+      const nodes = await this.host.mcp.callTool("k8s_list_nodes", {}).catch(() => "");
+      const isNode = !!host && new RegExp(`"name"\\s*:\\s*"${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(nodes);
+      return vmActionRefusal(proposal.action, host, names, isNode);
+    }
+    if (!["k8s_cordon", "k8s_uncordon", "k8s_drain"].includes(proposal.action)) return null;
+    const node = String(p.node ?? "");
+    if (!node) return null;
+    try {
+      const detail = parseNodeDetail(await this.host.mcp.callTool("k8s_describe_node", { name: node }));
+      return detail ? nodeActionRefusal(proposal.action, node, detail, userRequested) : null;
+    } catch (err) {
+      logger.debug(`[remediation] node gate could not read ${node}: ${errDetail(err)}`);
+      return null;
+    }
   }
 
   /**

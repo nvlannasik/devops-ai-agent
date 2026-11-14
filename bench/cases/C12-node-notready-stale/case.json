@@ -1,0 +1,25 @@
+{
+  "id": "C12-node-notready-stale",
+  "tier": "C",
+  "title": "A node alert for a node that is Ready — the node-level flap",
+  "settleSeconds": 0,
+  "groupLabels": { "alertname": "WorkerNodeIsNotReady", "severity": "critical", "cluster": "dev" },
+  "alerts": [
+    {
+      "labels": { "alertname": "WorkerNodeIsNotReady", "node": "worker2-raspi", "severity": "critical", "cluster": "dev" },
+      "annotations": {
+        "summary": "Kubernetes Node `worker2-raspi` is not ready",
+        "description": "Kubernetes Node `worker2-raspi` is not ready for more than 3 minutes. Time to check the health of the node! :hmmmmm:"
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "worker2-raspi",
+        "stale|resolved|recovered|flap|transient|(is|now|currently|sekarang|sudah|kembali)\\W{0,6}ready|ready\\W{0,6}(true|=\\s*true)|pulih"
+      ]
+    }
+  }
+}

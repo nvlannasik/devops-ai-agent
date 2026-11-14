@@ -1538,6 +1538,31 @@ included — it is replaced by `alertDeclinedFallback`: a visible model failure 
 count, because that sentence under an alert reads as "nothing to see here". Gate name
 `scope-decline`.
 
+### Node and VM actions read the node first (`agent/remediation/node-gate.ts`, 2026-11-14)
+
+The node actions (cordon, uncordon, drain) and the VM restart had no gate of their own: the first
+node bench cases found it. C12, a stale `WorkerNodeIsNotReady` for a Ready node: a `k8s_cordon` of
+it in one attempt, a `vm_restart_service` of `kubelet` on it in two — a VM action on a Kubernetes
+node, in a run with no VM agent configured. The dry-run catches neither: cordoning a healthy node
+is a valid operation.
+
+`nodeRefusalFor` runs first in `refusalFor` ("node gate"), reading the node LIVE with
+`k8s_describe_node` like the replacement guard reads pods:
+- cordon/drain of a node with no fault (Ready, no pressure) — refused unless a human asked
+  (maintenance is a reason the node cannot show; C11 is that request); cordon of a cordoned node
+  refused always (no-op);
+- uncordon of a node that is not cordoned refused always (no-op); of one still reporting a fault,
+  refused unless a human asked;
+- `vm_restart_service` refused when no VM agent is configured (the virtual tool is absent) or when
+  its host is a Kubernetes node (`k8s_list_nodes`) — restarting kubelet is a non-goal.
+Fails open on any read error.
+
+Beside it, `resourceFaultRefusal` refuses a resize for an ephemeral-storage eviction (C13: five
+cards raising MEMORY "to increase the ephemeral-storage limit") — by the proposal's own reason, or
+when every fault line for the target is a storage eviction with no cpu/memory fault. And
+`pod-pending.md` says `node.kubernetes.io/unschedulable` IS a cordon (A16: five RCAs of five told
+a human to add a toleration; the mcp-server's node listing now shows cordons too).
+
 ### An RCA is held to its evidence BEFORE it leaves (`agent/loop/answer-gates.ts`, `groundedAnswer`)
 
 `groundingGaps` found invented names from the day it shipped, and only after the fact: a warning
