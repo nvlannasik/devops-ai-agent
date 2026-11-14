@@ -386,6 +386,14 @@ export function worthProposing(
   if (CLEANUP_INTENT.test(userText) && NAMES_OBJECT.test(userText)) {
     return { propose: true, reason: "the user asked to clean up a named object", byUser: true };
   }
+  // A human answering "ya" to an [OFFER] — in this reply or the one before it — has made the
+  // request their own. Before the offer branch, which would otherwise report it as the model's:
+  // bench C11, 2026-11-14, five of five, the node gate refused a cordon the user had just
+  // approved because `byUser` was false. The proposal prompt already says an approved offer is
+  // a request and not to re-judge whether it is needed; this is the same rule for the gates.
+  if (isApproval(userText) && (offer || parseOffer(previousReply))) {
+    return { propose: true, reason: `the user approved the agent's offer: ${offer ?? parseOffer(previousReply)}`, byUser: true };
+  }
   // The agent's own structured signal — see parseOffer. Not byUser: the words are the model's,
   // so the replacement guard still applies.
   if (offer) return { propose: true, reason: `the agent offered a change: ${offer}`, byUser: false };

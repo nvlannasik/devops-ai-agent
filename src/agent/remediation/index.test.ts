@@ -1154,3 +1154,19 @@ test("buildProposalPrompt keeps the RCA head behind the alert path's timeline + 
   assert.ok(prompt.includes("ROOTCAUSE-MARKER"), "the RCA head must survive the timeline+memory prefix");
   assert.ok(prompt.includes("RECOMMENDED-MARKER"), "the RCA tail (Recommended Actions) must still survive");
 });
+
+// Bench C11, 2026-11-14, five of five: "ya" to an offered cordon reached the node gate as the model's
+// own proposal (byUser false) and was refused for a healthy node — the maintenance the user approved.
+test("an approval of an offer is the user's request, whether the offer is in this reply or the last", async () => {
+  const { worthProposing } = await import("./proposal.js");
+  const offered = "Cordoning it first is safe.\n[OFFER] cordon `Node/worker3-vm`";
+  const sameTurn = worthProposing("ya", offered, false, "", "cordon `Node/worker3-vm`");
+  assert.equal(sameTurn.propose, true);
+  assert.equal(sameTurn.byUser, true);
+  const lastTurn = worthProposing("oke lanjut", "Siap.", false, offered, null);
+  assert.equal(lastTurn.byUser, true);
+  // an offer the user has not answered yet is still the model's
+  assert.equal(worthProposing("is it safe to cordon worker3-vm?", offered, false, "", "cordon `Node/worker3-vm`").byUser, false);
+  // and a refusal of it is not an approval
+  assert.equal(worthProposing("jangan dulu", "Oke.", false, offered, null).byUser, false);
+});
