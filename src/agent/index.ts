@@ -787,6 +787,16 @@ export class DevOpsAgent {
     return this.incidents.markResolved(labels, "alertmanager", this.alertScope(labels));
   }
 
+  /** A flap: the same alert group resolved within `withinMinutes` — see IncidentMemory.recentlyResolved. */
+  recentlyResolvedIncident(groupLabels: Record<string, string>, withinMinutes: number) {
+    return this.incidents.recentlyResolved(groupLabels, withinMinutes);
+  }
+
+  /** Reopens a resolved incident (a flap fired again); null when it was not resolved. */
+  reopenIncident(id: number, by: string) {
+    return this.incidents.reopenById(id, by);
+  }
+
   /** Final review finding 7: the scope ternary `recallRemediations` and `resolveIncident` both
    *  had, byte for byte. Single-cluster mode: undefined, unchanged — no scope at all. */
   private alertScope(labels: Record<string, string>): { cluster: string | null; local: string | null } | undefined {

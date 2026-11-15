@@ -52,3 +52,13 @@ test("a VM action needs a VM agent and a host that is not a Kubernetes node", ()
   assert.equal(vmActionRefusal("vm_restart_service", "billing-vm", ["vm_restart_service"], false), null);
   assert.equal(vmActionRefusal("k8s_cordon", "worker3-vm", [], true), null);
 });
+
+// Production, 2026-11-14: a drain of control-plane master3-vm, stopped only at the dry-run, twice.
+test("a control-plane node is never cordoned or drained, whoever asks and whatever its state", () => {
+  const cp = parseNodeDetail(JSON.stringify({ name: "master3-vm", roles: ["control-plane"], conditions: [{ type: "Ready", status: "True" }, { type: "MemoryPressure", status: "True" }] }))!;
+  for (const a of ["k8s_cordon", "k8s_drain"]) {
+    for (const asked of [false, true]) assert.match(nodeActionRefusal(a, "master3-vm", cp, asked) ?? "", /control-plane node/, `${a} asked=${asked}`);
+  }
+  // a worker under the same pressure may be drained
+  assert.equal(nodeActionRefusal("k8s_drain", "worker1-raspi", { ...cp, roles: [] }, false), null);
+});

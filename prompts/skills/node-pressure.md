@@ -25,6 +25,12 @@ evicted pod as the cause** — find what actually grew.
 exceeds the total limit of containers" means that pod went over its own `ephemeral-storage` limit:
 the pod is the cause, the node is fine, and a cordon or drain fixes nothing.
 
+**A control-plane node under pressure is a capacity problem.** `kube-apiserver-<node>`,
+`etcd-<node>`, `kube-controller-manager-<node>` and `kube-scheduler-<node>` are static pods from the
+kubelet's manifests — never propose resizing them (a memory limit on the API server makes it the
+OOM victim) and never cordon or drain the node. Name what uses the memory, and recommend more
+memory for that machine or moving workload pods off it.
+
 **`Ready: Unknown` is not pressure.** It means the kubelet stopped reporting: the node may be
 fine and unreachable, or down. Its pods will sit `Terminating` until the node returns. That is a
 node/network incident and the pods are the symptom — do not investigate them individually.

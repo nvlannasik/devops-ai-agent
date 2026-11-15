@@ -56,6 +56,9 @@ export interface AlertmanagerPayload {
   alerts: AlertItem[];
 }
 
+/** A group that fires again within this many minutes of resolving is the same incident flapping. */
+export const FLAP_WINDOW_MINUTES = 60;
+
 export class AlertFlow {
   constructor(private readonly host: SlackHost) {}
 
@@ -169,6 +172,38 @@ export class AlertFlow {
     return true;
   }
 
+  /**
+   * An alert group that fires again within FLAP_WINDOW_MINUTES of resolving is the same incident.
+   *
+   * Production, 2026-11-14/15: `KubernetesNodeMemoryPressure` on `master3-vm` crossed the kubelet's
+   * eviction threshold, evicted a pod, dropped below, and crossed again — six full investigations,
+   * six Slack threads and six incident rows in three hours, each re-deriving the same root cause,
+   * two of them proposing the same drain. Matched on the stored group labels exactly (cluster,
+   * node or pod included), so another node's alert of the same name is still its own incident.
+   *
+   * Not re-investigated: the thread already holds the RCA, and a human can mention the agent to
+   * look again. The incident is reopened, so the next resolve closes it in the same thread. Any
+   * failure returns false and the alert takes the normal path — a flap is never lost.
+   */
+  async reopenFlap(groupLabels: Record<string, string>, alertName: string): Promise<boolean> {
+    const prior = await this.host.agent.recentlyResolvedIncident(groupLabels, FLAP_WINDOW_MINUTES);
+    if (!prior) return false;
+    const reopened = await this.host.agent.reopenIncident(prior.id, "alertmanager-refire");
+    if (!reopened) return false;
+    const ago = Math.max(1, Math.round((Date.now() - prior.resolvedAt.getTime()) / 60_000));
+    await this.host.app.client.chat.postMessage({
+      channel: prior.channel,
+      thread_ts: prior.threadTs,
+      text:
+        `🔁 *Fired again* — ${alertName}, ${ago} min after it resolved. Same alert, same labels: this is the incident ` +
+        `above flapping, so it was reopened here instead of starting a new investigation. The RCA above still ` +
+        `stands — mention me if you want it checked again.`,
+      mrkdwn: true,
+    });
+    logger.info(`[slack] ${alertName} fired again ${ago} min after resolving — reopened incident ${prior.id} in thread ${prior.threadTs}, not re-investigated`);
+    return true;
+  }
+
   async handleAlert(payload: AlertmanagerPayload): Promise<void> {
     const channel = config.slack.alertChannel;
     if (!channel) { logger.warn("SLACK_ALERT_CHANNEL not set, skipping"); return; }
@@ -203,6 +238,15 @@ export class AlertFlow {
     logger.info(`[slack] processing alert group: ${alertName} severity=${alertSeverity ?? "unknown"} firing=${firing.length}`);
 
     const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
+
+    // A flap: the same group resolved a few minutes ago. Back into that thread, not a new one.
+    if (
+      await this.reopenFlap(groupLabels, alertName).catch((e) => {
+        logger.warn(`[slack] flap check failed for ${alertName}, taking the normal path: ${errDetail(e)}`);
+        return false;
+      })
+    )
+      return;
 
     // Cross-alert correlation: a related alert joins the open incident's thread instead of
     // opening its own. Checked before the new thread is posted — a merge needs no thread at all.

@@ -17,6 +17,7 @@ export interface NodeDetail {
   name?: string;
   conditions?: Array<{ type?: string; status?: string }>;
   unschedulable?: boolean;
+  roles?: string[];
 }
 
 export function parseNodeDetail(raw: string): NodeDetail | null {
@@ -51,6 +52,17 @@ export function nodeFaults(d: NodeDetail): string[] {
 export function nodeActionRefusal(action: string, node: string, d: NodeDetail, userRequested: boolean): string | null {
   const faults = nodeFaults(d);
   const cordoned = d.unschedulable === true;
+  // The MCP server refuses these too, but only at the dry-run, where the refusal ends the card with
+  // no re-ask. Production, 2026-11-14: a drain of control-plane `master3-vm` under MemoryPressure,
+  // proposed twice in an hour and stopped both times only there. Said here, the one re-ask can turn
+  // to what does help a control-plane node: its capacity.
+  if ((action === "k8s_cordon" || action === "k8s_drain") && (d.roles ?? []).some((r) => r === "control-plane" || r === "master")) {
+    return (
+      `\`${node}\` is a control-plane node — it is never cordoned or drained by this agent, whoever asks. Its pods are ` +
+      `the API server, scheduler and controller manager. Under pressure, the fix is the node's capacity (more memory ` +
+      `or CPU for the machine) or moving workload pods off it; say that instead.`
+    );
+  }
   if (action === "k8s_cordon" && cordoned) {
     return `\`${node}\` is already cordoned — a cordon changes nothing. If pods must leave it, that is a drain.`;
   }

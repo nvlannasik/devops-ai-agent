@@ -1563,6 +1563,27 @@ when every fault line for the target is a storage eviction with no cpu/memory fa
 `pod-pending.md` says `node.kubernetes.io/unschedulable` IS a cordon (A16: five RCAs of five told
 a human to add a toleration; the mcp-server's node listing now shows cordons too).
 
+### The first real node incident (production, 2026-11-14/15, `master3-vm` MemoryPressure)
+
+Once kube-state-metrics was back, `KubernetesNodeMemoryPressure` fired for control-plane
+`master3-vm` (a 2Gi VM, ~1.1Gi allocatable, `kube-apiserver` at ~670Mi) and the agent handled it
+end to end, calling `k8s_node_pods` itself and naming the top consumer with live numbers. Four
+things it got wrong, each fixed:
+- **The victim was invisible.** Evicted pods are phase `Failed`; `k8s_node_pods` left them out, so
+  the RCA said the victim "is not visible from the evidence" while `KubernetesPodNotHealthy` fired
+  for node-exporter and metallb's speaker. mcp-server `4adab68`: an `evicted` list with the
+  kubelet's message.
+- **Drain of a control-plane node**, proposed twice and stopped only by the MCP dry-run (no re-ask
+  there). The node gate now refuses cordon/drain of a `control-plane`/`master` node for anyone.
+- **"Set requests/limits on kube-apiserver"** as the Immediate fix — a static pod outside GitOps,
+  where a memory limit makes the API server the OOM victim. `node-pressure.md`: never resize
+  control-plane static pods; on a control-plane node the fix is capacity.
+- **Six investigations in three hours** of the same flapping alert: each re-fire after a resolve
+  was a new thread and incident. `reopenFlap` (app/alerts.ts): a group whose stored
+  `group_labels` match EXACTLY and that resolved within `FLAP_WINDOW_MINUTES` (60) is reopened in
+  its own thread with a "🔁 Fired again" note and not re-investigated; the next resolve closes it
+  there. Any failure takes the normal path.
+
 ### From the 2026-11-14 28x5 baseline (`61d3e65`, pass^5 75%)
 
 - **The model answered with our own evidence stamp.** C11: the whole reply to "ya" was

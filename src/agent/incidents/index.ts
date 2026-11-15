@@ -580,6 +580,32 @@ export class IncidentMemory {
     }
   }
 
+  /**
+   * The newest top-level incident for EXACTLY this alert group that resolved in the last
+   * `withinMinutes` — a flap, not a new incident. Matched on the stored `group_labels` (jsonb
+   * equality ignores key order), which carries the cluster, the node or pod and every other label
+   * the group shares, so a different node or a different cluster never matches.
+   */
+  async recentlyResolved(
+    groupLabels: Record<string, string>,
+    withinMinutes: number
+  ): Promise<{ id: number; channel: string; threadTs: string; resolvedAt: Date } | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT id, channel, thread_ts, resolved_at FROM incidents
+          WHERE group_labels = $1::jsonb AND resolved_at > now() - make_interval(mins => $2) AND ${TOP_LEVEL}
+          ORDER BY resolved_at DESC LIMIT 1`,
+        [JSON.stringify(groupLabels), withinMinutes]
+      );
+      if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
+      return { id: Number(rows[0].id), channel: rows[0].channel, threadTs: rows[0].thread_ts, resolvedAt: new Date(rows[0].resolved_at) };
+    } catch (err) {
+      logger.error(`[incidents] recentlyResolved failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   // On-call says it is not over. Same guard in reverse: only a currently-resolved row flips,
   // so a second `reopen` is reported as "already firing" instead of silently doing nothing.
   // The cleared sighting goes too — the sweeper must re-earn its two passes.
