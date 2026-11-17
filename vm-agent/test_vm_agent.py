@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -63,7 +64,7 @@ class AgentTest(unittest.TestCase):
         Stub.claims, Stub.seen, Stub.agents = [], [], []
         self.runner = Runner()
         cfg = {"name": "vm-a", "url": self.url, "token": "tok-a", "units": ["nginx.service"], "poll_seconds": 10, "ca_file": None}
-        self.agent = vm_agent.Agent(cfg, runner=self.runner)
+        self.agent = vm_agent.Agent(cfg, runner=self.runner, snap=lambda: {"memory": {"totalBytes": 1}})
 
     def test_a_listed_unit_is_restarted_and_reported(self):
         Stub.claims = [{"id": 3, "unit": "nginx.service", "action": "restart"}]
@@ -91,6 +92,7 @@ class AgentTest(unittest.TestCase):
         self.agent.heartbeat()
         self.assertEqual(Stub.seen[-1][0], "/vm/heartbeat")
         self.assertEqual(Stub.seen[-1][2]["units"], ["nginx.service"])
+        self.assertEqual(Stub.seen[-1][2]["snapshot"], {"memory": {"totalBytes": 1}})
 
     def test_requests_name_the_agent_not_python_urllib(self):
         # Cloudflare blocks the default Python-urllib User-Agent with a 403 (error 1010).
@@ -119,3 +121,61 @@ class AgentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SnapshotTest(unittest.TestCase):
+    """snapshot() over a fake /proc and cgroup tree."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.tmp.name)
+        self.proc, self.cg = root / "proc", root / "cgroup"
+
+        def w(path, text):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+        w(self.proc / "meminfo", "MemTotal: 2000 kB\nMemFree: 100 kB\nMemAvailable: 200 kB\nCached: 300 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\nAnonPages: 1500 kB\n")
+        w(self.proc / "loadavg", "1.50 1.20 0.90 2/300 999\n")
+        w(self.proc / "uptime", "4242.5 100.0\n")
+        procs = {
+            "10": ("etcd", "330000", "0::/system.slice/etcd.service"),
+            "11": ("kube-apiserver", "700000", "0::/kubepods.slice/kubepods-burstable.slice/x/cri-containerd-1.scope"),
+            "12": ("kubelet", "75000", "0::/system.slice/kubelet.service"),
+            "13": ("sshd", "8000", "0::/user.slice/user-1000.slice/session-3.scope"),
+        }
+        for pid, (name, rss, cg) in procs.items():
+            w(self.proc / pid / "status", f"Name:\t{name}\nVmRSS:\t{rss} kB\n")
+            w(self.proc / pid / "cgroup", cg + "\n")
+        w(self.proc / "2" / "status", "Name:\tkthreadd\n")  # kernel thread: no VmRSS
+        w(self.proc / "2" / "cgroup", "0::/\n")
+        w(self.cg / "system.slice" / "etcd.service" / "memory.current", "349495296\n")
+        w(self.cg / "system.slice" / "kubelet.service" / "memory.current", "80000000\n")
+        w(self.cg / "system.slice" / "-.mount" / "memory.current", "1\n")
+        w(self.cg / "kubepods.slice" / "memory.current", "900000000\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_memory_processes_units_and_pods(self):
+        s = vm_agent.snapshot(proc=str(self.proc), cgroup=str(self.cg))
+        self.assertEqual(s["memory"]["totalBytes"], 2000 * 1024)
+        self.assertEqual(s["memory"]["availableBytes"], 200 * 1024)
+        self.assertEqual(s["load"], [1.5, 1.2, 0.9])
+        self.assertEqual(s["uptimeSeconds"], 4242)
+        self.assertEqual([p["name"] for p in s["processes"]], ["kube-apiserver", "etcd", "kubelet", "sshd"])
+        self.assertEqual([p["unit"] for p in s["processes"]], ["kubepods", "etcd.service", "kubelet.service", "session-3.scope"])
+        self.assertEqual(s["processes"][1]["rssBytes"], 330000 * 1024)
+        self.assertEqual(s["processCount"], 4)
+        self.assertEqual(s["units"], [{"unit": "etcd.service", "memoryBytes": 349495296}, {"unit": "kubelet.service", "memoryBytes": 80000000}])
+        self.assertEqual(s["kubepodsMemoryBytes"], 900000000)
+        self.assertIn("rootDisk", s)
+
+    def test_never_sends_a_command_line(self):
+        (self.proc / "10" / "cmdline").write_text("etcd\0--client-cert-auth\0--peer-key-file=/etc/ssl/etcd/key.pem")
+        self.assertNotIn("key.pem", json.dumps(vm_agent.snapshot(proc=str(self.proc), cgroup=str(self.cg))))
+
+    def test_a_missing_tree_leaves_sections_out_instead_of_failing(self):
+        s = vm_agent.snapshot(proc=str(self.proc) + "-none", cgroup=str(self.cg) + "-none")
+        for key in ("memory", "processes", "units", "kubepodsMemoryBytes"):
+            self.assertNotIn(key, s)

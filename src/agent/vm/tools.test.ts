@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withVmTools, VM_RESTART_TOOL } from "./tools.js";
+import { withVmTools, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL } from "./tools.js";
 import { parseProposal, PROPOSABLE_ACTIONS } from "../remediation/proposal.js";
 import { NO_POD_TARGET } from "../remediation/remediator.js";
 
@@ -12,15 +12,23 @@ const inner = {
   getTools: () => [{ name: "k8s_list_pods", description: "list", inputSchema: {} }],
   callTool: async (name: string) => (inner.calls.push(name), "inner"),
 };
-const store = (units: string[] | null) => {
+const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null = null) => {
   const queued: unknown[] = [];
-  return { queued, registered: async () => (units ? { units } : null), enqueue: async (...a: unknown[]) => (queued.push(a), 41) };
+  const asked: string[] = [];
+  return {
+    queued,
+    asked,
+    registered: async () => (units ? { units } : null),
+    enqueue: async (...a: unknown[]) => (queued.push(a), 41),
+    snapshot: async (h: string) => (asked.push(h), snap),
+  };
 };
 
-test("the virtual tool is listed as [WRITE] beside the wrapped tools; others pass through", async () => {
+test("the virtual tools are listed beside the wrapped tools — restart [WRITE], snapshot read-only; others pass through", async () => {
   const t = withVmTools(inner as never, store(["nginx.service"]) as never);
-  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL]);
+  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL]);
   assert.match(t.getTools()[1]!.description, /^\[WRITE\]/);
+  assert.doesNotMatch(t.getTools()[2]!.description, /^\[WRITE\]/);
   assert.equal(await t.callTool("k8s_list_pods", {}), "inner");
 });
 
@@ -44,4 +52,42 @@ test("vm_restart_service parses to a proposal keyed on the host, with no pod ver
   assert.match(p.summary, /restart `nginx\.service` on VM `vm-web-01`/);
   assert.ok((PROPOSABLE_ACTIONS as readonly string[]).includes(VM_RESTART_TOOL));
   assert.ok(NO_POD_TARGET.has(VM_RESTART_TOOL));
+});
+
+// The shape a version-3 vm-agent sends (vm-agent snapshot()), numbers from master3-vm on 2026-11-17.
+const MASTER3 = {
+  memory: { totalBytes: 2062548992, availableBytes: 208666624, anonBytes: 1552089088, cachedBytes: 263860224, swapTotalBytes: 0, swapFreeBytes: 0 },
+  load: [1.5, 1.4, 1.3],
+  uptimeSeconds: 418000,
+  processes: [
+    { name: "kube-apiserver", pid: 900, rssBytes: 740294656, unit: "kubepods" },
+    { name: "etcd", pid: 812, rssBytes: 344981504, unit: "etcd.service" },
+  ],
+  processCount: 160,
+  units: [{ unit: "etcd.service", memoryBytes: 349495296 }, { unit: "containerd.service", memoryBytes: 113246208 }],
+  kubepodsMemoryBytes: 1100000000,
+  rootDisk: { totalBytes: 20000000000, availableBytes: 9000000000 },
+};
+
+test("node_host_snapshot: Mi strings, where each process runs, and the cache caveat", async () => {
+  const s = store([], { snapshot: MASTER3, ageSeconds: 30, version: "3" });
+  const out = JSON.parse(await withVmTools(inner as never, s as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "Master3-VM" }));
+  assert.deepEqual(s.asked, ["master3-vm"]);
+  assert.equal(inner.calls.includes(NODE_HOST_SNAPSHOT_TOOL), false);
+  assert.deepEqual(out.memory, { total: "1967Mi", available: "199Mi", anonymous: "1480Mi", pageCache: "252Mi", swap: "none" });
+  assert.deepEqual(out.processes[1], { name: "etcd", pid: 812, rss: "329Mi", where: "etcd.service" });
+  assert.equal(out.processes[0].where, "pod");
+  assert.deepEqual(out.systemdServices[0], { unit: "etcd.service", memory: "333Mi" });
+  assert.equal(out.allPods, "1049Mi");
+  assert.equal(out.rootDisk.usedPercent, 55);
+  assert.equal(out.stale, undefined);
+  assert.ok(out.notes.some((n: string) => /page cache/.test(n)));
+});
+
+test("node_host_snapshot: an old snapshot says so; no agent and an old agent are told apart", async () => {
+  const stale = JSON.parse(await withVmTools(inner as never, store([], { snapshot: MASTER3, ageSeconds: 900, version: "3" }) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "master3-vm" }));
+  assert.match(stale.stale, /900s old/);
+  assert.match(await withVmTools(inner as never, store(null) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker9" }), /^Error: no devops-vm-agent reports as `worker9`/);
+  assert.match(await withVmTools(inner as never, store([]) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "master3-vm" }), /^Error: .*too old .*version 3/);
+  assert.match(await withVmTools(inner as never, store([]) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, {}), /^Error: `node` is required/);
 });

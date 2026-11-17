@@ -31,6 +31,17 @@ is-active` and the last 20 journal lines, which the agent posts in the card's Sl
 Anything else is reported `refused` and nothing runs. A heartbeat every minute tells the agent
 which units it may propose; a VM silent for 5 minutes gets no proposals.
 
+The heartbeat also carries a read-only **host snapshot** (version 3+): `/proc/meminfo`, load and
+uptime, the 15 largest processes by RSS (name from `/proc/<pid>/status`, never the command line,
+plus the systemd unit or `kubepods` from `/proc/<pid>/cgroup`), `memory.current` of the 15 largest
+`system.slice` services and of the kubepods cgroup (cgroup v2), and root disk usage. No subprocess
+and no root needed for it; a section it cannot read is left out. The agent serves the latest one
+as the `node_host_snapshot` tool. Every request carries `User-Agent: devops-vm-agent/<version>`:
+Cloudflare refuses urllib's default with 403 (error 1010).
+
+On the cluster's own Kubernetes nodes it is installed by the homelab-k8s playbook
+(`inventory/homelab/devops-vm-agent.yml`), which pins a commit of this directory.
+
 ## Test
 
 ```bash

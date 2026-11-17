@@ -7,13 +7,28 @@ export type VmStatus = "succeeded" | "failed" | "refused";
 export class VmStore {
   constructor(private readonly pool: Pool | null) {}
 
-  async heartbeat(host: string, units: string[], version: string): Promise<void> {
+  /** A heartbeat without a snapshot (an agent before version 3) keeps the last one it sent. */
+  async heartbeat(host: string, units: string[], version: string, snapshot: object | null = null): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO vm_hosts (name, units, version, last_seen) VALUES ($1, $2, $3, now())
-       ON CONFLICT (name) DO UPDATE SET units = EXCLUDED.units, version = EXCLUDED.version, last_seen = now()`,
-      [host, units, version]
+      `INSERT INTO vm_hosts (name, units, version, last_seen, snapshot, snapshot_at)
+       VALUES ($1, $2, $3, now(), $4::jsonb, CASE WHEN $4::jsonb IS NULL THEN NULL ELSE now() END)
+       ON CONFLICT (name) DO UPDATE SET units = EXCLUDED.units, version = EXCLUDED.version, last_seen = now(),
+         snapshot = COALESCE(EXCLUDED.snapshot, vm_hosts.snapshot),
+         snapshot_at = COALESCE(EXCLUDED.snapshot_at, vm_hosts.snapshot_at)`,
+      [host, units, version, snapshot === null ? null : JSON.stringify(snapshot)]
     );
+  }
+
+  /** The latest host snapshot and its age in seconds, or null when the host never sent one. */
+  async snapshot(host: string): Promise<{ snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(
+      `SELECT snapshot, version, extract(epoch FROM now() - snapshot_at)::int AS age
+         FROM vm_hosts WHERE name = $1 AND snapshot IS NOT NULL`,
+      [host]
+    );
+    return rows[0] ? { snapshot: rows[0].snapshot, ageSeconds: Number(rows[0].age), version: rows[0].version ?? null } : null;
   }
 
   /** The VM's allowlist while it is alive (a heartbeat within 5 minutes), else null. */

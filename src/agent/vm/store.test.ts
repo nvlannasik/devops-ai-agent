@@ -32,6 +32,24 @@ test("registered means a heartbeat within 5 minutes; no pool means nothing", asy
   assert.equal(await new VmStore(null).claim("vm-a"), null);
 });
 
+test("heartbeat stores the snapshot, and one without a snapshot keeps the last", async () => {
+  const pool = fakePool();
+  await new VmStore(pool as never).heartbeat("vm-a", [], "3", { memory: { totalBytes: 1 } });
+  await new VmStore(pool as never).heartbeat("vm-a", [], "2");
+  assert.match(pool.seen[0]!.text, /COALESCE\(EXCLUDED\.snapshot, vm_hosts\.snapshot\)/);
+  assert.deepEqual(pool.seen[0]!.values, ["vm-a", [], "3", '{"memory":{"totalBytes":1}}']);
+  assert.deepEqual(pool.seen[1]!.values, ["vm-a", [], "2", null]);
+});
+
+test("snapshot returns the latest with its age; none sent is null", async () => {
+  const pool = fakePool([{ rows: [{ snapshot: { load: [1] }, version: "3", age: 42 }] }, { rows: [] }]);
+  const store = new VmStore(pool as never);
+  assert.deepEqual(await store.snapshot("vm-a"), { snapshot: { load: [1] }, ageSeconds: 42, version: "3" });
+  assert.match(pool.seen[0]!.text, /snapshot IS NOT NULL/);
+  assert.equal(await store.snapshot("vm-b"), null);
+  assert.equal(await new VmStore(null).snapshot("vm-a"), null);
+});
+
 test("parseVmTokens: name=token pairs; unset is none; malformed fails boot", () => {
   assert.equal(parseVmTokens(undefined).size, 0);
   assert.deepEqual([...parseVmTokens("vm-web-01=abc123,vm-db-01=def456")], [["vm-web-01", "abc123"], ["vm-db-01", "def456"]]);

@@ -43,7 +43,12 @@ test("heartbeat records the units; result calls onResult once with the remediati
     results
   );
   assert.equal((await s.call("/vm/heartbeat", "tok-a", { units: ["nginx.service"], version: "1" })).status, 204);
-  assert.deepEqual(beats, [["vm-a", ["nginx.service"], "1"]]);
+  assert.deepEqual(beats, [["vm-a", ["nginx.service"], "1", null]]);
+  // version 3 sends a snapshot: an object is kept, anything else (or a huge one) is dropped
+  await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: { memory: { totalBytes: 1 } } });
+  await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: [1, 2] });
+  await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: { pad: "x".repeat(70 * 1024) } });
+  assert.deepEqual(beats.slice(1).map((b) => (b as unknown[])[3]), [{ memory: { totalBytes: 1 } }, null, null]);
   const body = { status: "succeeded", exitCode: 0, active: "active", journal: "ok" };
   assert.equal((await s.call("/vm/actions/3/result", "tok-a", body)).status, 204);
   assert.deepEqual(results, [["vm-a", 3, 12, body]]);

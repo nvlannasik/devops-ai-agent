@@ -67,7 +67,7 @@ cluster, no inbound port on the VM.
   `http://` — the user wants both, chosen per VM), `ca_file` (optional, for an internal CA), `token`, `units`
   (the allowlist, e.g. `nginx.service orders.service`), `poll_seconds` (default 10). An `http://` URL logs a
   warning at start: the token and the actions travel in clear.
-- Loop: heartbeat (name comes from the token; body carries `units`, `version`); claim the next action;
+- Loop: heartbeat (name comes from the token; body carries `units`, `version`, and since version 3 a host `snapshot`); claim the next action;
   if its unit is not in the local `units`, report `refused` without running anything; else run
   `systemctl restart <unit>` with a timeout, then report exit code, `systemctl is-active <unit>`, and the
   last 20 lines of `journalctl -u <unit>`.

@@ -22,6 +22,14 @@ function vmOf(tokens: Map<string, string>, header: string | undefined): string |
 }
 
 const STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "refused"]);
+/** A host snapshot is a few KB (vm-agent snapshot()); anything far larger is not one and is dropped. */
+const SNAPSHOT_MAX_CHARS = 64 * 1024;
+
+function snapshotOf(body: unknown): object | null {
+  const snap = (body as { snapshot?: unknown } | undefined)?.snapshot;
+  if (!snap || typeof snap !== "object" || Array.isArray(snap)) return null;
+  return JSON.stringify(snap).length <= SNAPSHOT_MAX_CHARS ? snap : null;
+}
 
 export function vmRoutes(deps: Deps): express.Router {
   const router = express.Router();
@@ -38,7 +46,7 @@ export function vmRoutes(deps: Deps): express.Router {
 
   router.post("/vm/heartbeat", auth, (req, res) => {
     const units = Array.isArray(req.body?.units) ? req.body.units.filter((u: unknown): u is string => typeof u === "string") : [];
-    deps.store.heartbeat(res.locals.vm, units, String(req.body?.version ?? "")).then(() => res.status(204).end(), fail(res, "heartbeat"));
+    deps.store.heartbeat(res.locals.vm, units, String(req.body?.version ?? ""), snapshotOf(req.body)).then(() => res.status(204).end(), fail(res, "heartbeat"));
   });
 
   router.post("/vm/actions/claim", auth, (_req, res) => {

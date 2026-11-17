@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """devops-vm-agent — pulls approved restarts from the devops agent and runs only its own allowlist.
 
+Every heartbeat (once a minute) also carries a read-only snapshot of the host — memory, the
+largest processes by RSS with their systemd unit, memory per systemd service, root disk — so the
+agent can see what runs outside Kubernetes pods (etcd, kubelet, containerd). See snapshot().
+
 Spec: devops-ai-agent/docs/superpowers/specs/2026-11-04-node-ops-and-vm-agent-design.md (Part B).
 The VM opens every connection (no inbound port), proves who it is with its own bearer token, and
 decides for itself what may run: an action whose unit is not in `units` below is reported
@@ -10,6 +14,7 @@ decides for itself what may run: an action whose unit is not in `units` below is
 import configparser
 import json
 import logging
+import os
 import ssl
 import subprocess
 import sys
@@ -17,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2"
+VERSION = "3"
 log = logging.getLogger("devops-vm-agent")
 
 
@@ -40,10 +45,109 @@ def load_config(path):
     }
 
 
+TOP_PROCESSES = 15
+TOP_UNITS = 15
+
+
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def _unit_of(cgroup_text):
+    """The systemd unit a process belongs to, "kubepods" for anything in a pod, or None."""
+    for line in cgroup_text.splitlines():
+        path = line.split(":", 2)[-1]
+        if "kubepods" in path:
+            return "kubepods"
+        for part in reversed(path.split("/")):
+            if part.endswith((".service", ".scope")):
+                return part
+    return None
+
+
+def snapshot(proc="/proc", cgroup="/sys/fs/cgroup"):
+    """What this host is doing, sent with every heartbeat. Read-only, no subprocess, no root needed.
+
+    Process NAMES only (/proc/<pid>/status Name, max 15 chars), never the command line: the
+    API server's and etcd's arguments carry certificate paths and sometimes credentials. Every
+    section is best-effort — a missing file leaves that section out, it never stops the heartbeat.
+    """
+    out = {}
+    try:
+        kb = {}
+        for line in _read(f"{proc}/meminfo").splitlines():
+            key, _, rest = line.partition(":")
+            kb[key] = int(rest.split()[0])
+        out["memory"] = {
+            "totalBytes": kb["MemTotal"] * 1024,
+            "availableBytes": kb["MemAvailable"] * 1024,
+            "anonBytes": kb.get("AnonPages", 0) * 1024,
+            "cachedBytes": kb.get("Cached", 0) * 1024,
+            "swapTotalBytes": kb.get("SwapTotal", 0) * 1024,
+            "swapFreeBytes": kb.get("SwapFree", 0) * 1024,
+        }
+    except (OSError, KeyError, ValueError, IndexError):
+        pass
+    try:
+        out["load"] = [float(x) for x in _read(f"{proc}/loadavg").split()[:3]]
+        out["uptimeSeconds"] = int(float(_read(f"{proc}/uptime").split()[0]))
+    except (OSError, ValueError, IndexError):
+        pass
+
+    procs = []
+    try:
+        pids = [d for d in os.listdir(proc) if d.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        try:
+            fields = dict(line.split(":", 1) for line in _read(f"{proc}/{pid}/status").splitlines() if ":" in line)
+            if "VmRSS" not in fields:  # kernel threads have no user memory
+                continue
+            rss = int(fields["VmRSS"].split()[0]) * 1024
+            unit = _unit_of(_read(f"{proc}/{pid}/cgroup"))
+        except (OSError, ValueError, IndexError):
+            continue  # gone between listdir and read, or unreadable
+        procs.append({"name": fields.get("Name", "?").strip(), "pid": int(pid), "rssBytes": rss, "unit": unit})
+    if procs:
+        procs.sort(key=lambda p: p["rssBytes"], reverse=True)
+        out["processes"] = procs[:TOP_PROCESSES]
+        out["processCount"] = len(procs)
+
+    # cgroup v2: memory.current per systemd service (includes its page cache, unlike RSS).
+    units = []
+    try:
+        for name in os.listdir(f"{cgroup}/system.slice"):
+            if name.endswith(".service"):
+                try:
+                    units.append({"unit": name, "memoryBytes": int(_read(f"{cgroup}/system.slice/{name}/memory.current"))})
+                except (OSError, ValueError):
+                    pass
+    except OSError:
+        pass
+    if units:
+        units.sort(key=lambda u: u["memoryBytes"], reverse=True)
+        out["units"] = units[:TOP_UNITS]
+    for slice_ in ("kubepods.slice", "kubepods"):
+        try:
+            out["kubepodsMemoryBytes"] = int(_read(f"{cgroup}/{slice_}/memory.current"))
+            break
+        except (OSError, ValueError):
+            pass
+    try:
+        st = os.statvfs("/")
+        out["rootDisk"] = {"totalBytes": st.f_blocks * st.f_frsize, "availableBytes": st.f_bavail * st.f_frsize}
+    except OSError:
+        pass
+    return out
+
+
 class Agent:
-    def __init__(self, cfg, runner=subprocess.run):
+    def __init__(self, cfg, runner=subprocess.run, snap=snapshot):
         self.cfg = cfg
         self.run = runner
+        self.snap = snap
         self.ssl = ssl.create_default_context(cafile=cfg["ca_file"]) if cfg["ca_file"] else None
         if cfg["url"].startswith("http://"):
             log.warning("url is http:// — the token and the actions travel in clear; use https:// outside a lab")
@@ -66,7 +170,7 @@ class Agent:
             return json.loads(raw) if res.status == 200 and raw else None
 
     def heartbeat(self):
-        self._post("/vm/heartbeat", {"units": self.cfg["units"], "version": VERSION})
+        self._post("/vm/heartbeat", {"units": self.cfg["units"], "version": VERSION, "snapshot": self.snap()})
 
     def poll_once(self):
         action = self._post("/vm/actions/claim", {})

@@ -16,6 +16,13 @@ evicted pod as the cause** — find what actually grew.
    (`allocated`). The top consumer and the evicted pod are usually different pods; name both, and
    say which is which. Requests are promises and working set is usage — a node can be 40%
    requested and 95% used.
+   **When the node's memory usage is well above the pods' total working set, the gap is memory
+   outside Kubernetes** — etcd (a systemd service on these control-plane nodes, not a pod),
+   kubelet, containerd, the OS. No pod listing shows it. Call `node_host_snapshot` for the node:
+   it lists the largest processes with `where` (a `.service` unit or `pod`) and memory per systemd
+   service, with `available`, `anonymous` and swap. Name the process and its unit with its number;
+   never say "something outside the pods". If the tool answers that no devops-vm-agent reports for
+   the node, say the gap is unexplained and that host-level data is missing there.
 3. `k8s_list_events` with `since_minutes: 60` — `Evicted`, `SystemOOM`, `FailedScheduling`. The
    eviction event names the threshold that was crossed.
 4. `k8s_recommend_resources` for the top consumer — an eviction loop is a sizing fault most of
@@ -26,10 +33,12 @@ exceeds the total limit of containers" means that pod went over its own `ephemer
 the pod is the cause, the node is fine, and a cordon or drain fixes nothing.
 
 **A control-plane node under pressure is a capacity problem.** `kube-apiserver-<node>`,
-`etcd-<node>`, `kube-controller-manager-<node>` and `kube-scheduler-<node>` are static pods from the
-kubelet's manifests — never propose resizing them (a memory limit on the API server makes it the
-OOM victim) and never cordon or drain the node. Name what uses the memory, and recommend more
-memory for that machine or moving workload pods off it.
+`kube-controller-manager-<node>` and `kube-scheduler-<node>` are static pods from the kubelet's
+manifests, and etcd is either another (`etcd-<node>`) or a systemd service (`etcd.service`, seen
+only in `node_host_snapshot`) — never propose resizing any of them (a memory limit on the API
+server or etcd makes it the OOM victim), never propose restarting etcd, and never cordon or drain
+the node. Name what uses the memory, and recommend more memory for that machine or moving workload
+pods off it.
 
 **`Ready: Unknown` is not pressure.** It means the kubelet stopped reporting: the node may be
 fine and unreachable, or down. Its pods will sit `Terminating` until the node returns. That is a

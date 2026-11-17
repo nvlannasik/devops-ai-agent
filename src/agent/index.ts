@@ -316,11 +316,15 @@ export class DevOpsAgent {
     return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
   }
 
-  /** The VM restart as a virtual tool, only when VM agents are configured (agent/vm/tools). Lambdas:
+  /** The VM restart and the host snapshot as virtual tools, only when VM agents are configured (agent/vm/tools). Lambdas:
    *  `vmStore` is swapped for the Postgres-backed one in initialize(), after this runs. */
   private withVm(mcp: McpTools): McpTools {
     if (config.vm.tokens.size === 0) return mcp;
-    return withVmTools(mcp, { registered: (h) => this.vmStore.registered(h), enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r) });
+    return withVmTools(mcp, {
+      registered: (h) => this.vmStore.registered(h),
+      enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r),
+      snapshot: (h) => this.vmStore.snapshot(h),
+    });
   }
 
   /** The registered VM an alert's host label names (agent/vm), or null — Kubernetes alerts carry no such label. */
