@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1"
+VERSION = "2"
 log = logging.getLogger("devops-vm-agent")
 
 
@@ -53,7 +53,13 @@ class Agent:
             self.cfg["url"] + path,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={"content-type": "application/json", "authorization": f"Bearer {self.cfg['token']}"},
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {self.cfg['token']}",
+                # Cloudflare in front of the agent answers urllib's default "Python-urllib/3.x" with
+                # 403 (error 1010, banned client signature) before the request reaches the agent.
+                "user-agent": f"devops-vm-agent/{VERSION}",
+            },
         )
         with urllib.request.urlopen(req, timeout=30, context=self.ssl) as res:
             raw = res.read()

@@ -16,10 +16,12 @@ class Stub(BaseHTTPRequestHandler):
     """The central endpoints: answers claims from a queue, records every request."""
     claims = []
     seen = []
+    agents = []
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)) or 0)
         Stub.seen.append((self.path, self.headers.get("authorization"), json.loads(body or b"{}")))
+        Stub.agents.append(self.headers.get("user-agent"))
         if self.path == "/vm/actions/claim" and Stub.claims:
             payload = json.dumps(Stub.claims.pop(0)).encode()
             self.send_response(200)
@@ -58,7 +60,7 @@ class AgentTest(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        Stub.claims, Stub.seen = [], []
+        Stub.claims, Stub.seen, Stub.agents = [], [], []
         self.runner = Runner()
         cfg = {"name": "vm-a", "url": self.url, "token": "tok-a", "units": ["nginx.service"], "poll_seconds": 10, "ca_file": None}
         self.agent = vm_agent.Agent(cfg, runner=self.runner)
@@ -89,6 +91,12 @@ class AgentTest(unittest.TestCase):
         self.agent.heartbeat()
         self.assertEqual(Stub.seen[-1][0], "/vm/heartbeat")
         self.assertEqual(Stub.seen[-1][2]["units"], ["nginx.service"])
+
+    def test_requests_name_the_agent_not_python_urllib(self):
+        # Cloudflare blocks the default Python-urllib User-Agent with a 403 (error 1010).
+        self.agent.heartbeat()
+        self.agent.poll_once()
+        self.assertEqual(set(Stub.agents), {f"devops-vm-agent/{vm_agent.VERSION}"})
 
     def test_plain_http_is_warned_about(self):
         with self.assertLogs("devops-vm-agent", level="WARNING") as logs:
