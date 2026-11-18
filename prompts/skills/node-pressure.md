@@ -32,13 +32,42 @@ evicted pod as the cause** — find what actually grew.
 exceeds the total limit of containers" means that pod went over its own `ephemeral-storage` limit:
 the pod is the cause, the node is fine, and a cordon or drain fixes nothing.
 
+**MemoryPressure has two triggers — say which one fired.** The kubelet raises it when the HOST is
+within its hard threshold (`memory.available`, usually 100Mi) OR when PODS are within that
+threshold of the node's `allocatable` memory. The second fires with hundreds of Mi still free on
+the host: compare `usage.memoryAvailable` with the sum of the pods' `memoryWorkingSet` against
+`allocatable.memory` from `k8s_node_pods`. Free memory on the host + pods near allocatable = the
+pod-allocatable signal, and the fix is placement or reservation sizing, not "something leaked".
+Allocatable is capacity minus `kubeReserved` + `systemReserved` + the eviction threshold.
+
 **A control-plane node under pressure is a capacity problem.** `kube-apiserver-<node>`,
 `kube-controller-manager-<node>` and `kube-scheduler-<node>` are static pods from the kubelet's
 manifests, and etcd is either another (`etcd-<node>`) or a systemd service (`etcd.service`, seen
 only in `node_host_snapshot`) — never propose resizing any of them (a memory limit on the API
-server or etcd makes it the OOM victim), never propose restarting etcd, and never cordon or drain
-the node. Name what uses the memory, and recommend more memory for that machine or moving workload
-pods off it.
+server or etcd makes it the OOM victim), never propose restarting etcd, and **never cordon or drain
+a control-plane node, not even as an "Immediate" line or a runbook step**: its pods are the control
+plane itself, a cordon frees no memory, and the agent refuses the action anyway. Name what uses
+the memory, and recommend more memory for that machine.
+
+On a small HA control plane the load is NOT even across the masters, and it moves:
+- Only the **leader** of `kube-controller-manager` and `kube-scheduler` does the work and holds the
+  caches (~2x the memory of a follower). The holders are the Leases `kube-system/kube-controller-manager`,
+  `kube-system/kube-scheduler`, and `plndr-cp-lock` for the kube-vip VIP — read them with
+  `k8s_get_resource` (`api_version: coordination.k8s.io/v1`, `kind: Lease`, `namespace: kube-system`).
+  A master that holds several of them is the heavy one, and pressure follows the leases when they
+  move: the master under pressure today may be a different one tomorrow, with no change at all.
+- **kube-apiserver** memory grows with its long-lived watch connections, which stay on whichever
+  API server they first reached. The longest-running API server collects the clients of the others
+  each time one restarts. A large gap in `kube-apiserver-<node>` working set between masters of the
+  same size points here, not to a leak.
+So compare the node under pressure with its peer control planes before naming a cause: the same
+pods using more memory on one master is placement (leases, connections), not growth.
+
+*Recommended Actions for a control-plane node*: more memory for that machine (the lasting fix);
+check that `kubeReserved` + `systemReserved` match what really runs outside pods there (oversized
+reservations shrink allocatable and trigger the pod-allocatable signal early); and, for an uneven
+API server, the kube-apiserver flag `--goaway-chance` (e.g. 0.001) that spreads clients over the
+API servers. Never restart, resize, cordon or drain anything of the control plane as the fix.
 
 **`Ready: Unknown` is not pressure.** It means the kubelet stopped reporting: the node may be
 fine and unreachable, or down. Its pods will sit `Terminating` until the node returns. That is a
