@@ -316,6 +316,11 @@ export class DevOpsAgent {
     return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
   }
 
+  /** One MCP read against the local cluster, for the dashboard's /nodes page (no LLM involved). */
+  async localTool(name: string, args: Record<string, unknown>): Promise<string> {
+    return this.onLocal(() => this.mcp.callTool(name, args));
+  }
+
   /** The VM restart and the host snapshot as virtual tools, only when VM agents are configured (agent/vm/tools). Lambdas:
    *  `vmStore` is swapped for the Postgres-backed one in initialize(), after this runs. */
   private withVm(mcp: McpTools): McpTools {

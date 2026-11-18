@@ -67,6 +67,8 @@ export const ICON = {
   ),
   speech: ico(`<path d="M20.5 14.5a2 2 0 0 1-2 2H7.8L3.5 20.8V5.5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z"/>`),
   check: ico(`<circle cx="12" cy="12" r="8.8"/><path d="m8.2 12.3 2.6 2.6 5-5.6"/>`),
+  // Two stacked chassis with a status light each: a host, not a cluster (that is `layers`).
+  server: ico(`<rect x="3.5" y="4" width="17" height="6.5" rx="1.6"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.6"/><path d="M7.5 7.25h.01"/><path d="M7.5 16.75h.01"/><path d="M11 7.25h5.5"/><path d="M11 16.75h5.5"/>`),
   layers: ico(`<path d="m12 2.6 9 4.9-9 4.9-9-4.9 9-4.9Z"/><path d="m3 13 9 4.9 9-4.9"/>`),
   // The two arrows are a pair and are read as one: what went to the model, what came back.
   // Same baseline, same head, mirrored — anything else and the reader has to check each.

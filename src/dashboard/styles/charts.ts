@@ -483,4 +483,30 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .lat-bar > span:first-child { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 .lat-bar > span:last-child { background: var(--accent); }
 .ratio.under { margin: var(--sp-1) 0 0; max-width: 7rem; }
+
+/* ---------- /nodes ---------- */
+/* Host memory in three parts: anonymous (what the kernel cannot take back), cache and the rest in
+   use, and what is still available. The legend names each with its number — never colour alone. */
+[data-k="mem-anon"] { background: var(--accent); }
+[data-k="mem-other"] { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+[data-k="mem-free"] { background: var(--mark-ok); }
+.node-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 30rem), 1fr));
+  gap: var(--sp-4); margin-bottom: var(--sp-6);
+}
+.node-card { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.node-badges { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.node-row { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: var(--sp-2); align-items: start; }
+.node-label { font-size: var(--fs-sm); color: var(--text-dim); }
+.stack-bar.node-mem { max-width: none; }
+.node-row .rate-bar { width: 45%; }
+.node-meter-text { margin-left: var(--sp-2); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.node-row p.meta { margin: var(--sp-1) 0 0; }
+.node-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: var(--sp-3); }
+.node-facts { margin: 0; }
+@media (max-width: 40rem) {
+  .node-row { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+  .node-row .rate-bar { width: 100%; }
+  .node-meter-text { display: block; margin: var(--sp-1) 0 0; }
+}
 `;

@@ -26,6 +26,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/topology", label: "Topology", icon: ICON.topology },
       { href: "/cluster", label: "Cluster", icon: ICON.layers },
+      { href: "/nodes", label: "Nodes", icon: ICON.server },
       { href: "/memory", label: "Alert memory", icon: ICON.memory },
       { href: "/memory/threads", label: "Conversation memory", icon: ICON.chats },
       { href: "/context", label: "Context", icon: ICON.context },

@@ -6,10 +6,11 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, nodesPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { memoryKeyPage, memoryListPage, threadPage, threadsPage, type ThreadIncident } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
+import { buildNodesModel, loadNodes, type NodesSource } from "./nodes.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -32,7 +33,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" | "people" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "nodes" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" | "people" }
   | { kind: "memoryThread"; threadTs: string }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
@@ -56,6 +57,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/harness") return { kind: "harness" };
   if (p === "/people") return { kind: "people" };
   if (p === "/cluster") return { kind: "cluster" };
+  if (p === "/nodes") return { kind: "nodes" };
   // /memory (2026-10-20). A key is two query parameters, not a path: a namespace may be absent,
   // and "absent" must stay distinguishable from any spelling of a name. A thread is a Slack ts
   // and only that, as on /api/trace.
@@ -196,6 +198,9 @@ export class DashboardServer {
   private readonly clusterModel: ((cluster?: string) => unknown) | undefined;
   private readonly memory?: MemorySource;
   private readonly slackNames?: SlackNames;
+  // /nodes: host snapshots + VM actions (Postgres, through the agent's VmStore) and MCP reads.
+  private readonly nodes?: NodesSource;
+  private readonly nodesTimeoutMs: number;
   // Keyed by cluster ("" in single-cluster mode, where there is only ever one key) so a stg
   // failure cannot evict dev's cached inventory — each cluster's 60s TTL and "failures are never
   // cached" rule apply independently.
@@ -224,7 +229,9 @@ export class DashboardServer {
     clusterModel?: (cluster?: string) => unknown,
     memory?: MemorySource,
     slackNames?: SlackNames,
-    inventoryTimeoutMs?: number
+    inventoryTimeoutMs?: number,
+    nodes?: NodesSource,
+    nodesTimeoutMs?: number
   ) {
     this.queries = queries ?? new DashboardQueries();
     this.mcpTools = mcpTools ?? (() => []);
@@ -234,6 +241,8 @@ export class DashboardServer {
     this.memory = memory;
     this.slackNames = slackNames;
     this.inventoryTimeoutMs = inventoryTimeoutMs ?? 10_000;
+    this.nodes = nodes;
+    this.nodesTimeoutMs = nodesTimeoutMs ?? 20_000;
   }
 
   /**
@@ -656,6 +665,22 @@ export class DashboardServer {
         "text/html; charset=utf-8",
         { "content-security-policy": csp(nonce) }
       );
+    }
+
+    // Before the database gate: the host half comes through the agent's VmStore (empty without a
+    // pool) and the Kubernetes half from MCP, so the page renders whatever answers. One deadline for
+    // the whole read — a node_pods call on an unreachable Prometheus must not hang the page.
+    if (route.kind === "nodes") {
+      if (!this.nodes) return send(200, errorPage("Nodes not available", "This dashboard is not attached to an agent process."));
+      let timer: NodeJS.Timeout | undefined;
+      const input = await Promise.race([
+        loadNodes(this.nodes),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), this.nodesTimeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (!input) return send(503, errorPage("Nodes did not answer", `The node reads took longer than ${this.nodesTimeoutMs / 1000}s. Reload in a moment.`));
+      return send(200, nodesPage(buildNodesModel(input), new Date(), await this.openCount()), "text/html; charset=utf-8");
     }
 
     if (route.kind === "bench") {

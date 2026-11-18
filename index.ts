@@ -19,7 +19,11 @@ async function main() {
       recall: (labels) => agent.memoryRecall(labels),
       threads: () => agent.conversationThreads(),
       thread: (id) => agent.conversationThread(id),
-    }, (ids) => slack.userProfiles(ids));
+    }, (ids) => slack.userProfiles(ids), undefined, {
+      hosts: () => agent.vmStore.hosts(),
+      actions: () => agent.vmStore.recentActions(30),
+      tool: (name, args) => agent.localTool(name, args),
+    });
 
     // graceful shutdown
     const shutdown = async (signal: string) => {

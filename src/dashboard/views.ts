@@ -8,4 +8,5 @@ export * from "./harness-views.js";
 export * from "./agent-views.js";
 export * from "./bench-views.js";
 export * from "./cluster-views.js";
+export * from "./node-views.js";
 export * from "./people-views.js";

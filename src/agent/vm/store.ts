@@ -4,6 +4,26 @@ import type { Pool } from "pg";
 // no-op — the agent without incident memory has no VM actions either.
 export type VmStatus = "succeeded" | "failed" | "refused";
 
+export interface VmHostRow {
+  name: string;
+  units: string[];
+  version: string | null;
+  lastSeenSeconds: number;
+  snapshot: Record<string, unknown> | null;
+  snapshotAgeSeconds: number | null;
+}
+
+export interface VmActionRow {
+  id: number;
+  host: string;
+  unit: string;
+  action: string;
+  status: string;
+  createdAt: Date;
+  finishedAt: Date | null;
+  exitCode: number | null;
+}
+
 export class VmStore {
   constructor(private readonly pool: Pool | null) {}
 
@@ -43,6 +63,45 @@ export class VmStore {
     if (!this.pool) return [];
     const { rows } = await this.pool.query(`SELECT name, units FROM vm_hosts WHERE last_seen > now() - interval '5 minutes' ORDER BY name`);
     return rows.map((r: { name: string; units: string[] }) => ({ host: r.name, units: r.units }));
+  }
+
+  /** Every host that ever heartbeated, with its latest snapshot and ages — the dashboard's /nodes. */
+  async hosts(): Promise<VmHostRow[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT name, units, version, snapshot,
+              extract(epoch FROM now() - last_seen)::int AS seen_age,
+              extract(epoch FROM now() - snapshot_at)::int AS snapshot_age
+         FROM vm_hosts ORDER BY name`
+    );
+    return rows.map((r: Record<string, unknown>) => ({
+      name: String(r.name),
+      units: (r.units as string[]) ?? [],
+      version: (r.version as string | null) ?? null,
+      lastSeenSeconds: Number(r.seen_age),
+      snapshot: (r.snapshot as Record<string, unknown> | null) ?? null,
+      snapshotAgeSeconds: r.snapshot_age === null ? null : Number(r.snapshot_age),
+    }));
+  }
+
+  /** The newest VM actions, any host — what was asked of the hosts and what they answered. */
+  async recentActions(limit = 30): Promise<VmActionRow[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT id, host, unit, action, status, created_at, finished_at, result->>'exitCode' AS exit_code
+         FROM vm_actions ORDER BY id DESC LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r: Record<string, unknown>) => ({
+      id: Number(r.id),
+      host: String(r.host),
+      unit: String(r.unit),
+      action: String(r.action),
+      status: String(r.status),
+      createdAt: r.created_at as Date,
+      finishedAt: (r.finished_at as Date | null) ?? null,
+      exitCode: r.exit_code === null || r.exit_code === undefined ? null : Number(r.exit_code),
+    }));
   }
 
   async enqueue(host: string, unit: string, remediationId: number | null): Promise<number | null> {
