@@ -97,73 +97,101 @@ export class ThreadCommands {
         return;
       }
 
-      const progress = await client.chat.postMessage({
-        channel: event.channel,
-        thread_ts: threadId,
-        text: "📝 Drafting the postmortem…",
-      });
-      const progressTs = progress.ts as string | undefined;
-      const updateProgress = (text: string): Promise<void> =>
-        progressTs
-          ? client.chat
-              .update({ channel: event.channel, ts: progressTs, text })
-              .then(() => {})
-              .catch((e) => { logger.debug(`[slack] postmortem progress update failed for thread ${threadId}: ${errDetail(e)}`); })
-          : Promise.resolve();
-
-      // Read by SlackApp (it owns the client) — agent.postmortemFacts only ever sees the result.
-      // A failed read is `humans: null`, not `[]`: "nobody said anything" and "couldn't check"
-      // are different facts, and only the first means there is nothing to quote.
-      let humans: string[] | null;
-      try {
-        const messages = await fetchThreadReplies(client, event.channel, threadId);
-        humans = humanStatements(messages, event.ts);
-      } catch (err) {
-        logger.warn(`[slack] postmortem: could not read thread ${threadId}: ${errDetail(err)}`);
-        humans = null;
-      }
-
-      try {
-        const facts = await this.host.agent.postmortemFacts(incidentId, humans);
-        // The incident row itself couldn't be read — treated like any other draft failure:
-        // no LLM call, nothing stored.
-        if (!facts) {
-          await updateProgress(`❌ Could not draft the postmortem: incident #${incidentId} could not be read`);
-          return;
-        }
-        const { markdown, backend } = await this.host.agent.draftPostmortem(facts, threadId);
-        const storedId = await this.host.agent.storePostmortem(incidentId, event.user ?? null, markdown, backend);
-
-        const link =
-          storedId === null
-            ? null
-            : config.dashboard.publicUrl
-              ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
-              : `/incidents/${incidentId}/postmortem`;
-        await updateProgress(
-          link === null ? "📝 Postmortem drafted — not stored (the dashboard will not have it)" : `📝 Postmortem draft ready — ${link}`
-        );
-
-        const text = postmortemSlackText(facts, markdown, link);
-        try {
-          await client.chat.postMessage({
-            channel: event.channel, thread_ts: threadId,
-            text: `📝 Postmortem draft — ${facts.incident.alertname}`,
-            blocks: postmortemSlackBlocks(facts, markdown, link),
-          });
-        } catch (err) {
-          // `invalid_blocks` refuses the WHOLE message — the same card goes out as plain mrkdwn
-          // rather than the draft reaching nobody (the RCA card's rule, postRca).
-          logger.warn(`[slack] postmortem card refused, posting as text: ${errDetail(err)}`);
-          for (const part of splitForSlack(text)) {
-            await client.chat.postMessage({ channel: event.channel, thread_ts: threadId, text: part, mrkdwn: true });
-          }
-        }
-      } catch (err) {
-        logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);
-        await updateProgress(`❌ Could not draft the postmortem: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      await this.writePostmortem(event.channel, threadId, incidentId, event.user ?? null, event.ts, client, "📝 Drafting the postmortem…");
     }));
+  }
+
+  /**
+   * D2 (2026-11-20): a resolved incident at a severity in POSTMORTEM_AUTO_SEVERITIES (default
+   * `critical`, the agent's ASSESSED severity) gets its draft without anyone asking — the moment
+   * the thread is freshest is the moment nobody remembers to type `postmortem`. Same queue, same
+   * draft, same store as the command; skipped when the incident already has one (a flap that
+   * resolves again must not draft twice). Requested-by is null: no person asked.
+   */
+  async autoPostmortem(channel: string, threadId: string, incidentId: number, severity: string): Promise<void> {
+    const client = this.host.app.client;
+    await this.host.inFlight.track({ channel, threadTs: threadId, kind: "mention" }, this.host.threadQueue.run(threadId, async () => {
+      if (await this.host.agent.postmortemExists(incidentId)) {
+        logger.info(`[postmortem] incident ${incidentId} resolved — a draft already exists, not drafting again`);
+        return;
+      }
+      logger.info(`[postmortem] incident ${incidentId} (${severity}) resolved — drafting automatically`);
+      await this.writePostmortem(channel, threadId, incidentId, null, null, client, `📝 ${severity[0]!.toUpperCase()}${severity.slice(1)} incident resolved — drafting the postmortem…`);
+    }));
+  }
+
+  /** The draft itself, shared by the command and the automatic path. Runs inside the thread's queue. */
+  private async writePostmortem(
+    channel: string,
+    threadId: string,
+    incidentId: number,
+    requestedBy: string | null,
+    triggerTs: string | null,
+    client: AllMiddlewareArgs["client"],
+    progressText: string
+  ): Promise<void> {
+    const progress = await client.chat.postMessage({ channel, thread_ts: threadId, text: progressText });
+    const progressTs = progress.ts as string | undefined;
+    const updateProgress = (text: string): Promise<void> =>
+      progressTs
+        ? client.chat
+            .update({ channel: channel, ts: progressTs, text })
+            .then(() => {})
+            .catch((e) => { logger.debug(`[slack] postmortem progress update failed for thread ${threadId}: ${errDetail(e)}`); })
+        : Promise.resolve();
+
+    // Read by SlackApp (it owns the client) — agent.postmortemFacts only ever sees the result.
+    // A failed read is `humans: null`, not `[]`: "nobody said anything" and "couldn't check"
+    // are different facts, and only the first means there is nothing to quote.
+    let humans: string[] | null;
+    try {
+      const messages = await fetchThreadReplies(client, channel, threadId);
+      humans = humanStatements(messages, triggerTs);
+    } catch (err) {
+      logger.warn(`[slack] postmortem: could not read thread ${threadId}: ${errDetail(err)}`);
+      humans = null;
+    }
+
+    try {
+      const facts = await this.host.agent.postmortemFacts(incidentId, humans);
+      // The incident row itself couldn't be read — treated like any other draft failure:
+      // no LLM call, nothing stored.
+      if (!facts) {
+        await updateProgress(`❌ Could not draft the postmortem: incident #${incidentId} could not be read`);
+        return;
+      }
+      const { markdown, backend } = await this.host.agent.draftPostmortem(facts, threadId);
+      const storedId = await this.host.agent.storePostmortem(incidentId, requestedBy, markdown, backend);
+
+      const link =
+        storedId === null
+          ? null
+          : config.dashboard.publicUrl
+            ? `${config.dashboard.publicUrl}/incidents/${incidentId}/postmortem`
+            : `/incidents/${incidentId}/postmortem`;
+      await updateProgress(
+        link === null ? "📝 Postmortem drafted — not stored (the dashboard will not have it)" : `📝 Postmortem draft ready — ${link}`
+      );
+
+      const text = postmortemSlackText(facts, markdown, link);
+      try {
+        await client.chat.postMessage({
+          channel: channel, thread_ts: threadId,
+          text: `📝 Postmortem draft — ${facts.incident.alertname}`,
+          blocks: postmortemSlackBlocks(facts, markdown, link),
+        });
+      } catch (err) {
+        // `invalid_blocks` refuses the WHOLE message — the same card goes out as plain mrkdwn
+        // rather than the draft reaching nobody (the RCA card's rule, postRca).
+        logger.warn(`[slack] postmortem card refused, posting as text: ${errDetail(err)}`);
+        for (const part of splitForSlack(text)) {
+          await client.chat.postMessage({ channel: channel, thread_ts: threadId, text: part, mrkdwn: true });
+        }
+      }
+    } catch (err) {
+      logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);
+      await updateProgress(`❌ Could not draft the postmortem: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Returns false when this thread isn't a stored incident, so the caller can fall through to

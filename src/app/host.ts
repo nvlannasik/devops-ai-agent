@@ -37,5 +37,6 @@ export interface SlackHost {
   maybeProposeRemediation: RemediationFlow["maybeProposeRemediation"];
   handleStatusCommand: ThreadCommands["handleStatusCommand"];
   handlePostmortem: ThreadCommands["handlePostmortem"];
+  autoPostmortem: ThreadCommands["autoPostmortem"];
   handleLearn: ThreadCommands["handleLearn"];
 }

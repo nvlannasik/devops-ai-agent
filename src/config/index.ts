@@ -260,6 +260,12 @@ export const config = {
   // be unchanged for anyone not using it. Behind a shared-password session (see
   // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
   // than serving incidents anonymously.
+  // D2: a resolved incident whose ASSESSED severity is in this list gets a postmortem draft without
+  // anyone asking (app/commands.ts autoPostmortem). Empty (`POSTMORTEM_AUTO_SEVERITIES=""`) = off.
+  postmortem: {
+    autoSeverities: (process.env.POSTMORTEM_AUTO_SEVERITIES ?? "critical").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+  },
+
   dashboard: {
     enabled: process.env.DASHBOARD_ENABLED === "true",
     port: dashboardPort(process.env.DASHBOARD_PORT),

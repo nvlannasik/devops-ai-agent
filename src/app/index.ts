@@ -16,6 +16,7 @@ import { Semaphore, ThreadQueue, InFlightWork, RESTART_NOTICE, type Accepted } f
 import type { SlackHost, UnstoredAlert } from "./host.js";
 import { MentionFlow } from "./mention.js";
 import { AlertFlow, type AlertmanagerPayload } from "./alerts.js";
+import { FeedbackFlow, RCA_CONFIRM, RCA_CORRECT } from "./feedback.js";
 import { RemediationFlow } from "./remediation.js";
 import { ThreadCommands } from "./commands.js";
 import { InFlightRegistry } from "../agent/inflight/index.js";
@@ -56,6 +57,7 @@ export class SlackApp {
   private mentions!: MentionFlow;
   private alerts!: AlertFlow;
   private remediation!: RemediationFlow;
+  private feedback!: FeedbackFlow;
   private commands!: ThreadCommands;
 
   constructor(agent: DevOpsAgent) {
@@ -100,6 +102,16 @@ export class SlackApp {
       await this.remediation.handleRemediationAction(false, body as Record<string, any>, (action as { value?: string }).value, client);
     });
 
+    // One-click RCA feedback on the resolve message (app/feedback.ts).
+    this.app.action(RCA_CONFIRM, async ({ ack, body, action, client }) => {
+      await ack();
+      await this.feedback.handle("confirmed", body as Record<string, any>, (action as { value?: string }).value, client);
+    });
+    this.app.action(RCA_CORRECT, async ({ ack, body, action, client }) => {
+      await ack();
+      await this.feedback.handle("corrected", body as Record<string, any>, (action as { value?: string }).value, client);
+    });
+
     // E step 5: ✅ reaction inside an investigated thread = same learn flow as
     // `@agent learn`. Needs reactions:read + the reaction_added event subscription.
     this.app.event("reaction_added", async ({ event, client }) => {
@@ -141,11 +153,13 @@ export class SlackApp {
       notifyIfLowConfidence: (...a) => self.notifyIfLowConfidence(...a),
       handleLearn: (...a) => self.commands.handleLearn(...a),
       handlePostmortem: (...a) => self.commands.handlePostmortem(...a),
+      autoPostmortem: (...a) => self.commands.autoPostmortem(...a),
       handleStatusCommand: (...a) => self.commands.handleStatusCommand(...a),
       maybeProposeRemediation: (...a) => self.remediation.maybeProposeRemediation(...a),
     };
     this.commands = new ThreadCommands(this.host);
     this.remediation = new RemediationFlow(this.host);
+    this.feedback = new FeedbackFlow(this.host);
     this.alerts = new AlertFlow(this.host);
     this.mentions = new MentionFlow(this.host);
   }

@@ -7,7 +7,7 @@ import { clusterRegistry, currentCluster, storedCluster, withCluster, type Clust
 import { alertCluster, clusterNote, clusterReply, parseClusterMention, speaksIndonesian, vmNote } from "./cluster/binding.js";
 import { createMcp } from "./cluster/router.js";
 import { ConversationMemory, type ThreadMemory, type ThreadSummary } from "./memory/index.js";
-import { IncidentMemory } from "./incidents/index.js";
+import { IncidentMemory, type ResolvedThread } from "./incidents/index.js";
 import { serviceGraph, type CallGraph, type OpenIncident } from "./correlation/topology.js";
 import { buildClusterModel, ClusterModelCache } from "./onboarding/index.js";
 import { namespaceNamed } from "./onboarding/model.js";
@@ -757,6 +757,11 @@ export class DevOpsAgent {
     return { markdown: assemblePostmortem(f, text, new Date()), backend: r.backend ?? "light route" };
   }
 
+  /** Whether an incident already has a draft — the automatic path drafts once (app/commands.ts autoPostmortem). */
+  postmortemExists(incidentId: number): Promise<boolean> {
+    return this.postmortems.exists(incidentId);
+  }
+
   async storePostmortem(incidentId: number, requestedBy: string | null, markdown: string, backend: string): Promise<number | null> {
     return this.postmortems.store(incidentId, requestedBy, markdown, backend);
   }
@@ -794,7 +799,7 @@ export class DevOpsAgent {
     return this.traceStore.prune();
   }
 
-  async resolveIncident(labels: Record<string, string>): Promise<{ channel: string; threadTs: string } | null> {
+  async resolveIncident(labels: Record<string, string>): Promise<ResolvedThread | null> {
     // Multi-cluster: dev and stg share alertnames, so an unscoped resolve could close the wrong
     // cluster's incident. An unlabelled alert still resolves — against the local cluster's row,
     // since NULL reads as local (migrations/017) and that is what an unlabelled store() wrote.
@@ -825,6 +830,16 @@ export class DevOpsAgent {
   learnFromThread(...a: Parameters<IncidentLifecycle["learnFromThread"]>): ReturnType<IncidentLifecycle["learnFromThread"]> { return this.lifecycle.learnFromThread(...a); }
 
   // E. reaction-learn needs to know silently whether a thread maps to a stored incident.
+  /** The stored root cause a one-click confirmation stores as human-confirmed (app/feedback.ts). */
+  rootCauseOf(id: number) {
+    return this.incidents.rootCauseOf(id);
+  }
+
+  /** Human-confirmed feedback, written by a person's click (app/feedback.ts) — never by the agent. */
+  storeFeedback(...a: Parameters<IncidentMemory["storeFeedback"]>) {
+    return this.incidents.storeFeedback(...a);
+  }
+
   async findIncidentForThread(channel: string, threadTs: string): Promise<number | null> {
     return this.incidents.findIncidentByThread(channel, threadTs);
   }

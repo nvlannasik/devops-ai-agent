@@ -12,6 +12,8 @@ import { renderForModel, renderForSlack } from "../agent/changes/index.js";
 import { flagInjection } from "../agent/injection/index.js";
 import { withRoute, withTrace } from "../utils/trace/index.js";
 import type { SlackHost } from "./host.js";
+import type { ResolvedThread } from "../agent/incidents/index.js";
+import { resolvedBlocks } from "./feedback.js";
 
 /**
  * What `markResolved` matches an incident on: alertname + namespace, plus the cluster label when
@@ -367,16 +369,28 @@ export class AlertFlow {
     }
   }
 
-  async postResolved(thread: { channel: string; threadTs: string }, groupLabels: Record<string, string>, resolved: AlertItem[]): Promise<void> {
+  async postResolved(thread: ResolvedThread, groupLabels: Record<string, string>, resolved: AlertItem[]): Promise<void> {
     const ends = resolved.map((a) => a.endsAt).filter(Boolean).map((s) => new Date(s!).getTime()).filter(Number.isFinite);
     const endedAt = ends.length > 0 ? ` at \`${new Date(Math.max(...ends)).toISOString()}\`` : "";
     const ns = groupLabels.namespace ? ` in \`${groupLabels.namespace}\`` : "";
-    await this.host.app.client.chat.postMessage({
-      channel: thread.channel,
-      thread_ts: thread.threadTs,
-      text: `✅ *Alert resolved* — ${groupLabels.alertname ?? "Unknown"}${ns}${endedAt}. If a manual fix did it, react :${config.slack.learnReaction}: on the message describing it (or mention me with \`learn\`) so I remember.`,
-      mrkdwn: true,
-    });
+    const text = `✅ *Alert resolved* — ${groupLabels.alertname ?? "Unknown"}${ns}${endedAt}. If a manual fix did it, react :${config.slack.learnReaction}: on the message describing it (or mention me with \`learn\`) so I remember.`;
+    // The buttons (app/feedback.ts) need the incident's id and a stored root cause to confirm.
+    const blocks = resolvedBlocks(text, thread.id, thread.hasRootCause === true);
+    try {
+      await this.host.app.client.chat.postMessage({ channel: thread.channel, thread_ts: thread.threadTs, text, mrkdwn: true, ...(blocks ? { blocks } : {}) });
+    } catch (err) {
+      if (!blocks) throw err;
+      // invalid_blocks refuses the whole message — the resolve itself must still be said.
+      logger.warn(`[slack] resolve card refused, posting as text: ${errDetail(err)}`);
+      await this.host.app.client.chat.postMessage({ channel: thread.channel, thread_ts: thread.threadTs, text, mrkdwn: true });
+    }
+    // D2: a severe incident gets its postmortem draft now, queued behind anything in the thread.
+    const severity = thread.assessedSeverity?.toLowerCase();
+    if (thread.id !== undefined && severity && config.postmortem.autoSeverities.includes(severity)) {
+      void this.host.autoPostmortem(thread.channel, thread.threadTs, thread.id, severity).catch((e) =>
+        logger.error(`[postmortem] automatic draft for incident ${thread.id} failed: ${errDetail(e)}`)
+      );
+    }
   }
 
   /** The other half of handleResolvedAlert's early branch: the incident exists now, so close it. */

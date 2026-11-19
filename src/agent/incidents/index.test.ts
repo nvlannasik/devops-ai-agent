@@ -518,12 +518,13 @@ test("markResolved flips the newest unresolved incident and returns its thread",
   const fakePool = {
     query: async (sql: string, params: unknown[]) => {
       captured = { sql, params };
-      return { rows: [{ channel: "C123", thread_ts: "1720.99" }] };
+      return { rows: [{ id: "12", channel: "C123", thread_ts: "1720.99", assessed_severity: "critical", has_cause: true }] };
     },
   } as any;
   const mem = new IncidentMemory(fakePool);
   const thread = await mem.markResolved({ alertname: "X", namespace: "ns" });
-  assert.deepEqual(thread, { channel: "C123", threadTs: "1720.99" });
+  // id/severity/cause feed the resolve message's buttons and the automatic postmortem (app/feedback.ts)
+  assert.deepEqual(thread, { channel: "C123", threadTs: "1720.99", id: 12, assessedSeverity: "critical", hasRootCause: true });
   assert.match(captured!.sql, /resolved_at IS NULL/);
   assert.match(captured!.sql, /ORDER BY created_at DESC LIMIT 1/);
 

@@ -296,3 +296,23 @@ test("an idle thread gets no queued ack", async () => {
   await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
   assert.ok(h.posted.every((m: any) => !/queued/i.test(m.text ?? "")));
 });
+
+test("autoPostmortem drafts once on resolve, with nobody named as requester", async () => {
+  const h = harness({ incidentId: 7 });
+  h.self.app = { client: h.client };
+  h.self.agent.postmortemExists = async () => false;
+  await ThreadCommands.prototype.autoPostmortem.call(viaCommands(h.self), "C1", "100.0", 7, "critical");
+  assert.equal(h.calls.draftCount, 1);
+  assert.equal(h.calls.store[0].by, null);
+  assert.match(h.posted[0].text, /Critical incident resolved/);
+  assert.equal(h.calls.facts[0].humans !== undefined, true);
+});
+
+test("autoPostmortem does nothing when the incident already has a draft", async () => {
+  const h = harness({ incidentId: 7 });
+  h.self.app = { client: h.client };
+  h.self.agent.postmortemExists = async () => true;
+  await ThreadCommands.prototype.autoPostmortem.call(viaCommands(h.self), "C1", "100.0", 7, "critical");
+  assert.equal(h.calls.draftCount, 0);
+  assert.equal(h.posted.length, 0);
+});

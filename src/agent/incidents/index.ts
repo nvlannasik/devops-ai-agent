@@ -81,6 +81,15 @@ const shapeResolved = (r: Record<string, any>): ResolvedIncident => ({
   groupLabels: r.group_labels ?? null,
 });
 
+/** A resolved incident's thread, plus what the resolve message offers on it (app/alerts.ts postResolved). */
+export interface ResolvedThread {
+  channel: string;
+  threadTs: string;
+  id?: number;
+  assessedSeverity?: string | null;
+  hasRootCause?: boolean;
+}
+
 export class IncidentMemory {
   constructor(
     private readonly pool: Pool | null,
@@ -255,7 +264,7 @@ export class IncidentMemory {
     labels: Record<string, string>,
     by = "alertmanager",
     scope?: { cluster: string | null; local: string | null }
-  ): Promise<{ channel: string; threadTs: string } | null> {
+  ): Promise<ResolvedThread | null> {
     if (!this.pool) return null;
     const alertname = labels.alertname;
     if (!alertname) return null;
@@ -267,11 +276,17 @@ export class IncidentMemory {
              WHERE alertname = $1 AND namespace IS NOT DISTINCT FROM $2 AND resolved_at IS NULL${scope ? `
                AND COALESCE(cluster, $4::text) IS NOT DISTINCT FROM $5::text` : ""}
              ORDER BY created_at DESC LIMIT 1)
-          RETURNING channel, thread_ts`,
+          RETURNING id, channel, thread_ts, assessed_severity, (root_cause IS NOT NULL AND root_cause <> '') AS has_cause`,
         scope ? [alertname, labels.namespace ?? null, by, scope.local, scope.cluster] : [alertname, labels.namespace ?? null, by]
       );
       if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
-      return { channel: rows[0].channel, threadTs: rows[0].thread_ts };
+      return {
+        channel: rows[0].channel,
+        threadTs: rows[0].thread_ts,
+        id: rows[0].id == null ? undefined : Number(rows[0].id),
+        assessedSeverity: rows[0].assessed_severity ?? null,
+        hasRootCause: rows[0].has_cause === true,
+      };
     } catch (err) {
       logger.error(`[incidents] markResolved failed: ${err instanceof Error ? err.message : err}`);
       return null;
@@ -295,6 +310,13 @@ export class IncidentMemory {
       logger.error(`[incidents] clusterForThread failed: ${err instanceof Error ? err.message : err}`);
       return null;
     }
+  }
+
+  /** What a one-click "the RCA was right" confirms (app/feedback.ts): the agent's stored root cause. */
+  async rootCauseOf(id: number): Promise<{ alertname: string; rootCause: string | null } | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(`SELECT alertname, root_cause FROM incidents WHERE id = $1`, [id]);
+    return rows.length > 0 ? { alertname: String(rows[0].alertname), rootCause: rows[0].root_cause ?? null } : null;
   }
 
   async findIncidentByThread(channel: string, threadTs: string): Promise<number | null> {
