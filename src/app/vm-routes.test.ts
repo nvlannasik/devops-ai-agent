@@ -43,12 +43,16 @@ test("heartbeat records the units; result calls onResult once with the remediati
     results
   );
   assert.equal((await s.call("/vm/heartbeat", "tok-a", { units: ["nginx.service"], version: "1" })).status, 204);
-  assert.deepEqual(beats, [["vm-a", ["nginx.service"], "1", null]]);
+  assert.deepEqual(beats, [["vm-a", ["nginx.service"], "1", null, { cluster: null, node: null }]]);
   // version 3 sends a snapshot: an object is kept, anything else (or a huge one) is dropped
   await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: { memory: { totalBytes: 1 } } });
   await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: [1, 2] });
   await s.call("/vm/heartbeat", "tok-a", { units: [], version: "3", snapshot: { pad: "x".repeat(70 * 1024) } });
   assert.deepEqual(beats.slice(1).map((b) => (b as unknown[])[3]), [{ memory: { totalBytes: 1 } }, null, null]);
+  // version 4 names its cluster and node; anything not shaped like a name is dropped
+  await s.call("/vm/heartbeat", "tok-a", { units: [], version: "4", cluster: "stg", node: "worker1" });
+  await s.call("/vm/heartbeat", "tok-a", { units: [], version: "4", cluster: "../etc", node: 7 });
+  assert.deepEqual(beats.slice(4).map((b) => (b as unknown[])[4]), [{ cluster: "stg", node: "worker1" }, { cluster: null, node: null }]);
   const body = { status: "succeeded", exitCode: 0, active: "active", journal: "ok" };
   assert.equal((await s.call("/vm/actions/3/result", "tok-a", body)).status, 204);
   assert.deepEqual(results, [["vm-a", 3, 12, body]]);

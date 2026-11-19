@@ -504,9 +504,72 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .node-row p.meta { margin: var(--sp-1) 0 0; }
 .node-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: var(--sp-3); }
 .node-facts { margin: 0; }
+/* The fleet: one card per cluster (and one for standalone hosts), a table inside each. */
+.node-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-4); }
+.node-toggle {
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface); font-size: var(--fs-sm); text-decoration: none; color: var(--text);
+}
+.node-toggle[aria-current="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.node-search { flex: 1 1 14rem; min-width: 0; }
+.node-search input {
+  box-sizing: border-box; width: 100%; font: inherit; font-size: var(--fs-sm); color: var(--text);
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface);
+}
+.node-group { margin-bottom: var(--sp-5); }
+.node-group-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border);
+}
+.node-group-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.node-group-title .card-title { margin: 0; }
+.node-holders {
+  display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-5); margin: 0; padding: var(--sp-2) var(--sp-4);
+  background: var(--surface-2); font-size: var(--fs-sm); color: var(--text-dim);
+}
+.node-holders strong { color: var(--text); font-weight: 600; }
+.node-group-note, .node-group-empty { margin: 0; padding: var(--sp-3) var(--sp-4); }
+.node-group-empty p { margin: var(--sp-1) 0 0; }
+.node-group tr[data-attention] > td { background: var(--tint-warning); }
+.node-host { font-weight: 600; }
+.node-sub { display: block; font-size: var(--fs-xs); color: var(--text-dim); }
+.node-cell-bar { display: block; width: 100%; max-width: 11rem; height: 6px; }
+.node-cell-text { display: block; margin-top: var(--sp-1); font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.node-group td [data-tone], .node-cell-text[data-tone] { color: var(--ink); font-weight: 600; }
+.node-notes, .node-map { margin-bottom: var(--sp-4); }
+.node-map .node-holders { background: none; padding: 0 0 var(--sp-1); }
+.node-map p.meta { margin: 0; }
+
+/* A control plane's memory as one budget, pods at the bottom, what is left at the top. The dashed
+   line is allocatable: the pods' parts crossing it is what raises MemoryPressure. Each part has its
+   number in the legend beside the bar, so no part is read by colour alone. */
+.budget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: var(--sp-5); margin-bottom: var(--sp-5); }
+.budget-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.budget-name { margin: 0; font-weight: 650; }
+.budget-body { display: flex; gap: var(--sp-3); align-items: stretch; }
+.budget-bar {
+  position: relative; flex: 0 0 4.5rem; height: 20rem; display: flex; flex-direction: column-reverse;
+  border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; background: var(--surface-2);
+}
+.budget-bar > span:not(.budget-line) { flex: 0 0 auto; height: calc(var(--h, 0) * 1%); }
+.budget-line { position: absolute; left: 0; right: 0; bottom: calc(var(--at, 0) * 1%); border-top: 2px dashed var(--text); }
+.budget-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; justify-content: space-between; gap: var(--sp-1); font-size: var(--fs-sm); min-width: 0; }
+.budget-legend li { display: flex; align-items: center; gap: var(--sp-2); }
+.budget-legend li span { flex: 1 1 auto; color: var(--text-dim); }
+.budget-legend li strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.budget-legend i { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+.budget-alloc { border-top: 1px dashed var(--border-strong); padding-top: var(--sp-1); }
+[data-k="b-apiserver"] { background: var(--brand-600); }
+[data-k="b-controller"] { background: var(--brand-400); }
+[data-k="b-pods"] { background: color-mix(in srgb, var(--brand-400) 45%, var(--surface)); }
+[data-k="b-etcd"] { background: var(--mark-warning); }
+[data-k="b-runtime"] { background: color-mix(in srgb, var(--mark-warning) 45%, var(--surface)); }
+[data-k="b-os"] { background: var(--mark-line); }
+[data-k="b-free"] { background: color-mix(in srgb, var(--mark-ok) 30%, var(--surface)); }
 @media (max-width: 40rem) {
   .node-row { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
   .node-row .rate-bar { width: 100%; }
   .node-meter-text { display: block; margin: var(--sp-1) 0 0; }
+  .budget-bar { flex-basis: 3.5rem; height: 16rem; }
 }
 `;

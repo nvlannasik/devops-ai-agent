@@ -32,22 +32,21 @@ test("registered means a heartbeat within 5 minutes; no pool means nothing", asy
   assert.equal(await new VmStore(null).claim("vm-a"), null);
 });
 
-test("heartbeat stores the snapshot, and one without a snapshot keeps the last", async () => {
+test("heartbeat stores the snapshot and the place; one without a snapshot keeps the last", async () => {
   const pool = fakePool();
-  await new VmStore(pool as never).heartbeat("vm-a", [], "3", { memory: { totalBytes: 1 } });
+  await new VmStore(pool as never).heartbeat("stg.worker1", [], "4", { memory: { totalBytes: 1 } }, { cluster: "stg", node: "worker1" });
   await new VmStore(pool as never).heartbeat("vm-a", [], "2");
-  assert.match(pool.seen[0]!.text, /COALESCE\(EXCLUDED\.snapshot, vm_hosts\.snapshot\)/);
-  assert.deepEqual(pool.seen[0]!.values, ["vm-a", [], "3", '{"memory":{"totalBytes":1}}']);
-  assert.deepEqual(pool.seen[1]!.values, ["vm-a", [], "2", null]);
+  assert.match(pool.seen[0]!.text, /COALESCE\(EXCLUDED\.snapshot, vm_hosts\.snapshot\)[\s\S]*cluster = EXCLUDED\.cluster, node = EXCLUDED\.node/);
+  assert.deepEqual(pool.seen[0]!.values, ["stg.worker1", [], "4", '{"memory":{"totalBytes":1}}', "stg", "worker1"]);
+  assert.deepEqual(pool.seen[1]!.values, ["vm-a", [], "2", null, null, null]);
 });
 
-test("snapshot returns the latest with its age; none sent is null", async () => {
-  const pool = fakePool([{ rows: [{ snapshot: { load: [1] }, version: "3", age: 42 }] }, { rows: [] }]);
+test("snapshotCandidates matches the node name, or the host name for a host without one", async () => {
+  const pool = fakePool([{ rows: [{ name: "stg.worker1", cluster: "stg", node: "worker1", snapshot: { load: [1] }, version: "4", age: 42 }] }]);
   const store = new VmStore(pool as never);
-  assert.deepEqual(await store.snapshot("vm-a"), { snapshot: { load: [1] }, ageSeconds: 42, version: "3" });
-  assert.match(pool.seen[0]!.text, /snapshot IS NOT NULL/);
-  assert.equal(await store.snapshot("vm-b"), null);
-  assert.equal(await new VmStore(null).snapshot("vm-a"), null);
+  assert.deepEqual(await store.snapshotCandidates("worker1"), [{ name: "stg.worker1", cluster: "stg", node: "worker1", snapshot: { load: [1] }, ageSeconds: 42, version: "4" }]);
+  assert.match(pool.seen[0]!.text, /COALESCE\(node, name\) = \$1 OR name = \$1/);
+  assert.deepEqual(await new VmStore(null).snapshotCandidates("x"), []);
 });
 
 test("parseVmTokens: name=token pairs; unset is none; malformed fails boot", () => {

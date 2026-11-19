@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withVmTools, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL } from "./tools.js";
+import { withVmTools, pickHost, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL } from "./tools.js";
+import type { SnapshotCandidate } from "./store.js";
 import { parseProposal, PROPOSABLE_ACTIONS } from "../remediation/proposal.js";
 import { NO_POD_TARGET } from "../remediation/remediator.js";
 
@@ -12,7 +13,7 @@ const inner = {
   getTools: () => [{ name: "k8s_list_pods", description: "list", inputSchema: {} }],
   callTool: async (name: string) => (inner.calls.push(name), "inner"),
 };
-const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null = null) => {
+const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null = null, cands?: SnapshotCandidate[]) => {
   const queued: unknown[] = [];
   const asked: string[] = [];
   return {
@@ -20,7 +21,12 @@ const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>
     asked,
     registered: async () => (units ? { units } : null),
     enqueue: async (...a: unknown[]) => (queued.push(a), 41),
-    snapshot: async (h: string) => (asked.push(h), snap),
+    snapshotCandidates: async (n: string): Promise<SnapshotCandidate[]> => {
+      asked.push(n);
+      if (cands) return cands;
+      if (snap) return [{ name: n, cluster: null, node: null, snapshot: snap.snapshot, ageSeconds: snap.ageSeconds, version: snap.version }];
+      return units ? [{ name: n, cluster: null, node: null, snapshot: null, ageSeconds: null, version: "2" }] : [];
+    },
   };
 };
 
@@ -90,4 +96,26 @@ test("node_host_snapshot: an old snapshot says so; no agent and an old agent are
   assert.match(await withVmTools(inner as never, store(null) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker9" }), /^Error: no devops-vm-agent reports as `worker9`/);
   assert.match(await withVmTools(inner as never, store([]) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "master3-vm" }), /^Error: .*too old .*version 3/);
   assert.match(await withVmTools(inner as never, store([]) as never).callTool(NODE_HOST_SNAPSHOT_TOOL, {}), /^Error: `node` is required/);
+});
+
+const cand = (name: string, cluster: string | null, node: string | null = null): SnapshotCandidate => ({ name, cluster, node, snapshot: { memory: {} }, ageSeconds: 10, version: "4" });
+
+test("pickHost: a host naming its cluster must match; one naming none stands for the local cluster", () => {
+  const both = [cand("worker1", "dev"), cand("stg.worker1", "stg", "worker1")];
+  assert.equal((pickHost(both, "worker1", "stg", "dev") as SnapshotCandidate).name, "stg.worker1");
+  assert.equal((pickHost(both, "worker1", "dev", "dev") as SnapshotCandidate).name, "worker1");
+  assert.ok(Array.isArray(pickHost(both, "worker1", null, "dev")), "unbound and two hosts: ambiguous, never a guess");
+  const legacy = [cand("master3-vm", null)];
+  assert.equal((pickHost(legacy, "master3-vm", "dev", "dev") as SnapshotCandidate).name, "master3-vm");
+  assert.equal(pickHost(legacy, "master3-vm", "stg", "dev"), null, "an unplaced host is not a stg node");
+  assert.equal(pickHost([], "x", null, "dev"), null);
+});
+
+test("node_host_snapshot: ambiguous names ask for a cluster; the bound cluster is the default", async () => {
+  const both = [cand("worker1", "dev"), cand("stg.worker1", "stg", "worker1")];
+  const unbound = withVmTools(inner as never, store([], null, both) as never, () => ({ cluster: null, local: "dev" }));
+  assert.match(await unbound.callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker1" }), /several hosts — `worker1` \(dev\), `stg.worker1` \(stg\)\. Pass `cluster`/);
+  const bound = withVmTools(inner as never, store([], null, both) as never, () => ({ cluster: "stg", local: "dev" }));
+  assert.equal(JSON.parse(await bound.callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker1" })).host, "stg.worker1");
+  assert.equal(JSON.parse(await unbound.callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker1", cluster: "dev" })).cluster, "dev");
 });

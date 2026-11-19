@@ -4,13 +4,26 @@ import type { Pool } from "pg";
 // no-op — the agent without incident memory has no VM actions either.
 export type VmStatus = "succeeded" | "failed" | "refused";
 
-export interface VmHostRow {
+/** Where a host says it sits (vm-agent version 4+): its cluster and Kubernetes node name, or nulls. */
+export interface HostPlace {
+  cluster: string | null;
+  node: string | null;
+}
+
+export interface VmHostRow extends HostPlace {
   name: string;
   units: string[];
   version: string | null;
   lastSeenSeconds: number;
   snapshot: Record<string, unknown> | null;
   snapshotAgeSeconds: number | null;
+}
+
+export interface SnapshotCandidate extends HostPlace {
+  name: string;
+  snapshot: Record<string, unknown> | null;
+  ageSeconds: number | null;
+  version: string | null;
 }
 
 export interface VmActionRow {
@@ -27,28 +40,38 @@ export interface VmActionRow {
 export class VmStore {
   constructor(private readonly pool: Pool | null) {}
 
-  /** A heartbeat without a snapshot (an agent before version 3) keeps the last one it sent. */
-  async heartbeat(host: string, units: string[], version: string, snapshot: object | null = null): Promise<void> {
+  /** A heartbeat without a snapshot (an agent before version 3) keeps the last one it sent. Its
+   *  place (version 4+) is overwritten each time: an older agent sends none and is placed by name. */
+  async heartbeat(host: string, units: string[], version: string, snapshot: object | null = null, place: HostPlace = { cluster: null, node: null }): Promise<void> {
     if (!this.pool) return;
     await this.pool.query(
-      `INSERT INTO vm_hosts (name, units, version, last_seen, snapshot, snapshot_at)
-       VALUES ($1, $2, $3, now(), $4::jsonb, CASE WHEN $4::jsonb IS NULL THEN NULL ELSE now() END)
+      `INSERT INTO vm_hosts (name, units, version, last_seen, snapshot, snapshot_at, cluster, node)
+       VALUES ($1, $2, $3, now(), $4::jsonb, CASE WHEN $4::jsonb IS NULL THEN NULL ELSE now() END, $5, $6)
        ON CONFLICT (name) DO UPDATE SET units = EXCLUDED.units, version = EXCLUDED.version, last_seen = now(),
          snapshot = COALESCE(EXCLUDED.snapshot, vm_hosts.snapshot),
-         snapshot_at = COALESCE(EXCLUDED.snapshot_at, vm_hosts.snapshot_at)`,
-      [host, units, version, snapshot === null ? null : JSON.stringify(snapshot)]
+         snapshot_at = COALESCE(EXCLUDED.snapshot_at, vm_hosts.snapshot_at),
+         cluster = EXCLUDED.cluster, node = EXCLUDED.node`,
+      [host, units, version, snapshot === null ? null : JSON.stringify(snapshot), place.cluster, place.node]
     );
   }
 
-  /** The latest host snapshot and its age in seconds, or null when the host never sent one. */
-  async snapshot(host: string): Promise<{ snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null> {
-    if (!this.pool) return null;
+  /** Every host whose Kubernetes node name (or, without one, whose own name) is `node`, with its
+   *  latest snapshot — several when two clusters share a node name. agent/vm/tools picks among them. */
+  async snapshotCandidates(node: string): Promise<SnapshotCandidate[]> {
+    if (!this.pool) return [];
     const { rows } = await this.pool.query(
-      `SELECT snapshot, version, extract(epoch FROM now() - snapshot_at)::int AS age
-         FROM vm_hosts WHERE name = $1 AND snapshot IS NOT NULL`,
-      [host]
+      `SELECT name, cluster, node, snapshot, version, extract(epoch FROM now() - snapshot_at)::int AS age
+         FROM vm_hosts WHERE COALESCE(node, name) = $1 OR name = $1 ORDER BY name`,
+      [node]
     );
-    return rows[0] ? { snapshot: rows[0].snapshot, ageSeconds: Number(rows[0].age), version: rows[0].version ?? null } : null;
+    return rows.map((r: Record<string, unknown>) => ({
+      name: String(r.name),
+      cluster: (r.cluster as string | null) ?? null,
+      node: (r.node as string | null) ?? null,
+      snapshot: (r.snapshot as Record<string, unknown> | null) ?? null,
+      ageSeconds: r.age === null ? null : Number(r.age),
+      version: (r.version as string | null) ?? null,
+    }));
   }
 
   /** The VM's allowlist while it is alive (a heartbeat within 5 minutes), else null. */
@@ -69,13 +92,15 @@ export class VmStore {
   async hosts(): Promise<VmHostRow[]> {
     if (!this.pool) return [];
     const { rows } = await this.pool.query(
-      `SELECT name, units, version, snapshot,
+      `SELECT name, units, version, snapshot, cluster, node,
               extract(epoch FROM now() - last_seen)::int AS seen_age,
               extract(epoch FROM now() - snapshot_at)::int AS snapshot_age
          FROM vm_hosts ORDER BY name`
     );
     return rows.map((r: Record<string, unknown>) => ({
       name: String(r.name),
+      cluster: (r.cluster as string | null) ?? null,
+      node: (r.node as string | null) ?? null,
       units: (r.units as string[]) ?? [],
       version: (r.version as string | null) ?? null,
       lastSeenSeconds: Number(r.seen_age),

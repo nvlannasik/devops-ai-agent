@@ -316,9 +316,14 @@ export class DevOpsAgent {
     return this.onLocal(() => this.mcp.callTool("k8s_cluster_inventory", { detail: true }), cluster);
   }
 
-  /** One MCP read against the local cluster, for the dashboard's /nodes page (no LLM involved). */
-  async localTool(name: string, args: Record<string, unknown>): Promise<string> {
-    return this.onLocal(() => this.mcp.callTool(name, args));
+  /** One MCP read against `cluster` (null: the local one), for the dashboard's /nodes pages — no LLM. */
+  async clusterTool(cluster: string | null, name: string, args: Record<string, unknown>): Promise<string> {
+    return this.onLocal(() => this.mcp.callTool(name, args), cluster ?? undefined);
+  }
+
+  /** The clusters the agent can read — the dashboard's /nodes groups. Empty names = single-cluster mode. */
+  clusterNames(): { names: string[]; local: string | null } {
+    return { names: this.clusters.names, local: this.clusters.local };
   }
 
   /** The VM restart and the host snapshot as virtual tools, only when VM agents are configured (agent/vm/tools). Lambdas:
@@ -328,8 +333,8 @@ export class DevOpsAgent {
     return withVmTools(mcp, {
       registered: (h) => this.vmStore.registered(h),
       enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r),
-      snapshot: (h) => this.vmStore.snapshot(h),
-    });
+      snapshotCandidates: (n) => this.vmStore.snapshotCandidates(n),
+    }, () => ({ cluster: currentCluster() ?? null, local: this.clusters.local }));
   }
 
   /** The registered VM an alert's host label names (agent/vm), or null — Kubernetes alerts carry no such label. */

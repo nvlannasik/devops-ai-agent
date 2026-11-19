@@ -25,6 +25,14 @@ const STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "refused"]
 /** A host snapshot is a few KB (vm-agent snapshot()); anything far larger is not one and is dropped. */
 const SNAPSHOT_MAX_CHARS = 64 * 1024;
 
+const PLACE_NAME = /^[a-z0-9][a-z0-9.-]{0,62}$/;
+/** The cluster and node a version-4 agent names; anything not shaped like a name is dropped. */
+function placeOf(body: unknown): { cluster: string | null; node: string | null } {
+  const b = (body ?? {}) as { cluster?: unknown; node?: unknown };
+  const pick = (v: unknown) => (typeof v === "string" && PLACE_NAME.test(v) ? v : null);
+  return { cluster: pick(b.cluster), node: pick(b.node) };
+}
+
 function snapshotOf(body: unknown): object | null {
   const snap = (body as { snapshot?: unknown } | undefined)?.snapshot;
   if (!snap || typeof snap !== "object" || Array.isArray(snap)) return null;
@@ -46,7 +54,7 @@ export function vmRoutes(deps: Deps): express.Router {
 
   router.post("/vm/heartbeat", auth, (req, res) => {
     const units = Array.isArray(req.body?.units) ? req.body.units.filter((u: unknown): u is string => typeof u === "string") : [];
-    deps.store.heartbeat(res.locals.vm, units, String(req.body?.version ?? ""), snapshotOf(req.body)).then(() => res.status(204).end(), fail(res, "heartbeat"));
+    deps.store.heartbeat(res.locals.vm, units, String(req.body?.version ?? ""), snapshotOf(req.body), placeOf(req.body)).then(() => res.status(204).end(), fail(res, "heartbeat"));
   });
 
   router.post("/vm/actions/claim", auth, (_req, res) => {

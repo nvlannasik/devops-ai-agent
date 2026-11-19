@@ -6,11 +6,11 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, nodesPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, hostPage, hostsPage, nodeClusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { memoryKeyPage, memoryListPage, threadPage, threadsPage, type ThreadIncident } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
-import { buildNodesModel, loadNodes, type NodesSource } from "./nodes.js";
+import { buildNodesModel, HOST_ID, loadNodes, type NodesSource } from "./nodes.js";
 import { GATE_NAMES } from "../agent/trace/index.js";
 import { buildTopology } from "./topology.js";
 import { loadAssets, type Assets } from "./assets.js";
@@ -42,7 +42,9 @@ export type Route =
   | { kind: "detail"; id: number }
   | { kind: "postmortem"; id: number }
   | { kind: "postmortemMd"; id: number }
-  | { kind: "skill"; name: string };
+  | { kind: "skill"; name: string }
+  | { kind: "nodeCluster"; name: string }
+  | { kind: "nodeHost"; id: string };
 
 export function matchRoute(pathname: string): Route {
   const p = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
@@ -58,6 +60,16 @@ export function matchRoute(pathname: string): Route {
   if (p === "/people") return { kind: "people" };
   if (p === "/cluster") return { kind: "cluster" };
   if (p === "/nodes") return { kind: "nodes" };
+  const nc = /^\/nodes\/c\/([^/]+)$/.exec(p);
+  if (nc) {
+    const name = decodeURIComponent(nc[1]!);
+    return HOST_ID.test(name) ? { kind: "nodeCluster", name } : { kind: "notfound" };
+  }
+  const nh = /^\/nodes\/h\/([^/]+)$/.exec(p);
+  if (nh) {
+    const id = decodeURIComponent(nh[1]!);
+    return HOST_ID.test(id) ? { kind: "nodeHost", id } : { kind: "notfound" };
+  }
   // /memory (2026-10-20). A key is two query parameters, not a path: a namespace may be absent,
   // and "absent" must stay distinguishable from any spelling of a name. A thread is a Slack ts
   // and only that, as on /api/trace.
@@ -242,7 +254,7 @@ export class DashboardServer {
     this.slackNames = slackNames;
     this.inventoryTimeoutMs = inventoryTimeoutMs ?? 10_000;
     this.nodes = nodes;
-    this.nodesTimeoutMs = nodesTimeoutMs ?? 20_000;
+    this.nodesTimeoutMs = nodesTimeoutMs ?? 25_000;
   }
 
   /**
@@ -670,8 +682,8 @@ export class DashboardServer {
     // Before the database gate: the host half comes through the agent's VmStore (empty without a
     // pool) and the Kubernetes half from MCP, so the page renders whatever answers. One deadline for
     // the whole read — a node_pods call on an unreachable Prometheus must not hang the page.
-    if (route.kind === "nodes") {
-      if (!this.nodes) return send(200, errorPage("Nodes not available", "This dashboard is not attached to an agent process."));
+    if (route.kind === "nodes" || route.kind === "nodeCluster" || route.kind === "nodeHost") {
+      if (!this.nodes) return send(200, errorPage("Hosts not available", "This dashboard is not attached to an agent process."));
       let timer: NodeJS.Timeout | undefined;
       const input = await Promise.race([
         loadNodes(this.nodes),
@@ -679,8 +691,22 @@ export class DashboardServer {
           timer = setTimeout(() => resolve(null), this.nodesTimeoutMs);
         }),
       ]).finally(() => clearTimeout(timer));
-      if (!input) return send(503, errorPage("Nodes did not answer", `The node reads took longer than ${this.nodesTimeoutMs / 1000}s. Reload in a moment.`));
-      return send(200, nodesPage(buildNodesModel(input), new Date(), await this.openCount()), "text/html; charset=utf-8");
+      if (!input) return send(503, errorPage("Hosts did not answer", `The host reads took longer than ${this.nodesTimeoutMs / 1000}s. Reload in a moment.`));
+      const model = buildNodesModel(input);
+      const open = await this.openCount();
+      if (route.kind === "nodes") {
+        const group = url.searchParams.get("group");
+        const q = (url.searchParams.get("q") ?? "").trim().toLowerCase().slice(0, 64);
+        const view = { group: group && (group === "standalone" || HOST_ID.test(group)) ? group : null, attention: url.searchParams.get("attention") === "1", q };
+        return send(200, hostsPage(model, view, new Date(), open), "text/html; charset=utf-8");
+      }
+      if (route.kind === "nodeCluster") {
+        const html = nodeClusterPage(model, route.name, new Date(), open);
+        return html ? send(200, html, "text/html; charset=utf-8") : send(404, errorPage("Not found", `No cluster "${route.name}".`));
+      }
+      const id = route.kind === "nodeHost" ? route.id : "";
+      const html = hostPage(model, id, new Date(), open);
+      return html ? send(200, html, "text/html; charset=utf-8") : send(404, errorPage("Not found", `No host "${id}".`));
     }
 
     if (route.kind === "bench") {

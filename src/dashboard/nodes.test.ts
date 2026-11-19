@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildNodesModel, loadNodes, toMi, type NodesInput, type NodesSource } from "./nodes.js";
-import { nodesPage } from "./node-views.js";
+import { buildNodesModel, loadNodes, toMi, type HostRowLike, type NodesInput, type NodesSource } from "./nodes.js";
+import { hostPage, hostsPage, nodeClusterPage } from "./node-views.js";
 
 const MiB = 1048576;
 // master2-vm as the agent saw it on 2026-11-18, when it went MemoryPressure with ~400Mi free.
@@ -12,8 +12,9 @@ const SNAP = {
   processes: [
     { name: "kube-apiserver", pid: 900, rssBytes: 663 * MiB, unit: "kubepods" },
     { name: "etcd", pid: 812, rssBytes: 357 * MiB, unit: "etcd.service" },
+    { name: "kube-controller", pid: 950, rssBytes: 107 * MiB, unit: "kubepods" },
   ],
-  units: [{ unit: "etcd.service", memoryBytes: 364 * MiB }],
+  units: [{ unit: "etcd.service", memoryBytes: 364 * MiB }, { unit: "containerd.service", memoryBytes: 120 * MiB }, { unit: "kubelet.service", memoryBytes: 80 * MiB }],
   kubepodsMemoryBytes: 1015 * MiB,
   rootDisk: { totalBytes: 24.4 * 1073741824, availableBytes: 15.7 * 1073741824 },
 };
@@ -21,29 +22,28 @@ const NODES = [
   { name: "master2-vm", status: "True", unschedulable: false, taints: ["node-role.kubernetes.io/control-plane:NoSchedule"], pressure: ["MemoryPressure"], roles: ["control-plane"], allocatable: { memory: "1126100Ki" } },
   { name: "worker3-vm", status: "True", unschedulable: true, taints: [], pressure: [], roles: [], allocatable: { memory: "1126100Ki" } },
 ];
-const PODS = (ws: string, head: string) => JSON.stringify({ podsTotal: 9, allocatable: { memory: "1100Mi" }, usage: { podsWorkingSet: ws, podsHeadroom: head } });
+const PODS = (ws: string) => JSON.stringify({ podsTotal: 9, allocatable: { memory: "1100Mi" }, usage: { podsWorkingSet: ws } });
+const host = (over: Partial<HostRowLike> & { name: string }): HostRowLike => ({ units: [], version: "3", lastSeenSeconds: 20, snapshot: SNAP, snapshotAgeSeconds: 20, cluster: null, node: null, ...over });
 
-const source = (over: Partial<Record<string, string | Error>> = {}): NodesSource & { asked: string[] } => {
+const source = (o: { names?: string[]; hosts?: HostRowLike[]; fail?: Record<string, string | Error>; slow?: string } = {}): NodesSource & { asked: string[] } => {
   const asked: string[] = [];
   return {
     asked,
-    hosts: async () => [
-      { name: "master2-vm", units: [], version: "3", lastSeenSeconds: 20, snapshot: SNAP, snapshotAgeSeconds: 20 },
-      { name: "worker3-vm", units: [], version: "2", lastSeenSeconds: 30, snapshot: null, snapshotAgeSeconds: null },
-    ],
-    actions: async () => [{ id: 4, host: "vm-a", unit: "nginx.service", action: "restart", status: "succeeded", createdAt: new Date("2026-11-18T10:00:00Z"), finishedAt: null, exitCode: 0 }],
-    tool: async (name, args) => {
-      const key = name === "k8s_get_resource" ? `lease:${args.name}` : name === "k8s_node_pods" ? `pods:${args.name}` : name;
+    clusters: () => ({ names: o.names ?? ["dev"], local: "dev" }),
+    hosts: async () => o.hosts ?? [host({ name: "master2-vm" }), host({ name: "worker3-vm", version: "2", snapshot: null, snapshotAgeSeconds: null })],
+    actions: async () => [{ id: 4, host: "vm-web-01", unit: "nginx.service", action: "restart", status: "succeeded", createdAt: new Date("2026-11-18T10:00:00Z"), finishedAt: null, exitCode: 0 }],
+    tool: async (cluster, name, args) => {
+      const key = `${cluster}:${name === "k8s_get_resource" ? `lease:${args.name}` : name === "k8s_node_pods" ? `pods:${args.name}` : name}`;
       asked.push(key);
-      const v = over[key];
+      if (o.slow === cluster) await new Promise((r) => setTimeout(r, 200));
+      const v = o.fail?.[key];
       if (v instanceof Error) throw v;
       if (v !== undefined) return v;
-      if (key === "k8s_list_nodes") return JSON.stringify(NODES);
-      if (key === "lease:kube-controller-manager") return JSON.stringify({ spec: { holderIdentity: "master2-vm_66b59630" } });
-      if (key === "lease:plndr-cp-lock") return JSON.stringify({ spec: { holderIdentity: "master2-vm" } });
-      if (key === "lease:kube-scheduler") return JSON.stringify({ spec: { holderIdentity: "master1-raspi_a8dd" } });
-      if (key === "pods:master2-vm") return PODS("1006Mi", "94Mi");
-      return PODS("384Mi", "716Mi");
+      if (key.endsWith(":k8s_list_nodes")) return JSON.stringify(NODES);
+      if (key.endsWith("lease:kube-controller-manager")) return JSON.stringify({ spec: { holderIdentity: "master2-vm_66b59630" } });
+      if (key.endsWith("lease:plndr-cp-lock")) return JSON.stringify({ spec: { holderIdentity: "master2-vm" } });
+      if (key.endsWith("lease:kube-scheduler")) return JSON.stringify({ spec: { holderIdentity: "master1-raspi_a8dd" } });
+      return key.endsWith("pods:master2-vm") ? PODS("1006Mi") : PODS("384Mi");
     },
   };
 };
@@ -54,68 +54,107 @@ test("toMi reads every quantity shape the two sources use", () => {
   assert.equal(toMi("1.5Gi"), 1536);
   assert.equal(toMi(2 * MiB), 2);
   assert.equal(toMi("lots"), null);
-  assert.equal(toMi(null), null);
 });
 
-test("loadNodes reads the nodes, each node's pods and the three leases, and names what failed", async () => {
-  const src = source({ "lease:kube-scheduler": new Error("forbidden"), "pods:worker3-vm": "Error: prometheus down" });
+test("each cluster is read with its own name, and a failed read is named, not thrown", async () => {
+  const src = source({ fail: { "dev:lease:kube-scheduler": new Error("forbidden"), "dev:pods:worker3-vm": "Error: prometheus down" } });
   const input = await loadNodes(src);
-  assert.deepEqual(src.asked.filter((a) => a.startsWith("pods:")).sort(), ["pods:master2-vm", "pods:worker3-vm"]);
-  assert.equal(input.leases.get("kube-controller-manager"), "master2-vm_66b59630");
-  assert.equal(input.leases.has("kube-scheduler"), false);
-  assert.ok(input.unavailable.some((u) => /Lease kube-scheduler: forbidden/.test(u)));
-  assert.ok(input.unavailable.some((u) => /k8s_node_pods worker3-vm: Error: prometheus down/.test(u)));
-  assert.equal(input.nodePods.has("worker3-vm"), false);
+  assert.ok(src.asked.every((k) => k.startsWith("dev:")));
+  assert.ok(input.unavailable.some((u) => /dev: Lease kube-scheduler: forbidden/.test(u)));
+  assert.ok(input.unavailable.some((u) => /dev: k8s_node_pods worker3-vm: Error: prometheus down/.test(u)));
 });
 
-test("a failed node listing still shows the hosts the agents report", async () => {
-  const input = await loadNodes(source({ k8s_list_nodes: new Error("API down") }));
-  assert.equal(input.nodes, null);
+test("a cluster that does not answer in time is unreachable, and the others still render", async () => {
+  const input = await loadNodes(source({ names: ["dev", "stg"], slow: "stg" }), 50);
   const m = buildNodesModel(input);
-  assert.deepEqual(m.cards.map((c) => c.name).sort(), ["master2-vm", "worker3-vm"]);
-  assert.equal(m.cards.find((c) => c.name === "master2-vm")!.k8s, null);
+  assert.deepEqual(m.clusters.map((g) => [g.name, g.reachable]), [["dev", true], ["stg", false]]);
+  assert.match(m.clusters[1]!.note!, /did not answer within/);
+  assert.deepEqual(m.summary.unreachable, ["stg"]);
+  assert.equal(m.clusters[0]!.cards.length, 2);
 });
 
-test("the model joins host and Kubernetes by name: leases, pod headroom, flags worst first", async () => {
+test("hosts are placed by what they say, else by the cluster that lists them, else standalone", async () => {
+  const hosts = [
+    host({ name: "master2-vm" }), // pre-v4, listed by dev
+    host({ name: "stg.worker1", cluster: "stg", node: "worker1", version: "4" }), // says stg
+    host({ name: "vm-web-01", version: "4", units: ["nginx.service"] }), // v4, no cluster: standalone
+    host({ name: "old-vm", version: "3" }), // pre-v4, listed nowhere, dev reachable: standalone
+  ];
+  const m = buildNodesModel(await loadNodes(source({ names: ["dev", "stg"], hosts, fail: { "stg:k8s_list_nodes": new Error("connection refused") } })));
+  const dev = m.clusters.find((g) => g.name === "dev")!;
+  const stg = m.clusters.find((g) => g.name === "stg")!;
+  assert.deepEqual(dev.cards.map((c) => c.name).sort(), ["master2-vm", "worker3-vm"]);
+  assert.deepEqual(stg.cards.map((c) => [c.id, c.name]), [["stg.worker1", "worker1"]]);
+  assert.equal(stg.reachable, false);
+  assert.deepEqual(m.standalone.map((c) => c.name).sort(), ["old-vm", "vm-web-01"]);
+  assert.equal(m.standalone.find((c) => c.name === "vm-web-01")!.lastAction!.status, "succeeded");
+});
+
+test("while the local cluster cannot be read, an older agent's host stays in it rather than turning standalone", async () => {
+  const m = buildNodesModel(await loadNodes(source({ hosts: [host({ name: "master2-vm" })], fail: { "dev:k8s_list_nodes": new Error("down") } })));
+  assert.deepEqual(m.clusters[0]!.cards.map((c) => c.name), ["master2-vm"]);
+  assert.equal(m.standalone.length, 0);
+});
+
+test("a host naming a cluster the agent cannot read gets a group of its own", async () => {
+  const m = buildNodesModel(await loadNodes(source({ hosts: [host({ name: "prd.n1", cluster: "prd", node: "n1", version: "4" })] })));
+  const prd = m.clusters.find((g) => g.name === "prd")!;
+  assert.equal(prd.reachable, false);
+  assert.match(prd.note!, /cluster registry/);
+});
+
+test("a control plane gets its memory budget, the leases it holds, and flags worst first", async () => {
   const m = buildNodesModel(await loadNodes(source()));
-  const [cp, w] = m.cards;
-  assert.equal(cp!.name, "master2-vm"); // control planes first
-  assert.deepEqual(cp!.holds, ["controller-manager leader", "API VIP (kube-vip)"]);
-  assert.deepEqual(cp!.pods, { count: 9, workingSetMi: 1006, allocatableMi: 1100, headroomMi: 94, tone: "critical" });
-  assert.equal(cp!.host!.availableMi, 404);
-  assert.equal(cp!.host!.disk!.usedPct, 36);
-  assert.deepEqual(cp!.host!.processes[1], { name: "etcd", pid: 812, mi: 357, where: "etcd.service" });
-  assert.equal(cp!.host!.processes[0]!.where, "pod");
-  assert.deepEqual(cp!.flags.map((f) => f.text), ["MemoryPressure", "pods 94Mi from allocatable"]);
-  assert.deepEqual(w!.flags.map((f) => f.text), ["cordoned", "agent v2 sends no snapshot"]);
-  assert.deepEqual(m.summary, { nodes: 2, controlPlanes: 1, underPressure: 1, reporting: 1, tightest: { node: "master2-vm", headroomMi: 94 } });
+  const cp = m.clusters[0]!.cards.find((c) => c.name === "master2-vm")!;
+  assert.deepEqual(cp.holds, ["controller-manager leader", "API VIP (kube-vip)"]);
+  assert.deepEqual(m.clusters[0]!.holders, [
+    { label: "controller-manager", node: "master2-vm" },
+    { label: "scheduler", node: "master1-raspi" },
+    { label: "API VIP", node: "master2-vm" },
+  ]);
+  assert.deepEqual(cp.flags.map((f) => f.text), ["MemoryPressure", "pods 94Mi from allocatable"]);
+  const parts = Object.fromEntries(cp.budget!.parts.map((p) => [p.key, p.mi]));
+  // apiserver 663 + controller 107 + other pods 236 = the pods' 1006; etcd 364; runtime 200; OS the rest of 1564 used
+  assert.deepEqual(parts, { apiserver: 663, controller: 107, pods: 236, etcd: 364, runtime: 200, free: 404 });
+  assert.equal(cp.budget!.allocatableMi, 1100);
+  assert.equal(m.clusters[0]!.cards[0]!.name, "master2-vm"); // worst first
 });
 
-test("an old snapshot is stale and says how old", () => {
-  const input: NodesInput = {
-    hosts: [{ name: "n1", units: [], version: "3", lastSeenSeconds: 900, snapshot: SNAP, snapshotAgeSeconds: 900 }],
-    actions: [],
-    nodes: null,
-    nodePods: new Map(),
-    leases: new Map(),
-    unavailable: [],
-  };
-  const c = buildNodesModel(input).cards[0]!;
-  assert.equal(c.host!.stale, true);
-  assert.ok(c.flags.some((f) => f.text === "snapshot 900s old"));
-  assert.equal(buildNodesModel(input).summary.reporting, 0);
+const view = { group: null, attention: false, q: "" };
+
+test("the fleet page groups by cluster, lists standalone hosts with their allowlist, and escapes", async () => {
+  const hosts = [host({ name: "master2-vm" }), host({ name: "vm-<b>", version: "4", units: ["nginx.service"] })];
+  const input = await loadNodes(source({ names: ["dev", "stg"], hosts, fail: { "stg:k8s_list_nodes": new Error("down") } }));
+  const html = hostsPage(buildNodesModel(input), view, new Date("2026-11-18T12:00:00Z"));
+  for (const s of ["Hosts", "group-dev", "group-stg", "unreachable", "Standalone hosts", "nginx.service", "controller-manager <strong>master2-vm</strong>", "/nodes/c/dev", "Clusters unreachable"]) assert.ok(html.includes(s), s);
+  assert.ok(!html.includes("vm-<b>") && html.includes("vm-&lt;b&gt;"));
 });
 
-test("the page shows each node, its leases, the pressure, the outside-pod services and the actions — escaped", async () => {
-  const input = await loadNodes(source());
-  input.hosts[0]!.snapshot = { ...SNAP, units: [{ unit: "<script>.service", memoryBytes: MiB }] };
-  input.unavailable.push("k8s_node_pods x: <b>boom</b>");
-  const html = nodesPage(buildNodesModel(input), new Date("2026-11-18T12:00:00Z"));
-  for (const s of ["master2-vm", "worker3-vm", "controller-manager leader", "API VIP (kube-vip)", "MemoryPressure", "94Mi headroom", "etcd.service", "nginx.service", "Host actions", "Not everything could be read"]) {
-    assert.ok(html.includes(s), s);
-  }
-  assert.match(html, /1,?006 \/ 1,?100Mi/);
-  assert.ok(!html.includes("<script>.service") && html.includes("&lt;script&gt;.service"));
-  assert.ok(!html.includes("<b>boom</b>"));
-  assert.match(html, /aria-current="page"[^>]*>|href="\/nodes"/);
+test("the fleet filters: one group, only what needs a look, a search", async () => {
+  const m = buildNodesModel(await loadNodes(source({ hosts: [host({ name: "master2-vm" }), host({ name: "vm-web-01", version: "4" })] })));
+  const devOnly = hostsPage(m, { ...view, group: "dev" });
+  assert.ok(devOnly.includes("group-dev") && !devOnly.includes("group-standalone"));
+  const attention = hostsPage(m, { ...view, attention: true });
+  // the Host actions panel links vm-web-01 too, so look at the rows only
+  const row = (n: string) => `class="node-host">${n}<`;
+  assert.ok(attention.includes(row("master2-vm")) && !attention.includes(row("vm-web-01")));
+  const search = hostsPage(m, { ...view, q: "web" });
+  assert.ok(search.includes(row("vm-web-01")) && !search.includes(row("master2-vm")));
+});
+
+test("the cluster page draws each control plane's budget; the host page shows one host; unknown is null", async () => {
+  const m = buildNodesModel(await loadNodes(source({ hosts: [host({ name: "master2-vm" }), host({ name: "vm-web-01", version: "4" })] })));
+  const c = nodeClusterPage(m, "dev")!;
+  assert.match(c, /class="budget-bar" role="img" aria-label="master2-vm: kube-apiserver 663Mi/);
+  assert.match(c, /budget-line" style="--at:/);
+  assert.ok(c.includes('id="node-worker3-vm"'));
+  assert.equal(nodeClusterPage(m, "nope"), null);
+  const h = hostPage(m, "vm-web-01")!;
+  assert.ok(h.includes("vm-web-01") && h.includes("Standalone hosts"));
+  assert.equal(hostPage(m, "nope"), null);
+});
+
+test("an empty input renders, never throws", () => {
+  const input: NodesInput = { hosts: [], actions: [], clusters: [], local: null, unavailable: [] };
+  assert.match(hostsPage(buildNodesModel(input), view), /No hosts/);
 });

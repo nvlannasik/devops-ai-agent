@@ -94,6 +94,19 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(Stub.seen[-1][2]["units"], ["nginx.service"])
         self.assertEqual(Stub.seen[-1][2]["snapshot"], {"memory": {"totalBytes": 1}})
 
+    def test_heartbeat_names_its_cluster_and_node_only_when_set(self):
+        self.agent.heartbeat()
+        self.assertNotIn("cluster", Stub.seen[-1][2])
+        self.agent.cfg = {**self.agent.cfg, "cluster": "stg", "node": "worker1"}
+        self.agent.heartbeat()
+        self.assertEqual((Stub.seen[-1][2]["cluster"], Stub.seen[-1][2]["node"]), ("stg", "worker1"))
+
+    def test_config_rejects_a_bad_cluster_name(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write("[agent]\nname = a\nurl = http://x\ntoken = t\ncluster = Bad Name\n")
+        with self.assertRaises(SystemExit):
+            vm_agent.load_config(f.name)
+
     def test_requests_name_the_agent_not_python_urllib(self):
         # Cloudflare blocks the default Python-urllib User-Agent with a 403 (error 1010).
         self.agent.heartbeat()

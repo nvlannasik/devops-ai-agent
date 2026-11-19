@@ -22,7 +22,8 @@ async function main() {
     }, (ids) => slack.userProfiles(ids), undefined, {
       hosts: () => agent.vmStore.hosts(),
       actions: () => agent.vmStore.recentActions(30),
-      tool: (name, args) => agent.localTool(name, args),
+      clusters: () => agent.clusterNames(),
+      tool: (cluster, name, args) => agent.clusterTool(cluster, name, args),
     });
 
     // graceful shutdown

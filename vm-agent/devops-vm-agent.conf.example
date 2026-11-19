@@ -8,3 +8,8 @@ token = <this VM's token from VM_AGENT_TOKENS>
 units = nginx.service orders.service
 poll_seconds = 10
 # ca_file = /etc/ssl/certs/internal-ca.pem
+# A Kubernetes node: its cluster (as the agent's MCP_LOCAL_CLUSTER / MCP_*_CLUSTERS names it) and its
+# node name there. Leave both out on a host outside any cluster — it is listed as standalone.
+# The node name defaults to `name`; set it when `name` differs (two clusters with a node `worker1`).
+# cluster = dev
+# node = worker1

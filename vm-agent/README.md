@@ -39,6 +39,8 @@ and no root needed for it; a section it cannot read is left out. The agent serve
 as the `node_host_snapshot` tool. Every request carries `User-Agent: devops-vm-agent/<version>`:
 Cloudflare refuses urllib's default with 403 (error 1010).
 
+Since version 4 the config may name `cluster` and `node` (the Kubernetes cluster this host is a node of and its node name there); the agent groups hosts by them on its Hosts pages and joins them to Kubernetes. Leave both out on a machine outside any cluster: it is listed as standalone.
+
 On the cluster's own Kubernetes nodes it is installed by the homelab-k8s playbook
 (`inventory/homelab/devops-vm-agent.yml`), which pins a commit of this directory.
 

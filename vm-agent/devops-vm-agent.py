@@ -15,6 +15,7 @@ import configparser
 import json
 import logging
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "3"
+VERSION = "4"
 log = logging.getLogger("devops-vm-agent")
 
 
@@ -35,8 +36,16 @@ def load_config(path):
     missing = [k for k in ("name", "url", "token") if not a.get(k)]
     if missing:
         sys.exit(f"{path}: missing {', '.join(missing)} in [agent]")
+    ident = re.compile(r"^[a-z0-9][a-z0-9.-]{0,62}$")
+    for key in ("cluster", "node"):
+        if a.get(key) and not ident.match(a[key]):
+            sys.exit(f"{path}: {key} must be lowercase letters, digits, . and - (got {a[key]!r})")
     return {
         "name": a["name"],
+        # The Kubernetes cluster this host is a node of, and its node name there; both empty for a
+        # host outside any cluster. The agent groups hosts by them and joins them to Kubernetes.
+        "cluster": a.get("cluster") or None,
+        "node": a.get("node") or None,
         "url": a["url"].rstrip("/"),
         "token": a["token"],
         "units": a.get("units", "").split(),
@@ -170,7 +179,11 @@ class Agent:
             return json.loads(raw) if res.status == 200 and raw else None
 
     def heartbeat(self):
-        self._post("/vm/heartbeat", {"units": self.cfg["units"], "version": VERSION, "snapshot": self.snap()})
+        body = {"units": self.cfg["units"], "version": VERSION, "snapshot": self.snap()}
+        for key in ("cluster", "node"):
+            if self.cfg.get(key):
+                body[key] = self.cfg[key]
+        self._post("/vm/heartbeat", body)
 
     def poll_once(self):
         action = self._post("/vm/actions/claim", {})

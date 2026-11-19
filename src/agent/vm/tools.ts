@@ -1,6 +1,6 @@
 import type { McpTools } from "../mcp/types.js";
 import type { ToolDefinition } from "../llm/types.js";
-import type { VmStore } from "./store.js";
+import type { SnapshotCandidate, VmStore } from "./store.js";
 
 // The VM restart as a virtual [WRITE] tool (spec 2026-11-04 Part B). The remediation flow only ever
 // calls tools — a dry run before the card, the real call on Approve — so making the VM action one
@@ -33,8 +33,16 @@ const SNAPSHOT_DEFINITION: ToolDefinition = {
     "the largest processes by RSS each with its systemd unit or `kubepods`, memory per systemd service (etcd, kubelet, containerd), all pods' " +
     "memory together, root disk, load. The ONLY tool that sees what runs OUTSIDE Kubernetes pods — call it when k8s_node_pods shows the node's " +
     "usage well above its pods' total working set, and on control-plane nodes, where etcd runs as a systemd service and is no pod. " +
-    "Process names only, never command lines. Nodes of the agent's own cluster.",
-  inputSchema: { type: "object", required: ["node"], properties: { node: { type: "string", description: "Node name, e.g. master3-vm" } } },
+    "Process names only, never command lines. Also answers for a standalone VM (no cluster). `cluster` defaults to the cluster this " +
+    "investigation is bound to; pass it when a node name exists in two clusters.",
+  inputSchema: {
+    type: "object",
+    required: ["node"],
+    properties: {
+      node: { type: "string", description: "Node name, e.g. master3-vm, or a standalone VM's name" },
+      cluster: { type: "string", description: "The node's cluster, e.g. dev. Omit for a standalone VM or to use this investigation's cluster." },
+    },
+  },
 };
 
 const mi = (bytes: unknown): string | undefined => (typeof bytes === "number" && Number.isFinite(bytes) ? `${Math.round(bytes / 1048576)}Mi` : undefined);
@@ -77,7 +85,32 @@ export function shapeSnapshot(node: string, snap: Record<string, unknown>, ageSe
   return out;
 }
 
-export function withVmTools(inner: McpTools, store: Pick<VmStore, "registered" | "enqueue" | "snapshot">): McpTools {
+/**
+ * Which reporting host a node name means. A host that names its cluster (vm-agent 4+) must match the
+ * cluster asked for; one that names none (an older agent, or a standalone VM) stands for the LOCAL
+ * cluster or for no cluster. Two left over is ambiguous, never a guess: the same node name in two
+ * clusters would otherwise read one cluster's etcd into the other's incident.
+ */
+export function pickHost(cands: SnapshotCandidate[], node: string, cluster: string | null, local: string | null): SnapshotCandidate | SnapshotCandidate[] | null {
+  const named = cands.filter((c) => (c.node ?? c.name) === node || c.name === node);
+  if (named.length === 0) return null;
+  if (cluster) {
+    const exact = named.filter((c) => c.cluster === cluster);
+    if (exact.length === 1) return exact[0]!;
+    if (exact.length > 1) return exact;
+    const unplaced = named.filter((c) => c.cluster === null && cluster === local);
+    if (unplaced.length === 1) return unplaced[0]!;
+    return unplaced.length > 1 ? unplaced : null;
+  }
+  return named.length === 1 ? named[0]! : named;
+}
+
+export function withVmTools(
+  inner: McpTools,
+  store: Pick<VmStore, "registered" | "enqueue" | "snapshotCandidates">,
+  /** The run's bound cluster (null when unbound) and the local cluster's name. */
+  scope: () => { cluster: string | null; local: string | null } = () => ({ cluster: null, local: null })
+): McpTools {
   return {
     connect: () => inner.connect(),
     disconnect: () => inner.disconnect(),
@@ -87,14 +120,19 @@ export function withVmTools(inner: McpTools, store: Pick<VmStore, "registered" |
       if (name === NODE_HOST_SNAPSHOT_TOOL) {
         const node = String(input.node ?? input.host ?? "").trim().toLowerCase();
         if (!node) return "Error: `node` is required — the node name, e.g. master3-vm.";
-        const got = await store.snapshot(node);
-        if (!got) {
-          const alive = await store.registered(node);
-          return alive
-            ? `Error: \`${node}\` runs a devops-vm-agent too old to send host snapshots (it needs version 3) — nothing is known about its processes.`
-            : `Error: no devops-vm-agent reports as \`${node}\` — it is not installed on that node (or the name differs), so nothing outside its pods is visible.`;
+        const { cluster: bound, local } = scope();
+        const asked = String(input.cluster ?? "").trim().toLowerCase() || bound;
+        const got = pickHost(await store.snapshotCandidates(node), node, asked, local);
+        if (got === null) {
+          return `Error: no devops-vm-agent reports as \`${node}\`${asked ? ` in cluster \`${asked}\`` : ""} — it is not installed there (or the name differs), so nothing outside its pods is visible.`;
         }
-        return JSON.stringify(shapeSnapshot(node, got.snapshot, got.ageSeconds, got.version));
+        if (Array.isArray(got)) {
+          return `Error: \`${node}\` is reported by several hosts — ${got.map((c) => `\`${c.name}\` (${c.cluster ?? "no cluster"})`).join(", ")}. Pass \`cluster\` to pick one.`;
+        }
+        if (!got.snapshot || got.ageSeconds === null) {
+          return `Error: \`${node}\` runs a devops-vm-agent too old to send host snapshots (it needs version 3) — nothing is known about its processes.`;
+        }
+        return JSON.stringify({ ...shapeSnapshot(node, got.snapshot, got.ageSeconds, got.version), cluster: got.cluster ?? (asked === local ? local : null), host: got.name });
       }
       if (name !== VM_RESTART_TOOL) return inner.callTool(name, input);
       const host = String(input.host ?? "");
