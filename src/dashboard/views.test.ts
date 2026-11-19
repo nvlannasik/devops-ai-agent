@@ -3579,3 +3579,8 @@ test("topology list: a search and ?family= show tools in place; otherwise each f
   assert.match(fam, /<a href="\/topology#tools">Close the loki tools<\/a>/);
 });
 
+
+test("the tool tiles share the row's width instead of leaving empty tracks", () => {
+  assert.match(STYLES, /\.topo-tiles \{ display: grid; grid-template-columns: repeat\(auto-fit,/);
+  assert.match(STYLES, /\.topo-groups \{ display: grid; grid-template-columns: repeat\(auto-fit,/);
+});

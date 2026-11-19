@@ -596,7 +596,9 @@ p.stack-legend { margin-bottom: var(--sp-3); }
   box-sizing: border-box; width: 100%; font: inherit; font-size: var(--fs-sm); color: var(--text);
   padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface);
 }
-.topo-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr)); gap: var(--sp-2); }
+/* auto-fit, not auto-fill: a row of seven tiles on a wide screen must share the width, not leave the
+   empty tracks auto-fill keeps for tiles that do not exist. */
+.topo-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr)); gap: var(--sp-2); }
 /* A tile is a way in, so it looks like one: raised at rest, lifted under the pointer and on focus. */
 .topo-tile {
   display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3); text-decoration: none; color: var(--text);
@@ -620,7 +622,7 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .topo-family { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
 .topo-family-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--sp-1) var(--sp-3); }
 .topo-family-head h3 { margin: 0; font-size: var(--fs-md); display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
-.topo-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr)); gap: var(--sp-4) var(--sp-5); }
+.topo-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: var(--sp-4) var(--sp-5); }
 .topo-group-title { margin: 0 0 var(--sp-1); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
 /* The write tools, set apart in the warning tint: the most consequential fact on this page is
    which tools can change the cluster, and each names the guard that stands in its way. */
