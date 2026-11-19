@@ -353,16 +353,19 @@ test("every link the map will draw lands on a row that exists on the page", () =
 // sit apart in their own box so the ones that can change the cluster cannot be missed.
 test("each family lists its own tools, and sets apart the ones that can change the cluster", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
-  // a family is a pop-up the tile (and the map) link to — the id is on the dialog wrapper
-  assert.match(html, /<div class="topo-pop" id="cap-0" role="dialog" aria-modal="true" aria-labelledby="cap-0-title"><a class="topo-pop-scrim" href="#tools" tabindex="-1" aria-hidden="true"><\/a><section class="card topo-family"><header class="topo-family-head"><h3 id="cap-0-title"><code translate="no">k8s<\/code>/);
-  assert.match(html, /<a class="topo-pop-close" href="#tools">Close<span class="sr-only"> the k8s tools<\/span><\/a>/);
+  // a family is a <dialog> the tile and the map open — the map's #cap-<i> is its id
+  assert.match(html, /<dialog class="topo-dialog" id="cap-0" aria-labelledby="cap-0-title"><div class="topo-split">/);
+  assert.match(html, /<h2 id="cap-0-title"><code translate="no">k8s<\/code><\/h2>/);
   assert.match(html, />k8s_list_pods</);
   assert.match(html, />loki_query</);
-  const writes = /<div class="topo-writes">[\s\S]*?<\/div><\/div><\/div>/.exec(html)?.[0] ?? "";
-  assert.match(writes, />k8s_restart_deployment</, "the write tool is in the write box");
-  assert.doesNotMatch(writes, />k8s_list_pods</, "a read tool is not");
-  // the tile row counts both halves
-  assert.match(html, /<a class="topo-tile has-write" href="#cap-0" aria-haspopup="dialog"><code translate="no">k8s<\/code><strong>2<\/strong><span>1 read · 1 write<\/span>/);
+  // the write tool has a group (and a tab) of its own, and its card is marked
+  assert.match(html, /<button type="button" role="tab" class="topo-split-tab is-write"[^>]*><span>Can change the cluster<\/span>/);
+  assert.match(html, /<li class="topo-tool-card is-write"[^>]*><div><code translate="no">k8s_restart_deployment<\/code>/);
+  assert.match(html, /<li class="topo-tool-card"[^>]*><div><code translate="no">k8s_list_pods<\/code>/);
+  // the tile: counts both halves, a real link to ?family= and the dialog it opens
+  assert.match(html, /<a class="topo-tile has-write" href="\/topology\?family=k8s#tools" data-dialog="cap-0" aria-haspopup="dialog"><code translate="no">k8s<\/code><strong>2<\/strong><span>1 read · 1 write<\/span>/);
+  // the close button is the dialog's own form, so the browser closes it without our script
+  assert.match(html, /<form method="dialog"><button class="topo-dialog-close" aria-label="Close the k8s tools">/);
 });
 
 // Four tables used to sit here, each tuned for a narrow screen. The list is cards and chips now:
@@ -3496,7 +3499,7 @@ test("the incident page opens with its lifecycle and links only the panels it ha
 
 // ---------- /topology's list (2026-11-19) ----------
 
-test("topology list: k8s tools grouped by question, an unknown one in Other, writes split workloads/nodes", () => {
+test("topology list: k8s tools grouped by question, an unknown one in Other, writes in their own group", () => {
   const t: Topology = {
     ...baseTopology,
     capabilities: [{ name: "k8s", tools: [
@@ -3507,11 +3510,16 @@ test("topology list: k8s tools grouped by question, an unknown one in Other, wri
     ] }],
   };
   const html = topologyPage(t, NONCE, ASSETS);
-  assert.match(html, /Pods &amp; logs · 1<\/p><ul class="topo-chips"><li><code translate="no" title="Get logs.">k8s_get_pod_logs<\/code>/);
-  assert.match(html, /Other · 1<\/p><ul class="topo-chips"><li><code translate="no">k8s_brand_new<\/code>/);
-  assert.match(html, /Workloads · 1<\/p><ul class="topo-write-list"><li><code translate="no">k8s_scale<\/code> <span class="meta">— zero only as a quarantine/);
-  assert.match(html, /Nodes · 1<\/p><ul class="topo-write-list"><li><code translate="no">k8s_drain<\/code>/);
+  const tabs = [...html.matchAll(/role="tab"[^>]*><span>([^<]+)<\/span><span class="topo-split-count">(\d+)/g)].map((m) => `${m[1]} ${m[2]}`);
+  assert.deepEqual(tabs, ["Pods &amp; logs 1", "Other 1", "Can change the cluster 2"]);
+  // the first group is shown, the rest hidden until their tab is chosen
+  assert.match(html, /id="cap-0-panel-0" role="tabpanel" aria-labelledby="cap-0-tab-0" data-panel>/);
+  assert.match(html, /id="cap-0-panel-1" role="tabpanel" aria-labelledby="cap-0-tab-1" hidden data-panel>/);
+  assert.match(html, /data-search="k8s_get_pod_logs get logs\."><div><code translate="no">k8s_get_pod_logs<\/code><p>Get logs\.<\/p>/);
+  assert.match(html, /k8s_scale<\/code><p class="topo-guard">zero only as a quarantine<\/p>/);
+  assert.match(html, /A control-plane node is never cordoned or drained/);
 });
+
 
 test("topology list: ?tool= narrows the families, says when nothing matches, and escapes the query", () => {
   const t: Topology = {
@@ -3546,20 +3554,28 @@ test("topology list: stores show what they hold; the agent's own tile looks like
   const html = topologyPage(t, NONCE, ASSETS);
   assert.match(html, /What it remembers[\s\S]*?<article class="card topo-dep" id="out-0">/);
   assert.match(html, /<li title="the incident log"><code translate="no">incidents<\/code><\/li>/);
-  assert.match(html, /<a class="topo-tile has-write" href="#cap-0" aria-haspopup="dialog"><code translate="no">agent&#39;s own<\/code><em class="topo-tile-origin">agent<\/em><strong>2<\/strong><span>1 read · 1 write/);
+  assert.match(html, /<a class="topo-tile has-write" href="\/topology\?family=agent#tools" data-dialog="cap-0" aria-haspopup="dialog"><code translate="no">agent&#39;s own<\/code><em class="topo-tile-origin">agent<\/em><strong>2<\/strong><span>1 read · 1 write/);
   assert.doesNotMatch(html, /is-agent/, "no separate look for it any more");
   const allWrite = topologyPage({ ...baseTopology, capabilities: [{ name: "flux", tools: [{ name: "flux_reconcile", write: true }] }] }, NONCE, ASSETS);
   assert.match(allWrite, /<code translate="no">flux<\/code><strong>1<\/strong><span>1 write<\/span>/, "no \"0 read\"");
-  assert.match(html, /vm_restart_service<\/code> <span class="badge" data-tone="warning">write<\/span> <span class="meta">— a unit in the host&#39;s own allowlist/);
+  assert.match(html, /vm_restart_service<\/code><p class="topo-guard">a unit in the host&#39;s own allowlist<\/p><\/div><span class="badge" data-tone="warning">write<\/span>/);
+  assert.match(html, /the agent&#39;s own — the host agents/);
 });
 
-test("topology list: a search shows its hits in place, not as pop-ups", () => {
+test("topology list: a search and ?family= show tools in place; otherwise each family is a closed dialog", () => {
   const t: Topology = { ...baseTopology, capabilities: [{ name: "loki", tools: [{ name: "loki_query", write: false }] }] };
   const hit = topologyPage(t, NONCE, ASSETS, undefined, "query");
   assert.match(hit, /<div class="topo-result" id="cap-0"><section class="card topo-family topo-family-small">/);
-  assert.doesNotMatch(hit, /class="topo-pop"/);
+  assert.doesNotMatch(hit, /<dialog/);
   assert.doesNotMatch(hit, /aria-haspopup/);
   const plain = topologyPage(t, NONCE, ASSETS);
-  assert.match(plain, /<div class="topo-pop" id="cap-0"/);
+  assert.match(plain, /<dialog class="topo-dialog" id="cap-0"/);
+  assert.doesNotMatch(plain, /<dialog[^>]* open/, "closed until the script opens it");
   assert.match(plain, /Open a family for its tools\./);
+  // no script: the tile is a link, and the page renders that family's tools
+  const fam = topologyPage(t, NONCE, ASSETS, undefined, "", "loki");
+  assert.match(fam, /<a class="topo-tile" href="\/topology\?family=loki#tools" data-dialog="cap-0" aria-haspopup="dialog" aria-current="true">/);
+  assert.match(fam, /<div class="topo-result topo-family-open"><section class="card topo-family topo-family-small">[\s\S]*?>loki_query</);
+  assert.match(fam, /<a href="\/topology#tools">Close the loki tools<\/a>/);
 });
+

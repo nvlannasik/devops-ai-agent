@@ -59,6 +59,19 @@ const K8S_GROUPS: ReadonlyArray<{ title: string; tools: readonly string[] }> = [
   { title: "Any resource", tools: ["k8s_get_resource", "k8s_get_custom_resources", "k8s_list_crds", "k8s_list_api_resources"] },
 ];
 const NODE_WRITES: ReadonlySet<string> = new Set(["k8s_cordon", "k8s_uncordon", "k8s_drain"]);
+/** One line under each group's title in the pop-up: what the group is for. */
+const GROUP_NOTE: Readonly<Record<string, string>> = {
+  "Whole cluster": "one call answers for every namespace",
+  "Pods & logs": "one pod at a time: its state, its logs, its events",
+  Network: "why traffic does not arrive",
+  Workloads: "controllers, rollouts and their history",
+  "Nodes & capacity": "what a node runs, and what a workload should get",
+  "Config & access": "Secrets: names and types only, never values",
+  Storage: "why a volume does not bind",
+  "Any resource": "kinds without a tool of their own — HelmReleases, Leases, …",
+  Other: "tools this page has no group for yet",
+  "Can change the cluster": "never called during an investigation — only as a proposal a human approves, after the gates",
+};
 /** What stands between each write tool and the cluster, in a few words — the guards are code in the
  *  agent and the server (remediation gates, orphanRefusal, the node gate), this only names them. */
 const GUARD: Readonly<Record<string, string>> = {
@@ -104,17 +117,16 @@ function writeBox(title: string, groups: Array<{ title: string; tools: Tool[]; n
 /** One family's tools. `popup`: the card a tile (or the map) opens over the page — it names itself
  *  for the dialog and carries a way back; inline (a search) it is plain. The id the map links to
  *  sits on the wrapper toolsSection() puts around it, never on this card. */
-function familyDetail(c: Capability, i: number, q: string, popup: boolean): string {
+function familyDetail(c: Capability, q: string): string {
   const shown = c.tools.filter(matches(q));
   if (!shown.length) return "";
   const reads = shown.filter((t) => !t.write);
   const writes = shown.filter((t) => t.write);
   const writeCount = c.tools.filter((t) => t.write).length;
   const title =
-    `<header class="topo-family-head"><h3${popup ? ` id="${esc(rowId("cap", i))}-title"` : ""}><code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code> · ${fmtInt(c.tools.length)} tool${c.tools.length === 1 ? "" : "s"}` +
+    `<header class="topo-family-head"><h3><code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code> · ${fmtInt(c.tools.length)} tool${c.tools.length === 1 ? "" : "s"}` +
     (writeCount ? ` ${badge(`${writeCount} write`, "warning")}` : "") +
     `</h3>${FAMILY_NOTE[c.name] ? `<span class="meta">${esc(FAMILY_NOTE[c.name]!)}</span>` : ""}` +
-    (popup ? `<a class="topo-pop-close" href="#tools">Close<span class="sr-only"> the ${esc(c.name)} tools</span></a>` : "") +
     `</header>`;
   if (c.name === "k8s") {
     const placed = new Set(K8S_GROUPS.flatMap((g) => g.tools));
@@ -139,7 +151,84 @@ function familyDetail(c: Capability, i: number, q: string, popup: boolean): stri
   );
 }
 
-function toolsSection(t: Topology, q: string): string {
+/** A family's tools split into the groups the pop-up's left column lists. */
+function popupGroups(c: Capability): Array<{ title: string; tools: Tool[]; write: boolean }> {
+  const reads = c.tools.filter((t) => !t.write);
+  const writes = c.tools.filter((t) => t.write);
+  const groups: Array<{ title: string; tools: Tool[]; write: boolean }> = [];
+  if (c.name === "k8s") {
+    const placed = new Set(K8S_GROUPS.flatMap((g) => g.tools));
+    for (const g of K8S_GROUPS) groups.push({ title: g.title, tools: reads.filter((t) => g.tools.includes(t.name)), write: false });
+    groups.push({ title: "Other", tools: reads.filter((t) => !placed.has(t.name)), write: false });
+  } else {
+    groups.push({ title: "Tools", tools: reads, write: false });
+  }
+  groups.push({ title: "Can change the cluster", tools: writes, write: true });
+  return groups.filter((g) => g.tools.length);
+}
+
+const toolCard = (t: Tool): string =>
+  `<li class="topo-tool-card${t.write ? " is-write" : ""}" data-search="${esc(`${t.name} ${t.summary ?? ""}`.toLowerCase())}"><div><code translate="no">${esc(t.name)}</code>` +
+  (t.summary ? `<p>${esc(t.summary)}</p>` : "") +
+  (GUARD[t.name] ? `<p class="topo-guard">${esc(GUARD[t.name]!)}</p>` : "") +
+  `</div>${t.write ? badge("write", "warning") : badge("read", "ok")}</li>`;
+
+/**
+ * One family as a split-view <dialog>: its groups down the left, the chosen group's tools on the
+ * right, a filter over all of them. The bundle opens it (client/tool-dialogs.ts: showModal, so Esc,
+ * the backdrop, focus kept inside and returned to the tile come from the browser), turns the left
+ * column into tabs and runs the filter. Without the bundle a <dialog> stays closed, which is why
+ * every tile is also a plain link to ?family=, rendered here as the same tools in the page.
+ */
+function toolDialog(c: Capability, i: number, server: string): string {
+  const id = rowId("cap", i);
+  const groups = popupGroups(c);
+  const name = familyName(c);
+  const origin = c.name === AGENT_FAMILY ? "the agent's own — the host agents" : `from ${server}`;
+  const tabs =
+    groups.length > 1
+      ? `<div class="topo-split-tabs" role="tablist" aria-orientation="vertical" aria-label="${esc(`Groups of ${name} tools`)}">` +
+        groups
+          .map(
+            (g, j) =>
+              `<button type="button" role="tab" class="topo-split-tab${g.write ? " is-write" : ""}" id="${esc(id)}-tab-${j}" aria-controls="${esc(id)}-panel-${j}" aria-selected="${j === 0}"${j === 0 ? "" : ` tabindex="-1"`}>` +
+              `<span>${esc(g.title)}</span><span class="topo-split-count">${fmtInt(g.tools.length)}</span></button>`
+          )
+          .join("") +
+        `</div>`
+      : "";
+  const panels = groups
+    .map(
+      (g, j) =>
+        `<section class="topo-split-panel" id="${esc(id)}-panel-${j}"${groups.length > 1 ? ` role="tabpanel" aria-labelledby="${esc(id)}-tab-${j}"` : ""}${j === 0 ? "" : " hidden"} data-panel>` +
+        `<header class="topo-split-head"><h3>${esc(g.title)} <span class="topo-split-count">${fmtInt(g.tools.length)}</span></h3>` +
+        (GROUP_NOTE[g.title] ? `<p class="meta">${esc(GROUP_NOTE[g.title]!)}</p>` : "") +
+        `</header><ul class="topo-tool-cards">${g.tools.map(toolCard).join("")}</ul>` +
+        (g.write && c.name === "k8s" ? `<p class="meta">${esc(K8S_WRITE_NOTE)}</p>` : "") +
+        `</section>`
+    )
+    .join("");
+  return (
+    `<dialog class="topo-dialog" id="${esc(id)}" aria-labelledby="${esc(id)}-title">` +
+    `<div class="topo-split${groups.length > 1 ? "" : " is-single"}">` +
+    `<nav class="topo-split-nav" aria-label="${esc(`${name} tools`)}">` +
+    `<div class="topo-split-name"><h2 id="${esc(id)}-title"><code translate="no">${esc(name)}</code></h2>` +
+    `<span class="meta">${fmtInt(c.tools.length)} tool${c.tools.length === 1 ? "" : "s"} · ${esc(origin)}</span></div>` +
+    tabs +
+    `</nav>` +
+    `<div class="topo-split-main">` +
+    `<div class="topo-split-bar"><label class="topo-dialog-filter"><span class="sr-only">${esc(`Filter the ${name} tools`)}</span>` +
+    `<input type="search" placeholder="${esc(`Filter ${name} tools`)}" autocomplete="off" data-filter></label>` +
+    `<form method="dialog"><button class="topo-dialog-close" aria-label="${esc(`Close the ${name} tools`)}">✕</button></form></div>` +
+    `<div class="topo-split-panels">${panels}<p class="meta topo-filter-none" hidden>No tool here matches.</p></div>` +
+    `</div></div></dialog>`
+  );
+}
+
+const familyName = (c: Capability): string => (c.name === AGENT_FAMILY ? "agent's own" : c.name);
+const K8S_WRITE_NOTE = "A Flux-managed workload gets a GitOps PR instead of a patch. A control-plane node is never cordoned or drained, whoever asks.";
+
+function toolsSection(t: Topology, q: string, family: string): string {
   const caps = t.capabilities;
   const mcpIndex = t.outbound.findIndex((n) => n.icon === "plug");
   const mcp = mcpIndex >= 0 ? t.outbound[mcpIndex]! : null;
@@ -157,15 +246,22 @@ function toolsSection(t: Topology, q: string): string {
   if (!caps.length) {
     return `<section class="topo-section">${head}${server}${empty("No tools discovered yet.", "The agent lists them when it connects to devops-mcp-server. If this persists, the server is unreachable.", ICON.plug)}</section>`;
   }
+  const open = q ? "" : family;
   const tiles =
     `<nav class="topo-tiles" aria-label="Tool families">` +
     caps
       .map((c, i) => {
         const hits = c.tools.filter(matches(q)).length;
         const w = c.tools.filter((x) => x.write).length;
+        // A real link first (?family=, the page renders that family's tools), a dialog when the
+        // bundle runs: it reads data-dialog and calls showModal() instead of following the link.
+        const href = q ? `#${rowId("cap", i)}` : `/topology?family=${encodeURIComponent(c.name)}#tools`;
         return (
-          `<a class="topo-tile${w ? " has-write" : ""}${q && !hits ? " is-empty" : ""}" href="#${esc(rowId("cap", i))}"${q ? "" : ` aria-haspopup="dialog"`}>` +
-          `<code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code>` +
+          `<a class="topo-tile${w ? " has-write" : ""}${q && !hits ? " is-empty" : ""}" href="${esc(href)}"` +
+          (q ? "" : ` data-dialog="${esc(rowId("cap", i))}" aria-haspopup="dialog"`) +
+          (open === c.name ? ` aria-current="true"` : "") +
+          `>` +
+          `<code translate="no">${esc(familyName(c))}</code>` +
           // Where the tools come from, in words: these two are the agent's own, not the server's.
           (c.name === AGENT_FAMILY ? `<em class="topo-tile-origin">agent</em>` : "") +
           `<strong>${fmtInt(q ? hits : c.tools.length)}</strong>` +
@@ -174,12 +270,9 @@ function toolsSection(t: Topology, q: string): string {
       })
       .join("") +
     `</nav>`;
-  // A search shows its hits in place: that is what a search is for. Otherwise each family is a
-  // pop-up — hidden until its tile (or its card on the map) links to it, then laid over the page by
-  // CSS :target alone, so it needs no script and the map's own links open the same pop-up. The
-  // scrim behind the card and the Close link both go back to #tools.
+  // A search shows its hits in place: that is what a search is for.
   if (q) {
-    const hits = caps.map((c, i) => ({ html: familyDetail(c, i, q, false), id: rowId("cap", i) })).filter((d) => d.html);
+    const hits = caps.map((c, i) => ({ html: familyDetail(c, q), id: rowId("cap", i) })).filter((d) => d.html);
     const none = hits.length === 0 ? `<p class="meta">No tool matches “${esc(q)}”. <a href="/topology#tools">Show every tool</a></p>` : "";
     return (
       `<section class="topo-section" id="tools">${head}${server}${tiles}${none}` +
@@ -187,18 +280,13 @@ function toolsSection(t: Topology, q: string): string {
       `</section>`
     );
   }
-  const pops = caps
-    .map((c, i) => {
-      const id = rowId("cap", i);
-      return (
-        `<div class="topo-pop" id="${esc(id)}" role="dialog" aria-modal="true" aria-labelledby="${esc(id)}-title">` +
-        `<a class="topo-pop-scrim" href="#tools" tabindex="-1" aria-hidden="true"></a>` +
-        familyDetail(c, i, "", true) +
-        `</div>`
-      );
-    })
-    .join("");
-  return `<section class="topo-section" id="tools">${head}${server}${tiles}<p class="meta">Open a family for its tools.</p>${pops}</section>`;
+  const fi = caps.findIndex((c) => c.name === open);
+  const inline =
+    fi >= 0
+      ? `<div class="topo-result topo-family-open">${familyDetail(caps[fi]!, "")}<p class="meta"><a href="/topology#tools">Close the ${esc(familyName(caps[fi]!))} tools</a></p></div>`
+      : `<p class="meta">Open a family for its tools.</p>`;
+  const dialogs = caps.map((c, i) => toolDialog(c, i, mcp?.label ?? "devops-mcp-server")).join("");
+  return `<section class="topo-section" id="tools">${head}${server}${tiles}${inline}${dialogs}</section>`;
 }
 
 // ---------- LLM backends ----------
@@ -244,7 +332,7 @@ function backendsSection(t: Topology): string {
 }
 
 /** Everything under the map, in the order an operator asks about it. */
-export function dependencyList(t: Topology, q = ""): string {
+export function dependencyList(t: Topology, q = "", family = ""): string {
   const query = q.trim().toLowerCase().slice(0, 64);
   const out = t.outbound.map((n, i) => ({ n, id: rowId("out", i) }));
   const stores = out.filter((x) => x.n.icon === "db" || x.n.icon === "cache");
@@ -258,7 +346,7 @@ export function dependencyList(t: Topology, q = ""): string {
     section(ICON.memory, "What it remembers", "incident and conversation memory", stores.map((x) => depCard(x.n, x.id))) +
     section(ICON.outbound, "Queues to the private network", "llm-worker over SQS", queues.map((x) => depCard(x.n, x.id))) +
     section(ICON.plug, "Other dependencies", "", other.map((x) => depCard(x.n, x.id))) +
-    toolsSection(t, query) +
+    toolsSection(t, query, family) +
     backendsSection(t) +
     `</div>`
   );

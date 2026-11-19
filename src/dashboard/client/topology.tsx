@@ -22,6 +22,7 @@ import { nodeTypes } from "./nodes.js";
 import { Legend } from "./legend.js";
 import { justDragged, markDragEnd } from "./drag-state.js";
 import { mapColorMode } from "./color-mode.js";
+import { wireToolDialogs } from "./tool-dialogs.js";
 
 // The interactive dependency map. The server renders the mount point and the topology as a
 // JSON data block; everything visible here is built in the browser.
@@ -156,6 +157,8 @@ function TopoMap({ topology }: { topology: Topology }): React.JSX.Element {
  * record, and the map has always been the glance at them.
  */
 function main(): void {
+  // First and independent of the map: the tool dialogs must open even if the map cannot render.
+  wireToolDialogs(document);
   const mount = document.getElementById(MOUNT_ID);
   const data = document.getElementById(DATA_ID);
   if (!mount || !data?.textContent) return;

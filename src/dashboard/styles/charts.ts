@@ -382,7 +382,7 @@ tbody tr:target { outline: 2px solid var(--accent); outline-offset: -2px; }
    than the top of the viewport, which is where you would want it anyway. */
 tbody tr:target td { scroll-margin-top: 5rem; }
 /* /topology's map links to the list's cards and tool families (2026-11-19) — same confirmation. */
-.topo-list [id]:target:not(.topo-pop) { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-top: 5rem; }
+.topo-list [id]:target:not(dialog) { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-top: 5rem; }
 
 details > summary { cursor: pointer; font-weight: 550; }
 details > summary > span { margin-left: .35em; }
@@ -597,10 +597,19 @@ p.stack-legend { margin-bottom: var(--sp-3); }
   padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface);
 }
 .topo-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr)); gap: var(--sp-2); }
+/* A tile is a way in, so it looks like one: raised at rest, lifted under the pointer and on focus. */
 .topo-tile {
   display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3); text-decoration: none; color: var(--text);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+  box-shadow: var(--shadow-sm); transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
 }
+.topo-tile:focus-visible, .topo-tile[aria-current="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow-md); transform: translateY(-2px);
+}
+@media (hover: hover) {
+  .topo-tile:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow-md); transform: translateY(-2px); }
+}
+@media (prefers-reduced-motion: reduce) { .topo-tile { transition: none; } .topo-tile:hover, .topo-tile:focus-visible { transform: none; } }
 .topo-tile code { font-weight: 600; font-size: var(--fs-sm); }
 .topo-tile strong { font-size: 1.375rem; line-height: 1.2; }
 .topo-tile span { font-size: var(--fs-xs); color: var(--text-dim); }
@@ -627,20 +636,66 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .topo-write-grid p.meta { margin: var(--sp-1) 0 0; }
 .topo-write-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
 .topo-write-list code { font-size: var(--fs-xs); }
-/* A family's tools as a pop-up: hidden until something links to it, then laid over the page by
-   :target alone (no script). The scrim is a link back to #tools, so a click beside the card
-   closes it, as does the card's own Close link. */
-.topo-pop { display: none; }
-.topo-pop:target {
-  display: flex; position: fixed; inset: 0; z-index: 60; justify-content: center; align-items: flex-start;
-  padding: 8vh var(--sp-4) var(--sp-6); overflow-y: auto; overscroll-behavior: contain;
+/* A family's tools as a <dialog> (client/tool-dialogs.ts opens it with showModal): its groups down the
+   left, the chosen group's tool cards on the right. The browser draws it on the top layer, so it needs
+   no z-index, and ::backdrop is the scrim. */
+dialog.topo-dialog {
+  padding: 0; border: 0; border-radius: var(--r-lg); background: var(--surface); color: var(--text);
+  width: min(68rem, calc(100vw - 2rem)); height: min(48rem, calc(100vh - 3rem)); max-width: none; max-height: none;
+  box-shadow: 0 24px 64px rgba(22, 26, 43, .32); overflow: hidden;
 }
-.topo-pop-scrim { position: fixed; inset: 0; background: color-mix(in srgb, var(--text) 45%, transparent); }
-.topo-pop > .topo-family { position: relative; width: 100%; max-width: 64rem; box-shadow: var(--shadow-md); }
-.topo-pop > .topo-family-small { max-width: 34rem; }
-.topo-pop-close {
-  margin-left: auto; padding: var(--sp-1) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill);
-  font-size: var(--fs-sm); text-decoration: none; color: var(--text); background: var(--surface);
+dialog.topo-dialog::backdrop { background: rgba(22, 26, 43, .5); }
+.topo-split { display: flex; height: 100%; min-height: 0; }
+.topo-split-nav {
+  flex: 0 0 16rem; display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-5) var(--sp-3);
+  background: var(--surface-2); border-right: 1px solid var(--border); overflow-y: auto;
+}
+.topo-split-name { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--sp-2) var(--sp-3); }
+.topo-split-name h2 { margin: 0; font-size: var(--fs-lg); }
+.topo-split-tabs { display: flex; flex-direction: column; gap: 2px; }
+.topo-split-tab {
+  display: flex; justify-content: space-between; gap: var(--sp-2); width: 100%; padding: var(--sp-2) var(--sp-3);
+  border: 0; border-radius: var(--r-sm); background: none; color: var(--text); font: inherit; font-size: var(--fs-sm);
+  text-align: left; cursor: pointer;
+}
+.topo-split-tab:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); }
+.topo-split-tab[aria-selected="true"] { background: var(--surface); box-shadow: var(--shadow-sm); font-weight: 600; }
+.topo-split-tab.is-write { margin-top: var(--sp-2); color: var(--warning); }
+.topo-split-tab.is-write[aria-selected="true"] { background: var(--tint-warning); }
+.topo-split-count { color: var(--text-dim); font-variant-numeric: tabular-nums; font-weight: 400; }
+.topo-split-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.topo-split-bar { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--border); }
+.topo-split-bar form { margin: 0; }
+.topo-dialog-filter { flex: 1 1 auto; display: flex; }
+.topo-dialog-filter input {
+  box-sizing: border-box; width: 100%; font: inherit; font-size: var(--fs-sm); color: var(--text);
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface);
+}
+.topo-dialog-close {
+  display: inline-flex; align-items: center; justify-content: center; width: 2.5rem; height: 2.5rem;
+  border: 0; border-radius: 50%; background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer;
+}
+.topo-split-panels { flex: 1 1 auto; overflow-y: auto; padding: var(--sp-4) var(--sp-5) var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-5); }
+.topo-split-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--sp-3); }
+.topo-split-head h3 { margin: 0; font-size: var(--fs-md); }
+.topo-split-head p.meta { margin: 0; }
+.topo-tool-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.topo-tool-card {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-sm); box-shadow: var(--shadow-sm);
+}
+.topo-tool-card > div { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.topo-tool-card code { font-weight: 600; overflow-wrap: anywhere; }
+.topo-tool-card p { margin: 0; font-size: var(--fs-sm); color: var(--text-dim); }
+.topo-tool-card p.topo-guard { color: var(--warning); }
+.topo-tool-card.is-write { border-color: color-mix(in srgb, var(--mark-warning) 35%, var(--border)); background: var(--tint-warning); }
+.topo-split-panel[hidden], .topo-tool-card[hidden] { display: none; }
+@media (max-width: 40rem) {
+  .topo-split { flex-direction: column; }
+  .topo-split-nav { flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border); padding: var(--sp-3); }
+  .topo-split-tabs { flex-direction: row; overflow-x: auto; }
+  .topo-split-tab { width: auto; white-space: nowrap; }
+  .topo-split-tab.is-write { margin-top: 0; }
 }
 .topo-result + .topo-result { margin-top: var(--sp-3); }
 .topo-lane { display: flex; flex-direction: column; gap: var(--sp-2); }

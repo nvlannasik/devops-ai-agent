@@ -86,7 +86,9 @@ export function topologyPage(
   assets: Assets | null,
   openIncidents?: number,
   /** `?tool=` — the tool search under the map. */
-  toolQuery = ""
+  toolQuery = "",
+  /** `?family=` — a tool family opened in the page (what a tile links to when no script runs). */
+  family = ""
 ): string {
   return layout(
     "Topology",
@@ -99,7 +101,7 @@ export function topologyPage(
      </div>
      ${topologyShelf(t)}
      ${topoFrame(t, nonce, assets)}
-     ${dependencyList(t, toolQuery)}`,
+     ${dependencyList(t, toolQuery, family)}`,
     // The one page with an external stylesheet. It is linked ahead of the inline <style> so
     // the dashboard's own rules win over React Flow's at equal specificity.
     { current: "/topology", openIncidents, stylesheet: assets?.css.path }
