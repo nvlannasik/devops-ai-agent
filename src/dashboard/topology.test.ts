@@ -175,11 +175,20 @@ test("toolFamilies marks the tools that can change the cluster", () => {
   assert.deepEqual(
     fam.tools,
     [
-      { name: "k8s_list_pods", write: false },
-      { name: "k8s_restart_deployment", write: true },
+      { name: "k8s_list_pods", write: false, summary: "List pods in a namespace." },
+      { name: "k8s_restart_deployment", write: true, summary: "Restart a deployment." },
       { name: "k8s_scale", write: false },
     ]
   );
+});
+
+test("the agent's own tools are one family, not two one-tool families", () => {
+  const fams = toolFamilies([
+    { name: "node_host_snapshot", description: "Host-level view." },
+    { name: "vm_restart_service", description: "[WRITE] Restart one systemd unit." },
+    { name: "loki_query", description: "q" },
+  ]);
+  assert.deepEqual(fams.map((f) => [f.name, f.tools.length]), [["agent", 2], ["loki", 1]]);
 });
 
 // Sort is size-then-name so the page does not reshuffle between two renders of the same

@@ -334,59 +334,44 @@ const wiredTopology: Topology = {
 // — not by re-deriving the ids here, which would only prove rowId() is deterministic.
 test("every link the map will draw lands on a row that exists on the page", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
-  // not anchored to `<tr `: a row that opts into a narrow layout carries role="row" first.
-  const targets = new Set([...html.matchAll(/<tr[^>]* id="([\w-]+)"/g)].map((m) => m[1]));
+  // any element: since 2026-11-19 the targets are the list's cards and tool families, not <tr>s.
+  const targets = new Set([...html.matchAll(/<[a-z0-9]+[^>]* id="([\w-]+)"/g)].map((m) => m[1]));
   const hrefs = buildGraph(wiredTopology)
     .nodes.map((n) => n.data.href)
     .filter((h): h is string => !!h)
     .map((h) => h.slice(1));
 
   assert.ok(hrefs.length >= 8, "each card in the map should link to its row");
-  for (const h of hrefs) assert.ok(targets.has(h), `#${h} is linked but no row carries that id`);
+  for (const h of hrefs) assert.ok(targets.has(h), `#${h} is linked but nothing on the page carries that id`);
   // and the numbering is per group, not per rendered cluster
   assert.ok(targets.has("backend-1"), "the second backend should keep its own row id");
   assert.ok(targets.has("cap-1"), "the second tool family should keep its own row id");
 });
 
-// The count answers "how much can this agent see"; the names answer "what, exactly". Both are
-// on the page — the names behind a <details> so a thirty-tool family cannot bury the counts.
-test("each family lists its own tools, and marks the ones that can change the cluster", () => {
+// The count answers "how much can this agent see"; the names answer "what, exactly". Both are on
+// the page — the family tiles carry the counts, each family's card the names, and the write tools
+// sit apart in their own box so the ones that can change the cluster cannot be missed.
+test("each family lists its own tools, and sets apart the ones that can change the cluster", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
-  assert.match(html, /<details><summary><span class="mono" translate="no">k8s<\/span><\/summary>/);
+  assert.match(html, /<section class="card topo-family" id="cap-0"><header class="topo-family-head"><h3><code translate="no">k8s<\/code>/);
   assert.match(html, />k8s_list_pods</);
   assert.match(html, />loki_query</);
-  // the write marker sits on the tool it belongs to, not merely somewhere in the row
-  assert.match(html, /k8s_restart_deployment\s*<span class="badge" data-tone="warning">write<\/span>/);
-  assert.doesNotMatch(html, /k8s_list_pods\s*<span class="badge"[^>]*>write<\/span>/);
+  const writes = /<div class="topo-writes">[\s\S]*?<\/div><\/div><\/div>/.exec(html)?.[0] ?? "";
+  assert.match(writes, />k8s_restart_deployment</, "the write tool is in the write box");
+  assert.doesNotMatch(writes, />k8s_list_pods</, "a read tool is not");
+  // the tile row counts both halves
+  assert.match(html, /<a class="topo-tile has-write" href="#cap-0"><code translate="no">k8s<\/code><strong>2<\/strong><span>1 read · 1 write<\/span>/);
 });
 
-// Three tables on this page opt into a narrow layout and a fourth deliberately does not, and
-// which is which is decided by what the cells hold: a dependency row is three phrases and takes
-// the stack, a backend row is five short identifiers and takes the pairs, a family and its count
-// are two words that fit any screen and take neither. Getting this wrong is invisible on a
-// desktop — the page only comes apart at 390px, where nothing here runs.
-test("each topology table takes the narrow layout its own cells call for", () => {
+// Four tables used to sit here, each tuned for a narrow screen. The list is cards and chips now:
+// they wrap instead of scrolling, so there is no table to take a narrow layout at all.
+test("the list under the map is cards, not tables", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
-
-  assert.equal([...html.matchAll(/<table role="table" data-stack>/g)].length, 2, "inbound and outbound");
-  const pairs = [...html.matchAll(/<table role="table" data-stack data-pairs>([\s\S]*?)<\/table>/g)];
-  assert.equal(pairs.length, 1, "the backend table, and only it");
-  assert.doesNotMatch(html, /<table role="table" data-pairs/, "pairs without stack never stacks");
-
-  // The opt-out, asserted rather than assumed: stacking this one would put the expanded tool
-  // list between a family and the count it belongs to.
-  assert.match(
-    html,
-    /<table class="caps"><thead><tr><th>Family<\/th>/,
-    "the capability table stays a table at every width"
-  );
-
-  for (const t of html.matchAll(/<table role="table" data-stack(?: data-pairs)?>([\s\S]*?)<\/table>/g)) {
-    const heads = [...t[1].matchAll(/<th role="columnheader">([^<]*)<\/th>/g)].map((m) => m[1]);
-    const labels = [...t[1].matchAll(/<td role="cell"[^>]*data-label="([^"]*)"/g)].map((m) => m[1]);
-    assert.equal(labels.length % heads.length, 0, "a row is missing a captioned cell");
-    for (const l of labels) assert.ok(heads.includes(l), `caption ${l} names no column of this table`);
-  }
+  const list = html.slice(html.indexOf('<div class="topo-list">'));
+  assert.ok(list.length > 100, "the list renders");
+  assert.doesNotMatch(list, /<table/);
+  assert.match(list, /<article class="card topo-dep" id="in-0">/);
+  assert.match(list, /<li id="backend-1"><strong>worker1<\/strong>/);
 });
 
 // The map is script-only since the React Flow rewrite, which makes what happens WITHOUT the
@@ -402,9 +387,9 @@ test("the map says it needs JavaScript, and the rest of the page does not", () =
   assert.doesNotMatch(html, /onclick=|javascript:/i);
   assert.match(html, /<div id="topo-root" data-fallback>/);
   assert.match(html, /needs JavaScript/);
-  // progressive disclosure in the TABLES is still script-free: <details> is the only widget
-  // that works under a policy with no script-src at all, which is what every other page has.
-  assert.match(html, /<details><summary>/);
+  // the list under the map needs no script at all: links, cards and a GET form.
+  assert.match(html, /<div class="topo-list">/);
+  assert.match(html, /<form class="topo-search" method="get" action="\/topology"/);
 });
 
 // A dev server never bundles (npm run dev is tsx against the source), so this is a state the
@@ -415,7 +400,7 @@ test("with no bundle built, the map is a note and the tables are untouched", () 
   assert.doesNotMatch(html, /<link rel="stylesheet" href="[^"]*topology/, "and no map stylesheet either");
   assert.match(html, /not built/);
   // the record is unaffected — this is the whole reason the map may degrade to a sentence
-  assert.match(html, /<tr[^>]* id="backend-1"/);
+  assert.match(html, / id="backend-1"/);
   assert.match(html, />k8s_list_pods</);
 });
 
@@ -2482,42 +2467,21 @@ test("React Flow keeps its attribution", async () => {
 // Expanding a family used to move the count column sideways under the reader's pointer, on the
 // very click that was supposed to reveal something. Auto layout sizes columns from content, so
 // inserting a list of tool names re-divided the whole table.
-test("opening a tool family cannot move the count column", () => {
-  const t: Topology = {
-    ...baseTopology,
-    capabilities: [
-      { name: "kubernetes", tools: [{ name: "k8s_restart_deployment", write: true }, { name: "k8s_list_pods", write: false }] },
-      { name: "loki", tools: [{ name: "loki_query", write: false }] },
-    ],
-  };
-  const html = topologyPage(t, NONCE, ASSETS);
-  // the hook the rule hangs off — the only table on the dashboard that carries a class
-  assert.match(html, /<table class="caps">/);
-  assert.match(STYLES, /table\.caps \{ table-layout: fixed; \}/);
-  // fixed layout takes its widths from the header row, so that is where the width is stated
-  assert.match(STYLES, /table\.caps th:last-child, table\.caps td:last-child \{ width: 6rem; \}/);
-});
-
-// The exception has to stay narrow. Every other table wants the auto algorithm: it divides the
-// frame in proportion to what each column could use, which is what balances the RCA's Evidence
-// table at roughly 65/35 without a number being written down anywhere.
-test("no other table is laid out fixed", () => {
-  assert.equal([...STYLES.matchAll(/table-layout: fixed/g)].length, 1);
+// Every table wants the auto algorithm: it divides the frame in proportion to what each column
+// could use, which is what balances the RCA's Evidence table at roughly 65/35 without a number
+// being written down anywhere. The one fixed table (the MCP tools table) left with /topology's
+// 2026-11-19 list.
+test("no table is laid out fixed", () => {
+  assert.equal([...STYLES.matchAll(/table-layout: fixed/g)].length, 0);
   assert.doesNotMatch(STYLES, /^table \{[^}]*table-layout/m, "a blanket rule would flatten Evidence");
 });
 
-// The disclosure lives in exactly one table, and the skills table's deliberate absence of one
-// is what keeps that true — a <details> there would expand a row and push every skill below it
-// off the screen, which is the reason skillPage exists.
-test("the MCP tools table is the only table with a disclosure in a cell", () => {
+// A <details> in a table row expands that row and pushes everything below it off the screen —
+// why skillPage exists, and why /topology's tool list moved to cards. Neither page has one now.
+test("no page puts a disclosure in a table", () => {
   assert.doesNotMatch(bodyOf(contextPage(CTX)), /<details/);
-  // and the one that does have it is the one that carries the class. baseTopology has no
-  // capabilities at all — it renders the empty state, not a table — so this needs its own.
   const t: Topology = { ...baseTopology, capabilities: [{ name: "loki", tools: [{ name: "loki_query", write: false }] }] };
-  const caps = bodyOf(topologyPage(t, NONCE, ASSETS));
-  assert.match(caps, /<table class="caps">[\s\S]*<details>/);
-  assert.equal([...caps.matchAll(/<table class="caps">/g)].length, 1, "one table carries the class");
-  assert.equal([...caps.matchAll(/<details>/g)].length, 1, "one disclosure, in that table");
+  assert.doesNotMatch(bodyOf(topologyPage(t, NONCE, ASSETS)), /<details/);
 });
 
 // ---------- the core prompt ----------
@@ -3526,4 +3490,60 @@ test("the incident page opens with its lifecycle and links only the panels it ha
   const worse = detailPage({ incident: { ...row, created_at: fired, resolved_at: null, rca: "x", channel: null, thread_ts: null }, remediations: [rem], feedback: [] }, now);
   assert.match(worse, /<li data-state="warn"><span class="lc-label">Verified<\/span><span class="lc-value"[^>]*>worse</, "a bad verdict is never shown as done");
   assert.match(worse, /<li data-state="done"><span class="lc-label">Remediation<\/span><span class="lc-value" translate="no">k8s_<wbr>rollout_<wbr>restart</);
+});
+
+// ---------- /topology's list (2026-11-19) ----------
+
+test("topology list: k8s tools grouped by question, an unknown one in Other, writes split workloads/nodes", () => {
+  const t: Topology = {
+    ...baseTopology,
+    capabilities: [{ name: "k8s", tools: [
+      { name: "k8s_get_pod_logs", write: false, summary: "Get logs." },
+      { name: "k8s_brand_new", write: false },
+      { name: "k8s_scale", write: true },
+      { name: "k8s_drain", write: true },
+    ] }],
+  };
+  const html = topologyPage(t, NONCE, ASSETS);
+  assert.match(html, /Pods &amp; logs · 1<\/p><ul class="topo-chips"><li><code translate="no" title="Get logs.">k8s_get_pod_logs<\/code>/);
+  assert.match(html, /Other · 1<\/p><ul class="topo-chips"><li><code translate="no">k8s_brand_new<\/code>/);
+  assert.match(html, /Workloads · 1<\/p><ul class="topo-write-list"><li><code translate="no">k8s_scale<\/code> <span class="meta">— zero only as a quarantine/);
+  assert.match(html, /Nodes · 1<\/p><ul class="topo-write-list"><li><code translate="no">k8s_drain<\/code>/);
+});
+
+test("topology list: ?tool= narrows the families, says when nothing matches, and escapes the query", () => {
+  const t: Topology = {
+    ...baseTopology,
+    capabilities: [
+      { name: "k8s", tools: [{ name: "k8s_get_pod_logs", write: false }, { name: "k8s_list_nodes", write: false }] },
+      { name: "loki", tools: [{ name: "loki_query", write: false, summary: "Execute an instant LogQL query" }] },
+    ],
+  };
+  const logs = topologyPage(t, NONCE, ASSETS, undefined, "logql");
+  assert.match(logs, />loki_query</);
+  assert.doesNotMatch(logs, />k8s_list_nodes</);
+  assert.match(logs, /<a class="topo-tile is-empty" href="#cap-0"><code translate="no">k8s<\/code><strong>0<\/strong><span>of 2 match/);
+  const none = topologyPage(t, NONCE, ASSETS, undefined, `<b>x`);
+  assert.match(none, /No tool matches “&lt;b&gt;x”/);
+  assert.match(none, /value="&lt;b&gt;x"/);
+});
+
+test("topology list: a backend with an unexpected route still renders, under Unrouted", () => {
+  const t: Topology = { ...baseTopology, backends: [{ name: "odd", kind: "claude", model: "m", endpoint: "e", route: "sideways" as never, viaWorker: false }] };
+  const html = topologyPage(t, NONCE, ASSETS);
+  assert.match(html, /Unrouted<\/p><ul class="topo-backends"><li id="backend-0"><strong>odd<\/strong>/);
+  assert.match(html, /route sideways/);
+});
+
+test("topology list: stores show what they hold; the agent's own tools sit in a dashed family", () => {
+  const t: Topology = {
+    ...baseTopology,
+    outbound: [{ label: "Postgres", detail: "pg:5432", meta: "ssl disable", configured: true, icon: "db", children: [{ label: "incidents", detail: "the incident log" }] }],
+    capabilities: [{ name: "agent", tools: [{ name: "node_host_snapshot", write: false }, { name: "vm_restart_service", write: true }] }],
+  };
+  const html = topologyPage(t, NONCE, ASSETS);
+  assert.match(html, /What it remembers[\s\S]*?<article class="card topo-dep" id="out-0">/);
+  assert.match(html, /<li title="the incident log"><code translate="no">incidents<\/code><\/li>/);
+  assert.match(html, /<a class="topo-tile has-write is-agent" href="#cap-0"><code translate="no">agent&#39;s own<\/code>/);
+  assert.match(html, /vm_restart_service<\/code> <span class="badge" data-tone="warning">write<\/span> <span class="meta">— a unit in the host&#39;s own allowlist/);
 });

@@ -381,24 +381,11 @@ tbody tr:target { outline: 2px solid var(--accent); outline-offset: -2px; }
    screen — where the rail is a column and overlaps nothing — is a row that lands a line lower
    than the top of the viewport, which is where you would want it anyway. */
 tbody tr:target td { scroll-margin-top: 5rem; }
+/* /topology's map links to the list's cards and tool families (2026-11-19) — same confirmation. */
+.topo-list [id]:target { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-top: 5rem; }
 
-/* The tool list a family expands into. Bare list, no bullets: these are identifiers, and a
-   bullet column would only push them off the mono grid they line up on. */
 details > summary { cursor: pointer; font-weight: 550; }
 details > summary > span { margin-left: .35em; }
-/* A <pre> inside a table cell's disclosure used to be a skill's playbook. It is not any more:
-   the only <details> left in a table is the MCP tools list, whose content is a <ul>, and a
-   skill's body moved to skillPage precisely because expanding a row pushed every skill below
-   it off the screen. Removed rather than kept "in case" — dead CSS that names a construction
-   the page has deliberately abandoned is a suggestion to bring it back.
-*/
-ul.toollist {
-  /* indented to the family name, not to the triangle: the names hang under the thing they
-     belong to, which is the only hierarchy this list has to show. */
-  list-style: none; margin: var(--sp-3) 0 var(--sp-2); padding-left: 1.15em;
-  display: flex; flex-direction: column; gap: var(--sp-2);
-}
-ul.toollist li { color: var(--text-dim); overflow-wrap: anywhere; }
 
 /* ---------- hover ---------- */
 /* Pointer-only, all of it. See the note beside the base link rule: a touch device latches
@@ -582,6 +569,69 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 [data-k="b-runtime"] { background: color-mix(in srgb, var(--mark-warning) 45%, var(--surface)); }
 [data-k="b-os"] { background: var(--mark-line); }
 [data-k="b-free"] { background: color-mix(in srgb, var(--mark-ok) 30%, var(--surface)); }
+/* ---------- /topology: the list under the map, grouped by what each dependency is for ---------- */
+.topo-list { display: flex; flex-direction: column; gap: var(--sp-6); margin-top: var(--sp-6); }
+.topo-section { display: flex; flex-direction: column; gap: var(--sp-3); }
+.topo-section > h2, .topo-tools-head > h2 { margin: 0; }
+.topo-head-note { font-size: var(--fs-sm); font-weight: 400; color: var(--text-dim); }
+.topo-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: var(--sp-3); }
+.topo-dep { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.topo-dep-head { display: flex; gap: var(--sp-3); align-items: flex-start; }
+.topo-glyph {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 2.25rem; height: 2.25rem;
+  border-radius: var(--r-sm); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--accent);
+}
+.topo-dep-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.topo-endpoint { font-family: var(--font-data); font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.topo-meta { font-size: var(--fs-xs); color: var(--text-dim); }
+.topo-holds, .topo-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.topo-holds li code, .topo-chips li code {
+  display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--surface-2);
+  font-size: var(--fs-xs); overflow-wrap: anywhere;
+}
+.topo-dep[data-tone="warning"] { border-color: color-mix(in srgb, var(--spine) 45%, var(--border)); }
+.topo-tools-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--sp-2) var(--sp-4); }
+.topo-search { flex: 0 1 20rem; min-width: 0; }
+.topo-search input {
+  box-sizing: border-box; width: 100%; font: inherit; font-size: var(--fs-sm); color: var(--text);
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface);
+}
+.topo-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr)); gap: var(--sp-2); }
+.topo-tile {
+  display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3); text-decoration: none; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-sm);
+}
+.topo-tile code { font-weight: 600; font-size: var(--fs-sm); }
+.topo-tile strong { font-size: 1.375rem; line-height: 1.2; }
+.topo-tile span { font-size: var(--fs-xs); color: var(--text-dim); }
+.topo-tile.has-write span { color: var(--warning); font-weight: 600; }
+.topo-tile.is-agent { border-style: dashed; background: var(--surface-2); }
+.topo-tile.is-empty { opacity: .55; }
+.topo-family { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.topo-family-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--sp-1) var(--sp-3); }
+.topo-family-head h3 { margin: 0; font-size: var(--fs-md); display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.topo-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr)); gap: var(--sp-4) var(--sp-5); }
+.topo-group-title { margin: 0 0 var(--sp-1); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+/* The write tools, set apart in the warning tint: the most consequential fact on this page is
+   which tools can change the cluster, and each names the guard that stands in its way. */
+.topo-writes {
+  display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-sm); background: var(--tint-warning);
+  border: 1px solid color-mix(in srgb, var(--mark-warning) 30%, transparent);
+}
+.topo-writes-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--sp-1) var(--sp-3); margin: 0; font-size: var(--fs-sm); }
+.topo-writes-head strong { color: var(--warning); letter-spacing: .04em; text-transform: uppercase; }
+.topo-writes-head span { color: var(--text-dim); }
+.topo-write-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: var(--sp-4); }
+.topo-write-grid p.meta { margin: var(--sp-1) 0 0; }
+.topo-write-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
+.topo-write-list code { font-size: var(--fs-xs); }
+.topo-small-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: var(--sp-3); }
+.topo-family-small.has-write { border-color: color-mix(in srgb, var(--mark-warning) 40%, var(--border)); }
+.topo-family-small.is-agent { border-style: dashed; }
+.topo-lane { display: flex; flex-direction: column; gap: var(--sp-2); }
+.topo-backends { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.topo-backends li { display: flex; flex-direction: column; gap: 2px; }
 @media (max-width: 40rem) {
   .node-row { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
   .node-row .rate-bar { width: 100%; }

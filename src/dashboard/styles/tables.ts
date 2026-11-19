@@ -12,21 +12,6 @@ export const TABLES_CSS = `
   scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
 }
 table { width: 100%; border-collapse: collapse; }
-/* The one table that is laid out FIXED rather than auto, and the exception is narrow on
-   purpose. Every other table here wants the auto algorithm: it divides the frame in proportion
-   to what each column could use, which is what balances the RCA's Evidence table at roughly
-   65/35 without a number being written down anywhere.
-   This one has a <details> inside its first cell. Auto layout sizes columns from their
-   CONTENT, so opening a family inserted a list of tool names, raised that column's preferred
-   width, and the whole table re-divided — the count column visibly jumped sideways under the
-   reader's pointer, on the click that was supposed to reveal something.
-   Fixed layout takes its widths from the header row and ignores what arrives later, so the
-   count column stays where it was. The width is stated on the header cell because that is the
-   row a fixed layout measures. */
-table.caps { table-layout: fixed; }
-/* Wide enough for the tracked-out "TOOLS" caption (~42px) plus the cell's own padding (32px),
-   with room left for a four-digit count. */
-table.caps th:last-child, table.caps td:last-child { width: 6rem; }
 /* The header row sits on the recessed surface, the body on the raised one. That one step is
    what separates the two on a modern table — the old sheet leaned on the hairline alone, which
    is the same weight as every rule between rows and so said nothing about which row was the

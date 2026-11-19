@@ -66,15 +66,30 @@ const present = (v: string | undefined): string => (v && v.trim() ? "set" : "not
  * Sorted by size then name so the list is stable between renders (a Map preserves insertion
  * order, which is server order, which is not something this page should depend on).
  */
+/** The tools the agent adds itself (agent/vm/tools) rather than receives from devops-mcp-server.
+ *  By prefix they would make two one-tool families, "node" and "vm"; they are one thing — the
+ *  agent's own reach into the hosts — so they share a family. */
+export const AGENT_FAMILY = "agent";
+const AGENT_TOOLS: ReadonlySet<string> = new Set(["node_host_snapshot", "vm_restart_service"]);
+
+/** A description's first sentence, without the write marker, capped — a hover title, not a doc. */
+const summaryOf = (d: string | undefined): string | undefined => {
+  const text = (d ?? "").replace(/^\[WRITE\]\s*/, "").replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  const first = text.split(/(?<=[.!?])\s/)[0]!;
+  return first.length > 160 ? `${first.slice(0, 157)}…` : first;
+};
+
 export function toolFamilies(tools: readonly McpTool[]): Capability[] {
   const fams = new Map<string, Tool[]>();
   for (const t of tools) {
     const i = t.name.indexOf("_");
     // i > 0, not i >= 0: a name that STARTS with "_" has no prefix to speak of, and slicing
     // at 0 would file every such tool under the empty string.
-    const family = i > 0 ? t.name.slice(0, i) : t.name;
+    const family = AGENT_TOOLS.has(t.name) ? AGENT_FAMILY : i > 0 ? t.name.slice(0, i) : t.name;
     const list = fams.get(family) ?? [];
-    list.push({ name: t.name, write: (t.description ?? "").startsWith(WRITE_PREFIX) });
+    const summary = summaryOf(t.description);
+    list.push({ name: t.name, write: (t.description ?? "").startsWith(WRITE_PREFIX), ...(summary ? { summary } : {}) });
     fams.set(family, list);
   }
   return [...fams.entries()]

@@ -6,6 +6,7 @@ export * from "./overview-views.js";
 export * from "./incident-views.js";
 export * from "./harness-views.js";
 export * from "./agent-views.js";
+export * from "./topology-list.js";
 export * from "./bench-views.js";
 export * from "./cluster-views.js";
 export * from "./node-views.js";

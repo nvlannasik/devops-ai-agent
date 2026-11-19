@@ -610,7 +610,7 @@ export class DashboardServer {
       // time, and a failure to read it must not take out a page that does not otherwise depend
       // on Postgres: it falls back to no badge rather than to an error.
       const open = await this.openCount();
-      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce, this.assets, open), "text/html; charset=utf-8", {
+      return send(200, topologyPage(buildTopology(this.mcpTools()), nonce, this.assets, open, url.searchParams.get("tool") ?? ""), "text/html; charset=utf-8", {
         "content-security-policy": csp(nonce),
       });
     }

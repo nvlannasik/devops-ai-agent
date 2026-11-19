@@ -1,110 +1,13 @@
 import { cell, esc, fmtCompact, fmtInt, headers, table } from "./html.js";
-import { rowId } from "./topology.js";
+import { dependencyList } from "./topology-list.js";
 import type { Assets } from "./assets.js";
 import { outlineOf, renderMarkdown } from "./markdown.js";
 import { shareBar } from "./chart.js";
 import { SKILL_MAX_CHARS } from "../agent/skills/index.js";
-import type { BackendNode, Capability, Node as TopoNode, Topology } from "./topology.js";
+import type { Topology } from "./topology.js";
 import type { ContextView } from "./context.js";
-import { ICON, badge, cardHead, empty, jsonBlock, pageHead, statList, panel } from "./parts.js";
+import { ICON, cardHead, empty, jsonBlock, pageHead, statList, panel } from "./parts.js";
 import { layout } from "./layout.js";
-
-// `group` is only ever the anchor prefix: each box in the diagram links to its own row here,
-// and rowId() is the single definition both sides derive that id from. Optional because the
-// activeClient table reuses this helper for a row the diagram never draws (non-router
-// providers have no backend chips), and an anchor nothing can link to is just dead markup.
-const nodeRows = (nodes: TopoNode[], group?: "in" | "out"): string =>
-  nodes.length === 0
-    ? empty("Nothing configured in this group.", "Set the matching environment variables to wire one up.", ICON.plug)
-    : table(
-        headers("Dependency", "Endpoint", "Notes"),
-        nodes
-          .map(
-            (n, i) => `<tr role="row"${group ? ` id="${rowId(group, i)}"` : ""}${n.configured ? "" : ` data-tone="warning"`}>` +
-              cell("Dependency", esc(n.label), "primary") +
-              cell("Endpoint", `<span translate="no">${esc(n.detail)}</span>`, "mono") +
-              cell(
-                "Notes",
-                `${esc(n.meta)}${n.configured ? "" : ` ${badge("not configured", "warning")}`}`,
-                "meta"
-              ) +
-              `</tr>`
-          )
-          .join(""),
-        // Stacked, not paired: every one of these three is a phrase rather than a value —
-        // "Postgres (incident memory)", a queue pair with an arrow between them, "bot token
-        // present, socket mode present". A caption beside them would leave each phrase a third
-        // of the screen to wrap in.
-        "stack"
-      );
-
-// Paired rather than stacked: a backend row is a spec sheet — a name, two identifiers, an enum
-// and an endpoint. Only the endpoint is long, and it is the one field a reader scans down rather
-// than reads, so it keeps the column the other four set.
-const backendRows = (backends: BackendNode[]): string =>
-  table(
-    headers("Backend", "Kind", "Model", "Route", "Reached via"),
-    backends
-      .map(
-        (b, i) => `<tr role="row" id="${rowId("backend", i)}">` +
-          cell("Backend", esc(b.name), "primary") +
-          cell("Kind", `<span translate="no">${esc(b.kind)}</span>`, "mono") +
-          cell("Model", `<span translate="no">${esc(b.model)}</span>`, "mono") +
-          cell("Route", badge(b.route, "")) +
-          cell("Reached via", `<span translate="no">${esc(b.endpoint)}</span>`, "mono") +
-          `</tr>`
-      )
-      .join(""),
-    "pairs"
-  );
-
-// The one table on this page whose source is NOT config: these families are derived from the
-// tool list devops-mcp-server returned when the agent connected. So the empty state is a real
-// state, not a misconfiguration — the agent may simply not have connected yet — and it must not
-// read like the "set the environment variable" copy the config tables use.
-// A family can hold thirty tools, and thirty names per row would bury the four numbers that
-// answer "what can this agent see". <details> gives the family line as the glance and the
-// names on demand — native, keyboard-operable, and the only disclosure widget that works
-// under a `default-src 'none'` CSP, which forbids the script every other one needs.
-const capabilityRows = (caps: Capability[]): string =>
-  caps.length === 0
-    ? empty(
-        "No tools discovered yet.",
-        "The agent lists them when it connects to devops-mcp-server. If this persists, the server is unreachable.",
-        ICON.plug
-      )
-    // The one table on this page that stays a table at every width, and deliberately. Two
-    // columns — a family name and a count — fit 320px with room to spare, so there is nothing to
-    // rescue; and stacking it would put the expanded tool list BETWEEN the family and its count,
-    // which is the pair the row exists to show. A narrow layout is for columns that fall off the
-    // edge, not for every table.
-    : table(
-        `<th>Family</th><th>Tools</th>`,
-        caps
-          .map(
-            (c, i) => `<tr id="${rowId("cap", i)}"><td class="primary">` +
-              // The name is wrapped rather than styled on the <summary> itself: the disclosure
-              // triangle lives inside that box, and every property that would set it off from
-              // the name (padding, indent) moves the triangle with it. A span is the one thing
-              // the marker cannot follow.
-              `<details><summary><span class="mono" translate="no">${esc(c.name)}</span></summary>` +
-              `<ul class="toollist">${c.tools
-                .map(
-                  (t) => `<li class="mono" translate="no">${esc(t.name)}` +
-                    // The most consequential fact on this page: which of these can change the
-                    // cluster. It is marked, not filtered — a reader who sees no marks has
-                    // been told something, and a reader who sees one knows to look.
-                    `${t.write ? ` ${badge("write", "warning")}` : ""}</li>`
-                )
-                .join("")}</ul></details></td>` +
-              `<td class="num">${fmtInt(c.tools.length)}</td></tr>`
-          )
-          .join(""),
-        undefined,
-        // The only table here with a <details> in a cell, and so the only one whose columns
-        // would move when a reader opens one. See table.caps in styles.ts.
-        "caps"
-      );
 
 /**
  * The map itself: a mount point, the data, and the bundle that joins them.
@@ -181,26 +84,10 @@ export function topologyPage(
   t: Topology,
   nonce: string,
   assets: Assets | null,
-  openIncidents?: number
+  openIncidents?: number,
+  /** `?tool=` — the tool search under the map. */
+  toolQuery = ""
 ): string {
-  // The brief's original version rendered only the bare provider name for the three
-  // non-router providers ("Provider claude — one client, no routing."). Task 1's review
-  // added `activeClient` (populated for claude / openai-compatible / private-llm, undefined
-  // for router — the router's answer is `backends[]` instead) precisely so this page could
-  // show the one active client, not merely name it (design §4.2). Reusing nodeRows() here —
-  // the same helper the inbound/outbound tables use — means this table and those tables
-  // can never render a node's fields differently from one another.
-  const router =
-    t.provider !== "router"
-      ? `<p class="meta">Provider <code translate="no">${esc(t.provider)}</code> — one client, no routing.</p>` +
-        nodeRows(t.activeClient ? [t.activeClient] : [])
-      : t.registryError
-        ? empty("The backend registry could not be read.", t.registryError, ICON.chip)
-        : backendRows(t.backends) +
-          `<p class="meta">Only <code translate="no">private-llm</code> backends traverse SQS to ` +
-          `<code translate="no">llm-worker</code>; <code translate="no">claude</code> and ` +
-          `<code translate="no">openai-compatible</code> backends are called directly from the agent.</p>`;
-
   return layout(
     "Topology",
     `<div class="doc">
@@ -212,10 +99,7 @@ export function topologyPage(
      </div>
      ${topologyShelf(t)}
      ${topoFrame(t, nonce, assets)}
-     ${panel("Inbound", nodeRows(t.inbound, "in"))}
-     ${panel("Outbound", nodeRows(t.outbound, "out"))}
-     ${panel("MCP tools", capabilityRows(t.capabilities))}
-     ${panel("LLM backends", router)}`,
+     ${dependencyList(t, toolQuery)}`,
     // The one page with an external stylesheet. It is linked ahead of the inline <style> so
     // the dashboard's own rules win over React Flow's at equal specificity.
     { current: "/topology", openIncidents, stylesheet: assets?.css.path }

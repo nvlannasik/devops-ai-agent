@@ -66,6 +66,9 @@ export interface Tool {
   // Reading the same test means the page cannot disagree with the thing it describes — a
   // server that sends no description is non-write to the agent, and non-write here too.
   write: boolean;
+  /** The first sentence of the tool's own description, for a hover title on /topology. Text from
+   *  the MCP server: escaped like everything else it sends. */
+  summary?: string;
 }
 
 // A family of tools the MCP server told us it exposes, e.g. { name: "k8s", tools: [...] }.
