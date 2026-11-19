@@ -62,3 +62,17 @@ test("a control-plane node is never cordoned or drained, whoever asks and whatev
   // a worker under the same pressure may be drained
   assert.equal(nodeActionRefusal("k8s_drain", "worker1-raspi", { ...cp, roles: [] }, false), null);
 });
+
+// 2026-11-17: the RCA for master3-vm's MemoryPressure told on-call to cordon it, in the TL;DR, the
+// actions table and the runbook, while the gate refused the card in silence.
+test("controlPlaneCorrection: only for the control-plane refusal, and only when the RCA advises it", async () => {
+  const { controlPlaneCorrection, nodeActionRefusal } = await import("./node-gate.js");
+  const refused = nodeActionRefusal("k8s_drain", "master3-vm", { roles: ["control-plane"], conditions: [] } as never, false)!;
+  const rca = "*:zap: TL;DR*\n• *Immediate:* Cordón master3-vm to drain load and restore headroom";
+  const note = controlPlaneCorrection(refused, rca)!;
+  assert.match(note, /^:no_entry: \*Do not cordon or drain `master3-vm`\*/);
+  assert.match(note, /a cordon frees no memory/);
+  assert.equal(controlPlaneCorrection(refused, "Add memory to master3-vm."), null, "no such advice on screen: stays hidden");
+  assert.equal(controlPlaneCorrection(refused, "drain worker1 instead; master3-vmx is fine"), null, "another node is not this one");
+  assert.equal(controlPlaneCorrection("`master3-vm` is Ready with no pressure condition", rca), null, "another refusal is not this one");
+});

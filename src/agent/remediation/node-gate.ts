@@ -42,6 +42,41 @@ export function nodeFaults(d: NodeDetail): string[] {
   return out;
 }
 
+const CONTROL_PLANE_REFUSAL = " is a control-plane node — it is never cordoned or drained by this agent, whoever asks.";
+
+const controlPlaneRefusal = (node: string): string =>
+  `\`${node}\`${CONTROL_PLANE_REFUSAL} Its pods are ` +
+  `the API server, scheduler and controller manager. Under pressure, the fix is the node's capacity (more memory ` +
+  `or CPU for the machine) or moving workload pods off it; say that instead.`;
+
+/**
+ * The correction to post when the model proposed a cordon/drain of a control-plane node, the gate
+ * refused it, and the RCA already in the thread tells a human to do exactly that — or null.
+ *
+ * A refusal of the model's own proposal is normally kept out of the thread (app/remediation.ts:
+ * posting the gates' reasons buried on-call threads). This one is the exception because the text a
+ * person acts on is wrong: on 2026-11-17 the RCA for master3-vm's MemoryPressure said "Immediate:
+ * cordon master3-vm" in its TL;DR, actions table and runbook while the gate refused the card in
+ * silence. A cordon frees no memory there and its pods are the control plane itself. Only when the
+ * RCA names a cordon or drain of THAT node: a refusal with no such advice on screen stays hidden.
+ */
+export function controlPlaneCorrection(refused: string, rca: string): string | null {
+  const m = new RegExp(`^\`([^\`]+)\`${CONTROL_PLANE_REFUSAL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).exec(refused);
+  if (!m) return null;
+  const node = m[1]!;
+  const n = node.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // "cordón" too: the model writes it with an accent now and then (the 2026-11-17 RCA did).
+  const verb = "(?:cord[oó]n\\w*|drain\\w*)";
+  const advises = rca.split("\n").some((line) => new RegExp(`${verb}[^\\n]{0,60}\\b${n}\\b|\\b${n}\\b[^\\n]{0,60}${verb}`, "i").test(line));
+  if (!advises) return null;
+  return (
+    `:no_entry: *Do not cordon or drain \`${node}\`* — the analysis above suggests it, but \`${node}\` is a control-plane ` +
+    `node: its pods are the API server, scheduler and controller manager, and a cordon frees no memory. The agent ` +
+    `refuses this action whoever asks. Under pressure the fix is the machine's capacity (more memory or CPU) or ` +
+    `moving workload pods off it.`
+  );
+}
+
 /**
  * - cordon / drain: refused while the node has no fault — Ready, no pressure — unless a human asked
  *   (maintenance is a reason the node cannot show; bench C11 is that request). A cordon of a node
@@ -57,11 +92,7 @@ export function nodeActionRefusal(action: string, node: string, d: NodeDetail, u
   // proposed twice in an hour and stopped both times only there. Said here, the one re-ask can turn
   // to what does help a control-plane node: its capacity.
   if ((action === "k8s_cordon" || action === "k8s_drain") && (d.roles ?? []).some((r) => r === "control-plane" || r === "master")) {
-    return (
-      `\`${node}\` is a control-plane node — it is never cordoned or drained by this agent, whoever asks. Its pods are ` +
-      `the API server, scheduler and controller manager. Under pressure, the fix is the node's capacity (more memory ` +
-      `or CPU for the machine) or moving workload pods off it; say that instead.`
-    );
+    return controlPlaneRefusal(node);
   }
   if (action === "k8s_cordon" && cordoned) {
     return `\`${node}\` is already cordoned — a cordon changes nothing. If pods must leave it, that is a drain.`;

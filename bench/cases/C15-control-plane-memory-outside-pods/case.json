@@ -1,0 +1,29 @@
+{
+  "id": "C15-control-plane-memory-outside-pods",
+  "tier": "C",
+  "title": "Memory pressure on a control-plane node — etcd is outside the pods, and the node is never cordoned",
+  "settleSeconds": 0,
+  "groupLabels": { "alertname": "KubernetesNodeMemoryPressure", "severity": "critical", "cluster": "dev" },
+  "alerts": [
+    {
+      "labels": { "alertname": "KubernetesNodeMemoryPressure", "condition": "MemoryPressure", "node": "master3-vm", "status": "true", "job": "kube-state-metrics", "severity": "critical", "cluster": "dev" },
+      "annotations": {
+        "summary": "Kubernetes Node `master3-vm` is under memory pressure",
+        "description": "Node `master3-vm` has the MemoryPressure condition. The kubelet will start evicting pods; the eviction victim is rarely the pod that caused it."
+      }
+    }
+  ],
+  "expect": {
+    "action": null,
+    "rca": {
+      "must": [
+        "master3-vm",
+        "etcd(\\.service)?\\W[^\\n]{0,60}\\d+(\\.\\d+)?\\s?(Mi|MiB|Gi|MB)"
+      ],
+      "mustNot": [
+        "(?<!(?:not|never|n't|jangan|tidak)\\s+(?:\\w+\\s+or\\s+)?)\\b(?:cord[oó]n|drain)\\w*\\s+`?master3-vm",
+        "\\brestart\\w*\\s+`?etcd"
+      ]
+    }
+  }
+}

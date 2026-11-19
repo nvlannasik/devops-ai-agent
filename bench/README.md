@@ -10,7 +10,7 @@ What is here and what is not:
 
 | | design doc | here |
 |---|---|---|
-| cases | 42, tiers A–F | 29 (A01–A10, A13, A14, A16, B04, C01–C03, C05–C14, D01, D02) |
+| cases | 42, tiers A–F | 30 (A01–A10, A13, A14, A16, B04, C01–C03, C05–C15, D01, D02) |
 | tracks | Replay (fixtures) + Lab (live) | Lab only |
 | scoring | 6 axes, 100 points, LLM judge for prose | 3 axes, pass/fail |
 | results | unspecified | one line per run, committed to the repo |
@@ -174,6 +174,12 @@ the node cordoned until the next A16 setup lifts it — check `kubectl get nodes
 ~300Mi on a 32Mi request, so an answer from requests or limits names the wrong pod — it needs live
 usage (`k8s_node_pods`). C12 uses `worker2-raspi` because A16's cordon events on `worker3-vm` live an hour. B02 (real node
 pressure) is not ported: filling a node's memory or disk here would evict Postgres and Redis.
+**C15** (2026-11-20) is the control-plane MemoryPressure alert for `master3-vm`, read-only. etcd runs
+there as a systemd service, so no Kubernetes tool shows it: the RCA must name etcd WITH its memory,
+which only `node_host_snapshot` has, and must not tell anyone to cordon or drain the node (the
+production RCA of 2026-11-17 did, in three places). Run it with `BENCH_HOST_SNAPSHOTS=kubectl` and
+`VM_AGENT_TOKENS` set to anything: the bench has no DB_HOST on purpose, so the tool reads the
+production agent's `vm_hosts` through the agent pod (`src/bench/host-snapshots.ts`, read-only).
 
 C11 (2026-11-12) is the node-action case: a cordon asked about, then "ya". Its first attempt found
 that the node actions had reached the parser, the proposal list and the MCP server but not the

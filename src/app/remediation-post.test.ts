@@ -80,3 +80,31 @@ test("an opened GitOps PR schedules the apply-watch", async () => {
 test("a live patch still schedules the ordinary verification, and nothing else", async () => {
   assert.deepEqual(await click({ text: "✅ *Remediation executed*", target: { namespace: "ns", name: "app" } }), ["verify"]);
 });
+
+// The one refusal of the model's own proposal that IS posted: the RCA on screen says to cordon a
+// control-plane node the gate refused (agent/remediation/node-gate.ts controlPlaneCorrection).
+test("a refused cordon of a control-plane node is posted when the RCA told on-call to do it", async () => {
+  const { nodeActionRefusal } = await import("../agent/remediation/node-gate.js");
+  const refused = nodeActionRefusal("k8s_cordon", "master3-vm", { roles: ["control-plane"], conditions: [] } as never, false)!;
+  const posted: any[] = [];
+  const gates: string[] = [];
+  const notes: string[] = [];
+  const self = {
+    agent: {
+      proposeRemediation: async () => ({ refused }),
+      noteInThread: async (_t: string, n: string) => void notes.push(n),
+      recordCardMessage: async () => {},
+      recordGate: (_t: string, name: string, out: string) => void gates.push(`${name}:${out}`),
+    },
+    app: { client: { chat: { postMessage: async (m: any) => (posted.push(m), { ts: "9.9" }) } } },
+  };
+  await RemediationFlow.prototype.maybeProposeRemediation.call(viaRemediation(self), "C1", "1.1", 42, {}, "Immediate: cordon master3-vm", false, null);
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].text, /Do not cordon or drain `master3-vm`/);
+  assert.equal(posted[0].thread_ts, "1.1");
+  assert.deepEqual(gates, ["proposal:refused-corrected"]);
+  assert.match(notes[0]!, /do not recommend that again/);
+  // the same refusal with no such advice in the RCA stays hidden
+  const quiet = await run({ refused }, false);
+  assert.equal(quiet.posted.length, 0);
+});

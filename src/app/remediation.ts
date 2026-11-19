@@ -5,6 +5,7 @@ import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/re
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
 import type { SlackHost } from "./host.js";
+import { controlPlaneCorrection } from "../agent/remediation/node-gate.js";
 
 export class RemediationFlow {
   constructor(private readonly host: SlackHost) {}
@@ -37,6 +38,15 @@ export class RemediationFlow {
         // paragraph about an image the model invented into every on-call thread (three
         // checkout-gateway incidents, 2026-09-29). Logged instead, and noted for the agent below
         // either way, so a follow-up question is still answered truthfully.
+        // The one exception: the RCA on screen tells a human to cordon/drain a control-plane node
+        // the gate just refused (agent/remediation/node-gate.ts controlPlaneCorrection).
+        const correction = userRequested ? null : controlPlaneCorrection(proposed.refused, rca);
+        if (correction) {
+          this.host.agent.recordGate(threadId, "proposal", "refused-corrected", truncate(proposed.refused, 200));
+          await this.host.app.client.chat.postMessage({ channel, thread_ts: threadId, text: correction, mrkdwn: true });
+          await this.host.agent.noteInThread(threadId, `Remediation was REFUSED by the server: ${truncate(proposed.refused, 300)} — the thread was told not to cordon or drain it; do not recommend that again.`);
+          return;
+        }
         if (!userRequested) {
           logger.info(`[remediation] refusal not posted (the model's proposal, not a request): ${truncate(proposed.refused, 200)}`);
           this.host.agent.recordGate(threadId, "proposal", "refused-hidden", truncate(proposed.refused, 200));

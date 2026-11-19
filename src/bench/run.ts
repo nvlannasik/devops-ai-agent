@@ -13,6 +13,7 @@
  * Requires: a cluster in KUBECONFIG, an MCP server pointed at it, and an LLM backend. Nothing
  * here creates any of the three; see bench/README.md.
  */
+import { KubectlHostSnapshots } from "./host-snapshots.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -293,6 +294,12 @@ async function main(): Promise<void> {
 
   const agent = new DevOpsAgent({ traceSource: "bench" });
   await agent.initialize();
+  // node_host_snapshot against production's host agents (read-only), for the cases about memory
+  // outside pods. Needs VM_AGENT_TOKENS set (any value) so the agent registers the tool at all.
+  if (process.env.BENCH_HOST_SNAPSHOTS === "kubectl") {
+    agent.vmStore = new KubectlHostSnapshots() as unknown as typeof agent.vmStore;
+    console.log("[bench] host snapshots: read from the production agent's vm_hosts via kubectl exec");
+  }
   const llm = createLLMClient();
 
   const runs: TaskRun[] = [];
