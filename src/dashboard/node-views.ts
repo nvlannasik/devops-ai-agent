@@ -153,10 +153,29 @@ const fleetHref = (v: FleetView, change: Partial<FleetView>): string => {
   return `/nodes${s ? `?${s}` : ""}`;
 };
 
+/** A lease's glyph: the pin for the API VIP, the crown for a leader. Decorative — the label says it. */
+const leaseIcon = (label: string): string => (/VIP/.test(label) ? `<span class="ico-vip">${ICON.pin}</span>` : `<span class="ico-lead">${ICON.crown}</span>`);
+
 const holdersStrip = (g: ClusterGroup): string =>
   g.holders.length
-    ? `<p class="node-holders">${g.holders.map((h) => `<span>${esc(h.label)} <strong>${esc(h.node)}</strong></span>`).join("")}</p>`
+    ? `<p class="node-holders">${g.holders.map((h) => `<span>${leaseIcon(h.label)}${esc(h.label)} <strong>${esc(h.node)}</strong></span>`).join("")}</p>`
     : "";
+
+/** The kind of host as a glyph in a chip, then its name and one line about it. The chip is
+ *  decorative: the line under the name says the same in words. */
+function hostCell(c: NodeCard, extra: string[] = []): string {
+  const [kind, glyph, label] = c.controlPlane
+    ? ["cp", ICON.layers, "control plane"]
+    : c.k8s || c.cluster
+      ? ["worker", ICON.server, c.k8s ? "worker" : "host"]
+      : ["vm", ICON.vm, "standalone VM"];
+  const roles = c.holds.map((h) => `${leaseIcon(h)}${esc(/VIP/.test(h) ? "VIP" : h.replace("controller-manager", "CM"))}`);
+  const sub = [esc(label), ...roles, ...extra.map(esc)].join(`<span aria-hidden="true">·</span>`);
+  return (
+    `<div class="host-cell"><span class="host-kind" data-kind="${kind}">${glyph}</span>` +
+    `<span><a href="${esc(hostHref(c))}" class="node-host">${esc(c.name)}</a><span class="node-sub">${sub}</span></span></div>`
+  );
+}
 
 function k8sRows(cards: NodeCard[]): string {
   return table(
@@ -165,10 +184,9 @@ function k8sRows(cards: NodeCard[]): string {
       .map((c) => {
         const h = c.host;
         const top = h?.services[0];
-        const sub = [c.controlPlane ? "control plane" : c.k8s ? "worker" : "host", ...c.holds.map((x) => x.replace(" leader", "").replace(" (kube-vip)", "")), c.pods ? `${fmtInt(c.pods.count)} pods` : ""].filter(Boolean).join(" · ");
         return (
           `<tr${worstTone(c) === "warning" || worstTone(c) === "critical" ? ` data-attention` : ""}>` +
-          cell("Host", `<a href="${esc(hostHref(c))}" class="node-host">${esc(c.name)}</a><span class="node-sub">${esc(sub)}</span>`) +
+          cell("Host", hostCell(c, c.pods && !c.controlPlane ? [`${fmtInt(c.pods.count)} pods`] : [])) +
           cell("Status", statusBadge(c)) +
           cell("Memory free", h ? cellMeter((h.availableMi / Math.max(1, h.totalMi)) * 100, "ok", `${fmtInt(h.availableMi)}Mi of ${fmtInt(h.totalMi)}Mi`) : dash) +
           cell("Pod headroom", c.pods ? cellMeter((c.pods.workingSetMi / Math.max(1, c.pods.allocatableMi)) * 100, c.pods.tone, `${fmtInt(c.pods.headroomMi)}Mi left`) : dash) +
@@ -191,7 +209,7 @@ function standaloneRows(cards: NodeCard[], now: Date): string {
         const a = c.lastAction;
         return (
           `<tr${worstTone(c) === "warning" || worstTone(c) === "critical" ? ` data-attention` : ""}>` +
-          cell("Host", `<a href="${esc(hostHref(c))}" class="node-host">${esc(c.name)}</a><span class="node-sub">standalone</span>`) +
+          cell("Host", hostCell(c)) +
           cell("Status", statusBadge(c)) +
           cell("Memory free", h ? cellMeter((h.availableMi / Math.max(1, h.totalMi)) * 100, "ok", `${fmtInt(h.availableMi)}Mi of ${fmtInt(h.totalMi)}Mi`) : dash) +
           cell("Disk", h?.disk ? `<span${h.disk.tone !== "ok" ? ` data-tone="${h.disk.tone}"` : ""}>${h.disk.usedPct}%</span>` : dash, "num") +

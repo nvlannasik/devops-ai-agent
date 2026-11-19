@@ -158,3 +158,14 @@ test("an empty input renders, never throws", () => {
   const input: NodesInput = { hosts: [], actions: [], clusters: [], local: null, unavailable: [] };
   assert.match(hostsPage(buildNodesModel(input), view), /No hosts/);
 });
+
+test("each row carries a decorative kind glyph, and VIP/leader glyphs sit beside their words", async () => {
+  const hosts = [host({ name: "master2-vm" }), host({ name: "vm-web-01", version: "4" })];
+  const html = hostsPage(buildNodesModel(await loadNodes(source({ hosts }))), view);
+  assert.match(html, /<span class="host-kind" data-kind="cp"><svg class="ico"[^>]*aria-hidden="true"/);
+  assert.match(html, /<span class="host-kind" data-kind="vm">/);
+  assert.match(html, /<span class="ico-vip"><svg[^>]*aria-hidden="true"[\s\S]*?<\/svg><\/span>VIP/);
+  assert.match(html, /<span class="ico-lead"><svg[\s\S]*?<\/svg><\/span>CM leader/);
+  assert.match(html, /class="node-holders"><span><span class="ico-lead">/);
+  assert.match(html, />standalone VM</);
+});

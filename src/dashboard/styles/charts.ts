@@ -532,7 +532,23 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .node-group-empty p { margin: var(--sp-1) 0 0; }
 .node-group tr[data-attention] > td { background: var(--tint-warning); }
 .node-host { font-weight: 600; }
-.node-sub { display: block; font-size: var(--fs-xs); color: var(--text-dim); }
+.node-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .35em; font-size: var(--fs-xs); color: var(--text-dim); }
+/* The kind of host, as a glyph in a chip before its name: control plane, worker, standalone VM.
+   The line under the name says the same in words, so the chip is decoration and is hidden from
+   assistive technology. */
+.host-cell { display: flex; align-items: center; gap: var(--sp-3); }
+.host-kind {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 2rem; height: 2rem; border-radius: var(--r-sm); background: var(--surface-2); color: var(--text-dim);
+}
+.host-kind[data-kind="cp"] { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--accent); }
+.host-kind[data-kind="vm"] { background: var(--surface); border: 1px solid var(--border); }
+/* The lease glyphs, in the row's line and in the group's holder strip: the pin is the API VIP,
+   the crown a leader. Coloured, never alone — the word is beside each. */
+.node-sub .ico, .node-holders .ico { width: 13px; height: 13px; vertical-align: -2px; }
+.ico-vip { display: inline-flex; color: var(--info); }
+.ico-lead { display: inline-flex; color: var(--warning); }
+.node-holders span { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .node-cell-bar { display: block; width: 100%; max-width: 11rem; height: 6px; }
 .node-cell-text { display: block; margin-top: var(--sp-1); font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
 .node-group td [data-tone], .node-cell-text[data-tone] { color: var(--ink); font-weight: 600; }

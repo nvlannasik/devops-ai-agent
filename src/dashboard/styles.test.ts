@@ -7,10 +7,10 @@ import { STYLES } from "./styles.js";
 // 2026-10-21 split: STYLES is seven ordered chunks. Order is the cascade, so the bytes are pinned —
 // a chunk moved or a line lost changes which rule wins with no error anywhere. A NEW rule re-pins
 // both numbers on purpose (2026-10-26: /people, the harness bars and bench folds, then the incident header and params;
-// 2026-11-18: /nodes, then the multi-cluster hosts pages).
+// 2026-11-18: /nodes, then the multi-cluster hosts pages and their icons).
 test("STYLES bytes are pinned", () => {
-  assert.equal(STYLES.length, 195814);
-  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "b9bfe8f34f3403f7d44e8959a2e96cb09d017f670e0f4d728d27b1c449aadf4d");
+  assert.equal(STYLES.length, 197036);
+  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "8cde1e8507c69955c4d9fb693b62bc918050a2fc5f987468b70f42371b11d636");
 });
 
 test("no stylesheet chunk interpolates", () => {

@@ -69,6 +69,12 @@ export const ICON = {
   check: ico(`<circle cx="12" cy="12" r="8.8"/><path d="m8.2 12.3 2.6 2.6 5-5.6"/>`),
   // Two stacked chassis with a status light each: a host, not a cluster (that is `layers`).
   server: ico(`<rect x="3.5" y="4" width="17" height="6.5" rx="1.6"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.6"/><path d="M7.5 7.25h.01"/><path d="M7.5 16.75h.01"/><path d="M11 7.25h5.5"/><path d="M11 16.75h5.5"/>`),
+  // A machine on its own (a monitor on a stand): a host outside any cluster.
+  vm: ico(`<rect x="3.5" y="4.5" width="17" height="11.5" rx="1.6"/><path d="M12 16v3.5"/><path d="M8.5 19.5h7"/>`),
+  // Where the API VIP lives — a map pin, because it is a place a role has moved to.
+  pin: ico(`<path d="M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10Z"/><circle cx="12" cy="11" r="2.2"/>`),
+  // A leader lease (controller-manager, scheduler).
+  crown: ico(`<path d="M3.5 17.5h17"/><path d="M4.5 15 3.5 7l5 3.5L12 5l3.5 5.5 5-3.5-1 8Z"/>`),
   layers: ico(`<path d="m12 2.6 9 4.9-9 4.9-9-4.9 9-4.9Z"/><path d="m3 13 9 4.9 9-4.9"/>`),
   // The two arrows are a pair and are read as one: what went to the model, what came back.
   // Same baseline, same head, mirrored — anything else and the reader has to check each.
