@@ -162,7 +162,7 @@ function toolsSection(t: Topology, q: string): string {
           `<a class="topo-tile${w ? " has-write" : ""}${c.name === AGENT_FAMILY ? " is-agent" : ""}${q && !hits ? " is-empty" : ""}" href="#${esc(rowId("cap", i))}">` +
           `<code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code>` +
           `<strong>${fmtInt(q ? hits : c.tools.length)}</strong>` +
-          `<span>${q ? `of ${fmtInt(c.tools.length)} match` : w ? `${fmtInt(c.tools.length - w)} read · ${fmtInt(w)} write` : "read only"}</span></a>`
+          `<span>${q ? `of ${fmtInt(c.tools.length)} match` : w === c.tools.length ? `${fmtInt(w)} write` : w ? `${fmtInt(c.tools.length - w)} read · ${fmtInt(w)} write` : "read only"}</span></a>`
         );
       })
       .join("") +

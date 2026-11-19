@@ -3544,6 +3544,8 @@ test("topology list: stores show what they hold; the agent's own tools sit in a 
   const html = topologyPage(t, NONCE, ASSETS);
   assert.match(html, /What it remembers[\s\S]*?<article class="card topo-dep" id="out-0">/);
   assert.match(html, /<li title="the incident log"><code translate="no">incidents<\/code><\/li>/);
-  assert.match(html, /<a class="topo-tile has-write is-agent" href="#cap-0"><code translate="no">agent&#39;s own<\/code>/);
+  assert.match(html, /<a class="topo-tile has-write is-agent" href="#cap-0"><code translate="no">agent&#39;s own<\/code><strong>2<\/strong><span>1 read · 1 write/);
+  const allWrite = topologyPage({ ...baseTopology, capabilities: [{ name: "flux", tools: [{ name: "flux_reconcile", write: true }] }] }, NONCE, ASSETS);
+  assert.match(allWrite, /<code translate="no">flux<\/code><strong>1<\/strong><span>1 write<\/span>/, "no \"0 read\"");
   assert.match(html, /vm_restart_service<\/code> <span class="badge" data-tone="warning">write<\/span> <span class="meta">— a unit in the host&#39;s own allowlist/);
 });
