@@ -15,7 +15,7 @@ export const GATE_NAMES = [
   "tool-budget", "iteration-ceiling", "deadline", "delegate",
   "placeholder", "injection", "repeat-call", "log-fanout", "scope-lock", "write-blocked",
   "confidence-cap", "cluster-cap", "template-echo", "fabricated-note", "runbook", "offer",
-  "grounding", "rca-structure",
+  "grounding", "rca-structure", "unsafe-advice",
   "remediation-replacement", "remediation-quarantine", "remediation-orphan", "remediation-offer",
   "remediation-target", "remediation-resource-fault", "remediation-scale", "remediation-image",
   "remediation-kind", "remediation-rollback", "remediation-node", "remediation-other", "dry-run", "proposal",

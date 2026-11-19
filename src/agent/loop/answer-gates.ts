@@ -7,6 +7,7 @@ import type { ConversationMemory } from "../memory/index.js";
 import { observedText, groundingGaps } from "../grounding/index.js";
 import { rcaGaps, rcaGapNotice } from "../rca-completeness/index.js";
 import { imageGapRepo, IMAGE_GAP_NOTICE } from "../remediation/evidence-refusals.js";
+import { unsafeAdvice, UNSAFE_ADVICE_NOTICE, unsafeAdviceFooter } from "../remediation/unsafe-advice.js";
 import type { TraceRecorder } from "../trace/index.js";
 import {
   extractText, needsEvidence, noToolRoundLeft, NO_EVIDENCE_NOTICE, FABRICATED_EVIDENCE_NOTICE,
@@ -90,6 +91,46 @@ async function groundedAnswer(h: GateHost, ctx: RunCtx, s: RunState, answer: str
 }
 
 /**
+ * An answer advising something that must never be done here — cordon a control plane, cap the API
+ * server, restart etcd, move static pods (remediation/unsafe-advice.ts). The gate chain keeps those
+ * off a card; this keeps them out of the text a person acts on by hand (2026-11-17, master3-vm).
+ *
+ * An RCA gets ONE rewrite round with the lines and the reasons; the retry is taken only when it is
+ * still an RCA, lost no section and advises fewer of them, else the earlier RCA is kept. Whatever
+ * advice is left — after the round, with no round to spend, or in a reply that is not an RCA — goes
+ * out with a footer naming why it must not be done, so the reader never sees it unanswered.
+ */
+async function adviceChecked(h: GateHost, ctx: RunCtx, s: RunState, answer: string): Promise<string | null> {
+  const evidence = [observedText(await h.memory.get(ctx.threadId)), ctx.opts.grounding ?? ""].join("\n");
+  if (s.adviceHeld !== null) {
+    const held = s.adviceHeld;
+    s.adviceHeld = null;
+    s.adviceFallback = null;
+    const [before, after] = [unsafeAdvice(held, evidence), unsafeAdvice(answer, evidence)];
+    const take = isRcaResponse(answer) && rcaGaps(answer).length <= rcaGaps(held).length && after.length < before.length;
+    if (!take) h.trace().resolveNudge(ctx.threadId, "kept-earlier");
+    const [chosen, left] = take ? [answer, after] : [held, before];
+    logger.info(`[${ctx.threadId}] the unsafe-advice round left ${after.length} of ${before.length} — ${take ? "taking the rewrite" : "keeping the earlier RCA"}`);
+    return left.length ? chosen + unsafeAdviceFooter(left) : chosen;
+  }
+  const found = unsafeAdvice(answer, evidence);
+  if (found.length === 0) return answer;
+  const rules = found.map((f) => f.rule).join(", ");
+  if (!s.adviceNudged && isRcaResponse(answer) && s.iterations < ctx.maxIterations && Date.now() < ctx.deadline) {
+    s.adviceNudged = true;
+    s.adviceHeld = answer;
+    s.adviceFallback = answer + unsafeAdviceFooter(found);
+    logger.info(`[${ctx.threadId}] the answer advises never-actions (${rules}) — one rewrite round`);
+    h.trace().gate(ctx.threadId, "unsafe-advice", "nudge", rules);
+    await h.memory.append(ctx.threadId, { role: "user", content: UNSAFE_ADVICE_NOTICE(found) });
+    return null;
+  }
+  logger.warn(`[${ctx.threadId}] the answer advises never-actions (${rules}) and no round is left — posting it with the footer`);
+  h.trace().gate(ctx.threadId, "unsafe-advice", "footer", rules);
+  return answer + unsafeAdviceFooter(found);
+}
+
+/**
  * The model stopped talking (end_turn or max_tokens): every gate that may hold the answer for one
  * more round runs here, in the order the loop always ran them. Returns the answer to finalise, or
  * null when a gate appended its notice and the loop must take another round. Moved out of
@@ -106,8 +147,10 @@ export async function settleAnswer(h: GateHost, ctx: RunCtx, s: RunState, respon
     h.trace().gate(ctx.threadId, "scope-decline", "replaced", truncate(answer, 200));
     return alertDeclinedFallback(s.toolRounds);
   }
-  // Last, on whatever is leaving: see groundedAnswer.
-  return groundedAnswer(h, ctx, s, answer);
+  // Then, on whatever is leaving: see groundedAnswer, and last adviceChecked.
+  const grounded = await groundedAnswer(h, ctx, s, answer);
+  if (grounded === null) return null;
+  return adviceChecked(h, ctx, s, grounded);
 }
 
 async function settle(h: GateHost, ctx: RunCtx, s: RunState, response: LLMResponse): Promise<string | null> {

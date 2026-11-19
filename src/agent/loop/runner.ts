@@ -206,7 +206,7 @@ export class InvestigationRunner {
           this.host.trace().gate(threadId, "deadline", "apology");
           // Unless the grounding gate is holding a finished RCA: its extra round ran out of
           // time, and the RCA it interrupted is the answer.
-          return done(s.groundingHeld ?? "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.");
+          return done(s.groundingHeld ?? s.adviceFallback ?? "⚠️ Investigation exceeded its time budget. Please review the partial findings above and try a more specific query.");
         }
       }
       s.iterations++;
@@ -291,7 +291,7 @@ export class InvestigationRunner {
     // Nothing was posted to the thread, so don't tell the reader to review findings "above".
     logger.warn(`[${threadId}] Investigation hit max iterations (${maxIterations}) — model kept calling tools on its final, tool-free turn`);
     this.host.trace().gate(threadId, "iteration-ceiling", "exhausted");
-    return done(s.groundingHeld ?? "⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.");
+    return done(s.groundingHeld ?? s.adviceFallback ?? "⚠️ Investigation ran out of steps before the model wrote a conclusion. Nothing was lost — re-run it, or ask about one specific symptom to narrow the search.");
   }
 
   /**

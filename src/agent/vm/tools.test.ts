@@ -80,7 +80,8 @@ test("node_host_snapshot: Mi strings, where each process runs, and the cache cav
   const out = JSON.parse(await withVmTools(inner as never, s as never).callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "Master3-VM" }));
   assert.deepEqual(s.asked, ["master3-vm"]);
   assert.equal(inner.calls.includes(NODE_HOST_SNAPSHOT_TOOL), false);
-  assert.deepEqual(out.memory, { total: "1967Mi", available: "199Mi", anonymous: "1480Mi", pageCache: "252Mi", swap: "none" });
+  assert.deepEqual(out.memory, { total: "1967Mi", used: "1768Mi", available: "199Mi", anonymous: "1480Mi", pageCache: "252Mi", swap: "none" });
+  assert.equal(out.systemdServicesTotal, "441Mi");
   assert.deepEqual(out.processes[1], { name: "etcd", pid: 812, rss: "329Mi", where: "etcd.service" });
   assert.equal(out.processes[0].where, "pod");
   assert.deepEqual(out.systemdServices[0], { unit: "etcd.service", memory: "333Mi" });

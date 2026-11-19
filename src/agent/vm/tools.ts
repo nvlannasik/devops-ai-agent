@@ -60,6 +60,8 @@ export function shapeSnapshot(node: string, snap: Record<string, unknown>, ageSe
   if (snap.memory) {
     out.memory = {
       total: mi(mem.totalBytes),
+      // Stated, not left to subtraction: a small model read `total` as the usage (2026-11-17).
+      used: typeof mem.totalBytes === "number" && typeof mem.availableBytes === "number" ? mi(mem.totalBytes - mem.availableBytes) : undefined,
       available: mi(mem.availableBytes),
       anonymous: mi(mem.anonBytes),
       pageCache: mi(mem.cachedBytes),
@@ -67,7 +69,11 @@ export function shapeSnapshot(node: string, snap: Record<string, unknown>, ageSe
     };
   }
   if (typeof snap.kubepodsMemoryBytes === "number") out.allPods = mi(snap.kubepodsMemoryBytes);
-  if (units.length) out.systemdServices = units.map((u) => ({ unit: u.unit, memory: mi(u.memoryBytes) }));
+  if (units.length) {
+    out.systemdServices = units.map((u) => ({ unit: u.unit, memory: mi(u.memoryBytes) }));
+    // The sum is the number an RCA needs ("outside pods, N Mi") and the one a model adds up wrong.
+    out.systemdServicesTotal = mi(units.reduce((a, u) => a + (typeof u.memoryBytes === "number" ? u.memoryBytes : 0), 0));
+  }
   if (procs.length) {
     out.processes = procs.map((p) => ({ name: p.name, pid: p.pid, rss: mi(p.rssBytes), where: p.unit === "kubepods" ? "pod" : (p.unit ?? "unknown") }));
     out.processCount = snap.processCount;

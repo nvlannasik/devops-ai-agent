@@ -113,6 +113,14 @@ export interface RunState {
    * that. The loop's two apology exits return it too — a nudge must never cost the RCA.
    */
   groundingHeld: string | null;
+  /** Same, for an RCA advising a never-action — see adviceChecked in answer-gates. */
+  adviceNudged: boolean;
+  /**
+   * The RCA the unsafe-advice nudge interrupted, raw — its own slot, like groundingHeld. The loop's
+   * apology exits return it WITH its footer (adviceFallback), never bare: bare, the advice would leave.
+   */
+  adviceHeld: string | null;
+  adviceFallback: string | null;
   /**
    * WHICH gate is holding an answer, not merely that one is. The log-gap restore test reads
    * "the extra round ran no tools" as failure, which is true of a nudge that asked for a fetch
@@ -162,6 +170,9 @@ export const newRunState = (skills: RunState["skills"]): RunState => ({
   scopeDeclineNudged: false,
   groundingNudged: false,
   groundingHeld: null,
+  adviceNudged: false,
+  adviceHeld: null,
+  adviceFallback: null,
   heldBy: null,
   preNudgeSummary: "",
   toolRoundsAtNudge: -1,

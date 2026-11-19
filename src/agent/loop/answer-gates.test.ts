@@ -133,3 +133,55 @@ test("the grounding gate stands down without the caller's evidence, without room
   const seen = rcaWith("Roll `invoice-worker` back; see the `gitops-drift` playbook. Pod `reporter-7d9f8b6c5-x2k4q` is unaffected.");
   assert.equal(await settleAnswer(host([], evidence), grounded, midRun(), reply(seen)), seen);
 });
+
+// 2026-11-17, master3-vm: the RCA told on-call to cordon a control plane and to put a limit on the
+// API server. The evidence (tool results in the thread) shows which nodes are control planes.
+const PLANE_HISTORY = [{ role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: '{"pods":[{"pod":"kube-apiserver-master3-vm"}]}' }] }];
+const UNSAFE = rcaWith("Cordon master3-vm to drain load; review memory limits for kube-apiserver.");
+const SAFE = rcaWith("Add memory to master3-vm (4GB); do not cordon or drain it.");
+
+test("unsafe advice: an RCA advising a never-action gets one rewrite round", async () => {
+  const appended: Array<{ content: string }> = [];
+  const s = newRunState([]);
+  s.iterations = 3;
+  s.toolRounds = 2;
+  assert.equal(await settleAnswer(host(appended as never, PLANE_HISTORY), ctx, s, reply(UNSAFE)), null);
+  assert.equal(s.adviceHeld, UNSAFE);
+  assert.match(appended[0]!.content, /^\[UNSAFE ADVICE[\s\S]*Cordon master3-vm[\s\S]*never cordoned or drained[\s\S]*never resized/);
+  assert.match(s.adviceFallback!, /:no_entry: \*Not to be done/, "an apology exit returns it with its footer");
+
+  // the rewrite took the advice out: it is taken, no footer
+  s.iterations = 4;
+  const out = await settleAnswer(host(appended as never, PLANE_HISTORY), ctx, s, reply(SAFE));
+  assert.equal(out, SAFE);
+  assert.equal(s.adviceHeld, null);
+});
+
+test("unsafe advice: a rewrite that did not help keeps the earlier RCA, with the footer", async () => {
+  const s = newRunState([]);
+  s.iterations = 3;
+  s.toolRounds = 2;
+  await settleAnswer(host([], PLANE_HISTORY), ctx, s, reply(UNSAFE));
+  s.iterations = 4;
+  const out = await settleAnswer(host([], PLANE_HISTORY), ctx, s, reply(UNSAFE));
+  assert.ok(out!.startsWith(UNSAFE));
+  assert.match(out!, /:no_entry: \*Not to be done[\s\S]*never cordoned or drained[\s\S]*never resized/);
+});
+
+test("unsafe advice: no round left — the answer goes out with the footer; safe advice passes untouched", async () => {
+  const s = newRunState([]);
+  s.iterations = 10;
+  s.toolRounds = 9;
+  const out = await settleAnswer(host([], PLANE_HISTORY), ctx, s, reply(UNSAFE));
+  assert.match(out!, /:no_entry:/);
+  const t = newRunState([]);
+  t.iterations = 3;
+  t.toolRounds = 2;
+  assert.equal(await settleAnswer(host([], PLANE_HISTORY), ctx, t, reply(SAFE)), SAFE);
+  // the same words about a node no evidence calls a control plane are not flagged
+  const u = newRunState([]);
+  u.iterations = 3;
+  u.toolRounds = 2;
+  const worker = rcaWith("Cordon worker3-vm while the disk is replaced.");
+  assert.equal(await settleAnswer(host([], PLANE_HISTORY), ctx, u, reply(worker)), worker);
+});
