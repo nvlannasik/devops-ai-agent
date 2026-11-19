@@ -9,8 +9,8 @@ import { STYLES } from "./styles.js";
 // both numbers on purpose (2026-10-26: /people, the harness bars and bench folds, then the incident header and params;
 // 2026-11-18: /nodes, then the multi-cluster hosts pages and their icons; 2026-11-19: the /topology list).
 test("STYLES bytes are pinned", () => {
-  assert.equal(STYLES.length, 200218);
-  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "627a0cdb2bd65050570fab8ab641f834654d4e1b448d9c64d637001a0ce4680b");
+  assert.equal(STYLES.length, 201182);
+  assert.equal(createHash("sha256").update(STYLES).digest("hex"), "e210028b582b6d352d18c241101e70a330ee155041ea955a477f748595fe6a1c");
 });
 
 test("no stylesheet chunk interpolates", () => {

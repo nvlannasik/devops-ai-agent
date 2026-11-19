@@ -101,21 +101,26 @@ function writeBox(title: string, groups: Array<{ title: string; tools: Tool[]; n
   );
 }
 
-function familyDetail(c: Capability, i: number, q: string): string {
+/** One family's tools. `popup`: the card a tile (or the map) opens over the page — it names itself
+ *  for the dialog and carries a way back; inline (a search) it is plain. The id the map links to
+ *  sits on the wrapper toolsSection() puts around it, never on this card. */
+function familyDetail(c: Capability, i: number, q: string, popup: boolean): string {
   const shown = c.tools.filter(matches(q));
   if (!shown.length) return "";
   const reads = shown.filter((t) => !t.write);
   const writes = shown.filter((t) => t.write);
   const writeCount = c.tools.filter((t) => t.write).length;
   const title =
-    `<header class="topo-family-head"><h3><code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code> · ${fmtInt(c.tools.length)} tool${c.tools.length === 1 ? "" : "s"}` +
+    `<header class="topo-family-head"><h3${popup ? ` id="${esc(rowId("cap", i))}-title"` : ""}><code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code> · ${fmtInt(c.tools.length)} tool${c.tools.length === 1 ? "" : "s"}` +
     (writeCount ? ` ${badge(`${writeCount} write`, "warning")}` : "") +
-    `</h3>${FAMILY_NOTE[c.name] ? `<span class="meta">${esc(FAMILY_NOTE[c.name]!)}</span>` : ""}</header>`;
+    `</h3>${FAMILY_NOTE[c.name] ? `<span class="meta">${esc(FAMILY_NOTE[c.name]!)}</span>` : ""}` +
+    (popup ? `<a class="topo-pop-close" href="#tools">Close<span class="sr-only"> the ${esc(c.name)} tools</span></a>` : "") +
+    `</header>`;
   if (c.name === "k8s") {
     const placed = new Set(K8S_GROUPS.flatMap((g) => g.tools));
     const groups = [...K8S_GROUPS.map((g) => ({ title: g.title, tools: reads.filter((t) => g.tools.includes(t.name)) })), { title: "Other", tools: reads.filter((t) => !placed.has(t.name)) }].filter((g) => g.tools.length);
     return (
-      `<section class="card topo-family" id="${esc(rowId("cap", i))}">${title}` +
+      `<section class="card topo-family">${title}` +
       `<div class="topo-groups">${groups.map((g) => `<div><p class="topo-group-title">${esc(g.title)} · ${fmtInt(g.tools.length)}</p>${chips(g.tools)}</div>`).join("")}</div>` +
       writeBox("Can change the cluster", [
         { title: "Workloads", tools: writes.filter((t) => !NODE_WRITES.has(t.name)), note: "A Flux-managed workload gets a GitOps PR instead of a patch." },
@@ -125,7 +130,7 @@ function familyDetail(c: Capability, i: number, q: string): string {
     );
   }
   return (
-    `<section class="card topo-family topo-family-small${writeCount ? " has-write" : ""}${c.name === AGENT_FAMILY ? " is-agent" : ""}" id="${esc(rowId("cap", i))}">${title}` +
+    `<section class="card topo-family topo-family-small">${title}` +
     (reads.length ? chips(reads) : "") +
     (writes.length
       ? `<ul class="topo-write-list">${writes.map((t) => `<li>${toolName(t)} ${badge("write", "warning")}${GUARD[t.name] ? ` <span class="meta">— ${esc(GUARD[t.name]!)}</span>` : ""}</li>`).join("")}</ul>`
@@ -159,23 +164,41 @@ function toolsSection(t: Topology, q: string): string {
         const hits = c.tools.filter(matches(q)).length;
         const w = c.tools.filter((x) => x.write).length;
         return (
-          `<a class="topo-tile${w ? " has-write" : ""}${c.name === AGENT_FAMILY ? " is-agent" : ""}${q && !hits ? " is-empty" : ""}" href="#${esc(rowId("cap", i))}">` +
+          `<a class="topo-tile${w ? " has-write" : ""}${q && !hits ? " is-empty" : ""}" href="#${esc(rowId("cap", i))}"${q ? "" : ` aria-haspopup="dialog"`}>` +
           `<code translate="no">${esc(c.name === AGENT_FAMILY ? "agent's own" : c.name)}</code>` +
+          // Where the tools come from, in words: these two are the agent's own, not the server's.
+          (c.name === AGENT_FAMILY ? `<em class="topo-tile-origin">agent</em>` : "") +
           `<strong>${fmtInt(q ? hits : c.tools.length)}</strong>` +
           `<span>${q ? `of ${fmtInt(c.tools.length)} match` : w === c.tools.length ? `${fmtInt(w)} write` : w ? `${fmtInt(c.tools.length - w)} read · ${fmtInt(w)} write` : "read only"}</span></a>`
         );
       })
       .join("") +
     `</nav>`;
-  const details = caps.map((c, i) => familyDetail(c, i, q)).filter(Boolean);
-  const big = details.filter((d) => !d.includes("topo-family-small"));
-  const small = details.filter((d) => d.includes("topo-family-small"));
-  const none = q && details.length === 0 ? `<p class="meta">No tool matches “${esc(q)}”. <a href="/topology#tools">Show every tool</a></p>` : "";
-  return (
-    `<section class="topo-section" id="tools">${head}${server}${tiles}${none}${big.join("")}` +
-    (small.length ? `<div class="topo-small-grid">${small.join("")}</div>` : "") +
-    `</section>`
-  );
+  // A search shows its hits in place: that is what a search is for. Otherwise each family is a
+  // pop-up — hidden until its tile (or its card on the map) links to it, then laid over the page by
+  // CSS :target alone, so it needs no script and the map's own links open the same pop-up. The
+  // scrim behind the card and the Close link both go back to #tools.
+  if (q) {
+    const hits = caps.map((c, i) => ({ html: familyDetail(c, i, q, false), id: rowId("cap", i) })).filter((d) => d.html);
+    const none = hits.length === 0 ? `<p class="meta">No tool matches “${esc(q)}”. <a href="/topology#tools">Show every tool</a></p>` : "";
+    return (
+      `<section class="topo-section" id="tools">${head}${server}${tiles}${none}` +
+      hits.map((d) => `<div class="topo-result" id="${esc(d.id)}">${d.html}</div>`).join("") +
+      `</section>`
+    );
+  }
+  const pops = caps
+    .map((c, i) => {
+      const id = rowId("cap", i);
+      return (
+        `<div class="topo-pop" id="${esc(id)}" role="dialog" aria-modal="true" aria-labelledby="${esc(id)}-title">` +
+        `<a class="topo-pop-scrim" href="#tools" tabindex="-1" aria-hidden="true"></a>` +
+        familyDetail(c, i, "", true) +
+        `</div>`
+      );
+    })
+    .join("");
+  return `<section class="topo-section" id="tools">${head}${server}${tiles}<p class="meta">Open a family for its tools.</p>${pops}</section>`;
 }
 
 // ---------- LLM backends ----------

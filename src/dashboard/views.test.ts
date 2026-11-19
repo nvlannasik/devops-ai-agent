@@ -353,14 +353,16 @@ test("every link the map will draw lands on a row that exists on the page", () =
 // sit apart in their own box so the ones that can change the cluster cannot be missed.
 test("each family lists its own tools, and sets apart the ones that can change the cluster", () => {
   const html = topologyPage(wiredTopology, NONCE, ASSETS);
-  assert.match(html, /<section class="card topo-family" id="cap-0"><header class="topo-family-head"><h3><code translate="no">k8s<\/code>/);
+  // a family is a pop-up the tile (and the map) link to — the id is on the dialog wrapper
+  assert.match(html, /<div class="topo-pop" id="cap-0" role="dialog" aria-modal="true" aria-labelledby="cap-0-title"><a class="topo-pop-scrim" href="#tools" tabindex="-1" aria-hidden="true"><\/a><section class="card topo-family"><header class="topo-family-head"><h3 id="cap-0-title"><code translate="no">k8s<\/code>/);
+  assert.match(html, /<a class="topo-pop-close" href="#tools">Close<span class="sr-only"> the k8s tools<\/span><\/a>/);
   assert.match(html, />k8s_list_pods</);
   assert.match(html, />loki_query</);
   const writes = /<div class="topo-writes">[\s\S]*?<\/div><\/div><\/div>/.exec(html)?.[0] ?? "";
   assert.match(writes, />k8s_restart_deployment</, "the write tool is in the write box");
   assert.doesNotMatch(writes, />k8s_list_pods</, "a read tool is not");
   // the tile row counts both halves
-  assert.match(html, /<a class="topo-tile has-write" href="#cap-0"><code translate="no">k8s<\/code><strong>2<\/strong><span>1 read · 1 write<\/span>/);
+  assert.match(html, /<a class="topo-tile has-write" href="#cap-0" aria-haspopup="dialog"><code translate="no">k8s<\/code><strong>2<\/strong><span>1 read · 1 write<\/span>/);
 });
 
 // Four tables used to sit here, each tuned for a narrow screen. The list is cards and chips now:
@@ -3535,7 +3537,7 @@ test("topology list: a backend with an unexpected route still renders, under Unr
   assert.match(html, /route sideways/);
 });
 
-test("topology list: stores show what they hold; the agent's own tools sit in a dashed family", () => {
+test("topology list: stores show what they hold; the agent's own tile looks like the rest and says where it is from", () => {
   const t: Topology = {
     ...baseTopology,
     outbound: [{ label: "Postgres", detail: "pg:5432", meta: "ssl disable", configured: true, icon: "db", children: [{ label: "incidents", detail: "the incident log" }] }],
@@ -3544,8 +3546,20 @@ test("topology list: stores show what they hold; the agent's own tools sit in a 
   const html = topologyPage(t, NONCE, ASSETS);
   assert.match(html, /What it remembers[\s\S]*?<article class="card topo-dep" id="out-0">/);
   assert.match(html, /<li title="the incident log"><code translate="no">incidents<\/code><\/li>/);
-  assert.match(html, /<a class="topo-tile has-write is-agent" href="#cap-0"><code translate="no">agent&#39;s own<\/code><strong>2<\/strong><span>1 read · 1 write/);
+  assert.match(html, /<a class="topo-tile has-write" href="#cap-0" aria-haspopup="dialog"><code translate="no">agent&#39;s own<\/code><em class="topo-tile-origin">agent<\/em><strong>2<\/strong><span>1 read · 1 write/);
+  assert.doesNotMatch(html, /is-agent/, "no separate look for it any more");
   const allWrite = topologyPage({ ...baseTopology, capabilities: [{ name: "flux", tools: [{ name: "flux_reconcile", write: true }] }] }, NONCE, ASSETS);
   assert.match(allWrite, /<code translate="no">flux<\/code><strong>1<\/strong><span>1 write<\/span>/, "no \"0 read\"");
   assert.match(html, /vm_restart_service<\/code> <span class="badge" data-tone="warning">write<\/span> <span class="meta">— a unit in the host&#39;s own allowlist/);
+});
+
+test("topology list: a search shows its hits in place, not as pop-ups", () => {
+  const t: Topology = { ...baseTopology, capabilities: [{ name: "loki", tools: [{ name: "loki_query", write: false }] }] };
+  const hit = topologyPage(t, NONCE, ASSETS, undefined, "query");
+  assert.match(hit, /<div class="topo-result" id="cap-0"><section class="card topo-family topo-family-small">/);
+  assert.doesNotMatch(hit, /class="topo-pop"/);
+  assert.doesNotMatch(hit, /aria-haspopup/);
+  const plain = topologyPage(t, NONCE, ASSETS);
+  assert.match(plain, /<div class="topo-pop" id="cap-0"/);
+  assert.match(plain, /Open a family for its tools\./);
 });

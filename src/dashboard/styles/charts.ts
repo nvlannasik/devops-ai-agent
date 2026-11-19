@@ -382,7 +382,7 @@ tbody tr:target { outline: 2px solid var(--accent); outline-offset: -2px; }
    than the top of the viewport, which is where you would want it anyway. */
 tbody tr:target td { scroll-margin-top: 5rem; }
 /* /topology's map links to the list's cards and tool families (2026-11-19) — same confirmation. */
-.topo-list [id]:target { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-top: 5rem; }
+.topo-list [id]:target:not(.topo-pop) { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-top: 5rem; }
 
 details > summary { cursor: pointer; font-weight: 550; }
 details > summary > span { margin-left: .35em; }
@@ -605,7 +605,8 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .topo-tile strong { font-size: 1.375rem; line-height: 1.2; }
 .topo-tile span { font-size: var(--fs-xs); color: var(--text-dim); }
 .topo-tile.has-write span { color: var(--warning); font-weight: 600; }
-.topo-tile.is-agent { border-style: dashed; background: var(--surface-2); }
+/* The agent's own family looks like every other tile; where its tools come from is said in words. */
+.topo-tile-origin { font-style: normal; font-size: var(--fs-2xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
 .topo-tile.is-empty { opacity: .55; }
 .topo-family { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
 .topo-family-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--sp-1) var(--sp-3); }
@@ -626,9 +627,22 @@ p.stack-legend { margin-bottom: var(--sp-3); }
 .topo-write-grid p.meta { margin: var(--sp-1) 0 0; }
 .topo-write-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-sm); }
 .topo-write-list code { font-size: var(--fs-xs); }
-.topo-small-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: var(--sp-3); }
-.topo-family-small.has-write { border-color: color-mix(in srgb, var(--mark-warning) 40%, var(--border)); }
-.topo-family-small.is-agent { border-style: dashed; }
+/* A family's tools as a pop-up: hidden until something links to it, then laid over the page by
+   :target alone (no script). The scrim is a link back to #tools, so a click beside the card
+   closes it, as does the card's own Close link. */
+.topo-pop { display: none; }
+.topo-pop:target {
+  display: flex; position: fixed; inset: 0; z-index: 60; justify-content: center; align-items: flex-start;
+  padding: 8vh var(--sp-4) var(--sp-6); overflow-y: auto; overscroll-behavior: contain;
+}
+.topo-pop-scrim { position: fixed; inset: 0; background: color-mix(in srgb, var(--text) 45%, transparent); }
+.topo-pop > .topo-family { position: relative; width: 100%; max-width: 64rem; box-shadow: var(--shadow-md); }
+.topo-pop > .topo-family-small { max-width: 34rem; }
+.topo-pop-close {
+  margin-left: auto; padding: var(--sp-1) var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill);
+  font-size: var(--fs-sm); text-decoration: none; color: var(--text); background: var(--surface);
+}
+.topo-result + .topo-result { margin-top: var(--sp-3); }
 .topo-lane { display: flex; flex-direction: column; gap: var(--sp-2); }
 .topo-backends { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
 .topo-backends li { display: flex; flex-direction: column; gap: 2px; }
