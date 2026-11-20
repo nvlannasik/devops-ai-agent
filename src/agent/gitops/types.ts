@@ -8,6 +8,14 @@ export interface GitOpsChange {
   to: string | number;
 }
 
+/** What the PR body says about the incident. `checks` (D3, agent/gitops/preflight.ts) is additive:
+ *  a worker that predates it ignores it, and the PR is opened either way. */
+export interface GitOpsIncident {
+  summary?: string;
+  threadUrl?: string;
+  checks?: { name: string; status: "ok" | "warn" | "info" | "unknown"; detail: string }[];
+}
+
 export interface GitOpsChangeBody {
   op: "dry_run" | "open_pr";
   helmRelease: { name: string; namespace: string };
@@ -16,7 +24,7 @@ export interface GitOpsChangeBody {
   component?: string; // chart component (multi-component values disambiguation)
   changes: GitOpsChange[];
   pathPrefix?: string; // repo subtree, auto-detected from the Flux Kustomization spec.path
-  incident?: { summary?: string; threadUrl?: string };
+  incident?: GitOpsIncident;
 }
 
 export interface GitOpsHistoryBody {
@@ -35,7 +43,7 @@ export interface GitOpsRevertBody {
   sha: string;
   pathPrefix?: string;
   dryRun?: boolean;
-  incident?: { summary?: string; threadUrl?: string };
+  incident?: GitOpsIncident;
 }
 
 // Read-only and batched (onboarding's "where to change it"): several HelmReleases answered from one

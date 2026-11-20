@@ -100,23 +100,33 @@ test("proposeRevertPr with no spec-change on record refuses — nothing to rever
 });
 
 // Final review, finding 5d: the two routing branches, through the real methods.
-test("executeRemediation on a stored revert card sends revert_pr with dryRun false and never calls MCP", async () => {
+test("executeRemediation on a stored revert card sends revert_pr with dryRun false and calls no MCP write", async () => {
   const sent: Array<Record<string, unknown>> = [];
-  let mcpCalled = false;
+  const mcpCalls: string[] = [];
   const finished: unknown[] = [];
   const fake = {
     remediations: {
       claimForExecution: async () => ({ action: "k8s_rollout_undo", params: { gitops: true, revert: true, helmRelease: preview.helmRelease, sha: "bad1111", pathPrefix: "apps/dev", summary: "s", reason: "r", target: "t" } }),
       finish: async (...a: unknown[]) => { finished.push(a); },
     },
-    gitops: { request: async (b: Record<string, unknown>) => { sent.push(b); return { ok: true, op: "revert_pr", dryRun: false, prUrl: "https://ghe/pr/1" }; } },
-    mcp: { callTool: async () => { mcpCalled = true; return "{}"; } },
+    gitops: {
+      request: async (b: Record<string, unknown>) => {
+        sent.push(b);
+        // the pre-merge checks (gitops/preflight.ts) read the HelmRelease's history first
+        return b.op === "history" ? { ok: true, op: "history", commits: [] } : { ok: true, op: "revert_pr", dryRun: false, prUrl: "https://ghe/pr/1" };
+      },
+    },
+    mcp: { callTool: async (name: string) => { mcpCalls.push(name); return "{}"; } },
   };
-  (fake as Record<string, unknown>).executeGitOpsPr = (Remediator.prototype as never as { executeGitOpsPr: Function }).executeGitOpsPr;
+  const proto = Remediator.prototype as never as { executeGitOpsPr: Function; preflight: Function };
+  Object.assign(fake as Record<string, unknown>, { executeGitOpsPr: proto.executeGitOpsPr, preflight: proto.preflight });
   const out = await Remediator.prototype.executeRemediation.call(viaHost(fake as never), 5, "U1");
   assert.match(out.text, /Revert PR opened/);
-  assert.deepEqual({ op: sent[0].op, sha: sent[0].sha, dryRun: sent[0].dryRun, pathPrefix: sent[0].pathPrefix }, { op: "revert_pr", sha: "bad1111", dryRun: false, pathPrefix: "apps/dev" });
-  assert.equal(mcpCalled, false);
+  const pr = sent.find((b) => b.op === "revert_pr")!;
+  assert.deepEqual({ sha: pr.sha, dryRun: pr.dryRun, pathPrefix: pr.pathPrefix }, { sha: "bad1111", dryRun: false, pathPrefix: "apps/dev" });
+  assert.ok((pr.incident as { checks?: unknown[] }).checks, "the PR carries the pre-merge checks");
+  // reads only — the approval opens a PR, it never patches the cluster
+  assert.ok(mcpCalls.every((n) => n === "k8s_list_pods" || n === "alertmanager_get_alerts"), mcpCalls.join(","));
 });
 
 // proposeRemediationRun end to end on a fake `this`: the model answers a rollout_undo, the MCP

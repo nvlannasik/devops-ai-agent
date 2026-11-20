@@ -1,3 +1,5 @@
+import { preflightChecks, preflightNote, type PreflightCheck } from "../gitops/preflight.js";
+import type { HistoryPayload } from "../changes/index.js";
 import { type McpTools } from "../mcp/types.js";
 import { ConversationMemory } from "../memory/index.js";
 import { IncidentMemory } from "../incidents/index.js";
@@ -843,6 +845,19 @@ export class Remediator {
   // Approve path for a GitOps PR remediation: ask the worker to open the PR. Returns NO
   // target — nothing is live until the PR merges + Flux syncs, so there is nothing for the
   // post-remediation verification to look at (app/index.ts only schedules when target exists).
+  /** D3: what the PR body states about the live state it is opened into (agent/gitops/preflight.ts). Never blocks. */
+  private preflight(workload: { namespace: string; name: string } | null | undefined, helmRelease: { name: string; namespace: string }, pathPrefix?: string): Promise<PreflightCheck[]> {
+    const gitops = this.host.gitops;
+    return preflightChecks(
+      {
+        callTool: (name, input) => this.host.mcp.callTool(name, input),
+        history: gitops ? async (hr, since) => (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix })) as HistoryPayload : undefined,
+      },
+      workload ? { namespace: workload.namespace, name: workload.name } : null,
+      helmRelease
+    ).catch(() => []);
+  }
+
   private async executeGitOpsPr(id: number, approvedBy: string, params: Record<string, unknown>): Promise<{ text: string; awaitApply?: AwaitApply }> {
     const p = params as { helmRelease: { name: string; namespace: string }; action: string; container?: string; component?: string; changes: { field: string; from: string | number; to: string | number }[]; pathPrefix?: string; summary?: string };
     const label = typeof p.summary === "string" ? p.summary : "GitOps PR";
@@ -853,7 +868,8 @@ export class Remediator {
     if ((params as { revert?: boolean }).revert) {
       const r = params as { helmRelease: { name: string; namespace: string }; sha: string; pathPrefix?: string; summary?: string };
       try {
-        const payload = await this.host.gitops.request({ op: "revert_pr", helmRelease: r.helmRelease, sha: r.sha, pathPrefix: r.pathPrefix, dryRun: false, incident: { summary: r.summary } });
+        const checks = await this.preflight(targetOf(String((params as { target?: unknown }).target ?? "")), r.helmRelease, r.pathPrefix);
+        const payload = await this.host.gitops.request({ op: "revert_pr", helmRelease: r.helmRelease, sha: r.sha, pathPrefix: r.pathPrefix, dryRun: false, incident: { summary: r.summary, checks } });
         if (!payload.ok || payload.op !== "revert_pr" || payload.dryRun) {
           const reason = payload.ok ? "unexpected worker response" : payload.reason;
           await this.host.remediations.finish(id, false, reason);
@@ -864,7 +880,7 @@ export class Remediator {
         const expect = ((params as { applyExpect?: ApplyExpectation }).applyExpect ?? null);
         const awaitApply = workload && expect?.fields?.length ? { target: { namespace: workload.namespace, name: workload.name, kind: "Deployment" }, expect } : undefined;
         return {
-          text: `✅ *Revert PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}`,
+          text: `✅ *Revert PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}${preflightNote(checks)}`,
           ...(awaitApply ? { awaitApply } : {}),
         };
       } catch (err) {
@@ -874,7 +890,9 @@ export class Remediator {
       }
     }
     try {
-      const payload = await this.host.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary } });
+      const live = this.workloadOf(String(params.workload ?? "")) ?? targetOf(String(params.target ?? ""));
+      const checks = await this.preflight(live, p.helmRelease, p.pathPrefix);
+      const payload = await this.host.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary, checks } });
       if (!payload.ok) {
         await this.host.remediations.finish(id, false, payload.reason);
         return { text: `❌ *PR not opened* — ${label}: ${truncate(payload.reason, 300)}` };
@@ -891,7 +909,7 @@ export class Remediator {
       const expect = expectFromChanges(p.changes ?? [], p.container);
       const awaitApply = workload && expect ? { target: { namespace: workload.namespace, name: workload.name, kind: kindName(workload.kind) }, expect } : undefined;
       return {
-        text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}`,
+        text: `✅ *GitOps PR opened* — ${label} (approved by <@${approvedBy}>)\n${payload.prUrl}\nReview & merge to apply — Flux syncs after merge; nothing changes on the cluster until then.${awaitApply ? " Once it runs, I check whether it fixed the problem." : ""}${preflightNote(checks)}`,
         ...(awaitApply ? { awaitApply } : {}),
       };
     } catch (err) {
