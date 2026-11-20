@@ -38,6 +38,21 @@ redacts tokens, keys, JWTs, `password=`-style values and URL credentials, and pr
 redaction. **Read `trace.json` before committing it.** Redaction is pattern matching; the review is
 the control.
 
+## Which runs to export: the replay track
+
+```bash
+DASHBOARD_PASSWORD=… npm run replay:candidates -- [--days 30] [--all]
+```
+
+Lists the recorded production incidents worth a case, from the dashboard's
+`/api/replay-candidates` (same port-forward and password as export), threads already in
+`replay/cases` left out, ranked: **confirmed** (a human root cause — `learn`, ✅ or the resolve
+message's *RCA was right* button; the only signal that grades the RCA, because export turns it into
+`answer.must`), then **rejected** cards and fixes whose verdict was **unchanged/worse**, then runs
+that hit `iteration-ceiling`/`deadline`, declined an alert (`scope-decline`) or advised a
+never-action (`unsafe-advice`). It prints the export command for each and exports nothing: a trace
+is read by a person before it is committed.
+
 ## A case
 
 ```

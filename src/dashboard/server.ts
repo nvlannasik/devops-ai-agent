@@ -37,6 +37,7 @@ export type Route =
   | { kind: "memoryThread"; threadTs: string }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
+  | { kind: "replayCandidates" }
   | { kind: "asset"; path: string }
   | { kind: "theme"; theme: Theme }
   | { kind: "detail"; id: number }
@@ -83,6 +84,7 @@ export function matchRoute(pathname: string): Route {
   const g = /^\/harness\/([a-z-]{1,40})$/.exec(p);
   if (g) return (GATE_NAMES as readonly string[]).includes(g[1]!) ? { kind: "harnessGate", name: g[1]! } : { kind: "notfound" };
   // A Slack ts and only that. Delegate sub-threads are included by the query, never addressed.
+  if (p === "/api/replay-candidates") return { kind: "replayCandidates" };
   const tr = /^\/api\/trace\/(\d{1,12}\.\d{1,9})$/.exec(p);
   if (tr) return { kind: "trace", threadTs: tr[1]! };
   // The dashboard's static assets: its own stylesheet and font (stylesheet.ts) and the maps'
@@ -839,6 +841,12 @@ export class DashboardServer {
         case "harnessGate": {
           const [d, open] = await Promise.all([this.queries.harnessGate(route.name), this.openCount()]);
           return send(200, harnessGatePage(route.name, d, new Date(), open));
+        }
+        // E1: which recorded runs are worth a replay case (src/replay/candidates.ts). ?days= 1..90.
+        case "replayCandidates": {
+          const d = Number(url.searchParams.get("days") ?? 30);
+          const days = Number.isInteger(d) && d >= 1 && d <= 90 ? d : 30;
+          return send(200, JSON.stringify({ days, candidates: await this.queries.replayCandidates(days) }), "application/json; charset=utf-8");
         }
         // The export source for replay (spec §6/§8.2). Same password as every page here.
         case "trace": {

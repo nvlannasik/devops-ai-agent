@@ -670,6 +670,7 @@ test("harness routes: only a known gate and a Slack ts shape are routed", () => 
   assert.deepEqual(matchRoute("/api/trace/1790690405.435999"), { kind: "trace", threadTs: "1790690405.435999" });
   assert.deepEqual(matchRoute("/api/trace/1790690405.435999%2Fsub-1"), { kind: "notfound" });
   assert.deepEqual(matchRoute("/api/trace/abc"), { kind: "notfound" });
+  assert.deepEqual(matchRoute("/api/replay-candidates"), { kind: "replayCandidates" });
 });
 
 // spec 2026-10-07-cluster-tour §3.5: the inventory is a whole-cluster scan, so a reload must not

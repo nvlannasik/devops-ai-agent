@@ -288,6 +288,18 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+export interface ReplayCandidate {
+  incidentId: number;
+  threadTs: string;
+  alertname: string;
+  namespace: string | null;
+  createdAt: string;
+  confirmed: boolean;
+  rejected: boolean;
+  notFixed: boolean;
+  gates: string[];
+}
+
 export class DashboardQueries {
   private readonly pool: Pool | null;
   // Keyed by range, because the three ranges are three different answers and a single slot
@@ -870,6 +882,47 @@ export class DashboardQueries {
    * `incident_feedback`) — replay export turns it into the case's answer key. Human tier only:
    * agent verdicts are never written to that table.
    */
+  /**
+   * Replay candidates (E1, 2026-11-20): recent top-level incidents whose run is worth keeping as a
+   * regression case, with the signal that says so. A human answer key first — a confirmed root
+   * cause (`learn`, ✅, or the resolve button) is the only thing that grades the RCA rather than
+   * snapshotting it — then the outcomes someone had to correct: a rejected card, a fix that left it
+   * unchanged or worse, a run that hit a ceiling, declined an alert or advised a never-action.
+   * Only threads with a recorded trace: there is nothing to export without one.
+   */
+  async replayCandidates(days: number): Promise<ReplayCandidate[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT i.id, i.thread_ts, i.alertname, i.namespace, i.created_at,
+              EXISTS (SELECT 1 FROM incident_feedback f WHERE f.incident_id = i.id AND f.confirmed_root_cause IS NOT NULL) AS confirmed,
+              EXISTS (SELECT 1 FROM remediations r WHERE r.incident_id = i.id AND r.status = 'rejected') AS rejected,
+              EXISTS (SELECT 1 FROM remediations r JOIN remediation_checks c ON c.remediation_id = r.id
+                       WHERE r.incident_id = i.id AND c.verdict IN ('unchanged', 'worse')) AS not_fixed,
+              ARRAY(SELECT DISTINCT e.name FROM agent_events e
+                     WHERE e.thread_ts = i.thread_ts AND e.kind = 'gate'
+                       AND e.name IN ('iteration-ceiling', 'deadline', 'scope-decline', 'unsafe-advice')) AS gates
+         FROM incidents i
+        WHERE i.created_at >= now() - make_interval(days => $1::int)
+          AND i.thread_ts IS NOT NULL
+          AND i.parent_id IS NULL AND i.rca NOT LIKE 'Merged into%'
+          AND EXISTS (SELECT 1 FROM agent_events e WHERE e.thread_ts = i.thread_ts)
+        ORDER BY i.created_at DESC
+        LIMIT 300`,
+      [days]
+    );
+    return rows.map((r) => ({
+      incidentId: Number(r.id),
+      threadTs: String(r.thread_ts),
+      alertname: String(r.alertname),
+      namespace: r.namespace ?? null,
+      createdAt: new Date(r.created_at).toISOString(),
+      confirmed: r.confirmed === true,
+      rejected: r.rejected === true,
+      notFixed: r.not_fixed === true,
+      gates: Array.isArray(r.gates) ? r.gates.map(String) : [],
+    }));
+  }
+
   async feedback(threadTs: string): Promise<Array<{ confirmedRootCause: string | null; actionTaken: string | null; outcome: string | null }>> {
     if (!this.pool) return [];
     const { rows } = await this.pool.query(
