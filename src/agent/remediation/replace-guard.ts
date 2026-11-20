@@ -367,16 +367,21 @@ export function passingProbeRefusal(
   pods: readonly PodState[],
   claim: string
 ): string | null {
-  if (action !== "k8s_rollout_restart") return null;
-  const name = typeof params.name === "string" ? params.name : "";
-  const mine = podsOf(pods, name);
+  // A pod delete rebuilds ONE pod from the same spec — the same answer for that pod (bench C01,
+  // 2026-11-20 attempt 1: "connection refused on port 80" from a pod listed Ready, delete proposed).
+  const podName = action === "k8s_delete_pod" && typeof params.pod === "string" ? params.pod : "";
+  if (action !== "k8s_rollout_restart" && !podName) return null;
+  const name = podName || (typeof params.name === "string" ? params.name : "");
+  const mine = podName ? pods.filter((p) => p.name === podName) : podsOf(pods, name);
   if (!name || mine.length === 0 || !mine.every(isServing) || !PROBE_FAULT.test(claim)) return null;
+  const what = podName ? "pod delete" : "restart";
+  const subject = podName ? `pod \`${podName}\` is` : `all ${mine.length} pod(s) of \`${name}\` are`;
   return (
-    `the restart is argued from a failing or misconfigured probe, and all ${mine.length} pod(s) of \`${name}\` ` +
-    `are Ready with zero restarts — the readiness probe is passing on every one of them right now, and no ` +
+    `the ${what} is argued from a failing or misconfigured probe, and ${subject} ` +
+    `Ready with zero restarts — the readiness probe is passing on ${podName ? "it" : "every one of them"} right now, and no ` +
     `liveness probe has ever killed a container. A \`Readiness probe failed\` event from a pod's first ` +
     `seconds is the container starting, not a fault. If a probe really were misconfigured it would be in ` +
-    `the spec, which a restart rebuilds unchanged. Nothing here needs a change; if \`${name}\` is wedged ` +
+    `the spec, which a ${what} rebuilds unchanged. Nothing here needs a change; if \`${name}\` is wedged ` +
     `while passing its probes, say what shows that instead.`
   );
 }

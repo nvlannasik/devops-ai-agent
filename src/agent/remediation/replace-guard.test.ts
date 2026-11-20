@@ -326,6 +326,19 @@ test("a restart argued from a failing probe is refused when every pod is passing
   }
 });
 
+// Bench C01, 2026-11-20 attempt 1 — the same stale alert, carded as a delete of ONE pod listed Ready.
+test("a pod delete argued from a failing probe is refused when that pod is passing it", () => {
+  const params = { namespace: "bench-c01", pod: "web-55f66d8cdf-6vbfv" };
+  const reason = "Readiness probe failing due to connection refused on port 80, while other pod in the same deployment is healthy, indicating a node-level issue affecting only this pod";
+  assert.match(passingProbeRefusal("k8s_delete_pod", params, C01_PODS, reason) ?? "", /pod delete is argued[\s\S]*pod `web-55f66d8cdf-6vbfv` is Ready with zero restarts[\s\S]*a pod delete rebuilds unchanged/);
+  // the pod really unready or restarted, or not in the list: not this rule's to refuse
+  assert.equal(passingProbeRefusal("k8s_delete_pod", params, [pod("web-55f66d8cdf-6vbfv", false), C01_PODS[1]!], reason), null);
+  assert.equal(passingProbeRefusal("k8s_delete_pod", params, [pod("web-55f66d8cdf-6vbfv", true, 3)], reason), null);
+  assert.equal(passingProbeRefusal("k8s_delete_pod", { ...params, pod: "web-55f66d8cdf-gone1" }, C01_PODS, reason), null);
+  // only its own pod counts — the unready sibling is not this delete's target
+  assert.ok(passingProbeRefusal("k8s_delete_pod", params, [C01_PODS[0]!, pod("web-55f66d8cdf-x2k9p", false)], reason));
+});
+
 test("the probe rule leaves alone what the pod list does not contradict", () => {
   const params = { namespace: "bench-c01", name: "web" };
   // a wedge that names no probe keeps its card — stale certificate, leaked pool
