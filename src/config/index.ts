@@ -79,6 +79,25 @@ export function parseVmTokens(raw: string | undefined): Map<string, string> {
   return out;
 }
 
+/** DIGEST_TIME as HH:MM (24 h), default 08:00. Malformed fails boot, like the cluster lists. */
+export function digestTime(raw: string | undefined): string {
+  const v = (raw ?? "").trim() || "08:00";
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(v);
+  if (!m) throw new Error(`DIGEST_TIME "${v}" is not HH:MM (24 h)`);
+  return `${m[1]!.padStart(2, "0")}:${m[2]}`;
+}
+
+/** DIGEST_TIMEZONE as an IANA zone the runtime knows, default UTC. Unknown fails boot. */
+export function digestTimeZone(raw: string | undefined): string {
+  const v = (raw ?? "").trim() || "UTC";
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: v });
+  } catch {
+    throw new Error(`DIGEST_TIMEZONE "${v}" is not a time zone (an IANA name, e.g. Asia/Jakarta)`);
+  }
+  return v;
+}
+
 export const config = {
   env,
   port: parseInt(process.env.PORT ?? "3000"),
@@ -260,6 +279,17 @@ export const config = {
   // be unchanged for anyone not using it. Behind a shared-password session (see
   // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
   // than serving incidents anonymously.
+  // C1: the daily health digest (agent/digest) — host headroom and disk forecast from the host history,
+  // the last day's investigations, the noisy alerts of the week, what is firing now. Posted once a day
+  // at DIGEST_TIME in DIGEST_TIMEZONE (an IANA name) to DIGEST_CHANNEL (default the alert channel).
+  // Needs Postgres (the per-day claim is what keeps several replicas to one post). DIGEST_ENABLED=false = off.
+  digest: {
+    enabled: process.env.DIGEST_ENABLED !== "false",
+    channel: process.env.DIGEST_CHANNEL || process.env.SLACK_ALERT_CHANNEL,
+    time: digestTime(process.env.DIGEST_TIME),
+    timeZone: digestTimeZone(process.env.DIGEST_TIMEZONE),
+  },
+
   // D2: a resolved incident whose ASSESSED severity is in this list gets a postmortem draft without
   // anyone asking (app/commands.ts autoPostmortem). Empty (`POSTMORTEM_AUTO_SEVERITIES=""`) = off.
   postmortem: {

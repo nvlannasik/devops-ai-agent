@@ -38,7 +38,39 @@ test("heartbeat stores the snapshot and the place; one without a snapshot keeps 
   await new VmStore(pool as never).heartbeat("vm-a", [], "2");
   assert.match(pool.seen[0]!.text, /COALESCE\(EXCLUDED\.snapshot, vm_hosts\.snapshot\)[\s\S]*cluster = EXCLUDED\.cluster, node = EXCLUDED\.node/);
   assert.deepEqual(pool.seen[0]!.values, ["stg.worker1", [], "4", '{"memory":{"totalBytes":1}}', "stg", "worker1"]);
-  assert.deepEqual(pool.seen[1]!.values, ["vm-a", [], "2", null, null, null]);
+  assert.deepEqual(pool.seen.at(-1)!.values, ["vm-a", [], "2", null, null, null]);
+});
+
+test("a heartbeat with a snapshot writes a history point at most every 5 minutes and prunes past 7 days; one without writes none", async () => {
+  const pool = fakePool([{ rows: [] }, { rows: [], rowCount: 1 } as never, { rows: [] }]);
+  await new VmStore(pool as never).heartbeat("master3-vm", [], "3", { memory: { totalBytes: 10, availableBytes: 4 }, load: [1.5] });
+  assert.equal(pool.seen.length, 3);
+  assert.match(pool.seen[1]!.text, /INSERT INTO vm_host_history[\s\S]*NOT EXISTS[\s\S]*host = \$1 AND at > now\(\) - interval '290 seconds'/);
+  assert.deepEqual(pool.seen[1]!.values, ["master3-vm", '{"memTotal":10,"memAvailable":4,"load1":1.5}']);
+  assert.match(pool.seen[2]!.text, /DELETE FROM vm_host_history WHERE host = \$1 AND at < now\(\) - interval '7 days'/);
+
+  const skipped = fakePool([{ rows: [] }, { rows: [], rowCount: 0 } as never]);
+  await new VmStore(skipped as never).heartbeat("master3-vm", [], "3", { load: [1] });
+  assert.equal(skipped.seen.length, 2, "a point inside 5 minutes: no insert, no prune");
+
+  const old = fakePool();
+  await new VmStore(old as never).heartbeat("vm-a", [], "2");
+  assert.equal(old.seen.length, 1, "no snapshot, no history");
+});
+
+test("a failed history write never fails the heartbeat", async () => {
+  let n = 0;
+  const pool = { query: async () => (n++ === 1 ? Promise.reject(new Error('relation "vm_host_history" does not exist')) : { rows: [] }) };
+  await new VmStore(pool as never).heartbeat("master3-vm", [], "3", { load: [1] });
+  assert.equal(n, 2);
+});
+
+test("history reads one host's points in the window, oldest first", async () => {
+  const pool = fakePool([{ rows: [{ at: "2026-11-20T00:00:00.000Z", point: { load1: 1 } }] }]);
+  assert.deepEqual(await new VmStore(pool as never).history("master3-vm", 24), [{ at: new Date("2026-11-20T00:00:00.000Z"), point: { load1: 1 } }]);
+  assert.match(pool.seen[0]!.text, /FROM vm_host_history WHERE host = \$1 AND at > now\(\) - make_interval\(hours => \$2\) ORDER BY at/);
+  assert.deepEqual(pool.seen[0]!.values, ["master3-vm", 24]);
+  assert.deepEqual(await new VmStore(null).history("x", 1), []);
 });
 
 test("snapshotCandidates matches the node name, or the host name for a host without one", async () => {

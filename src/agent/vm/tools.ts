@@ -1,6 +1,7 @@
 import type { McpTools } from "../mcp/types.js";
 import type { ToolDefinition } from "../llm/types.js";
 import type { SnapshotCandidate, VmStore } from "./store.js";
+import { summarizeHistory } from "./history.js";
 
 // The VM restart as a virtual [WRITE] tool (spec 2026-11-04 Part B). The remediation flow only ever
 // calls tools — a dry run before the card, the real call on Approve — so making the VM action one
@@ -41,6 +42,33 @@ const SNAPSHOT_DEFINITION: ToolDefinition = {
     properties: {
       node: { type: "string", description: "Node name, e.g. master3-vm, or a standalone VM's name" },
       cluster: { type: "string", description: "The node's cluster, e.g. dev. Omit for a standalone VM or to use this investigation's cluster." },
+    },
+  },
+};
+
+// The host history as a virtual READ tool (B1, migrations/021): a point every 5 minutes for 7 days,
+// summarized in code — what grew, by how much, the disk's days-to-full — so "what is eating master3?"
+// can be answered with a trend instead of one snapshot.
+export const NODE_HOST_HISTORY_TOOL = "node_host_history";
+const HISTORY_DEFAULT_HOURS = 24;
+const HISTORY_MAX_HOURS = 168;
+
+const HISTORY_DEFINITION: ToolDefinition = {
+  name: NODE_HOST_HISTORY_TOOL,
+  description:
+    "History of ONE node's (or registered VM's) host view from its devops-vm-agent: a point every 5 minutes, kept 7 days. Returns, " +
+    "computed for you: memory used/available/anonymous/all pods/systemd services at the window's start and end with min/max, the " +
+    "systemd services and processes whose memory MOVED by 10Mi or more (start, end, peak, change, percent — largest first), " +
+    "the lowest available memory and when, 12 evenly spaced samples, root disk usage with days-to-full when it is filling, and " +
+    "gaps where the host stopped reporting. Call it after node_host_snapshot to answer what GREW (a leak, etcd growing, " +
+    "a service creeping up) or since when a node has been short — one snapshot cannot say. `cluster` as in node_host_snapshot.",
+  inputSchema: {
+    type: "object",
+    required: ["node"],
+    properties: {
+      node: { type: "string", description: "Node name, e.g. master3-vm, or a standalone VM's name" },
+      cluster: { type: "string", description: "The node's cluster, e.g. dev. Omit for a standalone VM or to use this investigation's cluster." },
+      hours: { type: "number", description: `How far back, in hours (default ${HISTORY_DEFAULT_HOURS}, max ${HISTORY_MAX_HOURS})` },
     },
   },
 };
@@ -113,7 +141,7 @@ export function pickHost(cands: SnapshotCandidate[], node: string, cluster: stri
 
 export function withVmTools(
   inner: McpTools,
-  store: Pick<VmStore, "registered" | "enqueue" | "snapshotCandidates">,
+  store: Pick<VmStore, "registered" | "enqueue" | "snapshotCandidates" | "history">,
   /** The run's bound cluster (null when unbound) and the local cluster's name. */
   scope: () => { cluster: string | null; local: string | null } = () => ({ cluster: null, local: null })
 ): McpTools {
@@ -121,9 +149,9 @@ export function withVmTools(
     connect: () => inner.connect(),
     disconnect: () => inner.disconnect(),
     ping: () => inner.ping(),
-    getTools: () => [...inner.getTools(), DEFINITION, SNAPSHOT_DEFINITION],
+    getTools: () => [...inner.getTools(), DEFINITION, SNAPSHOT_DEFINITION, HISTORY_DEFINITION],
     async callTool(name, input) {
-      if (name === NODE_HOST_SNAPSHOT_TOOL) {
+      if (name === NODE_HOST_SNAPSHOT_TOOL || name === NODE_HOST_HISTORY_TOOL) {
         const node = String(input.node ?? input.host ?? "").trim().toLowerCase();
         if (!node) return "Error: `node` is required — the node name, e.g. master3-vm.";
         const { cluster: bound, local } = scope();
@@ -134,6 +162,12 @@ export function withVmTools(
         }
         if (Array.isArray(got)) {
           return `Error: \`${node}\` is reported by several hosts — ${got.map((c) => `\`${c.name}\` (${c.cluster ?? "no cluster"})`).join(", ")}. Pass \`cluster\` to pick one.`;
+        }
+        if (name === NODE_HOST_HISTORY_TOOL) {
+          const h = Number(input.hours);
+          const hours = Number.isFinite(h) && h > 0 ? Math.min(Math.ceil(h), HISTORY_MAX_HOURS) : HISTORY_DEFAULT_HOURS;
+          const points = await store.history(got.name, hours);
+          return JSON.stringify({ ...summarizeHistory(node, points, hours), cluster: got.cluster ?? (asked === local ? local : null), host: got.name });
         }
         if (!got.snapshot || got.ageSeconds === null) {
           return `Error: \`${node}\` runs a devops-vm-agent too old to send host snapshots (it needs version 3) — nothing is known about its processes.`;

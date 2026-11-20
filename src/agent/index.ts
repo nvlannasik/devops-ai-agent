@@ -40,6 +40,9 @@ import { lastToolResultIn } from "./remediation/evidence-refusals.js";
 import { ThreadSkills, SkillView } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
 import { VmStore } from "./vm/store.js";
+import { DigestStore } from "./digest/store.js";
+import { collectDigest } from "./digest/collect.js";
+import { renderDigest } from "./digest/build.js";
 import { withVmTools } from "./vm/tools.js";
 import { InvestigationRunner } from "./loop/runner.js";
 import { IncidentLifecycle } from "./incidents/lifecycle.js";
@@ -94,6 +97,7 @@ export class DevOpsAgent {
   /** The VM agent's storage (migrations/018) — public: the app layer mounts its routes on it. */
   vmStore: VmStore;
   private postmortems: PostmortemStore;
+  private digests = new DigestStore(null);
   private gitops: GitOpsClient | null;
   private readonly remediator: Remediator;
   private readonly runner: InvestigationRunner;
@@ -220,6 +224,7 @@ export class DevOpsAgent {
       this.checks = new RemediationCheckStore(pool);
       this.vmStore = new VmStore(pool);
       this.postmortems = new PostmortemStore(pool);
+      this.digests = new DigestStore(pool);
       logger.info(`Incident memory: Postgres ${host}:${port}/${database} sslmode=${sslMode}`);
     } else {
       logger.info("Incident memory: disabled (set DB_HOST to enable)");
@@ -326,7 +331,7 @@ export class DevOpsAgent {
     return { names: this.clusters.names, local: this.clusters.local };
   }
 
-  /** The VM restart and the host snapshot as virtual tools, only when VM agents are configured (agent/vm/tools). Lambdas:
+  /** The VM restart, the host snapshot and its history as virtual tools, only when VM agents are configured (agent/vm/tools). Lambdas:
    *  `vmStore` is swapped for the Postgres-backed one in initialize(), after this runs. */
   private withVm(mcp: McpTools): McpTools {
     if (config.vm.tokens.size === 0) return mcp;
@@ -334,7 +339,29 @@ export class DevOpsAgent {
       registered: (h) => this.vmStore.registered(h),
       enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r),
       snapshotCandidates: (n) => this.vmStore.snapshotCandidates(n),
+      history: (h, hours) => this.vmStore.history(h, hours),
     }, () => ({ cluster: currentCluster() ?? null, local: this.clusters.local }));
+  }
+
+  /** The daily health digest as Slack mrkdwn (agent/digest) — built from data, no LLM. */
+  async healthDigest(now: Date = new Date()): Promise<{ day: string; text: string }> {
+    const d = await collectDigest({
+      vm: this.vmStore,
+      store: this.digests,
+      callTool: (name, args) => this.clusterTool(null, name, args),
+      timeZone: config.digest.timeZone,
+      now,
+    });
+    return { day: d.day, text: renderDigest(d) };
+  }
+
+  /** Claims the scheduled digest for a local day — true for exactly one replica (migrations/022). */
+  claimDigest(day: string, channel: string): Promise<boolean> {
+    return this.digests.claim(day, channel);
+  }
+
+  digestPosted(day: string, ts: string): Promise<void> {
+    return this.digests.posted(day, ts);
   }
 
   /** The registered VM an alert's host label names (agent/vm), or null — Kubernetes alerts carry no such label. */

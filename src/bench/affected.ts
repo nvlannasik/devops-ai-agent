@@ -41,8 +41,8 @@ const NODE_CODE = [/^src\/agent\/vm\//, /^src\/agent\/remediation\/(node-gate|un
 const TOUR_CODE = [/^src\/agent\/(onboarding|tour)/, /^src\/utils\/slack\/tour-tables\.ts$/];
 const INJECTION_CODE = [/^src\/agent\/injection\//];
 /** Not behaviour the bench exercises: tests, docs, the Slack app layer (the bench calls the agent, not
- *  SlackApp), the dashboard, replay, tracing, the VM-side agent. */
-const IGNORED = [/\.test\.ts$/, /\.md$/, /^docs\//, /^src\/(app|dashboard|replay|tracing)\//, /^vm-agent\//, /^bench\/results\//, /^replay\//, /^migrations\//];
+ *  SlackApp), the dashboard, replay, tracing, the VM-side agent, the daily digest (no run reads it). */
+const IGNORED = [/\.test\.ts$/, /\.md$/, /^docs\//, /^src\/(app|dashboard|replay|tracing)\//, /^src\/agent\/digest\//, /^vm-agent\//, /^bench\/results\//, /^replay\//, /^migrations\//];
 
 export interface Selection {
   cases: Map<string, Map<string, string[]>>; // case id → rule → the files that triggered it

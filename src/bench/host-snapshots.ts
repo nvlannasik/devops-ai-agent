@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { SnapshotCandidate } from "../agent/vm/store.js";
+import type { StoredPoint } from "../agent/vm/history.js";
 
 const run = promisify(execFile);
 
@@ -15,6 +16,13 @@ const QUERY = `
 const {Pool}=require("pg");
 const p=new Pool({host:process.env.DB_HOST,port:+(process.env.DB_PORT||5432),user:process.env.DB_USERNAME,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||"devops_agent"});
 p.query("SELECT name, cluster, node, snapshot, version, extract(epoch FROM now() - snapshot_at)::int AS age FROM vm_hosts WHERE COALESCE(node, name) = $1 OR name = $1 ORDER BY name",[process.argv[1]])
+ .then(r=>{process.stdout.write(JSON.stringify(r.rows));return p.end()})
+ .catch(e=>{process.stderr.write(e.message);process.exit(1)});`;
+
+const HISTORY_QUERY = `
+const {Pool}=require("pg");
+const p=new Pool({host:process.env.DB_HOST,port:+(process.env.DB_PORT||5432),user:process.env.DB_USERNAME,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||"devops_agent"});
+p.query("SELECT at, point FROM vm_host_history WHERE host = $1 AND at > now() - make_interval(hours => $2) ORDER BY at",[process.argv[1],+process.argv[2]])
  .then(r=>{process.stdout.write(JSON.stringify(r.rows));return p.end()})
  .catch(e=>{process.stderr.write(e.message);process.exit(1)});`;
 
@@ -35,6 +43,12 @@ export class KubectlHostSnapshots {
       ageSeconds: r.age === null || r.age === undefined ? null : Number(r.age),
       version: (r.version as string | null) ?? null,
     }));
+  }
+
+  /** node_host_history's points, from production's vm_host_history (read-only, like the snapshot). */
+  async history(host: string, hours: number): Promise<StoredPoint[]> {
+    const { stdout } = await run("kubectl", ["-n", this.namespace, "exec", this.target, "--", "node", "-e", HISTORY_QUERY, host, String(hours)], { timeout: 30_000, maxBuffer: 16 << 20 });
+    return (JSON.parse(stdout) as Array<{ at: string; point: StoredPoint["point"] }>).map((r) => ({ at: new Date(r.at), point: r.point }));
   }
 
   // The restart tool's half: the bench never queues a host action.

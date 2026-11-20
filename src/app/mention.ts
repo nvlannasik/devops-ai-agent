@@ -153,6 +153,19 @@ export class MentionFlow {
       return;
     }
 
+    // `@agent digest` — the daily health digest (agent/digest) on demand, in this thread. Built by
+    // code from data, no investigation; the scheduled one is the same text in the alert channel.
+    if (/^(health\s+)?digest\s*[.!?]*$/i.test(text)) {
+      try {
+        const { text: digest } = await this.host.agent.healthDigest();
+        await say({ text: digest, thread_ts: threadId, mrkdwn: true });
+      } catch (err) {
+        logger.error(`[digest] on-demand digest failed: ${errDetail(err)}`);
+        await say({ text: "❌ Could not build the digest — see the agent log.", thread_ts: threadId });
+      }
+      return;
+    }
+
     // `@agent postmortem` — draft + store a postmortem for this thread's incident (spec
     // 2026-10-14-postmortem-draft-design.md). Same decline shape as `learn`.
     const pm = postmortemIntent(text);

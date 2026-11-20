@@ -22,7 +22,9 @@ evicted pod as the cause** — find what actually grew.
    it lists the largest processes with `where` (a `.service` unit or `pod`) and memory per systemd
    service, with `available`, `anonymous` and swap. Name the process and its unit with its number;
    never say "something outside the pods". If the tool answers that no devops-vm-agent reports for
-   the node, say the gap is unexplained and that host-level data is missing there.
+   the node, say the gap is unexplained and that host-level data is missing there. Then
+   `node_host_history` for the same node says what GREW: quote its `systemdServicesThatMoved` /
+   `processesThatMoved` (start → end, change) — a leak and a steady load look the same in one snapshot.
 3. `k8s_list_events` with `since_minutes: 60` — `Evicted`, `SystemOOM`, `FailedScheduling`. The
    eviction event names the threshold that was crossed.
 4. `k8s_recommend_resources` for the top consumer — an eviction loop is a sizing fault most of

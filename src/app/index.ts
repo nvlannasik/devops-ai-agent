@@ -18,6 +18,7 @@ import { MentionFlow } from "./mention.js";
 import { AlertFlow, type AlertmanagerPayload } from "./alerts.js";
 import { FeedbackFlow, RCA_CONFIRM, RCA_CORRECT } from "./feedback.js";
 import { RemediationFlow } from "./remediation.js";
+import { DigestSchedule } from "./digest.js";
 import { ThreadCommands } from "./commands.js";
 import { InFlightRegistry } from "../agent/inflight/index.js";
 import { ThreadLock } from "../agent/threadlock/index.js";
@@ -57,6 +58,7 @@ export class SlackApp {
   private mentions!: MentionFlow;
   private alerts!: AlertFlow;
   private remediation!: RemediationFlow;
+  private digest!: DigestSchedule;
   private feedback!: FeedbackFlow;
   private commands!: ThreadCommands;
 
@@ -159,6 +161,7 @@ export class SlackApp {
     };
     this.commands = new ThreadCommands(this.host);
     this.remediation = new RemediationFlow(this.host);
+    this.digest = new DigestSchedule(this.host);
     this.feedback = new FeedbackFlow(this.host);
     this.alerts = new AlertFlow(this.host);
     this.mentions = new MentionFlow(this.host);
@@ -383,6 +386,7 @@ export class SlackApp {
       logger.info(`Slack app started in HTTP Mode on port ${config.port}`);
     }
     this.remediation.startVerificationPoller();
+    this.digest.start();
   }
 
   /**
@@ -450,6 +454,7 @@ export class SlackApp {
     // one after the restart, claims it.
     this.stopping = true;
     if (this.verifyTimer) clearTimeout(this.verifyTimer);
+    this.digest.stop();
     await this.app.stop();
     if (this.httpServer) {
       await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));

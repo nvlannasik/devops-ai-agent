@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withVmTools, pickHost, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL } from "./tools.js";
+import { withVmTools, pickHost, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL } from "./tools.js";
 import type { SnapshotCandidate } from "./store.js";
 import { parseProposal, PROPOSABLE_ACTIONS } from "../remediation/proposal.js";
 import { NO_POD_TARGET } from "../remediation/remediator.js";
@@ -16,9 +16,12 @@ const inner = {
 const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>; ageSeconds: number; version: string | null } | null = null, cands?: SnapshotCandidate[]) => {
   const queued: unknown[] = [];
   const asked: string[] = [];
+  const historyAsked: Array<[string, number]> = [];
   return {
     queued,
     asked,
+    historyAsked,
+    history: async (h: string, hours: number) => (historyAsked.push([h, hours]), []),
     registered: async () => (units ? { units } : null),
     enqueue: async (...a: unknown[]) => (queued.push(a), 41),
     snapshotCandidates: async (n: string): Promise<SnapshotCandidate[]> => {
@@ -32,9 +35,10 @@ const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>
 
 test("the virtual tools are listed beside the wrapped tools — restart [WRITE], snapshot read-only; others pass through", async () => {
   const t = withVmTools(inner as never, store(["nginx.service"]) as never);
-  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL]);
+  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL]);
   assert.match(t.getTools()[1]!.description, /^\[WRITE\]/);
   assert.doesNotMatch(t.getTools()[2]!.description, /^\[WRITE\]/);
+  assert.doesNotMatch(t.getTools()[3]!.description, /^\[WRITE\]/);
   assert.equal(await t.callTool("k8s_list_pods", {}), "inner");
 });
 
@@ -119,4 +123,24 @@ test("node_host_snapshot: ambiguous names ask for a cluster; the bound cluster i
   const bound = withVmTools(inner as never, store([], null, both) as never, () => ({ cluster: "stg", local: "dev" }));
   assert.equal(JSON.parse(await bound.callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker1" })).host, "stg.worker1");
   assert.equal(JSON.parse(await unbound.callTool(NODE_HOST_SNAPSHOT_TOOL, { node: "worker1", cluster: "dev" })).cluster, "dev");
+});
+
+test("node_host_history resolves the host like the snapshot does, reads ITS points, and bounds the window", async () => {
+  const cands: SnapshotCandidate[] = [
+    { name: "stg.worker1", cluster: "stg", node: "worker1", snapshot: null, ageSeconds: null, version: "4" },
+    { name: "worker1", cluster: "dev", node: "worker1", snapshot: null, ageSeconds: null, version: "4" },
+  ];
+  const s = store([], null, cands);
+  const t = withVmTools(inner as never, s as never, () => ({ cluster: "stg", local: "dev" }));
+  const out = JSON.parse(await t.callTool(NODE_HOST_HISTORY_TOOL, { node: "Worker1", hours: 9999 }));
+  assert.deepEqual(s.historyAsked, [["stg.worker1", 168]], "the bound cluster's host, the window capped at 7 days");
+  assert.equal(out.host, "stg.worker1");
+  assert.equal(out.cluster, "stg");
+  assert.equal(out.points, 0);
+  await t.callTool(NODE_HOST_HISTORY_TOOL, { node: "worker1", cluster: "dev" });
+  assert.deepEqual(s.historyAsked[1], ["worker1", 24], "default 24 h");
+  const amb = await withVmTools(inner as never, s as never).callTool(NODE_HOST_HISTORY_TOOL, { node: "worker1" });
+  assert.match(amb, /several hosts/);
+  assert.match(await t.callTool(NODE_HOST_HISTORY_TOOL, {}), /`node` is required/);
+  assert.match(await withVmTools(inner as never, store(null) as never).callTool(NODE_HOST_HISTORY_TOOL, { node: "x" }), /no devops-vm-agent reports/);
 });

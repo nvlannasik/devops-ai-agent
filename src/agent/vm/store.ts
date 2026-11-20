@@ -1,4 +1,6 @@
 import type { Pool } from "pg";
+import logger, { errDetail } from "../../utils/logger/index.js";
+import { historyPoint, type StoredPoint } from "./history.js";
 
 // Postgres side of the VM agent (migrations/018). No pool: every read is empty and every write a
 // no-op — the agent without incident memory has no VM actions either.
@@ -53,6 +55,37 @@ export class VmStore {
          cluster = EXCLUDED.cluster, node = EXCLUDED.node`,
       [host, units, version, snapshot === null ? null : JSON.stringify(snapshot), place.cluster, place.node]
     );
+    if (snapshot !== null) await this.recordHistory(host, snapshot as Record<string, unknown>);
+  }
+
+  /**
+   * One history point per host per 5 minutes (migrations/021), pruned past 7 days in the same breath —
+   * no cron job. 290 s, not 300: heartbeats come every ~60 s, so the fifth one after a point is the next.
+   * A failure here costs the point, never the heartbeat: the latest snapshot is already stored.
+   */
+  private async recordHistory(host: string, snapshot: Record<string, unknown>): Promise<void> {
+    const point = historyPoint(snapshot);
+    if (!this.pool || !point) return;
+    try {
+      const r = await this.pool.query(
+        `INSERT INTO vm_host_history (host, point)
+         SELECT $1, $2::jsonb WHERE NOT EXISTS (SELECT 1 FROM vm_host_history WHERE host = $1 AND at > now() - interval '290 seconds')`,
+        [host, JSON.stringify(point)]
+      );
+      if (r.rowCount) await this.pool.query(`DELETE FROM vm_host_history WHERE host = $1 AND at < now() - interval '7 days'`, [host]);
+    } catch (err) {
+      logger.warn(`[vm] history point for ${host} not stored: ${errDetail(err)}`);
+    }
+  }
+
+  /** A host's history points in the last `hours`, oldest first — what node_host_history summarizes. */
+  async history(host: string, hours: number): Promise<StoredPoint[]> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT at, point FROM vm_host_history WHERE host = $1 AND at > now() - make_interval(hours => $2) ORDER BY at`,
+      [host, hours]
+    );
+    return rows.map((r: { at: Date | string; point: StoredPoint["point"] }) => ({ at: new Date(r.at), point: r.point }));
   }
 
   /** Every host whose Kubernetes node name (or, without one, whose own name) is `node`, with its
