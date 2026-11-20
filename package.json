@@ -15,6 +15,7 @@
     "build:client": "node scripts/build-client.mjs",
     "bench": "node --import tsx src/bench/run.ts",
     "bench:log": "node --import tsx src/bench/log.ts",
+    "bench:affected": "node --import tsx src/bench/affected.ts",
     "replay": "node --import tsx src/replay/cli.ts",
     "replay:export": "node --import tsx src/replay/export.ts"
   },

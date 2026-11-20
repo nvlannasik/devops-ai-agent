@@ -294,6 +294,25 @@ runner went on for two more with every tool call failing — C02, C03 and C06 sc
 model that could not read a pod, C08 "passed" four times for the same reason, and the score was
 on its way to being committed. That run was killed by hand and never recorded.
 
+## Only the cases a change can move
+
+```sh
+npm run bench:affected                       # the branch vs origin/main + the working tree
+npm run bench:affected -- --base HEAD~3      # or any base
+npm run bench:affected -- --files prompts/skills/node-pressure.md
+npm run bench:affected -- --run --attempts 2 # run the selection once (needs the bench env)
+```
+
+It prints each affected case with WHY, and the `--filter` to pass to `npm run bench`
+(`src/bench/affected.ts`). A playbook selects every case whose trigger loads it, computed with the
+agent's own skill selector over the text the runner builds, so it follows the `when:` regexes
+without a list to keep. Node code selects the node cases, tour code tier D, injection code C08. A
+change every run passes through (the system prompt, a mode-keyed skill like `rca-format`, the loop,
+the LLM layer, remediation, the bench itself) costs the **smoke set**: one case per family, never the
+full catalog. Tests, docs and the Slack app layer select nothing (the bench calls the agent, not
+SlackApp); a file no rule names is listed as unmapped. Being a filtered run, it is a spot check and
+is not recorded as a score.
+
 ## What is kept, and what is not
 
 `bench/results/history.jsonl` is the permanent record and one of two files here that git tracks
