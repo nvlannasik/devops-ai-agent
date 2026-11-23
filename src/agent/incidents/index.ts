@@ -480,6 +480,85 @@ export class IncidentMemory {
   // which is today's (pre-correlation) behaviour.
   /** `scope`: multi-cluster only (agent/cluster) — dev and stg share namespace names, so a neighbour
    *  must also share the cluster (NULL rows are the local one). Unset = no cluster predicate. */
+  /**
+   * Top-level incidents of `alertname` resolved in the last `hours` that concluded something — the
+   * candidates for a recurrence (agent/incidents/repeat.ts). The caller matches the subject; same
+   * cluster scope as openRelatable.
+   */
+  async resolvedRecently(
+    alertname: string,
+    hours: number,
+    scope?: { cluster: string | null; local: string | null }
+  ): Promise<Array<{ id: number; createdAt: Date; resolvedAt: Date; rootCause: string; groupLabels: Record<string, string>; subjects: string[] }>> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT id, created_at, resolved_at, root_cause, group_labels, subjects FROM incidents
+          WHERE alertname = $1 AND ${TOP_LEVEL} AND resolved_at IS NOT NULL AND root_cause IS NOT NULL
+            AND group_labels IS NOT NULL AND resolved_at > now() - make_interval(hours => $2)${scope ? `
+            AND COALESCE(cluster, $3::text) IS NOT DISTINCT FROM $4::text` : ""}
+          ORDER BY resolved_at DESC LIMIT 20`,
+        scope ? [alertname, hours, scope.local, scope.cluster] : [alertname, hours]
+      );
+      return rows.map((r: Record<string, any>) => ({
+        id: Number(r.id),
+        createdAt: new Date(r.created_at),
+        resolvedAt: new Date(r.resolved_at),
+        rootCause: String(r.root_cause),
+        groupLabels: r.group_labels as Record<string, string>,
+        subjects: Array.isArray(r.subjects) ? (r.subjects as string[]) : [],
+      }));
+    } catch (err) {
+      logger.error(`[incidents] resolvedRecently failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
+  }
+
+  /** Marks `id` as a recurrence of `of` (migrations/024). */
+  async markRepeat(id: number, of: number): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(`UPDATE incidents SET repeat_of = $2 WHERE id = $1`, [id, of]);
+  }
+
+  /**
+   * Open top-level incidents of the last `sinceMinutes` in any namespace, with their group labels —
+   * agent/correlation/subject reads its keys (cert-manager family, node) out of them. Same cluster
+   * scope as openRelatable.
+   */
+  async openWithLabels(
+    sinceMinutes: number,
+    scope?: { cluster: string | null; local: string | null }
+  ): Promise<Array<{ threadTs: string; channel: string; alertname: string; namespace: string | null; groupLabels: Record<string, string>; startedAt: number }>> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT channel, thread_ts, alertname, namespace, group_labels, created_at, alert_started_at
+           FROM incidents
+          WHERE resolved_at IS NULL AND ${TOP_LEVEL} AND group_labels IS NOT NULL
+            AND created_at > now() - ($1::int * interval '1 minute')${scope ? `
+            AND COALESCE(cluster, $2::text) IS NOT DISTINCT FROM $3::text` : ""}
+          ORDER BY created_at DESC LIMIT 50`,
+        scope ? [sinceMinutes, scope.local, scope.cluster] : [sinceMinutes]
+      );
+      return rows
+        .filter((r: Record<string, any>) => r.channel && r.thread_ts)
+        .map((r: Record<string, any>) => {
+          const started = r.alert_started_at ?? r.created_at;
+          return {
+            threadTs: r.thread_ts,
+            channel: r.channel,
+            alertname: r.alertname,
+            namespace: r.namespace ?? null,
+            groupLabels: r.group_labels as Record<string, string>,
+            startedAt: started instanceof Date ? started.getTime() : Date.parse(started),
+          };
+        });
+    } catch (err) {
+      logger.error(`[incidents] openWithLabels failed: ${err instanceof Error ? err.message : err}`);
+      return [];
+    }
+  }
+
   async openRelatable(namespace: string, sinceMinutes: number, scope?: { cluster: string | null; local: string | null }): Promise<OpenIncident[]> {
     if (!this.pool) return [];
     try {

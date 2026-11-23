@@ -34,6 +34,8 @@ export interface InFlightEntry {
   /** Final review finding 1: the alert group's cluster label, so another replica's correlation
    *  never treats a different cluster's in-flight investigation as a candidate. */
   cluster?: string;
+  /** Subject-correlation keys (agent/correlation/subject): `cert-manager`, `node:<name>`. */
+  keys?: string[];
 }
 
 type RedisLike = Pick<Redis, "set" | "get" | "del" | "mget" | "scan">;

@@ -88,6 +88,15 @@ export function positiveInt(raw: string | undefined, dflt: number, name: string)
   return n;
 }
 
+/** A non-negative integer setting (0 turns its feature off), or `dflt` when unset. */
+export function nonNegativeInt(raw: string | undefined, dflt: number, name: string): number {
+  const v = (raw ?? "").trim();
+  if (!v) return dflt;
+  const n = Number(v);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${name} "${v}" is not a non-negative integer`);
+  return n;
+}
+
 /** DIGEST_TIME as HH:MM (24 h), default 08:00. Malformed fails boot, like the cluster lists. */
 export function digestTime(raw: string | undefined): string {
   const v = (raw ?? "").trim() || "08:00";
@@ -295,6 +304,14 @@ export const config = {
   hostWatch: {
     enabled: process.env.HOST_WATCH_ENABLED !== "false",
     silentMinutes: positiveInt(process.env.HOST_SILENT_MINUTES, 5, "HOST_SILENT_MINUTES"),
+  },
+
+  // Recurrences (agent/incidents/repeat.ts, 2026-11-24): the same alert on the same subject resolved
+  // within REPEAT_WINDOW_HOURS (24; 0 = off) is investigated from that incident's root cause with
+  // REPEAT_MAX_ITERATIONS (5, against the usual 10) — about half the tokens went to such repeats.
+  repeat: {
+    windowHours: nonNegativeInt(process.env.REPEAT_WINDOW_HOURS, 24, "REPEAT_WINDOW_HOURS"),
+    maxIterations: positiveInt(process.env.REPEAT_MAX_ITERATIONS, 5, "REPEAT_MAX_ITERATIONS"),
   },
 
   // C1: the daily health digest (agent/digest) — host headroom and disk forecast from the host history,

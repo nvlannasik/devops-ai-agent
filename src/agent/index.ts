@@ -41,6 +41,7 @@ import { ThreadSkills, SkillView } from "./skills/thread.js";
 import { Remediator } from "./remediation/remediator.js";
 import { VmStore } from "./vm/store.js";
 import { DigestStore } from "./digest/store.js";
+import { repeatKey, type PriorIncident } from "./incidents/repeat.js";
 import { collectDigest } from "./digest/collect.js";
 import { renderDigest } from "./digest/build.js";
 import { withVmTools } from "./vm/tools.js";
@@ -596,6 +597,12 @@ export class DevOpsAgent {
   // Open top-level incidents in `namespace` from the last `sinceMinutes` — the candidate set a
   // new alert group is checked against for cross-alert correlation (agent/correlation).
   /** `labels`: the new group's — in multi-cluster mode a neighbour must share its cluster. */
+  /** Open incidents of the last `sinceMinutes` with their group labels, in the new group's cluster (agent/correlation/subject). */
+  openWithLabels(sinceMinutes: number, labels?: Record<string, string>) {
+    const cluster = labels ? alertCluster(labels, this.clusters) : undefined;
+    return this.incidents.openWithLabels(sinceMinutes, cluster === undefined ? undefined : { cluster, local: this.clusters.local });
+  }
+
   openRelatable(namespace: string, sinceMinutes: number, labels?: Record<string, string>): Promise<OpenIncident[]> {
     const cluster = labels ? alertCluster(labels, this.clusters) : undefined;
     return this.incidents.openRelatable(namespace, sinceMinutes, cluster === undefined ? undefined : { cluster, local: this.clusters.local });
@@ -836,6 +843,24 @@ export class DevOpsAgent {
   /** A flap: the same alert group resolved within `withinMinutes` — see IncidentMemory.recentlyResolved. */
   recentlyResolvedIncident(groupLabels: Record<string, string>, withinMinutes: number) {
     return this.incidents.recentlyResolved(groupLabels, withinMinutes);
+  }
+
+  /**
+   * The incident this alert group recurs from: same alertname, same subject (agent/incidents/
+   * repeat.ts), resolved within REPEAT_WINDOW_HOURS, with a root cause. Null when off or none.
+   */
+  async recentRepeat(labels: Record<string, string>, subjects: string[]): Promise<PriorIncident | null> {
+    const hours = config.repeat.windowHours;
+    const key = repeatKey(labels, subjects);
+    if (hours === 0 || !key || !labels.alertname) return null;
+    const cluster = alertCluster(labels, this.clusters);
+    const rows = await this.incidents.resolvedRecently(labels.alertname, hours, cluster === undefined ? undefined : { cluster, local: this.clusters.local });
+    const hit = rows.find((r) => repeatKey(r.groupLabels, r.subjects) === key);
+    return hit ? { id: hit.id, createdAt: hit.createdAt, resolvedAt: hit.resolvedAt, rootCause: hit.rootCause } : null;
+  }
+
+  markRepeat(id: number, of: number): Promise<void> {
+    return this.incidents.markRepeat(id, of);
   }
 
   /** The still-open incident of exactly this alert group, if any (app/alerts continueOpen). */
