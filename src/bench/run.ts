@@ -14,6 +14,7 @@
  * here creates any of the three; see bench/README.md.
  */
 import { KubectlHostSnapshots } from "./host-snapshots.js";
+import { withHostFixtures } from "./host-fixtures.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -300,6 +301,13 @@ async function main(): Promise<void> {
     agent.vmStore = new KubectlHostSnapshots() as unknown as typeof agent.vmStore;
     console.log("[bench] host snapshots: read from the production agent's vm_hosts via kubectl exec");
   }
+  // A case's invented hosts (case.json `hosts`) answer first; every other host from the store above.
+  const baseVmStore = agent.vmStore;
+  const vmStoreFor = (task: (typeof tasks)[number]) =>
+    task.hosts?.length ? (withHostFixtures(task.hosts, baseVmStore as never) as unknown as typeof agent.vmStore) : baseVmStore;
+  if (tasks.some((t) => t.hosts?.length) && config.vm.tokens.size === 0) {
+    logger.warn("[bench] a case invents hosts but VM_AGENT_TOKENS is unset — the host tools are not registered, so it cannot pass");
+  }
   const llm = createLLMClient();
 
   const runs: TaskRun[] = [];
@@ -324,6 +332,7 @@ async function main(): Promise<void> {
   try {
     tasks: for (const task of tasks) {
       const scores: Score[] = [];
+      agent.vmStore = vmStoreFor(task);
       for (let n = 1; n <= attempts; n++) {
         if (mcpHealth && !(await waitForMcp(mcpHealth))) {
           aborted = `the MCP server at ${mcpHealth} did not answer for 5 minutes before ${task.id} attempt ${n}`;

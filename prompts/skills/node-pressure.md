@@ -49,7 +49,9 @@ only in `node_host_snapshot`) — never propose resizing any of them (a memory l
 server or etcd makes it the OOM victim), never propose restarting etcd, and **never cordon or drain
 a control-plane node, not even as an "Immediate" line or a runbook step**: its pods are the control
 plane itself, a cordon frees no memory, and the agent refuses the action anyway. Name what uses
-the memory, and recommend more memory for that machine.
+the memory, and recommend more memory for that machine. Call `control_plane_balance` too: when
+the pressured master holds most leader roles (the API VIP sends it all outside traffic) or serves
+the most watches, say so with its numbers — that is why THIS master runs short first.
 
 On a small HA control plane the load is NOT even across the masters, and it moves:
 - Only the **leader** of `kube-controller-manager` and `kube-scheduler` does the work and holds the

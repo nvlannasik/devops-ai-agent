@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withVmTools, pickHost, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL } from "./tools.js";
+import { withVmTools, pickHost, VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL, CONTROL_PLANE_BALANCE_TOOL } from "./tools.js";
 import type { SnapshotCandidate } from "./store.js";
 import { parseProposal, PROPOSABLE_ACTIONS } from "../remediation/proposal.js";
 import { NO_POD_TARGET } from "../remediation/remediator.js";
@@ -35,7 +35,8 @@ const store = (units: string[] | null, snap: { snapshot: Record<string, unknown>
 
 test("the virtual tools are listed beside the wrapped tools — restart [WRITE], snapshot read-only; others pass through", async () => {
   const t = withVmTools(inner as never, store(["nginx.service"]) as never);
-  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL]);
+  assert.deepEqual(t.getTools().map((x) => x.name), ["k8s_list_pods", VM_RESTART_TOOL, NODE_HOST_SNAPSHOT_TOOL, NODE_HOST_HISTORY_TOOL, CONTROL_PLANE_BALANCE_TOOL]);
+  assert.doesNotMatch(t.getTools()[4]!.description, /^\[WRITE\]/);
   assert.match(t.getTools()[1]!.description, /^\[WRITE\]/);
   assert.doesNotMatch(t.getTools()[2]!.description, /^\[WRITE\]/);
   assert.doesNotMatch(t.getTools()[3]!.description, /^\[WRITE\]/);
@@ -143,4 +144,28 @@ test("node_host_history resolves the host like the snapshot does, reads ITS poin
   assert.match(amb, /several hosts/);
   assert.match(await t.callTool(NODE_HOST_HISTORY_TOOL, {}), /`node` is required/);
   assert.match(await withVmTools(inner as never, store(null) as never).callTool(NODE_HOST_HISTORY_TOOL, { node: "x" }), /no devops-vm-agent reports/);
+});
+
+test("control_plane_balance reads through the wrapped tools and the bound cluster's hosts", async () => {
+  const lease = (h: string) => JSON.stringify({ spec: { holderIdentity: h } });
+  const calls: string[] = [];
+  const innerTools = {
+    ...inner,
+    callTool: async (name: string, args: Record<string, unknown>) => {
+      calls.push(name);
+      if (name === "k8s_get_resource") return lease(args.name === "kube-scheduler" ? "m2_x" : "m1_y");
+      if (String(args.query).includes("longrunning")) return JSON.stringify({ result: [{ metric: { instance: "10.0.0.1:6443" }, value: [0, "300"] }, { metric: { instance: "10.0.0.2:6443" }, value: [0, "100"] }] });
+      if (String(args.query).includes("kubelet")) return JSON.stringify({ result: [{ metric: { node: "m1", node_ip: "10.0.0.1" }, value: [0, "1"] }, { metric: { node: "m2", node_ip: "10.0.0.2" }, value: [0, "1"] }] });
+      return JSON.stringify({ result: [] });
+    },
+  };
+  const s = { ...store([]), hosts: async () => [
+    { name: "m1", node: null, cluster: null, snapshot: { memory: { availableBytes: 100 * 1048576, totalBytes: 2000 * 1048576 } } },
+    { name: "m2", node: null, cluster: null, snapshot: { memory: { availableBytes: 900 * 1048576, totalBytes: 2000 * 1048576 } } },
+  ] };
+  const t = withVmTools(innerTools as never, s as never);
+  const out = JSON.parse(await t.callTool(CONTROL_PLANE_BALANCE_TOOL, {}));
+  assert.deepEqual(out.rows.map((r: any) => [r.node, r.roles, r.watches, r.available]), [["m1", ["controller-manager", "API VIP (kube-vip)"], 300, "100Mi"], ["m2", ["scheduler"], 100, "900Mi"]]);
+  assert.equal(out.findings.length, 3);
+  assert.ok(calls.includes("prometheus_query"));
 });

@@ -2,6 +2,7 @@ import type { McpTools } from "../mcp/types.js";
 import type { ToolDefinition } from "../llm/types.js";
 import type { SnapshotCandidate, VmStore } from "./store.js";
 import { summarizeHistory } from "./history.js";
+import { readBalance, type BalanceParts } from "./balance.js";
 
 // The VM restart as a virtual [WRITE] tool (spec 2026-11-04 Part B). The remediation flow only ever
 // calls tools — a dry run before the card, the real call on Approve — so making the VM action one
@@ -73,6 +74,22 @@ const HISTORY_DEFINITION: ToolDefinition = {
   },
 };
 
+// Control-plane balance as a virtual READ tool (B3): the leases, the API servers' load and the
+// masters' memory in one answer, computed by agent/vm/balance — the comparison a model gets wrong.
+export const CONTROL_PLANE_BALANCE_TOOL = "control_plane_balance";
+
+const BALANCE_DEFINITION: ToolDefinition = {
+  name: CONTROL_PLANE_BALANCE_TOOL,
+  description:
+    "How load is spread across the control-plane nodes: which master holds each leader role (controller-manager, scheduler, " +
+    "the API VIP — kube-vip, which receives every request from outside the cluster), each API server's long-running requests " +
+    "(watches) and resident memory, and each master's available memory from its host agent — with the findings already " +
+    "computed: roles concentrated on one master, watches that do not spread, and whether the busiest master is the one with " +
+    "the least memory. Call it for MemoryPressure or slowness on a control-plane node. Read-only; it proposes nothing — " +
+    "leader roles move only when a control-plane component restarts, which is never a fix to propose.",
+  inputSchema: { type: "object", properties: {} },
+};
+
 const mi = (bytes: unknown): string | undefined => (typeof bytes === "number" && Number.isFinite(bytes) ? `${Math.round(bytes / 1048576)}Mi` : undefined);
 
 /** The stored snapshot in the shape the model reads: Mi strings instead of raw bytes, plus what is easy to misread. */
@@ -141,7 +158,7 @@ export function pickHost(cands: SnapshotCandidate[], node: string, cluster: stri
 
 export function withVmTools(
   inner: McpTools,
-  store: Pick<VmStore, "registered" | "enqueue" | "snapshotCandidates" | "history">,
+  store: Pick<VmStore, "registered" | "enqueue" | "snapshotCandidates" | "history" | "hosts">,
   /** The run's bound cluster (null when unbound) and the local cluster's name. */
   scope: () => { cluster: string | null; local: string | null } = () => ({ cluster: null, local: null })
 ): McpTools {
@@ -149,8 +166,23 @@ export function withVmTools(
     connect: () => inner.connect(),
     disconnect: () => inner.disconnect(),
     ping: () => inner.ping(),
-    getTools: () => [...inner.getTools(), DEFINITION, SNAPSHOT_DEFINITION, HISTORY_DEFINITION],
+    getTools: () => [...inner.getTools(), DEFINITION, SNAPSHOT_DEFINITION, HISTORY_DEFINITION, BALANCE_DEFINITION],
     async callTool(name, input) {
+      if (name === CONTROL_PLANE_BALANCE_TOOL) {
+        const { cluster: bound, local } = scope();
+        const hosts = (await store.hosts()).filter((h) => (h.cluster ?? local) === (bound ?? local));
+        const memory: BalanceParts["memory"] = new Map();
+        for (const h of hosts) {
+          const m = (h.snapshot?.memory ?? {}) as Record<string, unknown>;
+          memory.set(h.node ?? h.name, {
+            ...(typeof m.availableBytes === "number" ? { available: m.availableBytes } : {}),
+            ...(typeof m.totalBytes === "number" ? { total: m.totalBytes } : {}),
+          });
+        }
+        const report = await readBalance((n, a) => inner.callTool(n, a), memory, [...memory.keys()]);
+        if (!report) return "Error: fewer than two control-plane nodes could be read (no leader leases or API server metrics) — nothing to compare.";
+        return JSON.stringify({ ...report, notes: ["watches = the API server's long-running requests; available = host memory now, from devops-vm-agent", "findings are computed; quote them rather than re-deriving"] });
+      }
       if (name === NODE_HOST_SNAPSHOT_TOOL || name === NODE_HOST_HISTORY_TOOL) {
         const node = String(input.node ?? input.host ?? "").trim().toLowerCase();
         if (!node) return "Error: `node` is required — the node name, e.g. master3-vm.";

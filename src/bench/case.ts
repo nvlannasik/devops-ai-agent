@@ -43,6 +43,28 @@ const Expectation = z.object({
     .optional(),
 });
 
+/** A start → end pair in Mi, interpolated linearly over the fixture's hours. */
+const Ramp = z.tuple([z.number().min(0), z.number().min(0)]);
+
+/**
+ * A host the case invents (bench/host-fixtures.ts): its snapshot and a point every 5 minutes, so a
+ * case about what GREW on a host is deterministic — production's history moves every day. Standalone
+ * (no cluster), so nothing in Kubernetes contradicts it.
+ */
+export const HostFixture = z
+  .object({
+    name: z.string().regex(/^[a-z0-9][a-z0-9.-]*$/),
+    totalMi: z.number().positive(),
+    hours: z.number().int().min(6).max(168).default(24),
+    availableMi: Ramp,
+    units: z.record(z.string(), Ramp),
+    processes: z.array(z.object({ name: z.string(), unit: z.string(), rssMi: Ramp }).strict()).optional(),
+    diskTotalMi: z.number().positive().optional(),
+    diskAvailableMi: Ramp.optional(),
+  })
+  .strict();
+export type HostFixture = z.infer<typeof HostFixture>;
+
 const Alert = z.object({
   labels: z.record(z.string(), z.string()),
   annotations: z.record(z.string(), z.string()).optional(),
@@ -68,6 +90,8 @@ export const CaseFile = z.object({
   settleSeconds: z.number().int().min(0).max(600).optional(),
   /** Defaults to `alert`, which is what every case written before this field assumed. */
   mode: Mode.default("alert"),
+  /** Invented hosts the VM tools answer for in this case (needs VM_AGENT_TOKENS set, as the bench runner does). */
+  hosts: z.array(HostFixture).optional(),
   /** The Slack text, for a case that enters as a mention rather than as an Alertmanager group. */
   message: z.string().min(1).optional(),
   /**

@@ -1,4 +1,5 @@
 import { diskTrend, movers, type StoredPoint } from "../vm/history.js";
+import type { BalanceReport } from "../vm/balance.js";
 
 // The daily health digest (C1 + C2, 2026-11-20): what on-call should look at before anything pages.
 // Built by code from data — host history (vm_host_history), incident memory and Alertmanager — with
@@ -119,6 +120,8 @@ export interface DigestData {
   firing: Array<{ name: string; count: number; severity: string | null }> | null;
   /** Flux objects that are not Ready (suspended ones aside), and how many there are in all. */
   gitops: FluxDigest | null;
+  /** Leader roles, API watches and memory per control plane (agent/vm/balance); null under two masters. */
+  controlPlane?: BalanceReport | null;
   /** What could not be read, with why. */
   unread: string[];
 }
@@ -194,6 +197,7 @@ export function renderDigest(d: DigestData): string {
   const summary: string[] = [];
   if (d.hosts) summary.push(attention.length ? `${attention.length} of ${d.hosts.length} hosts need a look` : `${d.hosts.length} hosts, none need a look`);
   if (d.firing) summary.push(d.firing.length ? `${d.firing.reduce((a, f) => a + f.count, 0)} alerts firing` : "nothing firing");
+  if (d.controlPlane?.findings.some((f) => f.startsWith("⚠️"))) summary.push("control plane unbalanced");
   if (d.gitops && d.gitops.notReady.length) summary.push(`${d.gitops.notReady.length} Flux object${d.gitops.notReady.length === 1 ? "" : "s"} not Ready`);
   if (d.incidents24h) summary.push(`${d.incidents24h.reduce((a, c) => a + c.count, 0)} investigations in 24 h`);
   if (d.openTotal !== null) summary.push(`${d.openTotal} incidents open`);
@@ -224,6 +228,20 @@ export function renderDigest(d: DigestData): string {
     if (d.firing.length === 0) lines.push("• nothing");
     for (const f of d.firing.slice(0, 10)) lines.push(`• \`${f.name}\` × ${f.count}${f.severity ? ` _(${f.severity})_` : ""}`);
     if (d.firing.length > 10) lines.push(`• … and ${d.firing.length - 10} more`);
+  }
+
+  if (d.controlPlane) {
+    lines.push("", "*🎛️ Control plane* _(leader roles · API watches · API server memory · lowest available in 24 h)_");
+    for (const r of d.controlPlane.rows) {
+      const parts = [
+        r.roles.length ? r.roles.join(", ") : "no leader role",
+        ...(r.watches !== undefined ? [`${r.watches} watches`] : []),
+        ...(r.apiserverMemory ? [`apiserver ${r.apiserverMemory}`] : []),
+        ...(r.lowest24h ? [`low ${r.lowest24h}${r.total ? ` of ${r.total}` : ""}`] : r.available ? [`${r.available} available`] : []),
+      ];
+      lines.push(`• \`${r.node}\` — ${parts.join(" · ")}`);
+    }
+    for (const f of d.controlPlane.findings) lines.push(`    ↳ ${f}`);
   }
 
   if (d.gitops) {

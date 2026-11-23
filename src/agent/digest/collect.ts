@@ -1,6 +1,7 @@
 import type { VmStore } from "../vm/store.js";
 import type { DigestStore } from "./store.js";
 import { firingFrom, fluxFrom, hostDigest, localClock, type DigestData } from "./build.js";
+import { readBalance, type BalanceParts } from "../vm/balance.js";
 
 const TIMEOUT_MS = 20_000;
 const HISTORY_HOURS = 168;
@@ -51,6 +52,15 @@ export async function collectDigest(deps: DigestDeps): Promise<DigestData> {
       return g;
     }),
   ]);
+  // The control plane after the hosts: it reads their memory. Leases and API load through MCP.
+  const memory: BalanceParts["memory"] = new Map(
+    (hosts ?? []).map((h) => [h.name, { ...(h.availableNow !== undefined ? { available: h.availableNow } : {}), ...(h.lowest24h ? { lowest: h.lowest24h.available } : {}), ...(h.total !== undefined ? { total: h.total } : {}) }])
+  );
+  const controlPlane = await read("control plane", async () => {
+    const r = await readBalance(deps.callTool, memory, [...memory.keys()]);
+    if (r?.unread.length) unread.push(...r.unread.map((u) => `control plane: ${u}`));
+    return r;
+  });
   // A source with nothing to say (no pool, no host agents) is absent, not unread.
-  return { day: localClock(now, deps.timeZone).day, now, hosts, incidents24h, repeat7d, openTotal, firing, gitops, unread };
+  return { day: localClock(now, deps.timeZone).day, now, hosts, incidents24h, repeat7d, openTotal, firing, gitops, controlPlane, unread };
 }

@@ -341,6 +341,7 @@ export class DevOpsAgent {
       enqueue: (h, u, r) => this.vmStore.enqueue(h, u, r),
       snapshotCandidates: (n) => this.vmStore.snapshotCandidates(n),
       history: (h, hours) => this.vmStore.history(h, hours),
+      hosts: () => this.vmStore.hosts(),
     }, () => ({ cluster: currentCluster() ?? null, local: this.clusters.local }));
   }
 

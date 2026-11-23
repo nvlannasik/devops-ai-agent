@@ -1,0 +1,33 @@
+{
+  "id": "C16-host-memory-growth",
+  "tier": "C",
+  "title": "What grew on a host — the history tool's mover, with its numbers, not one snapshot",
+  "mode": "conversation",
+  "settleSeconds": 0,
+  "message": "memori di bench-vm-01 naik terus sehari ini, apa yang tumbuh?",
+  "hosts": [
+    {
+      "name": "bench-vm-01",
+      "totalMi": 4096,
+      "hours": 24,
+      "availableMi": [2400, 900],
+      "units": { "billing-sync.service": [180, 1150], "postgresql.service": [600, 640], "nginx.service": [60, 62] },
+      "processes": [
+        { "name": "billing-sync", "unit": "billing-sync.service", "rssMi": [170, 1120] },
+        { "name": "postgres", "unit": "postgresql.service", "rssMi": [420, 450] }
+      ],
+      "diskTotalMi": 40960,
+      "diskAvailableMi": [20000, 19900]
+    }
+  ],
+  "expect": {
+    "action": null,
+    "alternatives": [{ "action": "vm_restart_service" }],
+    "rca": {
+      "must": [
+        "billing-sync",
+        "(\\b9\\d\\d|\\b1[01]\\d\\d)\\s?Mi|1[.,][01]\\d?\\s?Gi"
+      ]
+    }
+  }
+}

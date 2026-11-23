@@ -155,3 +155,21 @@ test("a shrinking low with plenty left is not flagged; one heading for zero soon
   const falling = week((h) => ({ memAvailable: (300 + (h / 24) * 100) * MI }));
   assert.match(hostDigest("m", falling, NOW).attention.join(" | "), /headroom shrinking — .* \(~3 d to none at 100Mi\/day\)/);
 });
+
+test("renderDigest: the control plane section — a row per master, the findings under it, flagged in the summary", () => {
+  const t = renderDigest({
+    ...DATA,
+    controlPlane: {
+      rows: [
+        { node: "master2-vm", roles: ["scheduler"], watches: 188, apiserverMemory: "501Mi", lowest24h: "516Mi", total: "1968Mi" },
+        { node: "master3-vm", roles: ["controller-manager", "API VIP (kube-vip)"], watches: 328, apiserverMemory: "554Mi", lowest24h: "300Mi", total: "1967Mi" },
+      ],
+      findings: ["`master3-vm` holds 2 of 3 leader roles", "⚠️ and `master3-vm` has the least memory of the control planes (300Mi)"],
+      unread: [],
+    },
+  });
+  assert.match(t, /control plane unbalanced/);
+  assert.match(t, /\*🎛️ Control plane\*[\s\S]*• `master3-vm` — controller-manager, API VIP \(kube-vip\) · 328 watches · apiserver 554Mi · low 300Mi of 1967Mi/);
+  assert.match(t, /↳ ⚠️ and `master3-vm` has the least memory/);
+  assert.doesNotMatch(renderDigest(DATA), /Control plane/, "absent when not read");
+});

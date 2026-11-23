@@ -70,7 +70,7 @@ const present = (v: string | undefined): string => (v && v.trim() ? "set" : "not
  *  By prefix they would make two one-tool families, "node" and "vm"; they are one thing — the
  *  agent's own reach into the hosts — so they share a family. */
 export const AGENT_FAMILY = "agent";
-const AGENT_TOOLS: ReadonlySet<string> = new Set(["node_host_history", "node_host_snapshot", "vm_restart_service"]);
+const AGENT_TOOLS: ReadonlySet<string> = new Set(["control_plane_balance", "node_host_history", "node_host_snapshot", "vm_restart_service"]);
 
 /** A description's first sentence, without the write marker, capped — a hover title, not a doc. */
 const summaryOf = (d: string | undefined): string | undefined => {
