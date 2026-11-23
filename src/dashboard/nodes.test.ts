@@ -169,3 +169,32 @@ test("each row carries a decorative kind glyph, and VIP/leader glyphs sit beside
   assert.match(html, /class="node-holders"><span><span class="ico-lead">/);
   assert.match(html, />standalone VM</);
 });
+
+test("the host page's history: the week's lowest available per 6 h, what moved in 24 h, the disk forecast; unread and empty said so", async () => {
+  const { historyPanel, lowestAvailableBuckets } = await import("./node-views.js");
+  const now = new Date("2026-11-24T00:00:00Z");
+  const MI = 1048576;
+  const points = Array.from({ length: 7 * 24 * 12 + 1 }, (_, i) => {
+    const at = new Date(now.getTime() - (7 * 24 * 12 - i) * 5 * 60_000);
+    const f = i / (7 * 24 * 12);
+    return { at, point: { memTotal: 2000 * MI, memAvailable: (800 - 500 * f) * MI, units: { "etcd.service": (250 + 110 * f) * MI }, diskTotal: 20000 * MI, diskAvailable: (5000 - 2100 * f) * MI } };
+  });
+  const buckets = lowestAvailableBuckets(points, now);
+  assert.equal(buckets.length, 28);
+  assert.ok(buckets[0]!.value > buckets.at(-1)!.value, "falling");
+  const html = historyPanel(points, now);
+  assert.match(html, /id="history"/);
+  assert.match(html, /Lowest available memory per 6 h, Mi/);
+  assert.match(html, /<code translate="no">etcd\.service<\/code>/);
+  assert.match(html, /Root disk \d+% used — full in ~\d+(\.\d)? days at -300Mi\/day/);
+  assert.match(historyPanel(null, now), /History not read/);
+  assert.match(historyPanel([], now), /No history yet/);
+});
+
+test("a node card with a host agent links to its history; the host page renders it when given", async () => {
+  const m = buildNodesModel(await loadNodes(source({ hosts: [host({ name: "vm-web-01", version: "4" })] })));
+  const h = hostPage(m, "vm-web-01", new Date(), undefined, [])!;
+  assert.match(h, /href="\/nodes\/h\/vm-web-01#history">7-day history<\/a>/);
+  assert.match(h, /No history yet/);
+  assert.doesNotMatch(hostPage(m, "vm-web-01")!, /id="history"/, "no history source: no section");
+});

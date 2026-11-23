@@ -43,6 +43,8 @@ export interface NodesSource {
   clusters(): { names: string[]; local: string | null };
   /** One MCP read against `cluster` (null: the local one); the raw tool result. */
   tool(cluster: string | null, name: string, args: Record<string, unknown>): Promise<string>;
+  /** A host's history points (vm_host_history), for its page. Absent: no history section. */
+  history?(host: string, hours: number): Promise<import("../agent/vm/history.js").StoredPoint[]>;
 }
 
 /** One cluster as read: nodes is null when the cluster did not answer. */

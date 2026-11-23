@@ -707,7 +707,8 @@ export class DashboardServer {
         return html ? send(200, html, "text/html; charset=utf-8") : send(404, errorPage("Not found", `No cluster "${route.name}".`));
       }
       const id = route.kind === "nodeHost" ? route.id : "";
-      const html = hostPage(model, id, new Date(), open);
+      const history = this.nodes.history ? await this.nodes.history(id, 168).catch(() => null) : undefined;
+      const html = hostPage(model, id, new Date(), open, history);
       return html ? send(200, html, "text/html; charset=utf-8") : send(404, errorPage("Not found", `No host "${id}".`));
     }
 

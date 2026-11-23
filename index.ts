@@ -24,6 +24,7 @@ async function main() {
       actions: () => agent.vmStore.recentActions(30),
       clusters: () => agent.clusterNames(),
       tool: (cluster, name, args) => agent.clusterTool(cluster, name, args),
+      history: (host, hours) => agent.vmStore.history(host, hours),
     });
 
     // graceful shutdown

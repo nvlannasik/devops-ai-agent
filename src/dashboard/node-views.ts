@@ -1,5 +1,7 @@
 import { cell, esc, fmtInt, headers, table, timeTag } from "./html.js";
 import { ICON, badge, cardHead, dash, empty, pageHead, panel, section, statList } from "./parts.js";
+import { lineChart } from "./chart.js";
+import { summarizeHistory, type StoredPoint } from "../agent/vm/history.js";
 import { layout } from "./layout.js";
 import { worstTone, type ActionRowLike, type ClusterGroup, type NodeCard, type NodesModel, type Tone } from "./nodes.js";
 
@@ -91,6 +93,7 @@ export function nodeCard(c: NodeCard): string {
   if (c.host) facts.push(`snapshot ${fmtInt(c.host.ageSeconds)}s ago`, `load ${esc(c.host.load.map((l) => l.toFixed(2)).join(" "))}`, `up ${hoursText(c.host.uptimeHours)}`);
   if (c.host?.allPodsMi !== null && c.host?.allPodsMi !== undefined && c.k8s) facts.push(`pods cgroup ${fmtInt(c.host.allPodsMi)}Mi`);
   if (c.agent) facts.push(c.agent.units.length ? `may restart: ${c.agent.units.map((u) => `<code translate="no">${esc(u)}</code>`).join(", ")}` : "restart allowlist empty");
+  if (c.agent) facts.push(`<a href="/nodes/h/${enc(c.id)}#history">7-day history</a>`);
   return (
     `<section class="card node-card" id="node-${esc(c.name)}">` +
     cardHead(c.name) +
@@ -104,6 +107,45 @@ export function nodeCard(c: NodeCard): string {
     (c.k8s?.taints.length ? `<p class="meta node-facts">taints: ${c.k8s.taints.map((t) => `<code translate="no">${esc(t)}</code>`).join(" ")}</p>` : "") +
     `</section>`
   );
+}
+
+/** Six-hour buckets of the LOWEST available memory, oldest first — the number that pages, not an average. */
+export function lowestAvailableBuckets(points: StoredPoint[], now: Date, hours = 168, bucketHours = 6): Array<{ label: string; value: number }> {
+  const span = bucketHours * 3_600_000;
+  const start = now.getTime() - hours * 3_600_000;
+  const out: Array<{ label: string; value: number }> = [];
+  for (let t = start; t < now.getTime(); t += span) {
+    const inside = points.filter((p) => p.at.getTime() >= t && p.at.getTime() < t + span && p.point.memAvailable !== undefined);
+    const d = new Date(t + span);
+    // 0 for a bucket with no report: the line drops to the floor, the honest drawing of a silence.
+    out.push({ label: `${d.toISOString().slice(5, 10)} ${d.toISOString().slice(11, 13)}h`, value: inside.length ? Math.round(Math.min(...inside.map((p) => p.point.memAvailable!)) / 1048576) : 0 });
+  }
+  return out;
+}
+
+/** The host page's history (vm_host_history, migrations/021): the week's lowest available memory, and what moved in 24 h. */
+export function historyPanel(points: StoredPoint[] | null, now: Date): string {
+  if (points === null) return `<div id="history">${panel("History · 7 days", empty("History not read", "The host history could not be read from the agent's database."))}</div>`;
+  if (points.length === 0) return `<div id="history">${panel("History · 7 days", empty("No history yet", "A point is kept every 5 minutes for 7 days once the host reports.", ICON.bench))}</div>`;
+  const chart = lineChart(lowestAvailableBuckets(points, now), { label: "Lowest available memory per 6 h, Mi — 0 means no report" });
+  const day = summarizeHistory("", points.filter((p) => p.at.getTime() > now.getTime() - 86_400_000), 24) as Record<string, unknown>;
+  const week = summarizeHistory("", points, 168) as Record<string, unknown>;
+  const moved: Array<Record<string, unknown>> = [
+    ...(Array.isArray(day.systemdServicesThatMoved) ? (day.systemdServicesThatMoved as Array<Record<string, unknown>>) : []),
+    ...(Array.isArray(day.processesThatMoved) ? (day.processesThatMoved as Array<Record<string, unknown>>).map((p) => ({ ...p, name: `${p.name} (${p.where})` })) : []),
+  ];
+  const rows = moved.length
+    ? table(
+        headers("Moved in 24 h", ["Start", "num"], ["End", "num"], ["Change", "num"]),
+        moved.map((r) => `<tr>${cell("Moved in 24 h", `<code translate="no">${esc(r.name)}</code>`)}${cell("Start", esc(r.start), "num")}${cell("End", esc(r.end), "num")}${cell("Change", esc(r.change), "num")}</tr>`).join("")
+      )
+    : `<p class="meta">Nothing moved by 10Mi or more in the last 24 h.</p>`;
+  const disk = week.rootDisk as Record<string, unknown> | undefined;
+  const diskLine = disk
+    ? `<p class="meta">Root disk ${esc(disk.usedPercentNow)}% used${typeof disk.daysToFull === "number" ? ` — full in ~${esc(disk.daysToFull)} days at ${esc(disk.changePerDay)}/day` : `, ${esc(disk.forecast ?? "")}`}.</p>`
+    : "";
+  const gaps = Array.isArray(week.gaps) && week.gaps.length ? `<p class="meta">Silent: ${(week.gaps as string[]).map((g) => esc(g)).join("; ")}</p>` : "";
+  return `<div id="history">${panel("History · 7 days", `<div class="card">${chart}</div>${rows}${diskLine}${gaps}`)}</div>`;
 }
 
 const STATUS_TONE: Record<string, Tone> = { succeeded: "ok", failed: "critical", refused: "warning", expired: "warning", pending: "", claimed: "" };
@@ -339,13 +381,14 @@ export function nodeClusterPage(m: NodesModel, name: string, now: Date = new Dat
 
 // ---------- /nodes/h/<host> ----------
 
-export function hostPage(m: NodesModel, id: string, now: Date = new Date(), openIncidents?: number): string | null {
+export function hostPage(m: NodesModel, id: string, now: Date = new Date(), openIncidents?: number, history?: StoredPoint[] | null): string | null {
   const c = allCards(m).find((x) => x.id === id || (!x.cluster && x.name === id));
   if (!c) return null;
   const back = c.cluster ? `<a class="standalone" href="${esc(clusterHref(c.cluster))}">← ${esc(c.cluster)}</a>` : `<a class="standalone" href="/nodes?group=standalone">← Standalone hosts</a>`;
   const body =
     pageHead({ eyebrow: c.cluster ? `Hosts · ${c.cluster}` : "Hosts · standalone", title: c.name, code: true, tools: back }) +
     nodeCard(c) +
+    (history !== undefined ? historyPanel(history, now) : "") +
     actionsPanel(m.actions.filter((a) => a.host === c.id), now, () => null);
   return layout(`${c.name} · Hosts`, body, { current: "/nodes", openIncidents });
 }
