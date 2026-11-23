@@ -10,6 +10,10 @@ The VM opens every connection (no inbound port), proves who it is with its own b
 decides for itself what may run: an action whose unit is not in `units` below is reported
 `refused` and nothing is executed. The only command it ever runs is `systemctl restart <unit>`
 (plus `systemctl is-active` and `journalctl` to report the result). Python 3 standard library only.
+
+Version 5 adds one READ action, `journal`: the last lines of one unit's journal, for a unit in its
+own `journal_units` (default kubelet, containerd, etcd and the restart allowlist). Values that look
+like secrets are redacted HERE, before the text leaves the host (redact()).
 """
 import configparser
 import json
@@ -23,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "4"
+VERSION = "5"
 log = logging.getLogger("devops-vm-agent")
 
 
@@ -49,6 +53,9 @@ def load_config(path):
         "url": a["url"].rstrip("/"),
         "token": a["token"],
         "units": a.get("units", "").split(),
+        # Units whose journal the agent may READ (version 5). Unset: the Kubernetes node services
+        # plus the restart allowlist — the logs an investigation of this host needs, nothing else.
+        "journal_units": a.get("journal_units", "").split() or sorted(set(DEFAULT_JOURNAL_UNITS) | set(a.get("units", "").split())),
         "poll_seconds": int(a.get("poll_seconds", "10")),
         "ca_file": a.get("ca_file") or None,
     }
@@ -56,6 +63,27 @@ def load_config(path):
 
 TOP_PROCESSES = 15
 TOP_UNITS = 15
+DEFAULT_JOURNAL_UNITS = ("kubelet.service", "containerd.service", "etcd.service")
+JOURNAL_MAX_LINES = 500
+JOURNAL_MAX_MINUTES = 24 * 60
+JOURNAL_MAX_CHARS = 48 * 1024
+
+# Secret-shaped values in log lines, replaced before the journal leaves the host. The agent masks
+# again on its side; this pass is the one that keeps them off the network at all.
+_REDACTIONS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "[REDACTED JWT]"),
+    (re.compile(r"(?i)\b([a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|credential)s?)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&\"']+)"), r"\1\2[REDACTED]"),
+    (re.compile(r"(?i)(://[^:/\s@]+:)[^@/\s]+@"), r"\1[REDACTED]@"),
+]
+
+
+def redact(text):
+    """Secret-shaped values out of a journal: private keys, bearer tokens, JWTs, key=value secrets, URL passwords."""
+    for pattern, repl in _REDACTIONS:
+        text = pattern.sub(repl, text)
+    return text
 
 
 def _read(path):
@@ -179,11 +207,36 @@ class Agent:
             return json.loads(raw) if res.status == 200 and raw else None
 
     def heartbeat(self):
-        body = {"units": self.cfg["units"], "version": VERSION, "snapshot": self.snap()}
+        body = {"units": self.cfg["units"], "journalUnits": self.cfg.get("journal_units", []), "version": VERSION, "snapshot": self.snap()}
         for key in ("cluster", "node"):
             if self.cfg.get(key):
                 body[key] = self.cfg[key]
         self._post("/vm/heartbeat", body)
+
+    def read_journal(self, aid, unit, action):
+        """The `journal` action: the last lines of one allowed unit, redacted, never more than JOURNAL_MAX_CHARS."""
+        if unit not in self.cfg.get("journal_units", []):
+            log.warning("journal read %s refused: %s is not in this host's journal_units", aid, unit)
+            self._post(f"/vm/actions/{aid}/result", {"status": "refused", "unit": unit})
+            return
+        try:
+            lines = max(1, min(JOURNAL_MAX_LINES, int(action.get("lines", 100))))
+            minutes = action.get("sinceMinutes")
+            minutes = max(1, min(JOURNAL_MAX_MINUTES, int(minutes))) if minutes is not None else None
+        except (TypeError, ValueError):
+            lines, minutes = 100, None
+        cmd = ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso"]
+        if minutes:
+            cmd.append(f"--since=-{minutes}min")
+        try:
+            done = self.run(cmd, capture_output=True, text=True, timeout=20)
+            code, out, err = done.returncode, done.stdout or "", done.stderr or ""
+        except subprocess.TimeoutExpired:
+            code, out, err = -1, "", "journalctl timed out after 20 s"
+        text = redact(out)[-JOURNAL_MAX_CHARS:]
+        status = "succeeded" if code == 0 else "failed"
+        log.info("journal read %s of %s: %s, %d lines", aid, unit, status, text.count("\n"))
+        self._post(f"/vm/actions/{aid}/result", {"status": status, "exitCode": code, "unit": unit, "journal": text, "error": redact(err)[-500:]})
 
     def poll_once(self):
         action = self._post("/vm/actions/claim", {})
@@ -191,6 +244,9 @@ class Agent:
             return
         aid, unit = action.get("id"), action.get("unit", "")
         log.info("claimed action %s: %s %s", aid, action.get("action"), unit)
+        if action.get("action") == "journal":
+            self.read_journal(aid, unit, action)
+            return
         if action.get("action") != "restart" or unit not in self.cfg["units"]:
             log.warning("action %s refused: %s is not in this VM's allowlist", aid, unit)
             self._post(f"/vm/actions/{aid}/result", {"status": "refused", "unit": unit})

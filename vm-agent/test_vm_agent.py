@@ -113,6 +113,35 @@ class AgentTest(unittest.TestCase):
         self.agent.poll_once()
         self.assertEqual(set(Stub.agents), {f"devops-vm-agent/{vm_agent.VERSION}"})
 
+    def test_a_journal_read_of_an_allowed_unit_runs_journalctl_and_redacts(self):
+        self.agent.cfg = {**self.agent.cfg, "journal_units": ["kubelet.service"]}
+        secret_out = 'msg="auth" token=abc123 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payloadpayload.signaturesig password: "hunter2" url=https://u:pw@reg.example\n'
+        self.agent.run = lambda cmd, **kw: (self.runner.calls.append(cmd), type("P", (), {"returncode": 0, "stdout": secret_out, "stderr": ""})())[1]
+        Stub.claims = [{"id": 7, "unit": "kubelet.service", "action": "journal", "lines": 9999, "sinceMinutes": 30}]
+        self.agent.poll_once()
+        self.assertEqual(self.runner.calls[0], ["journalctl", "-u", "kubelet.service", "-n", "500", "--no-pager", "-o", "short-iso", "--since=-30min"])
+        path, _, body = Stub.seen[-1]
+        self.assertEqual((path, body["status"], body["unit"]), ("/vm/actions/7/result", "succeeded", "kubelet.service"))
+        for leaked in ("abc123", "hunter2", "eyJhbGciOiJIUzI1NiJ9", ":pw@"):
+            self.assertNotIn(leaked, body["journal"])
+        self.assertIn("token=[REDACTED]", body["journal"])
+        self.assertNotIn("systemctl", [c[0] for c in self.runner.calls], "a read never restarts")
+
+    def test_a_journal_read_outside_journal_units_is_refused(self):
+        self.agent.cfg = {**self.agent.cfg, "journal_units": ["kubelet.service"]}
+        Stub.claims = [{"id": 8, "unit": "sshd.service", "action": "journal"}]
+        self.agent.poll_once()
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(Stub.seen[-1][2]["status"], "refused")
+
+    def test_journal_units_default_to_the_node_services_and_the_restart_allowlist(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write("[agent]\nname = a\nurl = http://x\ntoken = t\nunits = nginx.service\n")
+        cfg = vm_agent.load_config(f.name)
+        self.assertEqual(cfg["journal_units"], ["containerd.service", "etcd.service", "kubelet.service", "nginx.service"])
+        self.agent.heartbeat()
+        self.assertIn("journalUnits", Stub.seen[-1][2])
+
     def test_plain_http_is_warned_about(self):
         with self.assertLogs("devops-vm-agent", level="WARNING") as logs:
             vm_agent.Agent({"name": "vm-a", "url": "http://x", "token": "t", "units": [], "poll_seconds": 10, "ca_file": None}, runner=self.runner)

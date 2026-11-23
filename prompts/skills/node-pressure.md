@@ -25,6 +25,8 @@ evicted pod as the cause** — find what actually grew.
    the node, say the gap is unexplained and that host-level data is missing there. Then
    `node_host_history` for the same node says what GREW: quote its `systemdServicesThatMoved` /
    `processesThatMoved` (start → end, change) — a leak and a steady load look the same in one snapshot.
+   `node_journal` with `kubelet.service` (`minutes: 30`) shows the eviction manager's own lines —
+   which signal it acted on and what it evicted; quote the line, do not paraphrase it.
 3. `k8s_list_events` with `since_minutes: 60` — `Evicted`, `SystemOOM`, `FailedScheduling`. The
    eviction event names the threshold that was crossed.
 4. `k8s_recommend_resources` for the top consumer — an eviction loop is a sizing fault most of

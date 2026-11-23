@@ -214,14 +214,35 @@ export class VmStore {
     }));
   }
 
+  /** A READ the VM pulls like a restart (vm-agent 5): the last lines of one unit's journal. No remediation behind it. */
+  async enqueueRead(host: string, unit: string, params: { lines: number; sinceMinutes?: number }): Promise<number | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(`INSERT INTO vm_actions (host, unit, action, params) VALUES ($1, $2, 'journal', $3::jsonb) RETURNING id`, [host, unit, JSON.stringify(params)]);
+    return Number(rows[0].id);
+  }
+
+  /** An action's state and what the VM reported — the journal tool waits on this. */
+  async actionResult(id: number): Promise<{ status: string; result: Record<string, unknown> | null } | null> {
+    if (!this.pool) return null;
+    const { rows } = await this.pool.query(`SELECT status, result FROM vm_actions WHERE id = $1`, [id]);
+    return rows[0] ? { status: String(rows[0].status), result: (rows[0].result as Record<string, unknown> | null) ?? null } : null;
+  }
+
+  /** A read nobody waits for any more: never claimed later. */
+  async expireAction(id: number): Promise<void> {
+    if (!this.pool) return;
+    await this.pool.query(`UPDATE vm_actions SET status = 'expired', finished_at = now() WHERE id = $1 AND status = 'pending'`, [id]);
+  }
+
   async enqueue(host: string, unit: string, remediationId: number | null): Promise<number | null> {
     if (!this.pool) return null;
     const { rows } = await this.pool.query(`INSERT INTO vm_actions (host, unit, remediation_id) VALUES ($1, $2, $3) RETURNING id`, [host, unit, remediationId]);
     return Number(rows[0].id);
   }
 
-  /** The next approved action for `host`, taken exactly once; stale ones expire first and never run. */
-  async claim(host: string): Promise<{ id: number; unit: string; action: "restart" } | null> {
+  /** The next approved action for `host`, taken exactly once; stale ones expire first and never run.
+   *  A `journal` read carries its params (lines, sinceMinutes); an agent older than 5 refuses it. */
+  async claim(host: string): Promise<({ id: number; unit: string; action: "restart" | "journal" } & Record<string, unknown>) | null> {
     if (!this.pool) return null;
     await this.pool.query(
       `UPDATE vm_actions SET status = 'expired', finished_at = now()
@@ -233,10 +254,13 @@ export class VmStore {
         WHERE id = (SELECT id FROM vm_actions
                      WHERE host = $1 AND status = 'pending' AND created_at > now() - interval '15 minutes'
                      ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
-        RETURNING id, unit, action`,
+        RETURNING id, unit, action, params`,
       [host]
     );
-    return rows[0] ? { id: Number(rows[0].id), unit: rows[0].unit, action: "restart" } : null;
+    if (!rows[0]) return null;
+    const action = rows[0].action === "journal" ? "journal" : "restart";
+    const params = action === "journal" && rows[0].params && typeof rows[0].params === "object" ? (rows[0].params as Record<string, unknown>) : {};
+    return { ...params, id: Number(rows[0].id), unit: rows[0].unit, action };
   }
 
   /** Records the VM's report on ITS claimed action; null when the id is not that host's claim. */

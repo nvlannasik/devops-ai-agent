@@ -108,3 +108,17 @@ test("host silence: setting silent_since is the claim; recovery clears it and ha
   assert.deepEqual(await new VmStore(null).claimSilent(5), []);
   assert.deepEqual(await new VmStore(null).claimRecovered(), []);
 });
+
+test("a journal read is queued with its params and claimed with them; a restart claims as before", async () => {
+  const pool = fakePool([
+    { rows: [{ id: 55 }] },
+    { rows: [] },
+    { rows: [{ id: 55, unit: "kubelet.service", action: "journal", params: { lines: 100, sinceMinutes: 30 } }] },
+    { rows: [{ status: "succeeded", result: { journal: "x" } }] },
+  ]);
+  const store = new VmStore(pool as never);
+  assert.equal(await store.enqueueRead("master3-vm", "kubelet.service", { lines: 100, sinceMinutes: 30 }), 55);
+  assert.match(pool.seen[0]!.text, /INSERT INTO vm_actions \(host, unit, action, params\) VALUES \(\$1, \$2, 'journal', \$3::jsonb\)/);
+  assert.deepEqual(await store.claim("master3-vm"), { lines: 100, sinceMinutes: 30, id: 55, unit: "kubelet.service", action: "journal" });
+  assert.deepEqual(await store.actionResult(55), { status: "succeeded", result: { journal: "x" } });
+});

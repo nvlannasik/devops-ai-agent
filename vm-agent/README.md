@@ -49,3 +49,14 @@ On the cluster's own Kubernetes nodes it is installed by the homelab-k8s playboo
 ```bash
 python3 -m unittest test_vm_agent
 ```
+
+## Journal reads (version 5)
+
+The agent can ask for the newest lines of ONE unit's journal (`node_journal` tool). The read is
+queued like a restart and pulled by this agent — still no inbound port — and runs only
+`journalctl -u <unit> -n <lines> --no-pager -o short-iso [--since=-<N>min]` (at most 500 lines,
+24 h, 48 KB). Only units in `journal_units` are read; unset, that is `kubelet.service
+containerd.service etcd.service` plus the restart allowlist `units`. Secret-looking values
+(private keys, bearer tokens, JWTs, `password=`/`token=`-style pairs, URL passwords) are replaced
+with `[REDACTED]` on this host before the text is sent. An agent older than version 5 refuses
+every journal read, so the central agent can be upgraded first.
