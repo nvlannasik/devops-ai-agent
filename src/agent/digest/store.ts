@@ -27,11 +27,20 @@ export class DigestStore {
   /** Top-level investigations started in the last `hours`, by alert group; `minCount` keeps only the repeaters. */
   async incidentCounts(hours: number, minCount = 1): Promise<IncidentCount[] | null> {
     if (!this.pool) return null;
+    // How long each lasted (alert start → resolve), how many cleared within 30 min, and how many
+    // ended in an applied fix — what agent/digest/build.ts tuningHint reads (C3).
+    const top = TOP_LEVEL.replace(/\b(parent_id|rca)\b/g, "i.$1");
     const { rows } = await this.pool.query(
-      `SELECT alertname, namespace, cluster, count(*)::int AS n, (count(*) FILTER (WHERE resolved_at IS NULL))::int AS open
-         FROM incidents WHERE created_at > now() - make_interval(hours => $1) AND ${TOP_LEVEL}
-        GROUP BY alertname, namespace, cluster HAVING count(*) >= $2
-        ORDER BY n DESC, alertname LIMIT 20`,
+      `SELECT i.alertname, i.namespace, i.cluster, count(DISTINCT i.id)::int AS n,
+              (count(DISTINCT i.id) FILTER (WHERE i.resolved_at IS NULL))::int AS open,
+              (count(DISTINCT i.id) FILTER (WHERE i.resolved_at IS NOT NULL))::int AS resolved,
+              (count(DISTINCT i.id) FILTER (WHERE i.resolved_at - COALESCE(i.alert_started_at, i.created_at) < interval '30 minutes'))::int AS quick,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM i.resolved_at - COALESCE(i.alert_started_at, i.created_at)) / 60) AS median_min,
+              count(DISTINCT r.incident_id)::int AS acted
+         FROM incidents i LEFT JOIN remediations r ON r.incident_id = i.id AND r.status = 'succeeded'
+        WHERE i.created_at > now() - make_interval(hours => $1) AND ${top}
+        GROUP BY i.alertname, i.namespace, i.cluster HAVING count(DISTINCT i.id) >= $2
+        ORDER BY n DESC, i.alertname LIMIT 20`,
       [hours, minCount]
     );
     return rows.map((r: Record<string, unknown>) => ({
@@ -40,6 +49,10 @@ export class DigestStore {
       cluster: (r.cluster as string | null) ?? null,
       count: Number(r.n),
       open: Number(r.open),
+      resolved: Number(r.resolved),
+      quick: Number(r.quick),
+      medianMinutes: r.median_min === null || r.median_min === undefined ? null : Math.round(Number(r.median_min)),
+      acted: Number(r.acted),
     }));
   }
 

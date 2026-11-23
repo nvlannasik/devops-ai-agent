@@ -103,6 +103,33 @@ export interface IncidentCount {
   cluster: string | null;
   count: number;
   open: number;
+  /** Resolved ones; those cleared within 30 min; median minutes alert start → resolve; how many ended in an applied fix. */
+  resolved?: number;
+  quick?: number;
+  medianMinutes?: number | null;
+  acted?: number;
+}
+
+const duration = (min: number): string => (min < 90 ? `${min} min` : `${Math.round((min / 60) * 10) / 10} h`);
+
+/**
+ * What a noisy alert's week says about its RULE (C3, 2026-11-24) — read from the incidents, never
+ * guessed: one that keeps clearing by itself within half an hour and never led to a fix pages for
+ * noise; one that stays open is a cause still there, not a rule to tune; one whose fixes were
+ * applied and keep recurring is a fix that does not hold. Null when the week says nothing clear.
+ */
+export function tuningHint(c: IncidentCount): string | null {
+  const resolved = c.resolved ?? 0;
+  const quick = c.quick ?? 0;
+  const median = c.medianMinutes ?? null;
+  if (resolved >= 3 && quick / resolved >= 0.7 && (c.acted ?? 0) === 0 && median !== null && median < 30) {
+    return `${quick} of ${resolved} cleared within 30 min on their own (median ${duration(median)}) and none led to a fix — lengthen the rule's \`for:\` (or raise its threshold) so it pages for what stays`;
+  }
+  if ((median !== null && median >= 120) || c.open >= 2) {
+    return `${median !== null ? `median ${duration(median)} from firing to resolved` : `${c.open} still open`} — a cause still there; fix the cause, the rule is doing its job`;
+  }
+  if ((c.acted ?? 0) >= 2) return `${c.acted} of them ended in an applied fix and it came back — the fix does not hold`;
+  return null;
 }
 
 export interface DigestData {
@@ -270,7 +297,11 @@ export function renderDigest(d: DigestData): string {
 
   if (d.repeat7d && d.repeat7d.length) {
     lines.push("", "*🔁 Noisy this week* _(investigated 3+ times in 7 days — a rule to tune, or a cause still there)_");
-    for (const c of d.repeat7d.slice(0, 5)) lines.push(`• \`${c.alertname}\` in ${where(c)} — ${c.count}×`);
+    for (const c of d.repeat7d.slice(0, 5)) {
+      lines.push(`• \`${c.alertname}\` in ${where(c)} — ${c.count}×`);
+      const hint = tuningHint(c);
+      if (hint) lines.push(`    ↳ ${hint}`);
+    }
   }
 
   if (d.unread.length) lines.push("", `❔ *Not read:* ${d.unread.join("; ")} — those sections are missing, not empty.`);

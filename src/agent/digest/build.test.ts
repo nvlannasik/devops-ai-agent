@@ -173,3 +173,18 @@ test("renderDigest: the control plane section — a row per master, the findings
   assert.match(t, /↳ ⚠️ and `master3-vm` has the least memory/);
   assert.doesNotMatch(renderDigest(DATA), /Control plane/, "absent when not read");
 });
+
+// The week to 2026-11-24, as production's incidents read it.
+test("tuningHint: clears by itself → the rule; stays open → the cause; fixed and back → the fix; unclear → nothing", async () => {
+  const { tuningHint } = await import("./build.js");
+  const base = { namespace: null, cluster: "dev", open: 0 };
+  assert.match(
+    tuningHint({ ...base, alertname: "KubernetesNodeMemoryPressure", count: 30, resolved: 30, quick: 22, medianMinutes: 11, acted: 0 })!,
+    /^22 of 30 cleared within 30 min on their own \(median 11 min\) and none led to a fix — lengthen the rule's `for:`/
+  );
+  assert.match(tuningHint({ ...base, alertname: "FluxControllerDown", count: 7, resolved: 7, quick: 0, medianMinutes: 3952, acted: 0 })!, /^median 65\.9 h from firing to resolved — a cause still there/);
+  assert.match(tuningHint({ ...base, alertname: "X", count: 4, resolved: 4, quick: 1, medianMinutes: 40, acted: 3 })!, /3 of them ended in an applied fix and it came back/);
+  assert.equal(tuningHint({ ...base, alertname: "KubernetesPodNotHealthy", count: 22, resolved: 22, quick: 12, medianMinutes: 27, acted: 0 }), null);
+  const t = renderDigest({ ...DATA, repeat7d: [{ ...base, alertname: "KubernetesPodCrashLooping", namespace: "kube-system", count: 11, resolved: 11, quick: 11, medianMinutes: 6, acted: 0 }] });
+  assert.match(t, /• `KubernetesPodCrashLooping` in dev\/kube-system — 11×\n    ↳ 11 of 11 cleared within 30 min/);
+});
