@@ -14,8 +14,12 @@ const LOW_AVAILABLE_RATIO = 0.1;
 /** A root disk this full, or this close to full at the window's rate, needs a look. */
 const DISK_FULL_PERCENT = 85;
 const DISK_DAYS_WARN = 14;
-/** The daily lowest available falling by this much across the week = headroom shrinking. */
+/** The daily lowest available falling by this much across the week = headroom shrinking… */
 const SHRINK_BYTES = 50 * MI;
+/** …and worth a look only when it is already low, or would reach zero this soon at its rate.
+ *  2026-11-24: worker2-raspi was flagged for 5446 → 5110Mi with 5 GiB still free. */
+const SHRINK_LOW_RATIO = 0.2;
+const SHRINK_DAYS_WARN = 14;
 
 export interface HostDigest {
   name: string;
@@ -74,10 +78,15 @@ export function hostDigest(name: string, points: StoredPoint[], now: Date): Host
   if (out.total && out.availableNow !== undefined && out.availableNow < out.total * LOW_AVAILABLE_RATIO) {
     out.attention.push(`only ${mi(out.availableNow)} available now (${Math.round((out.availableNow / out.total) * 100)}% of ${mi(out.total)})`);
   }
-  if (out.dailyLowest.length >= 3) {
+  if (out.dailyLowest.length >= 3 && out.total) {
     const first = out.dailyLowest[0]!;
     const lastLow = out.dailyLowest[out.dailyLowest.length - 1]!;
-    if (first - lastLow >= SHRINK_BYTES) out.attention.push(`headroom shrinking — daily lowest available ${out.dailyLowest.map(mi).join(" → ")}`);
+    const perDay = (first - lastLow) / (out.dailyLowest.length - 1);
+    const daysLeft = perDay > 0 ? lastLow / perDay : Infinity;
+    if (first - lastLow >= SHRINK_BYTES && (lastLow < out.total * SHRINK_LOW_RATIO || daysLeft <= SHRINK_DAYS_WARN)) {
+      const at = Number.isFinite(daysLeft) ? ` (~${Math.round(daysLeft)} d to none at ${mi(perDay)}/day)` : "";
+      out.attention.push(`headroom shrinking — daily lowest available ${out.dailyLowest.map(mi).join(" → ")}${at}`);
+    }
   }
   if (out.disk && out.disk.usedPercentNow >= DISK_FULL_PERCENT) out.attention.push(`root disk ${out.disk.usedPercentNow}% used`);
   if (out.disk?.daysToFull !== undefined && out.disk.daysToFull <= DISK_DAYS_WARN) {

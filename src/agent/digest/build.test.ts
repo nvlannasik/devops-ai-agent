@@ -145,3 +145,13 @@ test("renderDigest: a stalled release is named with since when and why; all Read
   assert.match(t, /a Git change to these is not applied until they are Ready again/);
   assert.match(renderDigest(DATA), /• all 20 HelmReleases and 4 Kustomizations Ready/);
 });
+
+test("a shrinking low with plenty left is not flagged; one heading for zero soon is", () => {
+  // worker2-raspi, 2026-11-24: 5446 → 5476 → 5653 → 5110Mi of 7802Mi — 336Mi in 3 days, 45 days of it left.
+  const lows = [5446, 5476, 5653, 5110];
+  const pts = week((h) => ({ memTotal: 7802 * MI, memAvailable: lows[Math.min(3, Math.floor((72 - Math.min(h, 72)) / 24))]! * MI }));
+  assert.deepEqual(hostDigest("worker2-raspi", pts, NOW).attention, []);
+  // 900 → 300Mi of 2000Mi over the week: 100Mi/day, 3 days left — flagged, with the rate
+  const falling = week((h) => ({ memAvailable: (300 + (h / 24) * 100) * MI }));
+  assert.match(hostDigest("m", falling, NOW).attention.join(" | "), /headroom shrinking — .* \(~3 d to none at 100Mi\/day\)/);
+});
