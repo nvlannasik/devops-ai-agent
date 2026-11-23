@@ -698,6 +698,15 @@ export class DashboardQueries {
     };
   }
 
+  /** The daily digests that were posted, newest first (agent/digest, migrations/026): the /digests archive. */
+  async digests(): Promise<Array<{ day: string; text: string; postedAt: Date }>> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `SELECT day::text AS day, text, claimed_at FROM daily_digests WHERE text IS NOT NULL ORDER BY day DESC LIMIT 30`
+    );
+    return rows.map((r) => ({ day: String(r.day), text: String(r.text), postedAt: r.claimed_at }));
+  }
+
   /** Every incident with a draft, newest draft first: the /postmortems list. Never the markdown. */
   async postmortems(): Promise<PostmortemListRow[]> {
     if (!this.pool) return [];

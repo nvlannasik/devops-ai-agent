@@ -18,9 +18,10 @@ export class DigestStore {
     return (r.rowCount ?? 0) > 0;
   }
 
-  async posted(day: string, ts: string): Promise<void> {
+  /** The Slack message the day became, and its text — the dashboard's /digests archive (migrations/026). */
+  async posted(day: string, ts: string, text: string): Promise<void> {
     if (!this.pool) return;
-    await this.pool.query(`UPDATE daily_digests SET ts = $2 WHERE day = $1`, [day, ts]);
+    await this.pool.query(`UPDATE daily_digests SET ts = $2, text = $3 WHERE day = $1`, [day, ts, text]);
   }
 
   /** Top-level investigations started in the last `hours`, by alert group; `minCount` keeps only the repeaters. */

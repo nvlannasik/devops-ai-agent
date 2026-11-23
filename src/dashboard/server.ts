@@ -6,7 +6,7 @@ import logger, { errDetail } from "../utils/logger/index.js";
 import { DashboardQueries } from "./queries.js";
 import { parseFilters, parseRange } from "./filters.js";
 import { loadBenchHistory } from "./bench.js";
-import { benchPage, clusterPage, hostPage, hostsPage, nodeClusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
+import { benchPage, clusterPage, hostPage, hostsPage, nodeClusterPage, contextPage, detailPage, errorPage, harnessGatePage, harnessPage, listPage, peoplePage, type SlackProfile, loginPage, overviewPage, postmortemPage, postmortemsPage, digestsPage, promptPage, skillPage, topologyPage, type ClusterInventory } from "./views.js";
 import { memoryKeyPage, memoryListPage, threadPage, threadsPage, type ThreadIncident } from "./memory-views.js";
 import type { ThreadMemory, ThreadSummary } from "../agent/memory/index.js";
 import type { DashboardClusterModel } from "./cluster-types.js";
@@ -33,7 +33,7 @@ import {
 } from "./auth.js";
 
 export type Route =
-  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "nodes" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" | "people" }
+  | { kind: "overview" | "list" | "health" | "notfound" | "topology" | "context" | "prompt" | "bench" | "harness" | "cluster" | "nodes" | "login" | "logout" | "memory" | "memoryKey" | "memoryThreads" | "postmortems" | "people" | "digests" }
   | { kind: "memoryThread"; threadTs: string }
   | { kind: "harnessGate"; name: string }
   | { kind: "trace"; threadTs: string }
@@ -55,6 +55,7 @@ export function matchRoute(pathname: string): Route {
   if (p === "/logout") return { kind: "logout" };
   if (p === "/incidents") return { kind: "list" };
   if (p === "/postmortems") return { kind: "postmortems" };
+  if (p === "/digests") return { kind: "digests" };
   if (p === "/topology") return { kind: "topology" };
   if (p === "/bench") return { kind: "bench" };
   if (p === "/harness") return { kind: "harness" };
@@ -818,6 +819,10 @@ export class DashboardServer {
             );
           }
           return send(200, postmortemPage(route.id, pm, open, await this.nameMap([pm.requestedBy])));
+        }
+        case "digests": {
+          const [rows, open] = await Promise.all([this.queries.digests(), this.openCount()]);
+          return send(200, digestsPage(rows, open));
         }
         case "postmortems": {
           const [rows, open] = await Promise.all([this.queries.postmortems(), this.openCount()]);

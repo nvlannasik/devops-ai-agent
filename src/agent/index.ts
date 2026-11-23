@@ -365,8 +365,8 @@ export class DevOpsAgent {
     return this.digests.claim(day, channel);
   }
 
-  digestPosted(day: string, ts: string): Promise<void> {
-    return this.digests.posted(day, ts);
+  digestPosted(day: string, ts: string, text: string): Promise<void> {
+    return this.digests.posted(day, ts, text);
   }
 
   /** The registered VM an alert's host label names (agent/vm), or null — Kubernetes alerts carry no such label. */

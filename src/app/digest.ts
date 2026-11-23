@@ -52,7 +52,7 @@ export class DigestSchedule {
     this.settled = day;
     const digest = await this.host.agent.healthDigest(now);
     const res = await this.host.app.client.chat.postMessage({ channel, text: digest.text, mrkdwn: true, unfurl_links: false });
-    if (res.ts) await this.host.agent.digestPosted(day, res.ts).catch((e) => logger.warn(`[digest] posted but not recorded: ${errDetail(e)}`));
+    if (res.ts) await this.host.agent.digestPosted(day, res.ts, digest.text).catch((e) => logger.warn(`[digest] posted but not recorded: ${errDetail(e)}`));
     logger.info(`[digest] posted the ${day} digest to ${channel}`);
     return "posted";
   }

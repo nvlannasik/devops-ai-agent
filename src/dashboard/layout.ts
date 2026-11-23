@@ -19,6 +19,7 @@ const NAV_GROUPS = [
       { href: "/", label: "Overview", icon: ICON.overview },
       { href: "/incidents", label: "Incidents", icon: ICON.incidents, badge: "openIncidents" as const },
       { href: "/postmortems", label: "Postmortems", icon: ICON.postmortem },
+      { href: "/digests", label: "Daily digests", icon: ICON.repeat },
     ],
   },
   {

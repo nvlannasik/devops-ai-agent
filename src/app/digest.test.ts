@@ -18,7 +18,7 @@ const hostWith = (claimWins: boolean) => {
     agent: {
       claimDigest: async (day: string) => (claims.push(day), claimWins),
       healthDigest: async () => ({ day: "x", text: "*🩺 Daily health*" }),
-      digestPosted: async (day: string, ts: string) => void recorded.push(`${day}@${ts}`),
+      digestPosted: async (day: string, ts: string, text: string) => void recorded.push(`${day}@${ts}:${text.length}`),
     },
     app: { client: { chat: { postMessage: async (m: Record<string, unknown>) => (posted.push(m), { ts: "171.1" }) } } },
   };
@@ -36,7 +36,7 @@ test("one claim per local day: the winner posts once, a second tick that day doe
     assert.deepEqual(h.claims, ["2026-11-21"]);
     assert.equal(h.posted.length, 1);
     assert.equal(h.posted[0]!.channel, "C123");
-    assert.deepEqual(h.recorded, ["2026-11-21@171.1"]);
+    assert.deepEqual(h.recorded, ["2026-11-21@171.1:17"], "the text is kept for the dashboard's archive");
     assert.equal(await s.runIfDue(at("2026-11-22T01:00:00Z")), "posted", "the next day is a new claim");
 
     const l = hostWith(false);
