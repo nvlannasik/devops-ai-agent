@@ -628,6 +628,32 @@ export class IncidentMemory {
     }
   }
 
+  /**
+   * The newest top-level incident for EXACTLY this alert group that is still OPEN — the alert has
+   * been firing all along. Same group_labels equality as `recentlyResolved`. Without it, a group
+   * still firing past the 12 h dedup claim was investigated again from scratch: FluxControllerDown
+   * on worker1-raspi, 2026-11-21..23, six investigations ~13 h apart and six incidents open at once.
+   * Only within `maxHours` of opening: a row left open by a missed resolve (reconciler off) must not
+   * keep that alert from ever being investigated again.
+   */
+  async openForGroup(groupLabels: Record<string, string>, maxHours = 72): Promise<{ id: number; channel: string; threadTs: string; createdAt: Date } | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query(
+        `SELECT id, channel, thread_ts, created_at FROM incidents
+          WHERE group_labels = $1::jsonb AND resolved_at IS NULL AND ${TOP_LEVEL}
+            AND created_at > now() - make_interval(hours => $2)
+          ORDER BY id DESC LIMIT 1`,
+        [JSON.stringify(groupLabels), maxHours]
+      );
+      if (rows.length === 0 || !rows[0].channel || !rows[0].thread_ts) return null;
+      return { id: Number(rows[0].id), channel: rows[0].channel, threadTs: rows[0].thread_ts, createdAt: new Date(rows[0].created_at) };
+    } catch (err) {
+      logger.error(`[incidents] openForGroup failed: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   // On-call says it is not over. Same guard in reverse: only a currently-resolved row flips,
   // so a second `reopen` is reported as "already firing" instead of silently doing nothing.
   // The cleared sighting goes too — the sweeper must re-earn its two passes.

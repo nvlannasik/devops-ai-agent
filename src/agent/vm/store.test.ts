@@ -88,3 +88,23 @@ test("parseVmTokens: name=token pairs; unset is none; malformed fails boot", () 
   assert.throws(() => parseVmTokens("VM=x"), /bad VM name/);
   assert.throws(() => parseVmTokens("a=x,a=y"), /duplicate/);
 });
+
+test("host silence: setting silent_since is the claim; recovery clears it and hands back where it was announced", async () => {
+  const pool = fakePool([
+    { rows: [{ name: "master2-vm", node: null, cluster: null, last_seen: "2026-11-20T21:29:37.940Z", snapshot: { load: [1] } }] },
+    { rows: [] },
+    { rows: [{ name: "master2-vm", node: null, cluster: null, silent_since: "2026-11-20T21:29:37.940Z", silent_channel: "C1", silent_ts: "170.1" }] },
+    { rows: [] },
+  ]);
+  const store = new VmStore(pool as never);
+  assert.deepEqual(await store.claimSilent(5), [{ name: "master2-vm", node: null, cluster: null, lastSeen: new Date("2026-11-20T21:29:37.940Z"), snapshot: { load: [1] } }]);
+  assert.match(pool.seen[0]!.text, /SET silent_since = last_seen[\s\S]*WHERE silent_since IS NULL AND last_seen < now\(\) - make_interval\(mins => \$1\)/);
+  await store.silenceAnnounced(["master2-vm"], "C1", "170.1");
+  assert.deepEqual(pool.seen[1]!.values, [["master2-vm"], "C1", "170.1"]);
+  assert.deepEqual(await store.claimRecovered(), [{ name: "master2-vm", node: null, cluster: null, silentSince: new Date("2026-11-20T21:29:37.940Z"), channel: "C1", ts: "170.1" }]);
+  assert.match(pool.seen[2]!.text, /silent_since IS NOT NULL AND last_seen > silent_since FOR UPDATE SKIP LOCKED[\s\S]*SET silent_since = NULL/);
+  await store.unclaimSilent(["master2-vm"]);
+  assert.match(pool.seen[3]!.text, /SET silent_since = NULL WHERE name = ANY\(\$1\) AND silent_ts IS NULL/);
+  assert.deepEqual(await new VmStore(null).claimSilent(5), []);
+  assert.deepEqual(await new VmStore(null).claimRecovered(), []);
+});

@@ -126,7 +126,7 @@ test("executeRemediation on a stored revert card sends revert_pr with dryRun fal
   assert.deepEqual({ sha: pr.sha, dryRun: pr.dryRun, pathPrefix: pr.pathPrefix }, { sha: "bad1111", dryRun: false, pathPrefix: "apps/dev" });
   assert.ok((pr.incident as { checks?: unknown[] }).checks, "the PR carries the pre-merge checks");
   // reads only — the approval opens a PR, it never patches the cluster
-  assert.ok(mcpCalls.every((n) => n === "k8s_list_pods" || n === "alertmanager_get_alerts"), mcpCalls.join(","));
+  assert.ok(mcpCalls.every((n) => n === "k8s_list_pods" || n === "alertmanager_get_alerts" || n === "k8s_get_custom_resources"), mcpCalls.join(","));
 });
 
 // proposeRemediationRun end to end on a fake `this`: the model answers a rollout_undo, the MCP

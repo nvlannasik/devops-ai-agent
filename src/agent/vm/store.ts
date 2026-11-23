@@ -142,6 +142,58 @@ export class VmStore {
     }));
   }
 
+  /**
+   * Host silence (migrations/023): claims every host whose last heartbeat is older than `minutes` and
+   * whose silence is not announced yet. Setting `silent_since` IS the claim — one replica gets each row.
+   */
+  async claimSilent(minutes: number): Promise<Array<{ name: string; node: string | null; cluster: string | null; lastSeen: Date; snapshot: Record<string, unknown> | null }>> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `UPDATE vm_hosts SET silent_since = last_seen
+        WHERE silent_since IS NULL AND last_seen < now() - make_interval(mins => $1)
+        RETURNING name, node, cluster, last_seen, snapshot`,
+      [minutes]
+    );
+    return rows.map((r: Record<string, unknown>) => ({
+      name: String(r.name),
+      node: (r.node as string | null) ?? null,
+      cluster: (r.cluster as string | null) ?? null,
+      lastSeen: new Date(r.last_seen as string),
+      snapshot: (r.snapshot as Record<string, unknown> | null) ?? null,
+    }));
+  }
+
+  /** Gives claims back (the announcement could not be posted) — the next tick tries again. */
+  async unclaimSilent(names: string[]): Promise<void> {
+    if (!this.pool || names.length === 0) return;
+    await this.pool.query(`UPDATE vm_hosts SET silent_since = NULL WHERE name = ANY($1) AND silent_ts IS NULL`, [names]);
+  }
+
+  /** Where the silence of these hosts was announced — their recovery is posted in that thread. */
+  async silenceAnnounced(names: string[], channel: string, ts: string): Promise<void> {
+    if (!this.pool || names.length === 0) return;
+    await this.pool.query(`UPDATE vm_hosts SET silent_channel = $2, silent_ts = $3 WHERE name = ANY($1)`, [names, channel, ts]);
+  }
+
+  /** Claims every announced host that heartbeated since — clearing the mark is the claim — with where it was announced. */
+  async claimRecovered(): Promise<Array<{ name: string; node: string | null; cluster: string | null; silentSince: Date; channel: string | null; ts: string | null }>> {
+    if (!this.pool) return [];
+    const { rows } = await this.pool.query(
+      `WITH r AS (SELECT name, silent_since, silent_channel, silent_ts FROM vm_hosts
+                   WHERE silent_since IS NOT NULL AND last_seen > silent_since FOR UPDATE SKIP LOCKED)
+       UPDATE vm_hosts v SET silent_since = NULL, silent_channel = NULL, silent_ts = NULL FROM r WHERE v.name = r.name
+       RETURNING v.name, v.node, v.cluster, r.silent_since, r.silent_channel, r.silent_ts`
+    );
+    return rows.map((r: Record<string, unknown>) => ({
+      name: String(r.name),
+      node: (r.node as string | null) ?? null,
+      cluster: (r.cluster as string | null) ?? null,
+      silentSince: new Date(r.silent_since as string),
+      channel: (r.silent_channel as string | null) ?? null,
+      ts: (r.silent_ts as string | null) ?? null,
+    }));
+  }
+
   /** The newest VM actions, any host — what was asked of the hosts and what they answered. */
   async recentActions(limit = 30): Promise<VmActionRow[]> {
     if (!this.pool) return [];

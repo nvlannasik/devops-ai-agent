@@ -1,6 +1,9 @@
 import { getRedis } from "../../db/redis.js";
 
-const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours — matches Alertmanager repeat_interval
+// 12 hours. NOT Alertmanager's repeat_interval (1 h in dev): a group still firing when the claim
+// lapses reaches app/alerts again, where continueOpen notes it in the open incident's thread — so
+// this is also how often a long-running incident gets a "still firing" line.
+const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 
 /** The one Redis key prefix this module writes. See REDIS_KEYS in agent/memory for why these
  *  are named rather than inlined: the topology page lists them, and a copy would drift. */

@@ -7,7 +7,9 @@
 //   - the workload now: pods ready / total and restarts (k8s_list_pods, the verification's parser);
 //   - what is firing on it: Alertmanager, unfiltered, matched on namespace + the workload's name;
 //   - recent Git changes to the HelmRelease (the worker's `history` op, last 24 h): someone else
-//     changing the same file is the conflict a merge would walk into.
+//     changing the same file is the conflict a merge would walk into;
+//   - whether Flux will apply the merge at all (the HelmRelease's own Ready/Stalled, 2026-11-24): six
+//     releases sat Stalled from 9 to 23 Nov, and a PR to any of them would have merged into nothing.
 //
 // INFORMATIVE ONLY — nothing here blocks the PR. The card was approved by a human against the
 // evidence of the incident; a check that could refuse it now would be a second approval gate
@@ -87,7 +89,32 @@ export function historyCheck(p: HistoryPayload): PreflightCheck {
   return { name: `Git changes (${HISTORY_HOURS} h)`, status: "warn", detail: `${p.commits.length} commit${p.commits.length === 1 ? "" : "s"} — check it does not conflict: ${list}${more}` };
 }
 
-/** All three, in parallel, each bounded; never throws. */
+/** The HelmRelease object (k8s_get_custom_resources with `name`) → will Flux apply a merge to it? */
+export function fluxReleaseCheck(raw: string, hr: { name: string; namespace: string }): PreflightCheck {
+  const name = "Flux release";
+  let obj: { spec?: { suspend?: unknown }; status?: { conditions?: Array<{ type?: string; status?: string; message?: string; lastTransitionTime?: string }> } };
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return { name, status: "unknown", detail: "the HelmRelease could not be read" };
+  }
+  if (!obj || typeof obj !== "object" || !obj.status) return { name, status: "unknown", detail: "the HelmRelease could not be read" };
+  const id = `\`${hr.namespace}/${hr.name}\``;
+  if (obj.spec?.suspend === true) return { name, status: "warn", detail: `${id} is suspended — Flux will not apply this merge until it is resumed` };
+  const cond = (t: string) => obj.status?.conditions?.find((c) => c.type === t);
+  const ready = cond("Ready");
+  const stalled = cond("Stalled");
+  const since = (c: { lastTransitionTime?: string } | undefined) => (c?.lastTransitionTime ? ` since ${c.lastTransitionTime.slice(0, 10)}` : "");
+  const msg = (c: { message?: string } | undefined) => (c?.message ? `: ${c.message.replace(/\s+/g, " ").slice(0, 120)}` : "");
+  if (stalled?.status === "True") {
+    return { name, status: "warn", detail: `${id} is Stalled${since(stalled)}${msg(stalled)} — Flux has stopped retrying it, so this merge is not applied until its failure count is reset` };
+  }
+  if (ready?.status === "False") return { name, status: "warn", detail: `${id} is not Ready${since(ready)}${msg(ready)} — the merge may not be applied` };
+  if (ready?.status === "True") return { name, status: "ok", detail: `${id} is Ready — Flux applies the merge` };
+  return { name, status: "info", detail: `${id} Ready=${ready?.status ?? "unknown"}${msg(ready)}` };
+}
+
+/** All four, in parallel, each bounded; never throws. */
 export async function preflightChecks(
   deps: PreflightDeps,
   workload: { namespace: string; name: string } | null,
@@ -108,6 +135,11 @@ export async function preflightChecks(
         .catch((e) => ({ name: "Firing alerts", status: "unknown" as const, detail: `not read: ${why(e)}` }))
     );
   }
+  jobs.push(
+    within(ms, deps.callTool("k8s_get_custom_resources", { group: "helm.toolkit.fluxcd.io", version: "v2", plural: "helmreleases", namespace: helmRelease.namespace, name: helmRelease.name }))
+      .then((raw) => fluxReleaseCheck(raw, helmRelease))
+      .catch((e) => ({ name: "Flux release", status: "unknown" as const, detail: `not read: ${why(e)}` }))
+  );
   if (deps.history) {
     const since = new Date(now() - HISTORY_HOURS * 3_600_000).toISOString();
     jobs.push(

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertsCheck, historyCheck, podsCheck, preflightChecks, preflightNote } from "./preflight.js";
+import { alertsCheck, historyCheck, podsCheck, preflightChecks, preflightNote, fluxReleaseCheck } from "./preflight.js";
 
 const pods = JSON.stringify([
   { name: "api-7d9-abc", status: "Running", ready: true, restarts: 0 },
@@ -51,7 +51,39 @@ test("a source that throws or hangs is unknown, never ok, and nothing throws", a
     { namespace: "apps", name: "api" },
     { name: "api", namespace: "flux-system" }
   );
-  assert.deepEqual(checks.map((c) => [c.name, c.status]), [["Workload now", "unknown"], ["Firing alerts", "unknown"], ["Git changes (24 h)", "ok"]]);
+  assert.deepEqual(checks.map((c) => [c.name, c.status]), [["Workload now", "unknown"], ["Firing alerts", "unknown"], ["Flux release", "unknown"], ["Git changes (24 h)", "ok"]]);
+});
+
+// 2026-11-09..23: six HelmReleases Stalled after four failed installs — a merged PR to any of them
+// would have changed nothing in the cluster, and nothing said so.
+test("a Stalled, not-Ready or suspended HelmRelease is the warning that the merge will not land", () => {
+  const hr = { name: "checkout-gateway", namespace: "flux-app" };
+  const obj = (spec: object, conditions: object[]) => JSON.stringify({ spec, status: { conditions } });
+  const stalled = fluxReleaseCheck(
+    obj({}, [
+      { type: "Ready", status: "False", message: "Helm install failed", lastTransitionTime: "2026-11-09T17:09:18Z" },
+      { type: "Stalled", status: "True", message: "Failed to install after 4 attempt(s)", lastTransitionTime: "2026-11-09T17:09:18Z" },
+    ]),
+    hr
+  );
+  assert.equal(stalled.status, "warn");
+  assert.match(stalled.detail, /`flux-app\/checkout-gateway` is Stalled since 2026-11-09: Failed to install after 4 attempt\(s\) — Flux has stopped retrying it/);
+  assert.match(fluxReleaseCheck(obj({}, [{ type: "Ready", status: "False", message: "upgrade retries exhausted" }]), hr).detail, /is not Ready: upgrade retries exhausted/);
+  assert.match(fluxReleaseCheck(obj({ suspend: true }, [{ type: "Ready", status: "True" }]), hr).detail, /is suspended — Flux will not apply this merge/);
+  assert.deepEqual(fluxReleaseCheck(obj({}, [{ type: "Ready", status: "True" }]), hr), { name: "Flux release", status: "ok", detail: "`flux-app/checkout-gateway` is Ready — Flux applies the merge" });
+  assert.equal(fluxReleaseCheck("Error: helmreleases not found", hr).status, "unknown");
+  assert.equal(fluxReleaseCheck("{}", hr).status, "unknown");
+});
+
+test("the Flux check reads the card's own HelmRelease object", async () => {
+  const asked: unknown[] = [];
+  const checks = await preflightChecks(
+    { callTool: async (name, input) => (asked.push([name, input]), name === "k8s_get_custom_resources" ? JSON.stringify({ status: { conditions: [{ type: "Ready", status: "True" }] } }) : "[]") },
+    null,
+    { name: "orders-api", namespace: "flux-app" }
+  );
+  assert.deepEqual(asked, [["k8s_get_custom_resources", { group: "helm.toolkit.fluxcd.io", version: "v2", plural: "helmreleases", namespace: "flux-app", name: "orders-api" }]]);
+  assert.deepEqual(checks.map((c) => c.status), ["ok"]);
 });
 
 test("the Slack note names only what needs a look", () => {

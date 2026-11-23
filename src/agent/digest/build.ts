@@ -108,9 +108,73 @@ export interface DigestData {
   openTotal: number | null;
   /** Alertmanager, now: alert name -> count and the highest severity seen. */
   firing: Array<{ name: string; count: number; severity: string | null }> | null;
+  /** Flux objects that are not Ready (suspended ones aside), and how many there are in all. */
+  gitops: FluxDigest | null;
   /** What could not be read, with why. */
   unread: string[];
 }
+
+export interface FluxObject {
+  kind: "HelmRelease" | "Kustomization";
+  namespace: string;
+  name: string;
+  ready: string | null;
+  message: string | null;
+  since: Date | null;
+}
+
+export interface FluxDigest {
+  notReady: FluxObject[];
+  helmReleases: number;
+  kustomizations: number;
+  suspended: number;
+}
+
+/**
+ * `k8s_get_custom_resources` listings (compact rows: name, namespace, ready, message, since?,
+ * suspended?) for HelmReleases and Kustomizations → what is not Ready. A suspended object is
+ * counted apart: someone paused it on purpose. Null when either answer is not a listing.
+ */
+export function fluxFrom(rawHelmReleases: string, rawKustomizations: string): FluxDigest | null {
+  const rows = (raw: string): Array<Record<string, unknown>> | null => {
+    try {
+      const v = JSON.parse(raw);
+      return Array.isArray(v) ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  const hr = rows(rawHelmReleases);
+  const ks = rows(rawKustomizations);
+  if (!hr || !ks) return null;
+  const notReady: FluxObject[] = [];
+  let suspended = 0;
+  for (const [kind, list] of [["HelmRelease", hr], ["Kustomization", ks]] as const) {
+    for (const r of list) {
+      if (r.suspended === true) {
+        suspended++;
+        continue;
+      }
+      if (r.ready === "True") continue;
+      const since = typeof r.since === "string" && Number.isFinite(Date.parse(r.since)) ? new Date(r.since) : null;
+      notReady.push({
+        kind,
+        namespace: String(r.namespace ?? ""),
+        name: String(r.name ?? ""),
+        ready: typeof r.ready === "string" ? r.ready : null,
+        message: typeof r.message === "string" ? r.message : null,
+        since,
+      });
+    }
+  }
+  notReady.sort((a, b) => (a.since?.getTime() ?? 0) - (b.since?.getTime() ?? 0));
+  return { notReady, helmReleases: hr.length, kustomizations: ks.length, suspended };
+}
+
+const daysAgo = (d: Date, now: Date): string => {
+  const h = (now.getTime() - d.getTime()) / 3_600_000;
+  return h < 48 ? `${Math.max(1, Math.round(h))} h` : `${Math.round(h / 24)} d`;
+};
 
 const where = (c: IncidentCount): string => [c.cluster, c.namespace].filter(Boolean).join("/") || "cluster-wide";
 
@@ -121,6 +185,7 @@ export function renderDigest(d: DigestData): string {
   const summary: string[] = [];
   if (d.hosts) summary.push(attention.length ? `${attention.length} of ${d.hosts.length} hosts need a look` : `${d.hosts.length} hosts, none need a look`);
   if (d.firing) summary.push(d.firing.length ? `${d.firing.reduce((a, f) => a + f.count, 0)} alerts firing` : "nothing firing");
+  if (d.gitops && d.gitops.notReady.length) summary.push(`${d.gitops.notReady.length} Flux object${d.gitops.notReady.length === 1 ? "" : "s"} not Ready`);
   if (d.incidents24h) summary.push(`${d.incidents24h.reduce((a, c) => a + c.count, 0)} investigations in 24 h`);
   if (d.openTotal !== null) summary.push(`${d.openTotal} incidents open`);
   if (summary.length) lines.push(summary.join(" · "));
@@ -150,6 +215,22 @@ export function renderDigest(d: DigestData): string {
     if (d.firing.length === 0) lines.push("• nothing");
     for (const f of d.firing.slice(0, 10)) lines.push(`• \`${f.name}\` × ${f.count}${f.severity ? ` _(${f.severity})_` : ""}`);
     if (d.firing.length > 10) lines.push(`• … and ${d.firing.length - 10} more`);
+  }
+
+  if (d.gitops) {
+    lines.push("", "*🔄 GitOps (Flux)*");
+    const g = d.gitops;
+    if (g.notReady.length === 0) {
+      lines.push(`• all ${g.helmReleases} HelmReleases and ${g.kustomizations} Kustomizations Ready${g.suspended ? ` (${g.suspended} suspended)` : ""}`);
+    } else {
+      for (const o of g.notReady.slice(0, 8)) {
+        const since = o.since ? ` since ${o.since.toISOString().slice(0, 10)} (${daysAgo(o.since, d.now)})` : "";
+        const msg = o.message ? `: ${o.message.replace(/\s+/g, " ").slice(0, 140)}` : "";
+        lines.push(`• ⚠️ ${o.kind} \`${o.namespace}/${o.name}\` — Ready=${o.ready ?? "unknown"}${since}${msg}`);
+      }
+      if (g.notReady.length > 8) lines.push(`• … and ${g.notReady.length - 8} more`);
+      lines.push("    ↳ a Git change to these is not applied until they are Ready again");
+    }
   }
 
   if (d.incidents24h) {

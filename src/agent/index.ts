@@ -838,6 +838,11 @@ export class DevOpsAgent {
     return this.incidents.recentlyResolved(groupLabels, withinMinutes);
   }
 
+  /** The still-open incident of exactly this alert group, if any (app/alerts continueOpen). */
+  openIncidentFor(groupLabels: Record<string, string>) {
+    return this.incidents.openForGroup(groupLabels);
+  }
+
   /** Reopens a resolved incident (a flap fired again); null when it was not resolved. */
   reopenIncident(id: number, by: string) {
     return this.incidents.reopenById(id, by);

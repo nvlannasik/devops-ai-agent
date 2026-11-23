@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hostDigest, renderDigest, firingFrom, digestDue, localClock, type DigestData } from "./build.js";
+import { hostDigest, renderDigest, firingFrom, fluxFrom, digestDue, localClock, type DigestData } from "./build.js";
 import { collectDigest } from "./collect.js";
 import type { StoredPoint } from "../vm/history.js";
 
@@ -53,6 +53,7 @@ const DATA: DigestData = {
   repeat7d: [{ alertname: "KubernetesNodeMemoryPressure", namespace: null, cluster: "dev", count: 9, open: 1 }],
   openTotal: 2,
   firing: [{ name: "KubernetesNodeMemoryPressure", count: 1, severity: "warning" }],
+  gitops: { notReady: [], helmReleases: 20, kustomizations: 4, suspended: 0 },
   unread: [],
 };
 
@@ -105,7 +106,7 @@ test("collectDigest: a failing source is listed as unread and the others still a
   const d = await collectDigest({
     vm: { hosts: async () => [{ name: "stg.worker1", node: "worker1" }] as never, history: async () => week(() => ({})) },
     store: { incidentCounts: async () => [], openTotal: async () => { throw new Error("connection refused"); } },
-    callTool: async () => JSON.stringify({ groups: [] }),
+    callTool: async (name) => (name === "k8s_get_custom_resources" ? "[]" : JSON.stringify({ groups: [] })),
     timeZone: "Asia/Jakarta",
     now: NOW,
   });
@@ -116,5 +117,31 @@ test("collectDigest: a failing source is listed as unread and the others still a
   assert.deepEqual(d.unread, ["open incidents (connection refused)"]);
   const bad = await collectDigest({ vm: { hosts: async () => [], history: async () => [] }, store: { incidentCounts: async () => null, openTotal: async () => null }, callTool: async () => "nope", timeZone: "UTC", now: NOW });
   assert.equal(bad.hosts, null, "no host agents: the section is absent");
-  assert.deepEqual(bad.unread, ["Alertmanager (unexpected answer)"]);
+  assert.deepEqual(bad.unread.sort(), ["Alertmanager (unexpected answer)", "Flux (unexpected answer)"]);
+});
+
+// 2026-11-09..23: six HelmReleases Stalled for two weeks and nothing anywhere said so.
+const HR = JSON.stringify([
+  { name: "checkout-gateway", namespace: "flux-app", ready: "False", message: "Failed to install after 4 attempt(s)", since: "2026-11-09T17:09:18Z" },
+  { name: "devops-ai-stack", namespace: "flux-app", ready: "True", since: "2026-11-20T17:40:00Z" },
+  { name: "paused", namespace: "flux-app", ready: "False", suspended: true },
+]);
+const KS = JSON.stringify([{ name: "apps", namespace: "flux-app", ready: "True" }]);
+
+test("fluxFrom: what is not Ready, oldest first; suspended counted apart; another shape is unread", () => {
+  const g = fluxFrom(HR, KS)!;
+  assert.equal(g.helmReleases, 3);
+  assert.equal(g.kustomizations, 1);
+  assert.equal(g.suspended, 1);
+  assert.deepEqual(g.notReady.map((o) => [o.kind, o.namespace, o.name, o.ready]), [["HelmRelease", "flux-app", "checkout-gateway", "False"]]);
+  assert.equal(g.notReady[0]!.since!.toISOString(), "2026-11-09T17:09:18.000Z");
+  assert.equal(fluxFrom("Error: forbidden", KS), null);
+});
+
+test("renderDigest: a stalled release is named with since when and why; all Ready is one line", () => {
+  const t = renderDigest({ ...DATA, gitops: fluxFrom(HR, KS) });
+  assert.match(t, /1 Flux object not Ready/);
+  assert.match(t, /\*🔄 GitOps \(Flux\)\*\n• ⚠️ HelmRelease `flux-app\/checkout-gateway` — Ready=False since 2026-11-09 \(11 d\): Failed to install after 4 attempt\(s\)/);
+  assert.match(t, /a Git change to these is not applied until they are Ready again/);
+  assert.match(renderDigest(DATA), /• all 20 HelmReleases and 4 Kustomizations Ready/);
 });

@@ -206,6 +206,31 @@ export class AlertFlow {
     return true;
   }
 
+  /**
+   * The group is STILL FIRING and its incident is still open: Alertmanager re-sends it every
+   * `repeat_interval` (1 h) and the dedup claim lasts 12 h, so every ~13 h the claim lapsed and
+   * the next repeat started a full investigation in a new thread — FluxControllerDown on
+   * worker1-raspi during the 2026-11-21..23 control-plane outage: six investigations, none able to
+   * read Kubernetes, six incidents open at once. Now one line goes into the open incident's
+   * thread instead, at most once per claim (12 h). Any failure takes the normal path.
+   */
+  async continueOpen(groupLabels: Record<string, string>, alertName: string): Promise<boolean> {
+    const open = await this.host.agent.openIncidentFor(groupLabels);
+    if (!open) return false;
+    const hours = Math.max(1, Math.round((Date.now() - open.createdAt.getTime()) / 3_600_000));
+    await this.host.app.client.chat.postMessage({
+      channel: open.channel,
+      thread_ts: open.threadTs,
+      text:
+        `⏳ *Still firing* — ${alertName}, ${hours} h since this incident opened. Same alert, same labels, and the ` +
+        `incident is still open, so it was not investigated again. Mention me to look again, or say \`resolved\` ` +
+        `once it is fixed.`,
+      mrkdwn: true,
+    });
+    logger.info(`[slack] ${alertName} still firing after ${hours} h — noted in the open incident ${open.id} (thread ${open.threadTs}), not re-investigated`);
+    return true;
+  }
+
   async handleAlert(payload: AlertmanagerPayload): Promise<void> {
     const channel = config.slack.alertChannel;
     if (!channel) { logger.warn("SLACK_ALERT_CHANNEL not set, skipping"); return; }
@@ -226,8 +251,9 @@ export class AlertFlow {
     const groupLabels = groupIdentity(payload, firing);
     const alertName = groupLabels.alertname ?? firing[0].labels.alertname ?? "Unknown";
 
-    // Dedup on the GROUP identity: a re-fire of the same group (12h repeat_interval) is
-    // suppressed as a unit, and under agent autoscaling only the first replica investigates.
+    // Dedup on the GROUP identity: a re-fire of the same group within the claim (12 h) is
+    // suppressed as a unit, and under agent autoscaling only the first replica investigates. A
+    // re-fire after it, with the incident still open, is continueOpen's.
     if (!(await this.host.dedup.shouldProcess(groupLabels))) {
       logger.info(`[slack] duplicate alert group suppressed: ${alertName} (${firing.length} firing)`);
       return;
@@ -240,6 +266,15 @@ export class AlertFlow {
     logger.info(`[slack] processing alert group: ${alertName} severity=${alertSeverity ?? "unknown"} firing=${firing.length}`);
 
     const issueText = buildGroupAlertText(groupLabels, firing, payload.commonAnnotations);
+
+    // Still firing, incident still open: a line in its thread, not a second investigation.
+    if (
+      await this.continueOpen(groupLabels, alertName).catch((e) => {
+        logger.warn(`[slack] open-incident check failed for ${alertName}, taking the normal path: ${errDetail(e)}`);
+        return false;
+      })
+    )
+      return;
 
     // A flap: the same group resolved a few minutes ago. Back into that thread, not a new one.
     if (

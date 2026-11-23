@@ -1,6 +1,6 @@
 import type { VmStore } from "../vm/store.js";
 import type { DigestStore } from "./store.js";
-import { firingFrom, hostDigest, localClock, type DigestData } from "./build.js";
+import { firingFrom, fluxFrom, hostDigest, localClock, type DigestData } from "./build.js";
 
 const TIMEOUT_MS = 20_000;
 const HISTORY_HOURS = 168;
@@ -12,7 +12,7 @@ const why = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 export interface DigestDeps {
   vm: Pick<VmStore, "hosts" | "history">;
   store: Pick<DigestStore, "incidentCounts" | "openTotal">;
-  /** A central (non-Kubernetes) MCP tool call — Alertmanager. */
+  /** An MCP tool call on the local cluster — Alertmanager, and Flux's objects through k8s_get_custom_resources. */
   callTool: (name: string, args: Record<string, unknown>) => Promise<string>;
   timeZone: string;
   now?: Date;
@@ -27,7 +27,7 @@ export async function collectDigest(deps: DigestDeps): Promise<DigestData> {
   const read = <T>(label: string, p: () => Promise<T | null>): Promise<T | null> =>
     within(ms, p()).catch((e) => (unread.push(`${label} (${why(e)})`), null));
 
-  const [hosts, incidents24h, repeat7d, openTotal, firing] = await Promise.all([
+  const [hosts, incidents24h, repeat7d, openTotal, firing, gitops] = await Promise.all([
     read("host history", async () => {
       const list = await deps.vm.hosts();
       if (list.length === 0) return null;
@@ -41,7 +41,16 @@ export async function collectDigest(deps: DigestDeps): Promise<DigestData> {
       if (f === null) throw new Error("unexpected answer");
       return f;
     }),
+    read("Flux", async () => {
+      const [hr, ks] = await Promise.all([
+        deps.callTool("k8s_get_custom_resources", { group: "helm.toolkit.fluxcd.io", version: "v2", plural: "helmreleases" }),
+        deps.callTool("k8s_get_custom_resources", { group: "kustomize.toolkit.fluxcd.io", version: "v1", plural: "kustomizations" }),
+      ]);
+      const g = fluxFrom(hr, ks);
+      if (g === null) throw new Error("unexpected answer");
+      return g;
+    }),
   ]);
   // A source with nothing to say (no pool, no host agents) is absent, not unread.
-  return { day: localClock(now, deps.timeZone).day, now, hosts, incidents24h, repeat7d, openTotal, firing, unread };
+  return { day: localClock(now, deps.timeZone).day, now, hosts, incidents24h, repeat7d, openTotal, firing, gitops, unread };
 }

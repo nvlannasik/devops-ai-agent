@@ -79,6 +79,15 @@ export function parseVmTokens(raw: string | undefined): Map<string, string> {
   return out;
 }
 
+/** A positive integer setting, or `dflt` when unset. Anything else fails boot. */
+export function positiveInt(raw: string | undefined, dflt: number, name: string): number {
+  const v = (raw ?? "").trim();
+  if (!v) return dflt;
+  const n = Number(v);
+  if (!Number.isSafeInteger(n) || n < 1) throw new Error(`${name} "${v}" is not a positive integer`);
+  return n;
+}
+
 /** DIGEST_TIME as HH:MM (24 h), default 08:00. Malformed fails boot, like the cluster lists. */
 export function digestTime(raw: string | undefined): string {
   const v = (raw ?? "").trim() || "08:00";
@@ -279,6 +288,15 @@ export const config = {
   // be unchanged for anyone not using it. Behind a shared-password session (see
   // docs/DESIGN_dashboard_auth.md); with DASHBOARD_PASSWORD unset it serves 503 rather
   // than serving incidents anonymously.
+  // Host silence (app/host-watch, 2026-11-24): a host whose devops-vm-agent stopped heartbeating for
+  // HOST_SILENT_MINUTES (default 5) is announced in the alert channel, with what etcd's quorum looks
+  // like from the hosts' own reports; its return is posted in the same thread. Needs Postgres and
+  // VM_AGENT_TOKENS. HOST_WATCH_ENABLED=false = off.
+  hostWatch: {
+    enabled: process.env.HOST_WATCH_ENABLED !== "false",
+    silentMinutes: positiveInt(process.env.HOST_SILENT_MINUTES, 5, "HOST_SILENT_MINUTES"),
+  },
+
   // C1: the daily health digest (agent/digest) — host headroom and disk forecast from the host history,
   // the last day's investigations, the noisy alerts of the week, what is firing now. Posted once a day
   // at DIGEST_TIME in DIGEST_TIMEZONE (an IANA name) to DIGEST_CHANNEL (default the alert channel).
