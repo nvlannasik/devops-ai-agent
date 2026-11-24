@@ -9,7 +9,10 @@
 //   - recent Git changes to the HelmRelease (the worker's `history` op, last 24 h): someone else
 //     changing the same file is the conflict a merge would walk into;
 //   - whether Flux will apply the merge at all (the HelmRelease's own Ready/Stalled, 2026-11-24): six
-//     releases sat Stalled from 9 to 23 Nov, and a PR to any of them would have merged into nothing.
+//     releases sat Stalled from 9 to 23 Nov, and a PR to any of them would have merged into nothing;
+//   - what the PR's own change would do (D3 for the agent's PRs, 2026-11-24): a memory limit against
+//     the container's 7-day peak working set (an OOMKill at the next peak, bench A02/C02), and an image
+//     tag against its registry (ImagePullBackOff on the next rollout, bench A03/A08).
 //
 // INFORMATIVE ONLY — nothing here blocks the PR. The card was approved by a human against the
 // evidence of the incident; a check that could refuse it now would be a second approval gate
@@ -18,6 +21,9 @@
 
 import type { HistoryPayload } from "../changes/index.js";
 import { summarizePods } from "../remediation/verify.js";
+import { parseQuantity } from "../../utils/quantity/index.js";
+import { imageExists, type ImageAnswer } from "./registry.js";
+import type { GitOpsChange } from "./types.js";
 
 export type CheckStatus = "ok" | "warn" | "info" | "unknown";
 export interface PreflightCheck {
@@ -28,6 +34,8 @@ export interface PreflightCheck {
 
 export interface PreflightDeps {
   callTool(name: string, input: Record<string, unknown>): Promise<string>;
+  /** Registry lookups for an image change; a test passes a fake. */
+  imageExists?: (image: string) => Promise<ImageAnswer>;
   history?: (hr: { name: string; namespace: string }, since: string) => Promise<HistoryPayload>;
   timeoutMs?: number;
   now?: () => number;
@@ -89,6 +97,44 @@ export function historyCheck(p: HistoryPayload): PreflightCheck {
   return { name: `Git changes (${HISTORY_HOURS} h)`, status: "warn", detail: `${p.commits.length} commit${p.commits.length === 1 ? "" : "s"} — check it does not conflict: ${list}${more}` };
 }
 
+const MI = 1048576;
+const mi = (b: number) => `${Math.round(b / MI)}Mi`;
+/** A new limit closer than this to the peak leaves no room for the next spike. */
+const PEAK_MARGIN = 1.15;
+
+/** The PromQL for a container's peak working set over the last 7 days of recorded data. */
+export const peakQuery = (namespace: string, workload: string, container: string): string =>
+  `max(max_over_time(container_memory_working_set_bytes{namespace="${namespace}", pod=~"${workload}-.*", container="${container}"}[7d]))`;
+
+/** A memory limit change against what the container really used: below its peak is the next OOMKill. */
+export function memoryCheck(raw: string, change: GitOpsChange, container: string): PreflightCheck {
+  const name = "Memory limit vs peak";
+  const to = parseQuantity(String(change.to));
+  let peak: number | null = null;
+  try {
+    const v = JSON.parse(raw) as { result?: Array<{ value?: [number, string] }> };
+    const n = Number(v?.result?.[0]?.value?.[1]);
+    peak = Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    peak = null;
+  }
+  if (to === null) return { name, status: "unknown", detail: `\`${change.to}\` is not a quantity` };
+  if (peak === null) return { name, status: "unknown", detail: `no working-set data for \`${container}\` in the last 7 days` };
+  const pct = Math.round((to / peak - 1) * 100);
+  if (to < peak) return { name, status: "warn", detail: `${String(change.to)} is BELOW \`${container}\`'s 7-day peak working set ${mi(peak)} — it would be OOMKilled at its next peak` };
+  if (to < peak * PEAK_MARGIN) return { name, status: "warn", detail: `${String(change.to)} is only ${pct}% above \`${container}\`'s 7-day peak ${mi(peak)} — little room for the next spike` };
+  return { name, status: "ok", detail: `${String(change.to)} vs \`${container}\`'s 7-day peak ${mi(peak)} (+${pct}%)` };
+}
+
+/** An image change against its registry: a tag nobody pushed is ImagePullBackOff on the next rollout. */
+export function imageCheck(answer: ImageAnswer, image: string): PreflightCheck {
+  const name = "Image exists";
+  if ("unknown" in answer) return { name, status: "unknown", detail: `\`${image}\` not checked: ${answer.unknown}` };
+  return answer.exists
+    ? { name, status: "ok", detail: `\`${image}\` is in its registry` }
+    : { name, status: "warn", detail: `\`${image}\` does NOT exist in its registry (manifest 404) — the rollout would fail with ImagePullBackOff` };
+}
+
 /** The HelmRelease object (k8s_get_custom_resources with `name`) → will Flux apply a merge to it? */
 export function fluxReleaseCheck(raw: string, hr: { name: string; namespace: string }): PreflightCheck {
   const name = "Flux release";
@@ -114,11 +160,12 @@ export function fluxReleaseCheck(raw: string, hr: { name: string; namespace: str
   return { name, status: "info", detail: `${id} Ready=${ready?.status ?? "unknown"}${msg(ready)}` };
 }
 
-/** All four, in parallel, each bounded; never throws. */
+/** All of them, in parallel, each bounded; never throws. `change`: the PR's own changes (absent for a revert). */
 export async function preflightChecks(
   deps: PreflightDeps,
   workload: { namespace: string; name: string } | null,
-  helmRelease: { name: string; namespace: string }
+  helmRelease: { name: string; namespace: string },
+  change?: { container?: string; changes: GitOpsChange[] }
 ): Promise<PreflightCheck[]> {
   const ms = deps.timeoutMs ?? TIMEOUT_MS;
   const now = deps.now ?? Date.now;
@@ -134,6 +181,24 @@ export async function preflightChecks(
         .then((raw) => alertsCheck(raw, workload.namespace, workload.name))
         .catch((e) => ({ name: "Firing alerts", status: "unknown" as const, detail: `not read: ${why(e)}` }))
     );
+  }
+  for (const ch of change?.changes ?? []) {
+    if (ch.field === "limits.memory" && workload && change?.container) {
+      const container = change.container;
+      jobs.push(
+        within(ms, deps.callTool("prometheus_query", { query: peakQuery(workload.namespace, workload.name, container) }))
+          .then((raw) => memoryCheck(raw, ch, container))
+          .catch((e) => ({ name: "Memory limit vs peak", status: "unknown" as const, detail: `not read: ${why(e)}` }))
+      );
+    }
+    if (ch.field === "image" && typeof ch.to === "string" && ch.to) {
+      const image = ch.to;
+      jobs.push(
+        within(ms, (deps.imageExists ?? imageExists)(image))
+          .then((a) => imageCheck(a, image))
+          .catch((e) => ({ name: "Image exists", status: "unknown" as const, detail: `not read: ${why(e)}` }))
+      );
+    }
   }
   jobs.push(
     within(ms, deps.callTool("k8s_get_custom_resources", { group: "helm.toolkit.fluxcd.io", version: "v2", plural: "helmreleases", namespace: helmRelease.namespace, name: helmRelease.name }))

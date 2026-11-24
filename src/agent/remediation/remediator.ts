@@ -846,7 +846,12 @@ export class Remediator {
   // target — nothing is live until the PR merges + Flux syncs, so there is nothing for the
   // post-remediation verification to look at (app/index.ts only schedules when target exists).
   /** D3: what the PR body states about the live state it is opened into (agent/gitops/preflight.ts). Never blocks. */
-  private preflight(workload: { namespace: string; name: string } | null | undefined, helmRelease: { name: string; namespace: string }, pathPrefix?: string): Promise<PreflightCheck[]> {
+  private preflight(
+    workload: { namespace: string; name: string } | null | undefined,
+    helmRelease: { name: string; namespace: string },
+    pathPrefix?: string,
+    change?: { container?: string; changes: { field: string; from: string | number; to: string | number }[] }
+  ): Promise<PreflightCheck[]> {
     const gitops = this.host.gitops;
     return preflightChecks(
       {
@@ -854,7 +859,8 @@ export class Remediator {
         history: gitops ? async (hr, since) => (await gitops.request({ op: "history", helmRelease: hr, since, pathPrefix })) as HistoryPayload : undefined,
       },
       workload ? { namespace: workload.namespace, name: workload.name } : null,
-      helmRelease
+      helmRelease,
+      change
     ).catch(() => []);
   }
 
@@ -891,7 +897,7 @@ export class Remediator {
     }
     try {
       const live = this.workloadOf(String(params.workload ?? "")) ?? targetOf(String(params.target ?? ""));
-      const checks = await this.preflight(live, p.helmRelease, p.pathPrefix);
+      const checks = await this.preflight(live, p.helmRelease, p.pathPrefix, { container: p.container, changes: p.changes });
       const payload = await this.host.gitops.request({ op: "open_pr", helmRelease: p.helmRelease, action: p.action, container: p.container, component: p.component, changes: p.changes, pathPrefix: p.pathPrefix, incident: { summary: p.summary, checks } });
       if (!payload.ok) {
         await this.host.remediations.finish(id, false, payload.reason);

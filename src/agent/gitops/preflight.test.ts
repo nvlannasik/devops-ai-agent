@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alertsCheck, historyCheck, podsCheck, preflightChecks, preflightNote, fluxReleaseCheck } from "./preflight.js";
+import { alertsCheck, historyCheck, podsCheck, preflightChecks, preflightNote, fluxReleaseCheck, memoryCheck, imageCheck, peakQuery } from "./preflight.js";
 
 const pods = JSON.stringify([
   { name: "api-7d9-abc", status: "Running", ready: true, restarts: 0 },
@@ -91,4 +91,45 @@ test("the Slack note names only what needs a look", () => {
   const n = preflightNote([{ name: "Git changes (24 h)", status: "warn", detail: "1 commit" }, { name: "Workload now", status: "unknown", detail: "x" }]);
   assert.match(n, /⚠️ Git changes \(24 h\): 1 commit/);
   assert.match(n, /not checked: Workload now/);
+});
+
+// D3 for the agent's own PRs (2026-11-24): what the PR's change would do once Flux applies it.
+const vec = (bytes: number | null) => JSON.stringify({ resultType: "vector", result: bytes === null ? [] : [{ metric: {}, value: [0, String(bytes)] }] });
+
+test("memoryCheck: below the 7-day peak is the next OOMKill; just above it is no room; well above is fine; no data is unknown", () => {
+  const ch = (to: string) => ({ field: "limits.memory", from: "256Mi", to });
+  assert.match(memoryCheck(vec(160 * 1048576), ch("128Mi"), "api").detail, /128Mi is BELOW `api`'s 7-day peak working set 160Mi — it would be OOMKilled at its next peak/);
+  assert.equal(memoryCheck(vec(160 * 1048576), ch("128Mi"), "api").status, "warn");
+  assert.match(memoryCheck(vec(120 * 1048576), ch("128Mi"), "api").detail, /only 7% above `api`'s 7-day peak 120Mi/);
+  assert.deepEqual(memoryCheck(vec(90 * 1048576), ch("192Mi"), "api"), { name: "Memory limit vs peak", status: "ok", detail: "192Mi vs `api`'s 7-day peak 90Mi (+113%)" });
+  assert.equal(memoryCheck(vec(null), ch("128Mi"), "api").status, "unknown");
+  assert.equal(memoryCheck("Error: prometheus down", ch("128Mi"), "api").status, "unknown");
+  assert.equal(peakQuery("sample-apps", "orders-api", "orders-api"), 'max(max_over_time(container_memory_working_set_bytes{namespace="sample-apps", pod=~"orders-api-.*", container="orders-api"}[7d]))');
+});
+
+test("imageCheck: a tag nobody pushed is the warning; an unanswered registry is not checked, never fine", () => {
+  assert.equal(imageCheck({ exists: false }, "nvlannasik/orders-api:9.9.9").status, "warn");
+  assert.match(imageCheck({ exists: false }, "nvlannasik/orders-api:9.9.9").detail, /does NOT exist in its registry \(manifest 404\) — the rollout would fail with ImagePullBackOff/);
+  assert.equal(imageCheck({ exists: true }, "x:1").status, "ok");
+  assert.equal(imageCheck({ unknown: "the registry answered 401" }, "x:1").status, "unknown");
+});
+
+test("the PR's own changes add their checks: a memory limit with its container reads the peak, an image asks the registry", async () => {
+  const asked: unknown[] = [];
+  const checks = await preflightChecks(
+    {
+      callTool: async (name, input) => (asked.push([name, input]), name === "prometheus_query" ? vec(200 * 1048576) : name === "k8s_get_custom_resources" ? JSON.stringify({ status: { conditions: [{ type: "Ready", status: "True" }] } }) : "[]"),
+      imageExists: async (image) => (asked.push(["registry", image]), { exists: false }),
+    },
+    { namespace: "sample-apps", name: "orders-api" },
+    { name: "orders-api", namespace: "flux-app" },
+    { container: "orders-api", changes: [{ field: "limits.memory", from: "256Mi", to: "128Mi" }, { field: "image", from: "a:1", to: "nvlannasik/orders-api:9.9.9" }] }
+  );
+  const byName = Object.fromEntries(checks.map((c) => [c.name, c.status]));
+  assert.equal(byName["Memory limit vs peak"], "warn");
+  assert.equal(byName["Image exists"], "warn");
+  assert.ok(asked.some((a) => Array.isArray(a) && a[0] === "registry" && a[1] === "nvlannasik/orders-api:9.9.9"));
+  // a memory change without a container: no guess at which container's peak
+  const noContainer = await preflightChecks({ callTool: async () => "[]", imageExists: async () => ({ exists: true }) }, { namespace: "n", name: "w" }, { name: "w", namespace: "f" }, { changes: [{ field: "limits.memory", from: "1Gi", to: "512Mi" }] });
+  assert.equal(noContainer.some((c) => c.name === "Memory limit vs peak"), false);
 });

@@ -1,6 +1,10 @@
 # Pre-merge review of GitOps PRs — design (D3+)
 
-Status: **proposed, not built** (2026-11-24). Needs the owner's yes on the three questions at the end.
+Status (2026-11-24): the owner chose **the agent's own PRs only**. That part is built without any of
+the machinery below — the agent already knows its PR's `changes`, so both checks run as pre-merge
+checks (`agent/gitops/preflight.ts` `memoryCheck`/`imageCheck`, `agent/gitops/registry.ts`) and land in
+the PR body's table and the Slack line; no new worker op, no GitHub comment. The `pr_scan`/`pr_comment`
+design below for PRs a PERSON opens stays proposed, not built.
 
 ## Intent
 
