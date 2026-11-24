@@ -16,6 +16,7 @@ import type { SlackHost } from "./host.js";
 import type { ResolvedThread } from "../agent/incidents/index.js";
 import { resolvedBlocks } from "./feedback.js";
 import { repeatLine, repeatNotice } from "../agent/incidents/repeat.js";
+import { userFacingError } from "../agent/llm/failure.js";
 
 /**
  * What `markResolved` matches an incident on: alertname + namespace, plus the cluster label when
@@ -723,7 +724,8 @@ export class AlertFlow {
         .postMessage({
           channel,
           thread_ts: threadId,
-          text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`,
+          // Never the raw error: a person reads this, the stack is in the log line above.
+          text: userFacingError(err, "alert"),
           mrkdwn: true,
         })
         .catch((e) => logger.error(`[slack] failed to post error notice to thread ${threadId}: ${errDetail(e)}`));

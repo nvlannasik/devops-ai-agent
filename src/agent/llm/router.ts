@@ -2,6 +2,7 @@ import logger, { errDetail } from "../../utils/logger/index.js";
 import { config } from "../../config/index.js";
 import { currentRouteContext, traceSuffix } from "../../utils/trace/index.js";
 import type { ContentBlock, LLMClient, LLMResponse, Message, ToolDefinition } from "./types.js";
+import { AllBackendsFailedError, classifyFailure, oneLine, type BackendFailure } from "./failure.js";
 
 // A model echoing our own content-block JSON back as prose. Its meaning is NOT "the model is
 // weak" — the garbled JSON once seen in Slack was our own bug (JSON.stringify over content
@@ -35,7 +36,9 @@ export const ECHOED_STAMP = /^\s*\[EVIDENCE READ AT\][^\n]*\s*$/;
  * limiting, which IS transient and which a short cool-off handles correctly. Over-matching here
  * benches a working backend for half an hour, so the list stays narrow and literal.
  */
-const TERMINAL = /no credits remaining|insufficient_quota|insufficient credit|quota exceeded|billing|invalid[ _]api[ _]key|unauthorized|401|403/i;
+// `Insufficient Balance` / 402 is DeepSeek's wording for the same thing (2026-11-24): without it the
+// router re-asked an empty account every two minutes.
+const TERMINAL = /no credits remaining|insufficient_quota|insufficient credit|insufficient balance|payment required|\b402\b|quota exceeded|billing|invalid[ _]api[ _]key|unauthorized|401|403/i;
 
 export const isTerminalFailure = (reason: string): boolean => TERMINAL.test(reason);
 
@@ -183,13 +186,16 @@ export class RouterLLMClient implements LLMClient {
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
     const { names, route } = this.chain();
     const ctx = currentRouteContext();
-    const failures: string[] = [];
+    const failures: BackendFailure[] = [];
     let last: unknown;
 
     const usable = this.health.usable(names);
     for (const [i, name] of names.entries()) {
       if (!usable.has(name)) {
         logger.info(`[llm-router] skipping backend=${name} — cooling off after repeated failures${traceSuffix()}`);
+        // Say WHY it is cooling off, or a person reads "all backends failed" with nothing after it.
+        const prev = this.lastFailure.get(name);
+        failures.push(prev ? { ...prev, summary: `${prev.summary} (not retried yet)` } : { backend: name, kind: "unavailable", summary: "cooling off after repeated failures" });
         continue;
       }
       const backend = this.backends.get(name)!;
@@ -225,18 +231,27 @@ export class RouterLLMClient implements LLMClient {
           logger.warn(`[llm-router] backend=${name} failed: ${failure.reason}${traceSuffix()}`);
         }
         this.noteFailure(name, failure.reason);
-        failures.push(`${name}: ${failure.reason}`);
+        failures.push(this.remember({ backend: name, kind: classifyFailure(failure.reason), summary: oneLine(failure.reason) }));
         last = new Error(`${name}: ${failure.reason}`);
       } catch (err) {
         logger.warn(`[llm-router] backend=${name} threw: ${errDetail(err)}${traceSuffix()}`);
         this.noteFailure(name, errDetail(err));
-        failures.push(`${name}: ${errDetail(err)}`);
+        // One line per backend for whatever reads the message (Slack, via userFacingError); the
+        // stack stays in the warn line above.
+        failures.push(this.remember({ backend: name, kind: classifyFailure(errDetail(err)), summary: oneLine(err) }));
         last = err;
       }
     }
 
     logger.error(`[llm-router] all backends failed on the ${route} chain${traceSuffix()}`);
-    throw new Error(`all LLM backends failed — ${failures.join("; ")}`, { cause: last });
+    throw new AllBackendsFailedError(route, failures, { cause: last });
+  }
+
+  /** The last way each backend failed — what a skipped (cooling-off) backend is reported with. */
+  private readonly lastFailure = new Map<string, BackendFailure>();
+  private remember(f: BackendFailure): BackendFailure {
+    this.lastFailure.set(f.backend, f);
+    return f;
   }
 
   private noteFailure(name: string, reason: string): void {

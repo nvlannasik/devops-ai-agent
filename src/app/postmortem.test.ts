@@ -190,7 +190,7 @@ test("draftPostmortem throws: progress edited to the error, nothing stored", asy
   await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
 
   assert.equal(h.updated.length, 1);
-  assert.match(h.updated[0].text, /Could not draft the postmortem/);
+  assert.match(h.updated[0].text, /could not draft the postmortem/i);
   assert.match(h.updated[0].text, /LLM timeout/);
   assert.equal(h.calls.store.length, 0);
 });
@@ -200,7 +200,7 @@ test("postmortemFacts returns null (incident row unreadable): treated like a dra
   await h.run({ channel: "C1", ts: "100.9", thread_ts: "100.0", user: "U1" });
 
   assert.equal(h.updated.length, 1);
-  assert.match(h.updated[0].text, /Could not draft the postmortem/);
+  assert.match(h.updated[0].text, /could not draft the postmortem/i);
   assert.equal(h.calls.draftCount, 0);
   assert.equal(h.calls.store.length, 0);
 });

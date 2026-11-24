@@ -4,6 +4,7 @@ import { splitForSlack } from "../utils/slack/split.js";
 import { buildRemediationCard, remediationStatusBlocks } from "../utils/slack/remediation-card.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
+import { userFacingError } from "../agent/llm/failure.js";
 import type { SlackHost } from "./host.js";
 import { controlPlaneCorrection } from "../agent/remediation/node-gate.js";
 
@@ -174,7 +175,7 @@ export class RemediationFlow {
           .catch((e) => logger.error(`[remediation] could not schedule the apply-watch for ${remediationId}: ${errDetail(e)}`));
       }
     } catch (err) {
-      const msg = `⚠️ Remediation handling failed: ${err instanceof Error ? err.message : String(err)}`;
+      const msg = userFacingError(err, "remediation");
       logger.error(`[remediation] ${errDetail(err)}`);
       // if this update is swallowed the card stays frozen mid-flight and the operator has
       // no way to tell whether the action ran — say so in the log at least

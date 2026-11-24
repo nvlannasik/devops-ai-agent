@@ -5,6 +5,7 @@ import { postmortemSlackBlocks, postmortemSlackText } from "../agent/postmortem/
 import { type StatusCommand } from "../agent/incidents/reconcile.js";
 import { splitForSlack } from "../utils/slack/split.js";
 import logger, { errDetail } from "../utils/logger/index.js";
+import { userFacingError } from "../agent/llm/failure.js";
 import type { SlackHost } from "./host.js";
 
 // A postmortem's "what did humans say" read must not silently drop statements past the first
@@ -61,7 +62,7 @@ export class ThreadCommands {
       // missing_scope = reading the thread needs history scopes the app wasn't granted
       const text = msg.includes("missing_scope")
         ? "⚠️ I can't read this thread: the Slack app is missing the `channels:history` scope (`groups:history` for private channels). Add it under *OAuth & Permissions* and reinstall the app, then try `learn` again."
-        : `⚠️ Learn failed: ${msg}`;
+        : userFacingError(err, "learn");
       await client.chat
         .postMessage({ channel: event.channel, thread_ts: threadId, text, mrkdwn: true })
         .catch((e) => logger.error(`[slack] could not deliver the learn-failure notice to thread ${threadId}: ${errDetail(e)}`));
@@ -190,7 +191,7 @@ export class ThreadCommands {
       }
     } catch (err) {
       logger.error(`[slack] postmortem draft failed for thread ${threadId} (incident ${incidentId}): ${errDetail(err)}`);
-      await updateProgress(`❌ Could not draft the postmortem: ${err instanceof Error ? err.message : String(err)}`);
+      await updateProgress(userFacingError(err, "postmortem"));
     }
   }
 

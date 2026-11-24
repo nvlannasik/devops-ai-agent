@@ -13,6 +13,7 @@ import { flowFacts, renderModelText } from "../agent/onboarding/model.js";
 import type { ClusterModel } from "../agent/onboarding/types.js";
 import { truncate } from "../utils/truncate/index.js";
 import logger, { errDetail } from "../utils/logger/index.js";
+import { userFacingError } from "../agent/llm/failure.js";
 import { buildMentionMarker } from "../agent/prompts/system.js";
 import { clusterReply, speaksIndonesian } from "../agent/cluster/binding.js";
 import { withCluster } from "../agent/cluster/index.js";
@@ -280,7 +281,7 @@ export class MentionFlow {
         await this.proposeAfterMention(event.channel, threadId, text, reply, isRca, previousReply, offer);
       } catch (err) {
         logger.error(`[slack] investigation failed for thread ${threadId}: ${errDetail(err)}`);
-        await say({ text: `❌ Investigation failed: ${err instanceof Error ? err.message : String(err)}`, thread_ts: threadId });
+        await say({ text: userFacingError(err, "mention"), thread_ts: threadId });
       } finally {
         this.host.semaphore.release();
       }
