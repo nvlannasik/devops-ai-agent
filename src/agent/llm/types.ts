@@ -72,6 +72,9 @@ export interface LLMResponse {
   backend?: string;
   route?: "light" | "heavy";
   model?: string;
+  /** Set when a HEAVY call was answered by a light backend because every heavy one was out of
+   *  credit or refused its key (router `descend`) — said on the RCA card, never silent. */
+  descended?: string;
 }
 
 export interface LLMClient {

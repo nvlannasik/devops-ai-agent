@@ -157,6 +157,10 @@ export const config = {
     // Set the threshold to 0 to disable the memory entirely.
     routerFailureThreshold: parseInt(process.env.LLM_ROUTER_FAILURE_THRESHOLD ?? "2"),
     routerCooloffMs: parseInt(process.env.LLM_ROUTER_COOLOFF_SECONDS ?? "120") * 1000,
+    // When every HEAVY backend is out of credit or refuses its key, go on to the light backends
+    // (router `descend`, 2026-11-24) — "credit" (default) — or never ("never": the old up-only rule).
+    // A heavy answer that is merely bad never descends: that is the failure a weak model hides.
+    routerDescend: (process.env.LLM_ROUTER_DESCEND ?? "credit").trim().toLowerCase() === "never" ? ("never" as const) : ("credit" as const),
     claude: {
       apiKey: process.env.ANTHROPIC_API_KEY!,
       model: process.env.CLAUDE_MODEL ?? "claude-opus-5-5",

@@ -165,7 +165,9 @@ export class RouterLLMClient implements LLMClient {
     private readonly health: BackendHealth = new BackendHealth(
       config.llm.routerFailureThreshold,
       config.llm.routerCooloffMs
-    )
+    ),
+    /** `credit`: a heavy chain whose every failure is credit/auth goes on to the light lane. `never`: up-only. */
+    private readonly descend: "credit" | "never" = config.llm.routerDescend
   ) {
     if (heavy.length === 0) throw new Error("router needs a non-empty heavy chain");
     for (const n of [...heavy, ...light]) {
@@ -173,24 +175,44 @@ export class RouterLLMClient implements LLMClient {
     }
   }
 
-  // Failover is one-directional: light may escalate into heavy, heavy never descends into
-  // light. Lateral failover between strong backends is preserved because that is not a
-  // capability downgrade. Read docs/superpowers/specs/2026-07-30-llm-router-design.md §7
-  // before making this bidirectional.
+  // Failover is up-only for QUALITY: light may escalate into heavy, and heavy never descends into
+  // light because a backend answered badly — a weak model fails by answering confidently
+  // (docs/superpowers/specs/2026-07-30-llm-router-design.md §7). It descends for one reason only,
+  // since 2026-11-24 (`descend`): every heavy backend is out of credit or refuses its key. Both heavy
+  // backends ran dry that morning and every alert failed while the light ones had credit. A backend
+  // may sit in both lanes; the chain is deduped so each is still tried at most once per call.
   private chain(): { names: string[]; route: "heavy" | "light" } {
     const ctx = currentRouteContext();
     if (!ctx || ctx.route === "heavy" || ctx.escalated) return { names: this.heavy, route: "heavy" };
-    return { names: [...this.light, ...this.heavy], route: "light" };
+    return { names: [...this.light, ...this.heavy.filter((n) => !this.light.includes(n))], route: "light" };
+  }
+
+  /** The light backends a heavy chain may go on to when the heavy ones cannot be paid or authorised. */
+  private descent(primary: string[], route: "heavy" | "light"): string[] {
+    if (route !== "heavy" || this.descend === "never") return [];
+    return this.light.filter((n) => !primary.includes(n));
   }
 
   async chat(messages: Message[], tools: ToolDefinition[], systemPrompt: string): Promise<LLMResponse> {
-    const { names, route } = this.chain();
+    const { names: primary, route } = this.chain();
+    const fallback = this.descent(primary, route);
+    const names = [...primary, ...fallback];
     const ctx = currentRouteContext();
     const failures: BackendFailure[] = [];
     let last: unknown;
+    let descended: string | undefined;
 
     const usable = this.health.usable(names);
     for (const [i, name] of names.entries()) {
+      if (i >= primary.length && descended === undefined) {
+        // Into the light lane only when EVERY heavy failure was money or a key. A heavy backend that
+        // timed out or answered badly says nothing about whether a weaker model should answer.
+        const payable = failures.length > 0 && failures.every((f) => f.kind === "credit" || f.kind === "auth");
+        if (!payable) break;
+        const kinds = new Set(failures.map((f) => f.kind));
+        descended = kinds.has("auth") && kinds.has("credit") ? "heavy out of credit / key refused" : kinds.has("auth") ? "heavy key refused" : "heavy out of credit";
+        logger.warn(`[llm-router] every heavy backend is ${descended.replace("heavy ", "")} — descending to the light backends (${fallback.join(", ")})${traceSuffix()}`);
+      }
       if (!usable.has(name)) {
         logger.info(`[llm-router] skipping backend=${name} — cooling off after repeated failures${traceSuffix()}`);
         // Say WHY it is cooling off, or a person reads "all backends failed" with nothing after it.
@@ -210,7 +232,10 @@ export class RouterLLMClient implements LLMClient {
         // called tools properly on every round before. Never for a THROWN error: a timeout has
         // already cost its full wait, and a dead backend answers the same way twice. Never while
         // another backend is left: failing over is what the chain is for.
-        if (failure && !names.slice(i + 1).some((n) => usable.has(n))) {
+        // "Nothing left" within this backend's own lane: a descent is not a lateral failover, and a
+        // malformed heavy answer never descends, so the light lane does not count as left for it.
+        const lane = i < primary.length ? primary : names;
+        if (failure && !lane.slice(i + 1).some((n) => usable.has(n))) {
           logger.warn(`[llm-router] backend=${name}: ${failure.reason} — nothing left to fail over to, asking it once more${traceSuffix()}`);
           res = await backend.chat(messages, tools, systemPrompt);
           failure = failureOf(res, tools);
@@ -219,6 +244,7 @@ export class RouterLLMClient implements LLMClient {
           this.health.succeeded(name);
           // sticky only when we actually crossed into the heavy tier, not on a lateral hop
           if (route === "light" && i >= this.light.length && ctx) ctx.escalated = true;
+          if (descended) return { ...res, backend: name, route: "light", model: this.models.get(name), descended };
           return { ...res, backend: name, route, model: this.models.get(name) };
         }
         if (failure.toolChannelDead) {

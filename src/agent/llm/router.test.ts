@@ -489,3 +489,70 @@ test("an answer that is only the evidence stamp is a failure, and the last backe
   await ok.chat([], [], "sys");
   assert.deepEqual(cites, ["only"]);
 });
+
+// ---- descend: heavy goes on to light ONLY when every heavy failure is credit or a refused key ----
+// 2026-11-24: deepseek `402 Insufficient Balance`, chatgpt `429 You have no credits remaining`, and
+// every alert failed while the light backends had credit.
+const owe = (msg: string) => () => {
+  throw new Error(msg);
+};
+const lanes = (calls: string[], h1: LLMClient, h2: LLMClient, l1: LLMClient, descend: "credit" | "never" = "credit") =>
+  new RouterLLMClient(
+    new Map<string, LLMClient>([["deepseek", h1], ["chatgpt", h2], ["agus", l1]]),
+    ["deepseek", "chatgpt"],
+    ["agus"],
+    new Map([["agus", "agus-model"]]),
+    new BackendHealth(2, 120_000),
+    descend
+  );
+
+test("every heavy backend out of credit: the light lane answers, and the response says so", async () => {
+  const calls: string[] = [];
+  const r = lanes(calls, fake(owe("402 Insufficient Balance (request_id: x)"), calls, "deepseek"), fake(owe("429 You have no credits remaining."), calls, "chatgpt"), fake(answer("from agus"), calls, "agus"));
+  const res = await r.chat([], [], "sys");
+  assert.deepEqual(calls, ["deepseek", "chatgpt", "agus"]);
+  assert.equal(res.content[0].text, "from agus");
+  assert.deepEqual([res.backend, res.route, res.model, res.descended], ["agus", "light", "agus-model", "heavy out of credit"]);
+});
+
+test("the next call skips the benched heavy backends (terminal cool-off) and goes straight to light", async () => {
+  const calls: string[] = [];
+  const r = lanes(calls, fake(owe("402 Insufficient Balance"), calls, "deepseek"), fake(owe("429 You have no credits remaining."), calls, "chatgpt"), fake(answer("ok"), calls, "agus"));
+  await r.chat([], [], "sys");
+  calls.length = 0;
+  const res = await r.chat([], [], "sys");
+  assert.deepEqual(calls, ["agus"], "no request to a backend known to be out of credit");
+  assert.equal(res.descended, "heavy out of credit");
+});
+
+test("a heavy failure that is not money or a key never descends: timeout, bad answer, plain outage", async () => {
+  for (const second of [owe("Request timed out"), owe("backend down")]) {
+    const calls: string[] = [];
+    const r = lanes(calls, fake(owe("402 Insufficient Balance"), calls, "deepseek"), fake(second as () => never, calls, "chatgpt"), fake(answer("x"), calls, "agus"));
+    await assert.rejects(() => r.chat([], [], "sys"), /all LLM backends failed/);
+    assert.ok(!calls.includes("agus"), "one heavy backend failing for another reason keeps the light lane out");
+  }
+  const calls: string[] = [];
+  const empty: LLMResponse = { content: [], stopReason: "end_turn" };
+  const r = lanes(calls, fake(owe("402 Insufficient Balance"), calls, "deepseek"), fake(empty, calls, "chatgpt"), fake(answer("x"), calls, "agus"));
+  await assert.rejects(() => r.chat([], [], "sys"));
+  assert.ok(!calls.includes("agus"), "a malformed heavy answer never descends");
+});
+
+test("descend=never keeps the old up-only rule", async () => {
+  const calls: string[] = [];
+  const r = lanes(calls, fake(owe("402 Insufficient Balance"), calls, "deepseek"), fake(owe("429 You have no credits remaining."), calls, "chatgpt"), fake(answer("x"), calls, "agus"), "never");
+  await assert.rejects(() => r.chat([], [], "sys"), /all LLM backends failed/);
+  assert.deepEqual(calls, ["deepseek", "chatgpt"]);
+});
+
+test("a backend in both lanes is tried once per call, on either route", async () => {
+  const calls: string[] = [];
+  const r = new RouterLLMClient(
+    new Map<string, LLMClient>([["a", fake(boom, calls, "a")], ["b", fake(boom, calls, "b")], ["c", fake(answer("c"), calls, "c")]]),
+    ["b", "c"],
+    ["a", "b"]
+  );
+  await withRoute("light", () => r.chat([], [], "sys"));
+  assert.deepEqual(calls, ["a", "b", "c"]);
+});

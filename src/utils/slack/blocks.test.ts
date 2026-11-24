@@ -411,3 +411,9 @@ test("the footer names the cluster and the bridge", () => {
   assert.doesNotMatch(local, /bridge/);
   assert.doesNotMatch(formatRunFooter(base), /cluster/);
 });
+
+test("the footer says when a heavy run was answered on the light lane because heavy was out of credit", async () => {
+  const { formatRunFooter } = await import("./blocks.js");
+  const f = formatRunFooter({ durationMs: 60_000, rounds: 4, toolCalls: 6, backend: "private-llm-agus", model: "agus", route: "light", descended: "heavy out of credit" });
+  assert.match(f, /🧠 private-llm-agus \(agus\) · light \(heavy out of credit\)/);
+});

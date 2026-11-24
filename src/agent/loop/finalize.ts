@@ -24,6 +24,7 @@ export function finalizeAnswer(ctx: RunCtx, s: RunState, trace: TraceRecorder, t
     backend: s.lastResponse?.backend,
     model: s.lastResponse?.model,
     route: s.lastResponse?.route,
+    ...(s.lastResponse?.descended ? { descended: s.lastResponse.descended } : {}),
   });
   logger.info(
     `[${ctx.threadId}] Investigation complete in ${durationMs}ms (${s.iterations} LLM calls, ` +

@@ -126,11 +126,10 @@ test("buildBackends maps names to configured client instances", () => {
   assert.equal((m.get("or") as OpenAICompatibleClient).model, "qwen/qwen3-235b");
 });
 
-test("rejects a backend in both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT", () => {
-  assert.throws(
-    () => parseRegistry({ ...valid, LLM_ROUTE_LIGHT: "qwen,opus" }),
-    /opus.*both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT/
-  );
+// Since 2026-11-24 a backend may serve both lanes; the router dedupes the chain.
+test("accepts a backend in both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT", () => {
+  const r = parseRegistry({ ...valid, LLM_ROUTE_LIGHT: "qwen,opus" });
+  assert.ok(r.heavy.includes("opus") && r.light.includes("opus"));
 });
 
 test("rejects a duplicate within LLM_ROUTE_HEAVY", () => {

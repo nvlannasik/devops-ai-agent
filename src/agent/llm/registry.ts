@@ -147,11 +147,9 @@ export function parseRegistry(env: NodeJS.ProcessEnv): Registry {
     }
   }
 
-  // Each backend is tried at most once per chat() call. Overlaps or duplicates violate this.
+  // A backend may serve BOTH lanes (2026-11-24): the router dedupes the chain, so each backend is
+  // still tried at most once per chat() call. A duplicate inside one lane is still a mistake.
   for (const n of heavy) {
-    if (light.includes(n)) {
-      throw new Error(`backend "${n}" appears in both LLM_ROUTE_HEAVY and LLM_ROUTE_LIGHT`);
-    }
     const firstIdx = heavy.indexOf(n);
     const lastIdx = heavy.lastIndexOf(n);
     if (firstIdx !== lastIdx) {

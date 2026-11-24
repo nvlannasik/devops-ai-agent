@@ -190,6 +190,8 @@ export function formatRunFooter(meta: {
   model?: string;
   backend?: string;
   route?: "light" | "heavy";
+  /** Router `descend`: why a heavy run was answered on the light route. */
+  descended?: string;
   /** Multi-cluster (agent/cluster): which cluster the run read, and whether through an SQS bridge. */
   cluster?: string;
   viaBridge?: boolean;
@@ -201,7 +203,7 @@ export function formatRunFooter(meta: {
   const engine = meta.model && meta.backend && meta.model !== meta.backend
     ? `${meta.backend} (${meta.model})`
     : meta.model ?? meta.backend;
-  if (engine) parts.push(`🧠 ${engine}${meta.route ? ` · ${meta.route}` : ""}`);
+  if (engine) parts.push(`🧠 ${engine}${meta.route ? ` · ${meta.route}` : ""}${meta.descended ? ` (${meta.descended})` : ""}`);
   parts.push(`${meta.rounds} round${meta.rounds === 1 ? "" : "s"}`);
   if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool call${meta.toolCalls === 1 ? "" : "s"}`);
   if (meta.cluster) parts.push(`cluster ${meta.cluster}${meta.viaBridge ? " (bridge)" : ""}`);

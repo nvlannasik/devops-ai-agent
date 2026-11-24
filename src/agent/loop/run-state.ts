@@ -70,6 +70,8 @@ export interface RunMeta {
   backend?: string;
   model?: string;
   route?: "light" | "heavy";
+  /** The heavy route was out of credit and a light backend answered (router `descend`). */
+  descended?: string;
 }
 
 export const zeroUsage = (): TokenUsage => ({
