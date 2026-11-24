@@ -620,7 +620,10 @@ export function buildProposalPrompt(labels: Record<string, string>, full: string
     '9. {"action":"k8s_cordon","node":"...","reason":"..."} / {"action":"k8s_drain","node":"...","reason":"..."}\n' +
     "   — ONLY when the investigation shows the NODE itself failing (NotReady, a pressure condition, a disk or I/O fault on that node) — not one workload that happens to run there. Cordon stops new pods landing; drain also moves the running ones off (DaemonSet pods stay). Never the control-plane node\n" +
     '10. {"action":"k8s_uncordon","node":"...","reason":"..."}\n' +
-    "   — ONLY for a node cordoned earlier whose fault the evidence shows is gone\n" +
+    // Bench A16, 2026-11-24 attempt 3: the RCA named `worker3-vm` unschedulable as the reason pods were
+    // Pending, and the model proposed k8s_set_resources (refused) — "whose fault is gone" read as
+    // needing a fault story, and a node LEFT cordoned after maintenance has none.
+    "   — for a node that is cordoned (`unschedulable`, SchedulingDisabled) when the evidence shows it is healthy now (Ready, no pressure condition): a node left cordoned after maintenance, or one whose fault has passed. When pods are Pending because the only node they may run on is that cordoned node, THIS is the fix — not a resource change. Never when the node is still NotReady or under pressure\n" +
     '11. {"action":"vm_restart_service","host":"...","unit":"...","reason":"..."}\n' +
     "   — ONLY for a VM incident (the context names a VM, not a Kubernetes workload) whose evidence shows that unit is wedged and a restart fixes it. host is the VM's name and unit one of the units its context lists as restartable — nothing else is possible on a VM\n" +
     // "No action fits" was being treated as failure. It is the correct answer for a whole class
