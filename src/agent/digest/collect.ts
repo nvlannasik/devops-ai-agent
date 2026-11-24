@@ -32,7 +32,10 @@ export async function collectDigest(deps: DigestDeps): Promise<DigestData> {
     read("host history", async () => {
       const list = await deps.vm.hosts();
       if (list.length === 0) return null;
-      return Promise.all(list.map(async (h) => hostDigest(h.node ?? h.name, await deps.vm.history(h.name, HISTORY_HOURS), now)));
+      // A Kubernetes node is one whose snapshot shows the kubepods cgroup: the kubelet manages its disk.
+      return Promise.all(
+        list.map(async (h) => hostDigest(h.node ?? h.name, await deps.vm.history(h.name, HISTORY_HOURS), now, { kubernetes: typeof h.snapshot?.kubepodsMemoryBytes === "number" }))
+      );
     }),
     read("incidents", () => deps.store.incidentCounts(24)),
     read("incidents (7 days)", () => deps.store.incidentCounts(HISTORY_HOURS, 3)),

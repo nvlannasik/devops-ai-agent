@@ -33,13 +33,24 @@ export interface HostDigest {
   dailyLowest: number[];
   /** The largest memory mover over 24 h (a systemd service or a process), if one moved ≥10Mi. */
   topMover?: { name: string; where?: string; change: string; end: string };
-  disk?: { usedPercentNow: number; daysToFull?: number; changePerDay?: string };
+  disk?: { usedPercentNow: number; daysToFull?: number; changePerDay?: string; daysToPressure?: number };
+  /** A Kubernetes node (its snapshot shows the kubepods cgroup): the kubelet manages its disk. */
+  kubernetes?: boolean;
   attention: string[];
 }
 
 /** One host's digest from its last 7 days of points (oldest first). */
-export function hostDigest(name: string, points: StoredPoint[], now: Date): HostDigest {
-  const out: HostDigest = { name, coverHours: 0, dailyLowest: [], attention: [] };
+/**
+ * A Kubernetes node's kubelet deletes unused images once the image filesystem is 85 % used and starts
+ * evicting at `nodefs.available` < 10 % — so its disk "fills" at 90 %, and growth that is image pulls
+ * stops at 85 % on its own. 2026-11-24: worker1-raspi was flagged "full in ~13 days" at 81 %; it was
+ * seven old devops-ai-agent images, and the next morning the kubelet had brought it to 71 %.
+ */
+const NODE_PRESSURE_PERCENT = 90;
+const IMAGE_GC_PERCENT = 85;
+
+export function hostDigest(name: string, points: StoredPoint[], now: Date, opts: { kubernetes?: boolean } = {}): HostDigest {
+  const out: HostDigest = { name, coverHours: 0, dailyLowest: [], attention: [], ...(opts.kubernetes ? { kubernetes: true } : {}) };
   if (points.length === 0) return out;
   const last = points[points.length - 1]!;
   out.coverHours = Math.round(((last.at.getTime() - points[0]!.at.getTime()) / 3600_000) * 10) / 10;
@@ -74,6 +85,11 @@ export function hostDigest(name: string, points: StoredPoint[], now: Date): Host
       ...(typeof d.daysToFull === "number" ? { daysToFull: d.daysToFull } : {}),
       ...(typeof d.changePerDay === "string" ? { changePerDay: d.changePerDay } : {}),
     };
+    const perDay = Number(d.bytesPerDay);
+    if (opts.kubernetes && perDay < 0 && Number.isFinite(Number(d.availableBytes)) && Number(d.totalBytes) > 0) {
+      const room = Number(d.availableBytes) - Number(d.totalBytes) * (1 - NODE_PRESSURE_PERCENT / 100);
+      out.disk.daysToPressure = Math.max(0, Math.round((room / -perDay) * 10) / 10);
+    }
   }
 
   if (out.total && out.availableNow !== undefined && out.availableNow < out.total * LOW_AVAILABLE_RATIO) {
@@ -90,7 +106,15 @@ export function hostDigest(name: string, points: StoredPoint[], now: Date): Host
     }
   }
   if (out.disk && out.disk.usedPercentNow >= DISK_FULL_PERCENT) out.attention.push(`root disk ${out.disk.usedPercentNow}% used`);
-  if (out.disk?.daysToFull !== undefined && out.disk.daysToFull <= DISK_DAYS_WARN) {
+  if (out.kubernetes) {
+    // The kubelet's thresholds, not 100 %: DiskPressure at 90 %, and image growth capped at 85 %.
+    if (out.disk?.daysToPressure !== undefined && out.disk.daysToPressure <= DISK_DAYS_WARN) {
+      out.attention.push(
+        `root disk at ${out.disk.changePerDay}/day reaches DiskPressure (${NODE_PRESSURE_PERCENT} %) in ~${out.disk.daysToPressure} days — ` +
+          `if it is image pulls, the kubelet deletes unused images from ${IMAGE_GC_PERCENT} % and it stops there; logs or volumes it does not`
+      );
+    }
+  } else if (out.disk?.daysToFull !== undefined && out.disk.daysToFull <= DISK_DAYS_WARN) {
     out.attention.push(`root disk full in ~${out.disk.daysToFull} days at ${out.disk.changePerDay}/day`);
   }
   if (now.getTime() - last.at.getTime() > 15 * 60_000) out.attention.push(`no report for ${Math.round((now.getTime() - last.at.getTime()) / 60_000)} min`);
@@ -243,7 +267,12 @@ export function renderDigest(d: DigestData): string {
       const parts: string[] = [];
       if (h.lowest24h) parts.push(`low ${mi(h.lowest24h.available)}${h.total ? ` of ${mi(h.total)}` : ""}`);
       if (h.topMover) parts.push(`${h.topMover.name}${h.topMover.where && h.topMover.where !== h.topMover.name ? ` (${h.topMover.where})` : ""} ${h.topMover.change} → ${h.topMover.end}`);
-      if (h.disk) parts.push(`disk ${h.disk.usedPercentNow}%${h.disk.daysToFull !== undefined ? `, full in ~${h.disk.daysToFull} d` : ""}`);
+      if (h.disk) {
+        const when = h.kubernetes
+          ? h.disk.daysToPressure !== undefined ? `, DiskPressure in ~${h.disk.daysToPressure} d` : ""
+          : h.disk.daysToFull !== undefined ? `, full in ~${h.disk.daysToFull} d` : "";
+        parts.push(`disk ${h.disk.usedPercentNow}%${when}`);
+      }
       if (h.coverHours < 24) parts.push(`_${h.coverHours} h of history_`);
       lines.push(`• ${h.attention.length ? "⚠️ " : ""}\`${h.name}\` — ${parts.join(" · ")}`);
       for (const a of h.attention) lines.push(`    ↳ ${a}`);

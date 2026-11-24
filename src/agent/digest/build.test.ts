@@ -188,3 +188,16 @@ test("tuningHint: clears by itself → the rule; stays open → the cause; fixed
   const t = renderDigest({ ...DATA, repeat7d: [{ ...base, alertname: "KubernetesPodCrashLooping", namespace: "kube-system", count: 11, resolved: 11, quick: 11, medianMinutes: 6, acted: 0 }] });
   assert.match(t, /• `KubernetesPodCrashLooping` in dev\/kube-system — 11×\n    ↳ 11 of 11 cleared within 30 min/);
 });
+
+test("a Kubernetes node's disk is projected to DiskPressure (90 %), and the line says image growth stops at 85 %", () => {
+  // worker1-raspi-like: 14336Mi root, 2660Mi left now, falling 209Mi/day over the week.
+  const pts = week((h) => ({ diskTotal: 14336 * MI, diskAvailable: (2660 + (h / 24) * 209) * MI }));
+  const k8s = hostDigest("worker1-raspi", pts, NOW, { kubernetes: true });
+  // room to 90 %: 2660 - 1433.6 = 1226.4Mi at 209Mi/day ≈ 5.9 d
+  assert.equal(k8s.disk!.daysToPressure, 5.9);
+  assert.match(k8s.attention.join(" | "), /reaches DiskPressure \(90 %\) in ~5\.9 days — if it is image pulls, the kubelet deletes unused images from 85 % and it stops there/);
+  assert.doesNotMatch(k8s.attention.join(" | "), /full in/);
+  const vm = hostDigest("bench-vm-01", pts, NOW);
+  assert.match(vm.attention.join(" | "), /root disk full in ~12\.7 days/, "a host the kubelet does not manage still fills at 100 %");
+  assert.match(renderDigest({ ...DATA, hosts: [k8s] }), /disk 81%, DiskPressure in ~5\.9 d/);
+});

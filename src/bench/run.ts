@@ -16,8 +16,9 @@
 import { KubectlHostSnapshots } from "./host-snapshots.js";
 import { withHostFixtures } from "./host-fixtures.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { inTaskOrder, resumeFrom } from "./resume.js";
 import { DevOpsAgent } from "../agent/index.js";
 import { buildGroupAlertText } from "../agent/correlation/index.js";
 import { alertCluster } from "../agent/cluster/binding.js";
@@ -310,8 +311,11 @@ async function main(): Promise<void> {
   }
   const llm = createLLMClient();
 
-  const runs: TaskRun[] = [];
-  const detail: Array<Record<string, unknown>> = [];
+  const resumePath = flag("resume");
+  const resumed = resumePath ? resumeFrom(JSON.parse(readFileSync(resumePath, "utf8")), attempts) : null;
+  if (resumed) logger.info(`[bench] resuming ${resumePath}: ${resumed.runs.length} finished case(s) kept — ${resumed.runs.map((r) => r.task).join(", ")}`);
+  const runs: TaskRun[] = resumed ? [...resumed.runs] : [];
+  const detail: Array<Record<string, unknown>> = resumed ? [...resumed.detail] : [];
 
   // Before the first fault: an injected fault fires a real alert that pages the production agent.
   // Bounded at 10 min an attempt (the 2026-10-07 full run averaged under 3), so a run killed with
@@ -331,6 +335,7 @@ async function main(): Promise<void> {
 
   try {
     tasks: for (const task of tasks) {
+      if (resumed?.runs.some((r) => r.task === task.id)) continue;
       const scores: Score[] = [];
       agent.vmStore = vmStoreFor(task);
       for (let n = 1; n <= attempts; n++) {
@@ -385,12 +390,15 @@ async function main(): Promise<void> {
     }
   }
 
+  // A resumed run's finished cases came first; the report reads in the suite's order.
+  runs.splice(0, runs.length, ...inTaskOrder(runs, tasks.map((t) => t.id)));
+
   if (aborted) {
     // The attempts that DID run are real and took hours: keep their transcript on this machine.
     // No history line — a suite that stopped partway is not a score.
     mkdirSync(RESULTS_DIR, { recursive: true });
     const partial = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.partial.json`);
-    writeFileSync(partial, JSON.stringify({ aborted, runs, detail }, null, 2));
+    writeFileSync(partial, JSON.stringify({ aborted, attempts, filter: filterArg ?? null, runs, detail }, null, 2));
     logger.error(`[bench] run aborted and NOT recorded: ${aborted}. ${detail.length} attempt(s) kept in ${partial}`);
     process.exit(2);
   }
@@ -432,7 +440,7 @@ async function main(): Promise<void> {
 
   mkdirSync(RESULTS_DIR, { recursive: true });
   const out = join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  writeFileSync(out, JSON.stringify({ meta, rates, axes, runs, detail }, null, 2));
+  writeFileSync(out, JSON.stringify({ meta, rates, axes, runs, detail, ...(resumePath ? { resumedFrom: resumePath } : {}) }, null, 2));
   console.log(`full transcript: ${out}`);
 
   // The one file in bench/results/ that is NOT gitignored, and the only place a score outlives
@@ -456,7 +464,7 @@ async function main(): Promise<void> {
     // which is how a 0% from a bad API key ended up in this file's own history.
     console.log("--no-push: this run was not recorded");
   } else {
-    appendHistory(history, { meta, rates, axes, runs, filter: filterArg ?? null });
+    appendHistory(history, { meta, rates, axes, runs, filter: filterArg ?? null, resumedFrom: resumePath ? basename(resumePath) : null });
     console.log(`history line appended: ${history}`);
     publishHistory(history);
   }

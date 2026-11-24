@@ -118,6 +118,8 @@ export function appendHistory(
      * all-or-nothing could only answer one.
      */
     filter?: string | null;
+    /** A run resumed from an aborted one (`--resume`): the partial file its finished cases came from. */
+    resumedFrom?: string | null;
   }
 ): void {
   // `marks` and `failures` are the two parts of the transcript small enough to keep. A run's
@@ -158,6 +160,7 @@ export function appendHistory(
     marks,
     failures,
     ...(input.filter ? { filter: input.filter } : {}),
+    ...(input.resumedFrom ? { resumedFrom: input.resumedFrom } : {}),
   });
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, line + "\n");

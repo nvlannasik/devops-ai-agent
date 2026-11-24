@@ -166,6 +166,11 @@ export function diskTrend(points: StoredPoint[]): Record<string, unknown> | unde
   } else {
     out.changePerDay = signedMi(s * 86400);
     out.daysToFull = Math.round((lastX.y / -s / 86400) * 10) / 10;
+    // Raw numbers for a caller that projects to another threshold (the digest: a Kubernetes node's
+    // DiskPressure at 90 %, not 100 %).
+    out.bytesPerDay = s * 86400;
+    out.availableBytes = lastX.y;
+    out.totalBytes = lastX.total;
   }
   return out;
 }
